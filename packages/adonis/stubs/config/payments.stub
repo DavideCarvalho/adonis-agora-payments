@@ -80,5 +80,18 @@ export default defineConfig({
      * the in-process dispatcher, or `true` to require durable.
      */
     durable: 'auto',
+    /**
+     * Business webhook handlers run inside the lib-mounted route (errors mark the event
+     * failed + retry). Accepts a DI service class (the lib calls its `.handle`) or a
+     * plain function. Alternative: drop files in `app/payment_handlers/` (durable-style
+     * discovery, see `@adonis-agora/payments/hooks/webhook_handlers`). Recommended: the
+     * handler only dispatches to a durable workflow / queue — never heavy work inline.
+     *
+     * handlers: {
+     *   'payment.succeeded': PaymentSucceededHandler, // DI service → .handle(event)
+     *   'payment.refunded': (event) => { ... },
+     * },
+     */
+    handlers: {},
   },
 })

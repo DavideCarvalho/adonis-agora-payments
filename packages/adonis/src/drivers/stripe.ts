@@ -112,6 +112,9 @@ export class StripeDriver implements PaymentsDriver {
     if (input.idempotencyKey !== undefined) {
       params.metadata = { ...(params.metadata ?? {}), idempotency_key: input.idempotencyKey };
     }
+    if (input.externalReference !== undefined) {
+      params.metadata = { ...(params.metadata ?? {}), external_reference: input.externalReference };
+    }
     const intent = await this.#stripe.paymentIntents.create(params);
     const payment = this.#mapPayment(intent);
     await emitInvoiceIfRequested(this.#invoiceCtx, input, payment, this);
@@ -223,6 +226,14 @@ export class StripeDriver implements PaymentsDriver {
       ...(input.trialDays !== undefined ? { trial_period_days: input.trialDays } : {}),
       ...(input.metadata !== undefined
         ? { metadata: input.metadata as Record<string, string> }
+        : {}),
+      ...(input.externalReference !== undefined
+        ? {
+            metadata: {
+              ...((input.metadata ?? {}) as Record<string, string>),
+              external_reference: input.externalReference,
+            },
+          }
         : {}),
     };
     const subscription = await this.#stripe.subscriptions.create(params);

@@ -19,13 +19,26 @@ type TraceFn = <T>(lib: string, event: string, fn: () => T, payload?: unknown) =
 /**
  * Every payments milestone published on `agora:payments:<event>`. The single runtime
  * source for the {@link PaymentsDiagnosticEvent} union — a Telescope watcher iterates
- * this to subscribe/claim.
+ * this to subscribe/claim, and apps subscribe with `onDiagnostic('payments', ...)`.
+ *
+ * Two layers:
+ * - **Gateway-action** events, emitted by the drivers on API calls (`charge.created`,
+ *   `charge.refunded`, `subscription.created`/`canceled`, `invoice.emitted`).
+ * - **Business** events, emitted by the `WebhookProcessor` when a webhook confirms a
+ *   state change (`payment.succeeded`/`failed`/`refunded`/`updated`,
+ *   `subscription.updated`, plus `subscription.created`/`canceled` from webhooks) and
+ *   the webhook lifecycle (`webhook.received`/`processed`/`failed`).
  */
 export const PAYMENTS_DIAGNOSTIC_EVENTS = [
   'charge.created',
   'charge.refunded',
   'subscription.created',
+  'subscription.updated',
   'subscription.canceled',
+  'payment.succeeded',
+  'payment.failed',
+  'payment.refunded',
+  'payment.updated',
   'invoice.emitted',
   'webhook.received',
   'webhook.processed',
@@ -102,9 +115,43 @@ export interface SubscriptionCreatedPayload {
   customerId: string;
   planId: string;
 }
+export interface SubscriptionUpdatedPayload {
+  gatewayId: string;
+  provider: string;
+  customerId: string;
+  status: string;
+}
 export interface SubscriptionCanceledPayload {
   gatewayId: string;
   provider: string;
+}
+/** Webhook-confirmed payment (normalized business event). */
+export interface PaymentSucceededPayload {
+  gatewayId: string;
+  provider: string;
+  amount: number;
+  currency: string;
+  /** The `externalReference` the app set on the charge, echoed back by the gateway. */
+  externalReference?: string;
+}
+export interface PaymentFailedPayload {
+  gatewayId: string;
+  provider: string;
+  amount: number;
+  currency: string;
+  reason?: string;
+  externalReference?: string;
+}
+export interface PaymentRefundedPayload {
+  gatewayId: string;
+  provider: string;
+  amount: number;
+  currency: string;
+}
+export interface PaymentUpdatedPayload {
+  gatewayId: string;
+  provider: string;
+  status: string;
 }
 export interface InvoiceEmittedPayload {
   gatewayId: string;
@@ -134,7 +181,12 @@ export interface PaymentsDiagnosticPayloads {
   'charge.created': ChargeCreatedPayload;
   'charge.refunded': ChargeRefundedPayload;
   'subscription.created': SubscriptionCreatedPayload;
+  'subscription.updated': SubscriptionUpdatedPayload;
   'subscription.canceled': SubscriptionCanceledPayload;
+  'payment.succeeded': PaymentSucceededPayload;
+  'payment.failed': PaymentFailedPayload;
+  'payment.refunded': PaymentRefundedPayload;
+  'payment.updated': PaymentUpdatedPayload;
   'invoice.emitted': InvoiceEmittedPayload;
   'webhook.received': WebhookReceivedPayload;
   'webhook.processed': WebhookProcessedPayload;

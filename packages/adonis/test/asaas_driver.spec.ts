@@ -94,4 +94,77 @@ describe('AsaasDriver', () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it('maps externalReference (preferred over idempotencyKey) to the Asaas externalReference field', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 'pay_2',
+        customer: 'cus_1',
+        value: 10,
+        billingType: 'PIX',
+        status: 'PENDING',
+        dueDate: '2026-01-10',
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const driver = makeDriver();
+      await driver.charge({
+        customerId: 'cus_1',
+        amount: 1000,
+        method: 'pix',
+        externalReference: 'pay_local_1',
+        idempotencyKey: 'idem_1',
+      });
+      const [_, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
+      expect(JSON.parse(String(init.body))).toMatchObject({ externalReference: 'pay_local_1' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('createSubscription sends card + externalReference for transparent checkout', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 'sub_1',
+        customer: 'cus_1',
+        value: 49.9,
+        billingType: 'CREDIT_CARD',
+        status: 'PENDING',
+        cycle: 'MONTHLY',
+        nextDueDate: '2026-02-01',
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const driver = makeDriver();
+      await driver.createSubscription({
+        customerId: 'cus_1',
+        planId: 'tier:x',
+        amount: 4990,
+        method: 'credit_card',
+        startDate: '2026-01-01',
+        externalReference: 'sub:local_1',
+        card: {
+          token: 'tok_123',
+          holder: { name: 'A', email: 'a@b.com', cpfCnpj: '123', postalCode: '000', addressNumber: '1', phone: '999' },
+          remoteIp: '1.2.3.4',
+        },
+      });
+      const [_, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
+      expect(JSON.parse(String(init.body))).toMatchObject({
+        billingType: 'CREDIT_CARD',
+        creditCardToken: 'tok_123',
+        creditCardHolderInfo: { name: 'A', cpfCnpj: '123' },
+        remoteIp: '1.2.3.4',
+        externalReference: 'sub:local_1',
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

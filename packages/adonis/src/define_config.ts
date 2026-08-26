@@ -1,6 +1,8 @@
 import type { PaymentsDriver } from './driver.js';
 import type { InvoiceProvider } from './invoice/invoice_provider.js';
 import type { InvoiceOptions, PaymentMethodName } from './types.js';
+import type { WebhookHandler } from './billing/webhook_processor.js';
+import type { WebhookHandlerService } from './webhook_handlers.js';
 
 /**
  * A lazy factory that builds a {@link PaymentsDriver}. Each driver factory imports its
@@ -11,6 +13,9 @@ export type PaymentsDriverFactory = (ctx: PaymentsContext) => Promise<PaymentsDr
 
 /** A lazy factory that builds an {@link InvoiceProvider} (Focus, Tecnospeed, eNotas, PlugNotas). */
 export type InvoiceProviderFactory = (ctx: InvoiceContext) => Promise<InvoiceProvider>;
+
+/** `config.billing.handlers` — normalized webhook event type → handler. */
+export type BillingHandlers = Record<string, WebhookHandler | WebhookHandlerService>;
 
 /** Context handed to driver factories when the provider resolves them. */
 export interface PaymentsContext {
@@ -159,6 +164,27 @@ export interface PaymentsConfig {
      * dispatcher.
      */
     durable?: 'auto' | boolean;
+    /**
+     * Business webhook handlers run INSIDE the lib-mounted `/payments/webhook/:provider`
+     * route, by the {@link WebhookProcessor}. Errors mark the event failed in the ledger
+     * and trigger the dispatcher's retry. An alternative to subscribing to the
+     * `agora:payments:billing:*` events — pick whichever fits the app (events for
+     * fire-and-forget, handlers here for error-driven retry).
+     *
+     * Keyed by the normalized event type (e.g. `'payment.succeeded'`). Each factory
+     * receives the AdonisJS container and returns the handler, so it can resolve DI
+     * services lazily:
+     *
+     * ```ts
+     * handlers: {
+     *   'payment.succeeded': async ({ app }) => {
+     *     const svc = await app.container.make(MeetingPackageService)
+     *     return (event) => svc.handlePayment(event)
+     *   },
+     * }
+     * ```
+     */
+    handlers?: BillingHandlers;
   };
 }
 

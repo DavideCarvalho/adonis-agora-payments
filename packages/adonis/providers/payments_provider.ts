@@ -1,13 +1,22 @@
 import type { HttpContext } from '@adonisjs/core/http';
 import type { ApplicationService, HttpRouterService } from '@adonisjs/core/types';
+import { pathToFileURL } from 'node:url';
 import { LucidBillingStore } from '../src/billing/lucid_billing_store.js';
 import { WebhookDispatcher } from '../src/billing/webhook_dispatcher.js';
 import type { WebhookDispatchMode } from '../src/billing/webhook_dispatcher.js';
 import { WebhookProcessor } from '../src/billing/webhook_processor.js';
-import type { PaymentsConfig } from '../src/define_config.js';
+import type { WebhookHandler } from '../src/billing/webhook_processor.js';
+import type { BillingHandlers, PaymentsConfig } from '../src/define_config.js';
 import { InvoiceManager, resolveInvoiceProviders } from '../src/invoice/invoice_manager.js';
 import { PaymentsManager, resolveDrivers } from '../src/payments_manager.js';
 import { setPayments } from '../src/services/main.js';
+import {
+  discoverWebhookHandlers,
+  loadWebhookHandlersFromBarrel,
+  resolveWebhookHandler,
+  type DiscoveredWebhookHandler,
+  type WebhookHandlersBarrel,
+} from '../src/webhook_handlers.js';
 
 /**
  * Wires `@adonis-agora/payments` into the AdonisJS application: binds a singleton
@@ -42,18 +51,84 @@ export default class PaymentsProvider {
       setPayments(manager);
       return manager;
     });
+  }
 
-    // Wire the billing layer (subscription store + webhook processing) when enabled.
-    if (config.billing?.enabled !== false) {
-      const store = new LucidBillingStore();
-      const processor = new WebhookProcessor({ store });
-      this.#webhook = new WebhookDispatcher({
-        processor,
-        mode: this.#resolveMode(config),
-        // In 'auto', durable is used only when its engine is resolvable in the app
-        // (i.e. the durable provider is registered) — not merely installed.
-        durableAvailable: () => this.#isDurableAvailable(),
-      });
+  async boot() {
+    await this.app.booted(async () => {
+      const config = this.app.config.get<PaymentsConfig>('payments', {});
+      // Build the billing layer here (async — resolves the app emitter + handler
+      // factories), so the mounted route can emit `billing:*` and run app handlers.
+      if (config.billing?.enabled !== false) {
+        await this.#buildBillingLayer(config);
+      }
+      // Resolve the manager here so `setPayments` runs and `getPayments()` works for
+      // services that read it during boot — after every provider has registered.
+      await this.app.container.make(PaymentsManager);
+      const router = await this.app.container.make('router');
+      this.#registerWebhookRoute(router);
+    });
+  }
+
+  async #buildBillingLayer(config: PaymentsConfig): Promise<void> {
+    const store = new LucidBillingStore();
+    const handlers = await this.#resolveAllHandlers(config.billing?.handlers);
+    const processor = new WebhookProcessor({
+      store,
+      ...(handlers !== undefined ? { handlers } : {}),
+    });
+    this.#webhook = new WebhookDispatcher({
+      processor,
+      mode: this.#resolveMode(config),
+      // In 'auto', durable is used only when its engine is resolvable in the app
+      // (i.e. the durable provider is registered) — not merely installed.
+      durableAvailable: () => this.#isDurableAvailable(),
+    });
+  }
+
+  /**
+   * Merge webhook handlers from the two sources:
+   * 1. `config.billing.handlers` (functions or service classes),
+   * 2. the conventions folder `app/payment_handlers/` (build-time barrel, runtime scan
+   *    as fallback) — the durable-style discovery.
+   */
+  async #resolveAllHandlers(
+    configHandlers: BillingHandlers | undefined,
+  ): Promise<Record<string, WebhookHandler> | undefined> {
+    const handlers: Record<string, WebhookHandler> = {};
+    if (configHandlers) {
+      for (const [type, entry] of Object.entries(configHandlers)) {
+        handlers[type] = await resolveWebhookHandler(entry, this.app.container);
+      }
+    }
+    for (const discovered of await this.#discoverFolderHandlers()) {
+      handlers[discovered.type] = await resolveWebhookHandler(
+        discovered.entry,
+        this.app.container,
+      );
+    }
+    return Object.keys(handlers).length > 0 ? handlers : undefined;
+  }
+
+  /** Discover handlers in `app/payment_handlers/`: build-time barrel, else runtime scan. */
+  async #discoverFolderHandlers(): Promise<DiscoveredWebhookHandler[]> {
+    const barrel = await this.#loadGeneratedBarrel();
+    if (barrel) return loadWebhookHandlersFromBarrel(barrel);
+    const dir = this.app.makePath('app/payment_handlers');
+    return discoverWebhookHandlers(dir);
+  }
+
+  /** Import the Assembler `init`-hook barrel (`.adonisjs/payments/webhook_handlers.js`). */
+  async #loadGeneratedBarrel(): Promise<WebhookHandlersBarrel | null> {
+    const path = this.app.makePath('.adonisjs/payments/webhook_handlers.js');
+    try {
+      const mod = (await import(pathToFileURL(path).href)) as {
+        webhookHandlers?: WebhookHandlersBarrel;
+      };
+      return mod.webhookHandlers ?? null;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ERR_MODULE_NOT_FOUND' || code === 'ENOENT') return null;
+      throw err;
     }
   }
 
@@ -74,17 +149,6 @@ export default class PaymentsProvider {
     if (setting === true) return 'durable';
     if (setting === false) return 'in-process';
     return 'auto';
-  }
-
-  async boot() {
-    // Mount the webhook route once the app has booted (same deferral as the media provider).
-    await this.app.booted(async () => {
-      // Resolve the manager here so `setPayments` runs and `getPayments()` works for
-      // services that read it during boot — after every provider has registered.
-      await this.app.container.make(PaymentsManager);
-      const router = await this.app.container.make('router');
-      this.#registerWebhookRoute(router);
-    });
   }
 
   #registerWebhookRoute(router: HttpRouterService) {

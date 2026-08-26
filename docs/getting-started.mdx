@@ -1,4 +1,7 @@
-# Getting started
+---
+title: Getting started
+description: Install @adonis-agora/payments, configure providers, run the billing migrations, register webhooks and make your first charge.
+---
 
 ## Install
 
@@ -46,6 +49,31 @@ node ace payments:webhook
 ```
 
 The provider mounts `POST /payments/webhook/:provider` automatically.
+
+## Reacting to webhooks — your business logic
+
+The route validates + syncs, but your business logic (grant credits, activate a
+subscription) needs a home. Three equivalent options ([details](./webhooks)):
+
+1. **Convention folder** — scaffold a handler and drop it in `app/payment_handlers/`
+   (register the codegen hook once in `adonisrc.ts`):
+
+   ```sh
+   node ace make:webhook-handler payment.succeeded
+   ```
+
+   ```ts
+   // adonisrc.ts
+   hooks: { init: [() => import('@adonis-agora/payments/hooks/webhook_handlers')] }
+   ```
+
+2. **`billing.handlers`** in `config/payments.ts` — a DI service class (the lib calls its
+   `.handle`) or a plain function.
+3. **Events** — `onDiagnostic('payments', 'payment.succeeded', fn)`.
+
+The recommended money-flow pattern: the handler only **dispatches a durable workflow**
+(durable owns retry + exactly-once) — see the [Webhooks doc](./webhooks) for the
+`@OnDiagnostic` example.
 
 ## Your first charge
 

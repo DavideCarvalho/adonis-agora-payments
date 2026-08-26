@@ -1,5 +1,3 @@
-import type { BillingEmitterLike, BillingEventPayloads, BillingEventType } from '../events.js';
-import { billingEventName } from '../events.js';
 import type { WebhookEvent } from '../types.js';
 import type { WebhookProcessor } from './webhook_processor.js';
 
@@ -16,7 +14,6 @@ export type WebhookDispatchMode = 'durable' | 'in-process' | 'auto';
 
 export interface WebhookDispatcherOptions {
   processor: WebhookProcessor;
-  emitter?: BillingEmitterLike;
   /**
    * How webhooks are processed. `'auto'` (default) lazily resolves
    * `@adonis-agora/durable` and uses it when installed AND available (the app has the
@@ -57,7 +54,6 @@ export interface DurableWorkflowLike {
  */
 export class WebhookDispatcher {
   #processor: WebhookProcessor;
-  #emitter: BillingEmitterLike | undefined;
   #mode: WebhookDispatchMode;
   #maxAttempts: number;
   #baseDelayMs: number;
@@ -68,7 +64,6 @@ export class WebhookDispatcher {
 
   constructor(options: WebhookDispatcherOptions) {
     this.#processor = options.processor;
-    this.#emitter = options.emitter;
     this.#mode = options.mode ?? 'auto';
     this.#maxAttempts = options.retries?.max ?? 5;
     this.#baseDelayMs = options.retries?.baseDelayMs ?? 500;
@@ -81,12 +76,6 @@ export class WebhookDispatcher {
    * or fully processed (in-process).
    */
   async dispatch(event: WebhookEvent): Promise<{ runId?: string }> {
-    this.#emit('billing:webhook.received', {
-      id: event.id,
-      provider: event.provider,
-      type: event.type,
-    });
-
     if (await this.#useDurable()) {
       const workflow = await this.#resolveDurable();
       const { runId } = await workflow.dispatch({ event });
@@ -164,14 +153,8 @@ export class WebhookDispatcher {
       await this.#processor.process(event);
       return {};
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.#emit('billing:webhook.failed', {
-        id: event.id,
-        provider: event.provider,
-        type: event.type,
-        error: message,
-      });
-      // Retry in the background (don't block the webhook response).
+      // Retry in the background (don't block the webhook response). The processor itself
+      // publishes `webhook.failed` on the diagnostics channel.
       void this.#retry(event, 2);
       return {};
     }
@@ -183,26 +166,9 @@ export class WebhookDispatcher {
     await sleep(delay);
     try {
       await this.#processor.process(event);
-      this.#emit('billing:webhook.handled', {
-        id: event.id,
-        provider: event.provider,
-        type: event.type,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.#emit('billing:webhook.failed', {
-        id: event.id,
-        provider: event.provider,
-        type: event.type,
-        error: message,
-      });
+    } catch {
       await this.#retry(event, attempt + 1);
     }
-  }
-
-  #emit<K extends BillingEventType>(type: K, payload: BillingEventPayloads[K]): void {
-    if (!this.#emitter) return;
-    void this.#emitter.emit(billingEventName(type), payload);
   }
 }
 

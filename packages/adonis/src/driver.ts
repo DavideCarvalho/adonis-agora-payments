@@ -119,6 +119,25 @@ export interface UpdateCustomerInput {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * Checkout transparente: a card tokenized in the frontend, plus the holder info most BR
+ * gateways require (Asaas `creditCardToken`/`creditCardHolderInfo`, Stripe
+ * `payment_method`). First-class so drivers map it without metadata hacks — shared by
+ * one-off {@link ChargeInput.card} and recurring {@link CreateSubscriptionInput.card}.
+ */
+export interface CardInput {
+  token: string;
+  holder?: {
+    name: string;
+    email: string;
+    cpfCnpj: string;
+    postalCode: string;
+    addressNumber: string;
+    phone: string;
+  };
+  remoteIp?: string;
+}
+
 export interface ChargeInput {
   /** Gateway customer id. When absent, some gateways charge without a customer. */
   customerId?: string;
@@ -132,21 +151,9 @@ export interface ChargeInput {
   paymentMethodId?: string;
   /**
    * Checkout transparente: card tokenized in the frontend, plus the holder info most BR
-   * gateways require (Asaas `creditCardToken`/`creditCardHolderInfo`, Stripe
-   * `payment_method`). First-class so drivers map it without metadata hacks.
+   * gateways require. First-class so drivers map it without metadata hacks.
    */
-  card?: {
-    token: string;
-    holder?: {
-      name: string;
-      email: string;
-      cpfCnpj: string;
-      postalCode: string;
-      addressNumber: string;
-      phone: string;
-    };
-    remoteIp?: string;
-  };
+  card?: CardInput;
   /**
    * The payer's fiscal data — the single source used when an invoice is emitted with
    * this charge. Falls back to `card.holder` (cpfCnpj/name/email) when absent, so a
@@ -159,6 +166,14 @@ export interface ChargeInput {
   };
   /** Idempotency key — reusing it must not double-charge. */
   idempotencyKey?: string;
+  /**
+   * Your own reference echoed back on the gateway payment — the stable id webhook
+   * handlers use to route a payment back to your local record. Many BR gateways expose
+   * it as `externalReference` (Asaas) or `correlationID` (Woovi); Stripe maps it into
+   * metadata. Distinct from `idempotencyKey`: idempotency protects against duplicate
+   * charges, `externalReference` is for routing. Prefer it over digging into `event.raw`.
+   */
+  externalReference?: string;
   /**
    * Emit an invoice for this charge: `true` uses the default invoice provider, a string
    * names one from `invoice.providers`, or pass {@link InvoiceOptions} for overrides.
@@ -204,6 +219,18 @@ export interface CreateSubscriptionInput {
   trialDays?: number;
   /** First due date (ISO date) — required by some BR gateways (e.g. Asaas). */
   startDate?: string;
+  /**
+   * Checkout transparente for recurring charges: a card tokenized in the frontend (plus
+   * holder info) so the gateway auto-charges the card each cycle. Asaas maps it to
+   * `creditCardToken`/`creditCardHolderInfo`; other gateways accept it when supported.
+   */
+  card?: CardInput;
+  /**
+   * Your own reference echoed on the gateway subscription (and its generated charges) —
+   * the stable id webhook handlers use to route a subscription payment back to your
+   * local record. Asaas propagates it to every installment payment's `externalReference`.
+   */
+  externalReference?: string;
   /** Emit an invoice for this subscription's charges: `true`/name/options. */
   invoice?: boolean | string | InvoiceOptions;
   /** Extra provider-specific fields. */

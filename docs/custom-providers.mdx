@@ -1,9 +1,30 @@
-# Custom providers
+---
+title: Custom providers
+description: Write a custom payment or invoice provider as a plain config factory, using the exported building blocks (httpRequest, toDecimal, ensureCustomer, ...).
+---
 
 The library is built so you never have to wait for a new gateway or invoice provider to
 ship: **custom drivers** are plain factories in `config/payments.ts`, and the building
-blocks they need (`httpRequest`, `toDecimal`, `emitInvoiceIfRequested`, ...) are exported
-from the package root.
+blocks they need (`httpRequest`, `toDecimal`, `emitInvoiceIfRequested`, `ensureCustomer`, ...)
+are exported from the package root.
+
+## Reusing a gateway customer
+
+Every charge/subscription flow needs a gateway customer id; `ensureCustomer` does the
+"reuse the stored id, or create at the gateway" branch for you (the app owns the
+user→customer mapping and persists the new id):
+
+```ts
+import { ensureCustomer } from '@adonis-agora/payments'
+
+const customer = await ensureCustomer(driver, user.asaasCustomerId, {
+  name: user.fullName,
+  email: user.email,
+  taxId: user.cpfCnpj ?? undefined,
+})
+user.asaasCustomerId = customer.id
+await user.save()
+```
 
 ## Custom payment gateway
 

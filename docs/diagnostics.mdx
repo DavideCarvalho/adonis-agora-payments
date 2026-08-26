@@ -1,4 +1,7 @@
-# Diagnostics
+---
+title: Diagnostics
+description: Every payments milestone on the @adonis-agora/diagnostics bus — the event catalog, business events, and watching in Telescope.
+---
 
 Every payment milestone emits on the `@adonis-agora/diagnostics` bus as
 `agora:payments:<event>` — when diagnostics is installed in the app. The library reads
@@ -11,14 +14,26 @@ is absent the emits are inert no-ops.
 | --- | --- | --- |
 | `charge.created` | a charge succeeded at the gateway | gatewayId, provider, amount, currency, method |
 | `charge.refunded` | a refund completed | gatewayId, provider, amount, currency |
-| `subscription.created` | a subscription was created | gatewayId, provider, customerId, planId |
-| `subscription.canceled` | a subscription was canceled | gatewayId, provider |
+| `subscription.created` | a subscription was created (API or webhook) | gatewayId, provider, customerId, planId |
+| `subscription.updated` | a subscription changed (webhook) | gatewayId, provider, customerId, status |
+| `subscription.canceled` | a subscription was canceled (API or webhook) | gatewayId, provider |
+| `payment.succeeded` | a webhook confirmed a payment | gatewayId, provider, amount, currency, externalReference |
+| `payment.failed` | a webhook confirmed a failed payment | gatewayId, provider, amount, currency, reason, externalReference |
+| `payment.refunded` | a webhook confirmed a refund | gatewayId, provider, amount, currency |
+| `payment.updated` | a webhook reported a payment update | gatewayId, provider, status |
 | `invoice.emitted` | an invoice (NFe/NFSe) was emitted | gatewayId, provider, number, url |
 | `webhook.received` | a gateway webhook arrived | id, provider, type |
 | `webhook.processed` | a webhook finished processing | id, provider, type |
 | `webhook.failed` | a webhook handler threw | id, provider, type, error |
 
 The runtime catalog is exported as `PAYMENTS_DIAGNOSTIC_EVENTS`.
+
+## Subscribing for business logic
+
+The `payment.*`/`subscription.*` events are the **normalized business events** — apps
+react to them with `onDiagnostic` (framework-agnostic, works in HTTP, workers and ace
+commands). See [Webhooks → Running your business logic](./webhooks) for the three ways to
+handle them (events, `billing.handlers`, or the `app/payment_handlers/` folder).
 
 ## Watching in Telescope
 

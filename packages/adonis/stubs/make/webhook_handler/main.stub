@@ -1,0 +1,29 @@
+{{#var handlerName = string(entity.name).pascalCase().toString()}}
+{{#var fileName = string(entity.name).snakeCase().toString()}}
+{{{
+  exports({
+    to: app.makePath('app/payment_handlers', entity.path, fileName + '.ts')
+  })
+}}}
+import { inject } from '@adonisjs/core'
+import type { WebhookEvent } from '@adonis-agora/payments'
+
+/**
+ * Webhook handler para `{{ entity.name }}` — rodado pela rota da própria lib
+ * (`/payments/webhook/:provider`) dentro do WebhookProcessor. Um throw marca o evento
+ * como failed no ledger e o dispatcher re-tenta (durable/in-process).
+ *
+ * Faça a lógica pesada rodar numa fila/workflow durable e dispatch aqui:
+ *
+ *   const engine = await app.container.make(WorkflowEngine)
+ *   await engine.start(MyWorkflow, { ... }, randomUUID())
+ */
+@inject()
+export default class {{ handlerName }}Handler {
+  static readonly eventType = '{{ entity.name }}'
+
+  async handle(event: WebhookEvent): Promise<void> {
+    // Sua lógica de negócio (ou dispatch pra um workflow durable / job da fila)...
+    void event
+  }
+}

@@ -109,7 +109,10 @@ export class WooviDriver implements PaymentsDriver {
 
   async charge(input: ChargeInput): Promise<Payment> {
     const data = await this.#client.charge.create({
-      correlationID: input.idempotencyKey ?? `charge_${Date.now()}`,
+      // Woovi's `correlationID` is the app's own reference — the routing key webhook
+      // handlers read. Prefer the explicit `externalReference`, fall back to the
+      // idempotency key (legacy behavior).
+      correlationID: input.externalReference ?? input.idempotencyKey ?? `charge_${Date.now()}`,
       value: toDecimal(input.amount),
       ...(input.description !== undefined ? { comment: input.description } : {}),
       ...(input.customerId !== undefined ? { customer: input.customerId } : {}),

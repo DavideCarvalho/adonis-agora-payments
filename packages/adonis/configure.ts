@@ -24,15 +24,15 @@ export async function configure(command: Configure) {
   await codemods.makeUsingStub(stubs, 'database/migrations/create_billing_tables.stub', {});
 
   await codemods.defineEnvValidations({
-    lead: 'PAYMENTS_',
-    schema: `{
-      STRIPE_KEY: Env.schema.string.optional(),
-      STRIPE_WEBHOOK_SECRET: Env.schema.string.optional(),
-      ABACATE_API_KEY: Env.schema.string.optional(),
-      ABACATE_PUBLIC_KEY: Env.schema.string.optional(),
-      ASAAS_API_KEY: Env.schema.string.optional(),
-      WOOVI_APP_ID: Env.schema.string.optional(),
-      FOCUS_NFE_TOKEN: Env.schema.string.optional(),
-    }`,
+    leadingComment: 'PAYMENTS_',
+    variables: {
+      STRIPE_KEY: 'Env.schema.string.optional()',
+      STRIPE_WEBHOOK_SECRET: 'Env.schema.string.optional()',
+      ABACATE_API_KEY: 'Env.schema.string.optional()',
+      ABACATE_PUBLIC_KEY: 'Env.schema.string.optional()',
+      ASAAS_API_KEY: 'Env.schema.string.optional()',
+      WOOVI_APP_ID: 'Env.schema.string.optional()',
+      FOCUS_NFE_TOKEN: 'Env.schema.string.optional()',
+    },
   });
 }

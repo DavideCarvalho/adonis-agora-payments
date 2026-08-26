@@ -28,6 +28,21 @@ export type { EmitInvoiceContext, EmitInvoiceData } from './invoice/emit_invoice
 export { httpRequest, headerValue, isNotFound } from './http.js';
 export type { HttpRequestOptions } from './http.js';
 export { toDecimal, fromDecimal } from './money.js';
+export { ensureCustomer } from './ensure_customer.js';
+export {
+  isWebhookHandlerService,
+  resolveWebhookHandler,
+  normalizeWebhookHandlerModule,
+  discoverWebhookHandlers,
+  loadWebhookHandlersFromBarrel,
+  pickModuleExt,
+} from './webhook_handlers.js';
+export type {
+  WebhookHandlerService,
+  WebhookHandlerModule,
+  DiscoveredWebhookHandler,
+  WebhookHandlersBarrel,
+} from './webhook_handlers.js';
 export {
   PAYMENTS_DIAGNOSTIC_EVENTS,
   publishPayments,
@@ -47,15 +62,6 @@ export { WebhookProcessor } from './billing/webhook_processor.js';
 export type { WebhookHandler } from './billing/webhook_processor.js';
 export { LucidBillingStore, lucidBillingStore } from './billing/lucid_billing_store.js';
 export type { BillingModels } from './billing/lucid_billing_store.js';
-export { BILLING_EVENT_TYPES, billingEventName } from './events.js';
-export type {
-  BillingEventType,
-  BillingEventPayloads,
-  BillingEventPayload,
-  BillingEmitterEvents,
-  BillingEmitterLike,
-  BillingWatcher,
-} from './events.js';
 export type {
   Money,
   Currency,

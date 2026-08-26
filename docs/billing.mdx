@@ -1,4 +1,7 @@
-# Billing
+---
+title: Billing
+description: The Cashier-style subscription layer — Billable mixins, Lucid stores, idempotent webhook processing and the billing events.
+---
 
 The billing layer is Cashier-style: Lucid models + mixins, an idempotent webhook
 processor that keeps the local tables in sync with the gateway, and a dispatcher that
@@ -70,9 +73,9 @@ run after the built-in sync and can send emails, release access, etc.:
 
 ```ts
 // start/events.ts
-import emitter from '@adonisjs/core/services/emitter'
+import { onDiagnostic } from '@adonis-agora/diagnostics'
 
-emitter.on('billing:payment.succeeded', ({ gatewayId, amount }) => {
+onDiagnostic('payments', 'payment.succeeded', ({ payload }) => {
   // grant access, send receipt...
 })
 ```

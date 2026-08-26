@@ -1,4 +1,7 @@
-# Providers
+---
+title: Providers
+description: Gateway specifics for Stripe, AbacatePay, Asaas and Woovi — supported methods, webhooks, subscriptions, externalReference and invoice behavior.
+---
 
 Every provider implements the same `PaymentsDriver` contract — `createCustomer`,
 `charge`, `refund`, `createCheckout`, `createSubscription`, `cancelSubscription`,
@@ -50,10 +53,14 @@ await payments.driver('pix').charge({
   events `PAYMENT_CREATED`, `PAYMENT_RECEIVED`, `PAYMENT_OVERDUE`, `PAYMENT_REFUNDED`,
   `SUBSCRIPTION_*`
 - **Subscriptions**: native recurring billing — charges are generated automatically and
-  the webhook arrives per charge (with the `subscription` id)
+  the webhook arrives per charge (with the `subscription` id); pass `card` for transparent
+  checkout (tokenized card auto-charged each cycle)
 - **Invoices**: Asaas emits NFS-e natively; use the `invoice` option with an invoice
   provider, or Asaas's own invoice settings
 - **Requires** a customer for every charge and subscription
+- **`externalReference`**: sent as the Asaas `externalReference` field — propagated to
+  every installment of a subscription's charges, so webhooks route each payment back to
+  your record
 
 ```ts
 await payments.driver('boleto').charge({
@@ -62,11 +69,17 @@ await payments.driver('boleto').charge({
   invoice: true,
 })
 
-await payments.driver('pix').createSubscription({
+await payments.driver('credit_card').createSubscription({
   customerId: 'cus_123',
   planId: 'plan_pro',
   amount: 4990,
   startDate: '2026-09-01',
+  externalReference: 'sub:sub_local_1',
+  card: {
+    token: 'tok_123',
+    holder: { name: 'A', email: 'a@b.com', cpfCnpj: '123', postalCode: '000', addressNumber: '1', phone: '999' },
+    remoteIp: '1.2.3.4',
+  },
 })
 ```
 

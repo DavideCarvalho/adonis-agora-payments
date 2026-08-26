@@ -1,7 +1,5 @@
 import { publishPayments } from '../diagnostics.js';
 import type { PaymentsDriver } from '../driver.js';
-import type { BillingEmitterLike, BillingEventPayloads, BillingEventType } from '../events.js';
-import { BILLING_EVENT_TYPES, billingEventName } from '../events.js';
 import type { WebhookEvent } from '../types.js';
 import type { BillingStore } from './billing_store.js';
 import { isPaymentWebhookData, isSubscriptionWebhookData } from './webhook_events.js';
@@ -20,8 +18,6 @@ export interface WebhookProcessorOptions {
    * built-in handlers persist through the store and don't call the gateway.
    */
   driver?: PaymentsDriver;
-  /** Optional emitter to broadcast `billing:*` events to (app emitter / in-process). */
-  emitter?: BillingEmitterLike;
   /** Map of gateway event type → handler. Apps register their business logic here. */
   handlers?: Record<string, WebhookHandler>;
 }
@@ -31,19 +27,19 @@ export interface WebhookProcessorOptions {
  * `billing_webhook_events` ledger (keyed by gateway event id), and keeps the local
  * billing tables in sync (payments, subscriptions).
  *
- * Built-in handlers keep the store in sync; app handlers (via `handlers`) run after and
- * can emit events, send emails, release access, etc.
+ * Built-in handlers keep the store in sync and publish the normalized business events on
+ * the `@adonis-agora/diagnostics` channel (`agora:payments:payment.succeeded`, ...) —
+ * apps react with `onDiagnostic('payments', ...)` (or the `handlers` below). App
+ * handlers (via `handlers`) run after the built-in sync and can dispatch work.
  */
 export class WebhookProcessor {
   #store: BillingStore;
   #driver: PaymentsDriver | undefined;
-  #emitter: BillingEmitterLike | undefined;
   #handlers: Record<string, WebhookHandler>;
 
   constructor(options: WebhookProcessorOptions) {
     this.#store = options.store;
     this.#driver = options.driver;
-    this.#emitter = options.emitter;
     this.#handlers = options.handlers ?? {};
   }
 
@@ -62,11 +58,6 @@ export class WebhookProcessor {
     // Already seen → idempotent replay, skip.
     if (ledger === null) return false;
 
-    this.#emit('billing:webhook.received', {
-      id: event.id,
-      provider: event.provider,
-      type: event.type,
-    });
     publishPayments('webhook.received', {
       id: event.id,
       provider: event.provider,
@@ -78,11 +69,6 @@ export class WebhookProcessor {
       const handler = this.#handlers[event.type];
       if (handler) await handler(event);
       await this.#store.markWebhookProcessed(ledger.id);
-      this.#emit('billing:webhook.handled', {
-        id: event.id,
-        provider: event.provider,
-        type: event.type,
-      });
       publishPayments('webhook.processed', {
         id: event.id,
         provider: event.provider,
@@ -92,12 +78,6 @@ export class WebhookProcessor {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await this.#store.markWebhookFailed(ledger.id, message);
-      this.#emit('billing:webhook.failed', {
-        id: event.id,
-        provider: event.provider,
-        type: event.type,
-        error: message,
-      });
       publishPayments('webhook.failed', {
         id: event.id,
         provider: event.provider,
@@ -143,7 +123,15 @@ export class WebhookProcessor {
       paidAt: new Date(),
       payload: event.raw,
     });
-    this.#emit('billing:payment.succeeded', { gatewayId, amount, currency });
+    publishPayments('payment.succeeded', {
+      gatewayId,
+      provider: event.provider,
+      amount,
+      currency,
+      ...(event.data.externalReference !== undefined
+        ? { externalReference: event.data.externalReference }
+        : {}),
+    });
   }
 
   async #onPaymentFailed(event: WebhookEvent): Promise<void> {
@@ -161,7 +149,15 @@ export class WebhookProcessor {
       ...(subscriptionId !== undefined ? { subscriptionId } : {}),
       payload: event.raw,
     });
-    this.#emit('billing:payment.failed', { gatewayId, amount, currency });
+    publishPayments('payment.failed', {
+      gatewayId,
+      provider: event.provider,
+      amount,
+      currency,
+      ...(event.data.externalReference !== undefined
+        ? { externalReference: event.data.externalReference }
+        : {}),
+    });
   }
 
   async #onPaymentRefunded(event: WebhookEvent): Promise<void> {
@@ -184,7 +180,12 @@ export class WebhookProcessor {
         payload: event.raw,
       });
     }
-    this.#emit('billing:payment.refunded', { gatewayId, amount, currency });
+    publishPayments('payment.refunded', {
+      gatewayId,
+      provider: event.provider,
+      amount,
+      currency,
+    });
   }
 
   async #onSubscriptionChanged(event: WebhookEvent): Promise<void> {
@@ -202,14 +203,12 @@ export class WebhookProcessor {
       ...(data.endsAt !== undefined ? { endsAt: new Date(data.endsAt) } : {}),
       payload: event.raw,
     });
-    const type: BillingEventType =
-      event.type === 'subscription.created'
-        ? 'billing:subscription.created'
-        : 'billing:subscription.updated';
-    this.#emit(type, {
+    const type = event.type === 'subscription.created' ? 'subscription.created' : 'subscription.updated';
+    publishPayments(type, {
       gatewayId: data.gatewayId,
+      provider: event.provider,
       customerId: data.customerId,
-      planId: data.planId ?? '',
+      status: data.status,
     });
   }
 
@@ -231,11 +230,9 @@ export class WebhookProcessor {
         payload: event.raw,
       });
     }
-    this.#emit('billing:subscription.canceled', { gatewayId: data.gatewayId });
-  }
-
-  #emit<K extends BillingEventType>(type: K, payload: BillingEventPayloads[K]): void {
-    if (!this.#emitter) return;
-    void this.#emitter.emit(billingEventName(type), payload);
+    publishPayments('subscription.canceled', {
+      gatewayId: data.gatewayId,
+      provider: event.provider,
+    });
   }
 }

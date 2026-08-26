@@ -25,6 +25,14 @@ export interface PaymentWebhookData {
   currency: string;
   customerId?: string;
   subscriptionId?: string;
+  /**
+   * The `externalReference` the app set on the charge/subscription, echoed back by the
+   * gateway. First-class so app handlers route payments to their local records without
+   * digging into `event.raw` — the reason {@link ChargeInput.externalReference} exists.
+   */
+  externalReference?: string;
+  /** Gateway-echoed metadata, when the gateway includes it in the webhook payload. */
+  metadata?: Record<string, unknown>;
 }
 
 /** Shape the built-in sync handlers expect from a subscription event's `data`. */

@@ -167,7 +167,12 @@ export class AsaasDriver implements PaymentsDriver {
       dueDate: this.#dueDate(input),
       billingType: this.#mapMethod(isCard ? 'credit_card' : input.method),
       ...(input.description !== undefined ? { description: input.description } : {}),
-      ...(input.idempotencyKey !== undefined ? { externalReference: input.idempotencyKey } : {}),
+      // `externalReference` is the app's own id echoed back on the payment — the routing
+      // key webhook handlers read. `idempotencyKey` doubles as it only when the app
+      // didn't pass an explicit reference (legacy behavior).
+      ...(input.externalReference !== undefined || input.idempotencyKey !== undefined
+        ? { externalReference: input.externalReference ?? input.idempotencyKey }
+        : {}),
       // Checkout transparente: cartão tokenizado no front (Asaas tokenization).
       ...(input.card !== undefined ? { creditCardToken: input.card.token } : {}),
       ...(input.paymentMethodId !== undefined ? { creditCardToken: input.paymentMethodId } : {}),
@@ -272,6 +277,17 @@ export class AsaasDriver implements PaymentsDriver {
       ...(input.amount !== undefined ? { value: toDecimal(input.amount) } : {}),
       ...(input.startDate !== undefined ? { nextDueDate: input.startDate } : {}),
       ...(input.description !== undefined ? { description: input.description } : {}),
+      // Asaas propagates the subscription's externalReference to every installment
+      // payment — the routing key webhook handlers read on each charge.
+      ...(input.externalReference !== undefined
+        ? { externalReference: input.externalReference }
+        : {}),
+      // Checkout transparente de assinatura: cartão tokenizado cobrado a cada ciclo.
+      ...(input.card !== undefined ? { creditCardToken: input.card.token } : {}),
+      ...(input.card?.holder !== undefined
+        ? { creditCardHolderInfo: input.card.holder }
+        : {}),
+      ...(input.card?.remoteIp !== undefined ? { remoteIp: input.card.remoteIp } : {}),
     };
     const data = await this.#request<AsaasSubscriptionResponse>('/subscriptions', {
       method: 'POST',
@@ -487,6 +503,9 @@ export class AsaasDriver implements PaymentsDriver {
         currency: payment.amount.currency,
         ...(payment.customerId !== undefined ? { customerId: payment.customerId } : {}),
         ...(payment.subscriptionId !== undefined ? { subscriptionId: payment.subscriptionId } : {}),
+        ...(payload.payment.externalReference !== undefined
+          ? { externalReference: payload.payment.externalReference }
+          : {}),
       };
     }
     if (payload.subscription) {

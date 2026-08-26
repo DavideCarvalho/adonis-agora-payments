@@ -90,4 +90,38 @@ describe('WebhookProcessor', () => {
     await processor.process(makeEvent());
     expect(calls).toEqual(['handler']);
   });
+
+  it('publishes payment.succeeded on the diagnostics channel with the externalReference', async () => {
+    const { channel } = await import('node:diagnostics_channel');
+    // Seed the structural emit slot as the loaded `@adonis-agora/diagnostics` would.
+    const EMIT_SLOT = Symbol.for('@agora/diagnostics:emit');
+    const previous = (globalThis as Record<symbol, unknown>)[EMIT_SLOT];
+    (globalThis as Record<symbol, unknown>)[EMIT_SLOT] = (
+      lib: string,
+      event: string,
+      payload: unknown,
+    ) => {
+      channel(`agora:${lib}:${event}`).publish({ v: 1, lib, event, payload });
+    };
+    const received: Array<{ gatewayId: string; externalReference?: string }> = [];
+    const handler = (msg: unknown) => {
+      const envelope = msg as { payload?: { gatewayId: string; externalReference?: string } };
+      if (envelope?.payload) received.push(envelope.payload);
+    };
+    channel('agora:payments:payment.succeeded').subscribe(handler);
+    try {
+      const store = new InMemoryBillingStore();
+      const processor = new WebhookProcessor({ store, driver: new FakePaymentsDriver() });
+      await processor.process(
+        makeEvent({ data: { gatewayId: 'pi_1', amount: 1000, currency: 'brl', externalReference: 'pay_local_1' } }),
+      );
+      expect(received).toEqual([
+        { gatewayId: 'pi_1', provider: 'stripe', amount: 1000, currency: 'brl', externalReference: 'pay_local_1' },
+      ]);
+    } finally {
+      channel('agora:payments:payment.succeeded').unsubscribe(handler);
+      if (previous === undefined) delete (globalThis as Record<symbol, unknown>)[EMIT_SLOT];
+      else (globalThis as Record<symbol, unknown>)[EMIT_SLOT] = previous;
+    }
+  });
 });

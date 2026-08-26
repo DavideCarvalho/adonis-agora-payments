@@ -65,6 +65,19 @@ export default class extends BaseSchema {
       table.timestamp('created_at', { useTz: true }).notNullable()
       table.timestamp('updated_at', { useTz: true }).notNullable()
     })
+
+    this.schema.createTable('billing_usage_events', (table) => {
+      table.uuid('id').primary()
+      table.string('subscription_id').nullable()
+      table.string('customer_id').nullable()
+      table.string('meter')
+      table.integer('quantity').defaultTo(1)
+      table.jsonb('metadata').nullable()
+      table.timestamp('recorded_at', { useTz: true }).notNullable()
+      table.timestamp('updated_at', { useTz: true }).notNullable()
+      table.index(['subscription_id', 'meter'], 'billing_usage_subscription_meter_idx')
+      table.index(['customer_id', 'meter'], 'billing_usage_customer_meter_idx')
+    })
   }
 
   async down() {
@@ -72,5 +85,6 @@ export default class extends BaseSchema {
     this.schema.dropTable('billing_subscriptions')
     this.schema.dropTable('billing_payments')
     this.schema.dropTable('billing_webhook_events')
+    this.schema.dropTable('billing_usage_events')
   }
 }

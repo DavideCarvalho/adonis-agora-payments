@@ -4,6 +4,7 @@ import type { BillingStore } from './billing_store.js';
 import {
   BillingPayment as DefaultPayment,
   BillingSubscription as DefaultSubscription,
+  BillingUsageEvent as DefaultUsageEvent,
   BillingWebhookEvent as DefaultWebhookEvent,
 } from './mixins/index.js';
 
@@ -15,11 +16,13 @@ export interface BillingModels {
   subscriptionModel?: NormalizeConstructor<typeof DefaultSubscription>;
   paymentModel?: NormalizeConstructor<typeof DefaultPayment>;
   webhookEventModel?: NormalizeConstructor<typeof DefaultWebhookEvent>;
+  usageEventModel?: NormalizeConstructor<typeof DefaultUsageEvent>;
 }
 
 type SubscriptionInstance = InstanceType<typeof DefaultSubscription>;
 type PaymentInstance = InstanceType<typeof DefaultPayment>;
 type WebhookEventInstance = InstanceType<typeof DefaultWebhookEvent>;
+type UsageEventInstance = InstanceType<typeof DefaultUsageEvent>;
 
 /**
  * Lucid implementation of {@link BillingStore}. Resolves the models passed in (defaulting
@@ -27,11 +30,13 @@ type WebhookEventInstance = InstanceType<typeof DefaultWebhookEvent>;
  * working with the same store.
  */
 export class LucidBillingStore
-  implements BillingStore<SubscriptionInstance, PaymentInstance, WebhookEventInstance>
+  implements
+    BillingStore<SubscriptionInstance, PaymentInstance, WebhookEventInstance, UsageEventInstance>
 {
   #subscriptionModel: typeof DefaultSubscription;
   #paymentModel: typeof DefaultPayment;
   #webhookEventModel: typeof DefaultWebhookEvent;
+  #usageEventModel: typeof DefaultUsageEvent;
 
   constructor(models: BillingModels = {}) {
     this.#subscriptionModel = (models.subscriptionModel ??
@@ -39,6 +44,8 @@ export class LucidBillingStore
     this.#paymentModel = (models.paymentModel ?? DefaultPayment) as typeof DefaultPayment;
     this.#webhookEventModel = (models.webhookEventModel ??
       DefaultWebhookEvent) as typeof DefaultWebhookEvent;
+    this.#usageEventModel = (models.usageEventModel ??
+      DefaultUsageEvent) as typeof DefaultUsageEvent;
   }
 
   async saveSubscription(sub: {
@@ -135,6 +142,49 @@ export class LucidBillingStore
       row.error = error;
       await row.save();
     }
+  }
+
+  async recordUsage(event: {
+    subscriptionId?: string | null;
+    customerId?: string;
+    meter: string;
+    quantity: number;
+    metadata?: Record<string, unknown>;
+    recordedAt?: Date;
+  }): Promise<UsageEventInstance> {
+    const row = new this.#usageEventModel() as UsageEventInstance;
+    row.subscriptionId = event.subscriptionId ?? null;
+    row.customerId = event.customerId ?? null;
+    row.meter = event.meter;
+    row.quantity = event.quantity;
+    row.metadata = event.metadata ?? {};
+    row.recordedAt = event.recordedAt ? DateTime.fromJSDate(event.recordedAt) : DateTime.now();
+    await row.save();
+    return row;
+  }
+
+  async usageReport(query: {
+    subscriptionId?: string;
+    customerId?: string;
+    meter?: string;
+    from?: Date;
+    to?: Date;
+  }): Promise<Array<{ meter: string; quantity: number }>> {
+    const builder = this.#usageEventModel
+      .query()
+      .select('meter')
+      .sum('quantity as quantity')
+      .groupBy('meter');
+    if (query.subscriptionId !== undefined) builder.where('subscription_id', query.subscriptionId);
+    else if (query.customerId !== undefined) builder.where('customer_id', query.customerId);
+    if (query.meter !== undefined) builder.where('meter', query.meter);
+    if (query.from !== undefined) builder.where('recorded_at', '>=', query.from);
+    if (query.to !== undefined) builder.where('recorded_at', '<', query.to);
+    const rows = await builder;
+    return (rows as Array<{ meter: string; quantity: string | number }>).map((row) => ({
+      meter: row.meter,
+      quantity: Number(row.quantity),
+    }));
   }
 }
 

@@ -36,16 +36,34 @@ export interface InMemoryWebhookEventRow {
   error: string | null;
 }
 
+/** A plain in-memory metered-usage row (mirrors the Lucid model's columns). */
+export interface InMemoryUsageEventRow {
+  id: string;
+  subscriptionId: string | null;
+  customerId: string | null;
+  meter: string;
+  quantity: number;
+  metadata?: Record<string, unknown>;
+  recordedAt: Date;
+}
+
 /**
  * In-memory {@link BillingStore} for tests — no database required. Mirrors the shape of
  * the Lucid models so the billing layer behaves identically.
  */
 export class InMemoryBillingStore
-  implements BillingStore<InMemorySubscriptionRow, InMemoryPaymentRow, InMemoryWebhookEventRow>
+  implements
+    BillingStore<
+      InMemorySubscriptionRow,
+      InMemoryPaymentRow,
+      InMemoryWebhookEventRow,
+      InMemoryUsageEventRow
+    >
 {
   subscriptions: Map<string, InMemorySubscriptionRow> = new Map();
   payments: Map<string, InMemoryPaymentRow> = new Map();
   webhookEvents: Map<string, InMemoryWebhookEventRow> = new Map();
+  usageEvents: Map<string, InMemoryUsageEventRow> = new Map();
 
   #nextId = 1;
 
@@ -149,5 +167,48 @@ export class InMemoryBillingStore
         return;
       }
     }
+  }
+
+  async recordUsage(event: {
+    subscriptionId?: string | null;
+    customerId?: string;
+    meter: string;
+    quantity: number;
+    metadata?: Record<string, unknown>;
+    recordedAt?: Date;
+  }): Promise<InMemoryUsageEventRow> {
+    const row: InMemoryUsageEventRow = {
+      id: `usage_${this.#nextId++}`,
+      subscriptionId: event.subscriptionId ?? null,
+      customerId: event.customerId ?? null,
+      meter: event.meter,
+      quantity: event.quantity,
+      ...(event.metadata !== undefined ? { metadata: event.metadata } : {}),
+      recordedAt: event.recordedAt ?? new Date(),
+    };
+    this.usageEvents.set(row.id, row);
+    return row;
+  }
+
+  async usageReport(query: {
+    subscriptionId?: string;
+    customerId?: string;
+    meter?: string;
+    from?: Date;
+    to?: Date;
+  }): Promise<Array<{ meter: string; quantity: number }>> {
+    const totals = new Map<string, number>();
+    for (const row of this.usageEvents.values()) {
+      if (query.subscriptionId !== undefined && row.subscriptionId !== query.subscriptionId)
+        continue;
+      if (query.customerId !== undefined && row.customerId !== query.customerId) {
+        continue;
+      }
+      if (query.meter !== undefined && row.meter !== query.meter) continue;
+      if (query.from !== undefined && row.recordedAt < query.from) continue;
+      if (query.to !== undefined && row.recordedAt >= query.to) continue;
+      totals.set(row.meter, (totals.get(row.meter) ?? 0) + row.quantity);
+    }
+    return [...totals.entries()].map(([meter, quantity]) => ({ meter, quantity }));
   }
 }

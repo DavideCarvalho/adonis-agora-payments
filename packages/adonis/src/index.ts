@@ -66,6 +66,8 @@ export { WebhookProcessor } from './billing/webhook_processor.js';
 export type { WebhookHandler } from './billing/webhook_processor.js';
 export { LucidBillingStore, lucidBillingStore } from './billing/lucid_billing_store.js';
 export type { BillingModels } from './billing/lucid_billing_store.js';
+export type { BillingStore } from './billing/billing_store.js';
+export { BillingUsageEvent } from './billing/mixins/with_usage_event.js';
 export type {
   Money,
   Currency,

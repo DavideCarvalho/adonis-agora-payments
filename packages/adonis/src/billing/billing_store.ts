@@ -1,4 +1,9 @@
-import type { BillingPayment, BillingSubscription, BillingWebhookEvent } from './mixins/index.js';
+import type {
+  BillingPayment,
+  BillingSubscription,
+  BillingUsageEvent,
+  BillingWebhookEvent,
+} from './mixins/index.js';
 
 /**
  * The persistence SPI for the billing layer. The Lucid implementation writes through the
@@ -12,6 +17,7 @@ export interface BillingStore<
   SubscriptionRow = BillingSubscription,
   PaymentRow = BillingPayment,
   WebhookEventRow = BillingWebhookEvent,
+  UsageEventRow = BillingUsageEvent,
 > {
   // ── Subscriptions ────────────────────────────────────────────────────────────────
 
@@ -59,4 +65,25 @@ export interface BillingStore<
   markWebhookProcessed(id: string): Promise<void>;
 
   markWebhookFailed(id: string, error: string): Promise<void>;
+
+  // ── Metered usage ────────────────────────────────────────────────────────────────
+
+  /** Record one metered-usage event (a metered subscription's consumption). */
+  recordUsage(event: {
+    subscriptionId?: string | null;
+    customerId?: string;
+    meter: string;
+    quantity: number;
+    metadata?: Record<string, unknown>;
+    recordedAt?: Date;
+  }): Promise<UsageEventRow>;
+
+  /** Aggregate metered usage by meter, filtered by subscription/customer/meter/window. */
+  usageReport(query: {
+    subscriptionId?: string;
+    customerId?: string;
+    meter?: string;
+    from?: Date;
+    to?: Date;
+  }): Promise<Array<{ meter: string; quantity: number }>>;
 }

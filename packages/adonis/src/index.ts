@@ -71,6 +71,8 @@ export type { BillingStore } from './billing/billing_store.js';
 export { BillingUsageEvent } from './billing/mixins/with_usage_event.js';
 export { billingOverview } from './billing/billing_overview.js';
 export type { BillingOverview, BillingOverviewMetric } from './billing/billing_overview.js';
+export { meteredBill, meteredBillForSubscription } from './billing/metered_bill.js';
+export type { MeterRate, MeteredBill, MeteredBillLine } from './billing/metered_bill.js';
 export type {
   Money,
   Currency,

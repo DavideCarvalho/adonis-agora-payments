@@ -178,6 +178,18 @@ export class AsaasDriver implements PaymentsDriver {
       ...(input.paymentMethodId !== undefined ? { creditCardToken: input.paymentMethodId } : {}),
       ...(input.card?.holder !== undefined ? { creditCardHolderInfo: input.card.holder } : {}),
       ...(input.card?.remoteIp !== undefined ? { remoteIp: input.card.remoteIp } : {}),
+      // Marketplace split: each entry shares the charge with a wallet (percent and/or fixed).
+      ...(input.split !== undefined && input.split.length > 0
+        ? {
+            split: input.split.map((entry) => ({
+              walletId: entry.walletId,
+              ...(entry.percentualValue !== undefined
+                ? { percentualValue: entry.percentualValue }
+                : {}),
+              ...(entry.fixedValue !== undefined ? { fixedValue: entry.fixedValue / 100 } : {}),
+            })),
+          }
+        : {}),
     };
     const data = await this.#request<AsaasPaymentResponse>('/payments', { method: 'POST', body });
     const payment = this.#mapPayment(data);

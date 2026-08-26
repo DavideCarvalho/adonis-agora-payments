@@ -167,6 +167,19 @@ export interface ChargeInput {
   /** Idempotency key — reusing it must not double-charge. */
   idempotencyKey?: string;
   /**
+   * Split the payment across recipients (marketplace-style). Each entry names the gateway
+   * wallet/account receiving a share, by percent and/or a fixed amount. Asaas maps it to
+   * the `split` array on the charge; other gateways accept it when supported.
+   */
+  split?: Array<{
+    /** Gateway wallet/recipient id. */
+    walletId: string;
+    /** Percent of the charge value this wallet receives (0–100). */
+    percentualValue?: number;
+    /** Fixed amount (cents) this wallet receives. */
+    fixedValue?: number;
+  }>;
+  /**
    * Your own reference echoed back on the gateway payment — the stable id webhook
    * handlers use to route a payment back to your local record. Many BR gateways expose
    * it as `externalReference` (Asaas) or `correlationID` (Woovi); Stripe maps it into

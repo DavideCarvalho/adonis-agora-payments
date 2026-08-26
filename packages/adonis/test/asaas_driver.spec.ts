@@ -174,4 +174,41 @@ describe('AsaasDriver', () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it('maps a marketplace split onto the charge', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 'pay_3',
+        customer: 'cus_1',
+        value: 100,
+        billingType: 'PIX',
+        status: 'PENDING',
+        dueDate: '2026-01-10',
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const driver = makeDriver();
+      await driver.charge({
+        customerId: 'cus_1',
+        amount: 10000,
+        method: 'pix',
+        split: [
+          { walletId: 'wal_owner', percentualValue: 70 },
+          { walletId: 'wal_partner', fixedValue: 3000 },
+        ],
+      });
+      const [_, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
+      expect(JSON.parse(String(init.body))).toMatchObject({
+        split: [
+          { walletId: 'wal_owner', percentualValue: 70 },
+          { walletId: 'wal_partner', fixedValue: 30 },
+        ],
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

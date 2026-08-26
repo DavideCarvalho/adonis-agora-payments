@@ -50,9 +50,7 @@ export default class PaymentsSync extends BaseCommand {
     manager.assertCapability(driver, 'invoices');
     const store = new LucidBillingStore();
 
-    const customers = this.customer
-      ? [this.customer]
-      : await this.#listCustomers();
+    const customers = this.customer ? [this.customer] : await this.#listCustomers();
     if (customers.length === 0) {
       this.logger.info('No customers to sync (billing_customers is empty).');
       return;

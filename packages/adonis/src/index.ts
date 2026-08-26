@@ -13,6 +13,7 @@ export type {
   ENotasInvoiceConfig,
   PlugNotasInvoiceConfig,
   AsaasInvoiceConfig,
+  TecnospeedInvoiceConfig,
 } from './define_config.js';
 export { PaymentsManager, resolveDrivers } from './payments_manager.js';
 export type {

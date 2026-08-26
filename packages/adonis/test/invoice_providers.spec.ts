@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AsaasInvoiceProvider } from '../src/invoice/drivers/asaas.js';
 import { ENotasInvoiceProvider } from '../src/invoice/drivers/enotas.js';
 import { PlugNotasInvoiceProvider } from '../src/invoice/drivers/plugnotas.js';
+import { TecnospeedInvoiceProvider } from '../src/invoice/drivers/tecnospeed.js';
 import type { InvoiceEmitInput } from '../src/invoice/invoice_provider.js';
 
 const INPUT: InvoiceEmitInput = {
@@ -86,6 +87,26 @@ describe('invoice providers', () => {
     expect(String(url)).toContain('/nfse');
     expect((init.headers as Record<string, string>)['X-API-KEY']).toBe('test');
     expect(JSON.parse(String(init.body)).valor).toBe(19.9);
+  });
+
+  it('Tecnospeed emits via /nfse with the token auth header', async () => {
+    const fetchMock = stubFetch(200, {
+      id: 'ts_1',
+      numero: '555',
+      status: 'autorizado',
+      chave: 'NfseKey',
+      valor: 19.9,
+    });
+    const provider = new TecnospeedInvoiceProvider({ config: () => ({}) }, { token: 'test' });
+
+    const invoice = await provider.emit(INPUT);
+
+    expect(invoice.provider).toBe('tecnospeed');
+    expect(invoice.key).toBe('NfseKey');
+    const [url, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
+    expect(String(url)).toContain('/nfse');
+    expect((init.headers as Record<string, string>).Authorization).toBe('test');
+    expect(JSON.parse(String(init.body)).tomador.cpf_cnpj).toBe('12345678900');
   });
 
   it('throws with a clear error when the provider rejects', async () => {

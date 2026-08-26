@@ -97,6 +97,13 @@ export interface AsaasInvoiceConfig {
   sandbox?: boolean;
 }
 
+export interface TecnospeedInvoiceConfig {
+  /** Tecnospeed API token. Defaults to `env.get('TECNOSPEED_TOKEN')`. */
+  token?: string;
+  /** Tecnospeed API base URL (per-municipality/plan). Defaults to the generic v1 base. */
+  baseUrl?: string;
+}
+
 export interface WooviDriverConfig {
   /** Woovi/OpenPix app id. Defaults to `env.get('WOOVI_APP_ID')`. */
   appId?: string;
@@ -281,6 +288,12 @@ export const invoice = {
     return async (ctx) => {
       const { AsaasInvoiceProvider } = await import('./invoice/drivers/asaas.js');
       return new AsaasInvoiceProvider(ctx, config);
+    };
+  },
+  tecnospeed(config: TecnospeedInvoiceConfig = {}): InvoiceProviderFactory {
+    return async (ctx) => {
+      const { TecnospeedInvoiceProvider } = await import('./invoice/drivers/tecnospeed.js');
+      return new TecnospeedInvoiceProvider(ctx, config);
     };
   },
 };

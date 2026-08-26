@@ -31,6 +31,13 @@ import { verifyHmacSignature, verifyRsaSha256Signature } from '../webhook_securi
  * webhooks, no card). Uses the official `@woovi/node-sdk` (lazily imported by the factory,
  * so the SDK stays an optional peer dependency).
  */
+/** A Woovi subaccount (OpenPix for Platforms marketplace receiver). */
+export interface WooviSubAccount {
+  name: string;
+  pixKey: string;
+  balance: number;
+}
+
 export class WooviDriver implements PaymentsDriver {
   readonly provider = 'woovi';
   // Woovi/OpenPix is Pix-only and has no refunds or invoice concept.
@@ -49,6 +56,11 @@ export class WooviDriver implements PaymentsDriver {
     customer: {
       create(input: Record<string, unknown>): Promise<Record<string, unknown>>;
       get(data: { id: string }): Promise<Record<string, unknown>>;
+    };
+    subAccount: {
+      create(input: { pixKey: string; name: string }): Promise<{ SubAccount: WooviSubAccount }>;
+      get(data: { id: string }): Promise<{ SubAccount: WooviSubAccount }>;
+      list(): Promise<{ subAccounts: WooviSubAccount[] }>;
     };
   };
 
@@ -134,6 +146,38 @@ export class WooviDriver implements PaymentsDriver {
 
   async refund(_paymentGatewayId: string, _amount?: Money): Promise<Refund> {
     throw new Error('[payments] Woovi/OpenPix does not support refunds via API.');
+  }
+
+  // ── Subaccounts (Woovi for Platforms) ────────────────────────────────────────────────
+
+  /** Create a subaccount (marketplace receiver) keyed by a Pix key. */
+  async createSubAccount(input: { pixKey: string; name: string }): Promise<WooviSubAccount> {
+    const data = await this.#client.subAccount.create(input);
+    return this.#mapSubAccount(data.SubAccount);
+  }
+
+  /** Find a subaccount by its id. */
+  async findSubAccount(id: string): Promise<WooviSubAccount | null> {
+    try {
+      const data = await this.#client.subAccount.get({ id });
+      return this.#mapSubAccount(data.SubAccount);
+    } catch {
+      return null;
+    }
+  }
+
+  /** List every subaccount. */
+  async listSubAccounts(): Promise<WooviSubAccount[]> {
+    const data = await this.#client.subAccount.list();
+    return data.subAccounts.map((s) => this.#mapSubAccount(s));
+  }
+
+  #mapSubAccount(data: WooviSubAccount): WooviSubAccount {
+    return {
+      name: data.name ?? '',
+      pixKey: data.pixKey ?? '',
+      balance: Number(data.balance ?? 0),
+    };
   }
 
   // ── Checkout ─────────────────────────────────────────────────────────────────────────

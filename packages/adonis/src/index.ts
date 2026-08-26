@@ -16,6 +16,7 @@ export type {
   TecnospeedInvoiceConfig,
 } from './define_config.js';
 export { PaymentsManager, resolveDrivers } from './payments_manager.js';
+export type { WooviSubAccount } from './drivers/woovi.js';
 export type {
   PaymentsDriver,
   CreateCustomerInput,

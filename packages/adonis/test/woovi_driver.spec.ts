@@ -5,6 +5,7 @@ const createClientMock = vi.hoisted(() => ({
   subscription: { create: vi.fn(), get: vi.fn() },
   charge: { create: vi.fn() },
   customer: { create: vi.fn() },
+  subAccount: { create: vi.fn(), get: vi.fn(), list: vi.fn() },
 }));
 
 vi.mock('@woovi/node-sdk', () => ({
@@ -96,5 +97,32 @@ describe('WooviDriver', () => {
     await expect(driver.createSubscription({ customerId: 'cus_1', amount: 4990 })).rejects.toThrow(
       /name \+ taxId/,
     );
+  });
+
+  it('creates and lists subaccounts (OpenPix for Platforms)', async () => {
+    createClientMock.subAccount = {
+      create: vi.fn().mockResolvedValue({
+        SubAccount: { name: 'Partner', pixKey: 'partner@example.com', balance: 0 },
+      }),
+      get: vi.fn(),
+      list: vi.fn().mockResolvedValue({
+        subAccounts: [{ name: 'Partner', pixKey: 'partner@example.com', balance: 0 }],
+      }),
+    };
+    const driver = new WooviDriver({ config: () => ({}) }, { appId: 'test' });
+
+    const created = await driver.createSubAccount({
+      pixKey: 'partner@example.com',
+      name: 'Partner',
+    });
+    expect(created).toEqual({ name: 'Partner', pixKey: 'partner@example.com', balance: 0 });
+    expect(createClientMock.subAccount.create).toHaveBeenCalledWith({
+      pixKey: 'partner@example.com',
+      name: 'Partner',
+    });
+
+    const list = await driver.listSubAccounts();
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ name: 'Partner' });
   });
 });

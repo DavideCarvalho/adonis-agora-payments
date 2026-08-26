@@ -69,6 +69,8 @@ export { LucidBillingStore, lucidBillingStore } from './billing/lucid_billing_st
 export type { BillingModels } from './billing/lucid_billing_store.js';
 export type { BillingStore } from './billing/billing_store.js';
 export { BillingUsageEvent } from './billing/mixins/with_usage_event.js';
+export { billingOverview } from './billing/billing_overview.js';
+export type { BillingOverview, BillingOverviewMetric } from './billing/billing_overview.js';
 export type {
   Money,
   Currency,

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { billingOverview } from '../src/billing/billing_overview.js';
 import { InMemoryBillingStore } from '../src/testing/in_memory_billing_store.js';
 
 describe('metered usage (usage-based billing)', () => {
@@ -66,5 +67,57 @@ describe('metered usage (usage-based billing)', () => {
       to: new Date('2026-09-02T00:00:00Z'),
     });
     expect(windowed).toEqual([{ meter: 'api_calls', quantity: 2 }]);
+  });
+});
+
+describe('billingOverview (dashboard foundation)', () => {
+  it('aggregates revenue, active subscriptions and usage per meter over a window', async () => {
+    const store = new InMemoryBillingStore();
+    await store.saveSubscription({
+      gatewayId: 'sub_1',
+      provider: 'asaas',
+      customerId: 'cus_1',
+      status: 'active',
+      planId: 'pro',
+    });
+    await store.saveSubscription({
+      gatewayId: 'sub_2',
+      provider: 'asaas',
+      customerId: 'cus_2',
+      status: 'canceled',
+      planId: 'free',
+    });
+    await store.savePayment({
+      gatewayId: 'pay_1',
+      provider: 'asaas',
+      status: 'paid',
+      amount: 10000,
+      currency: 'brl',
+      paidAt: new Date('2026-09-02T10:00:00Z'),
+    });
+    await store.savePayment({
+      gatewayId: 'pay_2',
+      provider: 'asaas',
+      status: 'paid',
+      amount: 5000,
+      currency: 'brl',
+      paidAt: new Date('2026-09-10T10:00:00Z'),
+    });
+    await store.recordUsage({
+      subscriptionId: 'sub_1',
+      meter: 'api_calls',
+      quantity: 7,
+      recordedAt: new Date('2026-09-05T10:00:00Z'),
+    });
+
+    const overview = await billingOverview(store, {
+      from: new Date('2026-09-01T00:00:00Z'),
+      to: new Date('2026-10-01T00:00:00Z'),
+    });
+
+    const byKey = new Map(overview.metrics.map((m) => [m.key, m.value]));
+    expect(byKey.get('revenue')).toBe(15000);
+    expect(byKey.get('active_subscriptions')).toBe(1);
+    expect(byKey.get('meter:api_calls')).toBe(7);
   });
 });

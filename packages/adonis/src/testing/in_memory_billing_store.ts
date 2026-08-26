@@ -211,4 +211,23 @@ export class InMemoryBillingStore
     }
     return [...totals.entries()].map(([meter, quantity]) => ({ meter, quantity }));
   }
+
+  async revenue(query: { from?: Date; to?: Date }): Promise<number> {
+    let total = 0;
+    for (const row of this.payments.values()) {
+      if (row.status !== 'paid') continue;
+      if (query.from !== undefined && row.paidAt !== null && row.paidAt < query.from) continue;
+      if (query.to !== undefined && row.paidAt !== null && row.paidAt >= query.to) continue;
+      total += row.amount;
+    }
+    return total;
+  }
+
+  async countActiveSubscriptions(): Promise<number> {
+    let count = 0;
+    for (const row of this.subscriptions.values()) {
+      if (row.status === 'active' || row.status === 'trialing') count += 1;
+    }
+    return count;
+  }
 }

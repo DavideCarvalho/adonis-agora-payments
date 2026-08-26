@@ -186,6 +186,23 @@ export class LucidBillingStore
       quantity: Number(row.quantity),
     }));
   }
+
+  async revenue(query: { from?: Date; to?: Date }): Promise<number> {
+    const builder = this.#paymentModel.query().where('status', 'paid').sum('amount as total');
+    if (query.from !== undefined) builder.where('paid_at', '>=', query.from);
+    if (query.to !== undefined) builder.where('paid_at', '<', query.to);
+    const rows = await builder;
+    const total = (rows[0] as { total?: string | number } | undefined)?.total;
+    return Number(total ?? 0);
+  }
+
+  async countActiveSubscriptions(): Promise<number> {
+    const count = await this.#subscriptionModel
+      .query()
+      .whereIn('status', ['active', 'trialing'])
+      .count('* as total');
+    return Number((count[0] as { total?: string | number } | undefined)?.total ?? 0);
+  }
 }
 
 /** Builder matching the authkit `lucidStores(...)` convention. */

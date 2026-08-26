@@ -86,4 +86,10 @@ export interface BillingStore<
     from?: Date;
     to?: Date;
   }): Promise<Array<{ meter: string; quantity: number }>>;
+
+  /** Sum of paid payments within a window (revenue, in cents). */
+  revenue(query: { from?: Date; to?: Date }): Promise<number>;
+
+  /** Count of active subscriptions (status `'active'`/`'trialing'`). */
+  countActiveSubscriptions(): Promise<number>;
 }

@@ -113,10 +113,23 @@ describe('WebhookProcessor', () => {
       const store = new InMemoryBillingStore();
       const processor = new WebhookProcessor({ store, driver: new FakePaymentsDriver() });
       await processor.process(
-        makeEvent({ data: { gatewayId: 'pi_1', amount: 1000, currency: 'brl', externalReference: 'pay_local_1' } }),
+        makeEvent({
+          data: {
+            gatewayId: 'pi_1',
+            amount: 1000,
+            currency: 'brl',
+            externalReference: 'pay_local_1',
+          },
+        }),
       );
       expect(received).toEqual([
-        { gatewayId: 'pi_1', provider: 'stripe', amount: 1000, currency: 'brl', externalReference: 'pay_local_1' },
+        {
+          gatewayId: 'pi_1',
+          provider: 'stripe',
+          amount: 1000,
+          currency: 'brl',
+          externalReference: 'pay_local_1',
+        },
       ]);
     } finally {
       channel('agora:payments:payment.succeeded').unsubscribe(handler);

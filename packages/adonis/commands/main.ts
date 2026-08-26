@@ -11,12 +11,7 @@ import PaymentsWebhook from './payments_webhook.js';
  * {@link ListLoader} over the payments commands (`make:billable`, `make:webhook-handler`,
  * `payments:webhook`, `payments:sync`) provides their metadata and constructors.
  */
-const loader = new ListLoader([
-  MakeBillable,
-  MakeWebhookHandler,
-  PaymentsWebhook,
-  PaymentsSync,
-]);
+const loader = new ListLoader([MakeBillable, MakeWebhookHandler, PaymentsWebhook, PaymentsSync]);
 
 export const getMetaData = loader.getMetaData.bind(loader);
 export const getCommand = loader.getCommand.bind(loader);

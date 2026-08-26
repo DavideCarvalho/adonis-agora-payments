@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ensureCustomer } from '../src/ensure_customer.js';
 import type { PaymentsDriver } from '../src/driver.js';
+import { ensureCustomer } from '../src/ensure_customer.js';
 
 describe('ensureCustomer', () => {
   it('returns the existing gateway customer id without calling the gateway', async () => {

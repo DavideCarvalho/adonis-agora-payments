@@ -1,8 +1,8 @@
 import { readdir } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { WebhookEvent } from './types.js';
 import type { WebhookHandler } from './billing/webhook_processor.js';
+import type { WebhookEvent } from './types.js';
 
 /**
  * A webhook-handler service constructor: the lib resolves it from the Adonis container
@@ -24,14 +24,10 @@ export interface HandlerContainer {
  * a `handle` member — only a class declaring `handle` matches, so plain handlers are
  * never misrouted.
  */
-export function isWebhookHandlerService(
-  entry: unknown,
-): entry is WebhookHandlerService {
+export function isWebhookHandlerService(entry: unknown): entry is WebhookHandlerService {
   return (
     typeof entry === 'function' &&
-    Object.getOwnPropertyNames((entry as { prototype?: object }).prototype ?? {}).includes(
-      'handle',
-    )
+    Object.getOwnPropertyNames((entry as { prototype?: object }).prototype ?? {}).includes('handle')
   );
 }
 
@@ -74,9 +70,7 @@ export interface WebhookHandlerModule {
 }
 
 /** Normalize a module's default export into a {@link DiscoveredWebhookHandler}, or null. */
-export function normalizeWebhookHandlerModule(
-  mod: unknown,
-): DiscoveredWebhookHandler | null {
+export function normalizeWebhookHandlerModule(mod: unknown): DiscoveredWebhookHandler | null {
   if (typeof mod !== 'function' && (typeof mod !== 'object' || mod === null)) return null;
   const candidate = mod as WebhookHandlerModule;
   const type = candidate.type ?? candidate.eventType;
@@ -145,9 +139,7 @@ export function pickModuleExt(entries: readonly string[]): '.ts' | '.js' | null 
  * directory → empty list (the convention is opt-in: no `app/payment_handlers`, nothing
  * to register). Mirrors durable's `discoverWorkflows`.
  */
-export async function discoverWebhookHandlers(
-  dir: string,
-): Promise<DiscoveredWebhookHandler[]> {
+export async function discoverWebhookHandlers(dir: string): Promise<DiscoveredWebhookHandler[]> {
   let entries: string[];
   try {
     entries = await readdir(dir, { recursive: true });

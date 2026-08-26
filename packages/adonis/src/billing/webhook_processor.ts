@@ -203,7 +203,8 @@ export class WebhookProcessor {
       ...(data.endsAt !== undefined ? { endsAt: new Date(data.endsAt) } : {}),
       payload: event.raw,
     });
-    const type = event.type === 'subscription.created' ? 'subscription.created' : 'subscription.updated';
+    const type =
+      event.type === 'subscription.created' ? 'subscription.created' : 'subscription.updated';
     publishPayments(type, {
       gatewayId: data.gatewayId,
       provider: event.provider,

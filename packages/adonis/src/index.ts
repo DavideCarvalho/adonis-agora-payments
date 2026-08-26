@@ -10,6 +10,9 @@ export type {
   AsaasDriverConfig,
   WooviDriverConfig,
   FocusInvoiceConfig,
+  ENotasInvoiceConfig,
+  PlugNotasInvoiceConfig,
+  AsaasInvoiceConfig,
 } from './define_config.js';
 export { PaymentsManager, resolveDrivers } from './payments_manager.js';
 export type {

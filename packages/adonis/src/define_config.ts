@@ -1,7 +1,7 @@
+import type { WebhookHandler } from './billing/webhook_processor.js';
 import type { PaymentsDriver } from './driver.js';
 import type { InvoiceProvider } from './invoice/invoice_provider.js';
 import type { InvoiceOptions, PaymentMethodName } from './types.js';
-import type { WebhookHandler } from './billing/webhook_processor.js';
 import type { WebhookHandlerService } from './webhook_handlers.js';
 
 /**
@@ -74,6 +74,27 @@ export interface FocusInvoiceConfig {
   token?: string;
   /** Focus NFe API URL. Defaults to the production endpoint. */
   baseUrl?: string;
+}
+
+export interface ENotasInvoiceConfig {
+  /** eNotas API key. Defaults to `env.get('ENOTAS_API_KEY')`. */
+  apiKey?: string;
+  /** eNotas API URL. Defaults to the production endpoint. */
+  baseUrl?: string;
+}
+
+export interface PlugNotasInvoiceConfig {
+  /** PlugNotas API key. Defaults to `env.get('PLUGNOTAS_API_KEY')`. */
+  apiKey?: string;
+  /** PlugNotas API URL. Defaults to the production endpoint. */
+  baseUrl?: string;
+}
+
+export interface AsaasInvoiceConfig {
+  /** Asaas API key. Defaults to `env.get('ASAAS_API_KEY')`. */
+  apiKey?: string;
+  /** Use the Asaas sandbox environment. Defaults to `NODE_ENV !== 'production'`. */
+  sandbox?: boolean;
 }
 
 export interface WooviDriverConfig {
@@ -158,12 +179,25 @@ export interface PaymentsConfig {
      */
     enabled?: boolean;
     /**
-     * `'auto'` (default): use `@adonis-agora/durable` to process webhooks when it is
-     * installed in the app; otherwise fall back to an in-process dispatcher with retries.
-     * `true`: require durable (throw when missing). `false`: always use the in-process
-     * dispatcher.
+     * Legacy alias for {@link dispatcher}: `'auto'` (default) or a boolean (`true` =
+     * `'durable'`, `false` = `'in-process'`). Prefer `dispatcher` for the full set of
+     * backends.
      */
     durable?: 'auto' | boolean;
+    /**
+     * How webhook events are processed:
+     *
+     * - `'auto'` (default) — `@adonis-agora/durable` when its provider is registered;
+     *   else `@adonisjs/queue` when it's installed; else in-process with retries.
+     * - `'durable'` — a durable workflow run (requires `@adonis-agora/durable`, throws when missing).
+     * - `'queue'` — an `@adonisjs/queue` job (requires the queue provider, throws when missing).
+     * - `'in-process'` — inline with exponential-backoff retries.
+     *
+     * Mirrors how other Agora libraries pick a backend (`durable`'s `store`, etc.).
+     */
+    dispatcher?: 'auto' | 'durable' | 'queue' | 'in-process';
+    /** Queue name the `'queue'` dispatcher enqueues to. Defaults to the queue's default. */
+    queue?: string;
     /**
      * Business webhook handlers run INSIDE the lib-mounted `/payments/webhook/:provider`
      * route, by the {@link WebhookProcessor}. Errors mark the event failed in the ledger
@@ -229,6 +263,24 @@ export const invoice = {
     return async (ctx) => {
       const { FocusInvoiceProvider } = await import('./invoice/drivers/focus.js');
       return new FocusInvoiceProvider(ctx, config);
+    };
+  },
+  enotas(config: ENotasInvoiceConfig = {}): InvoiceProviderFactory {
+    return async (ctx) => {
+      const { ENotasInvoiceProvider } = await import('./invoice/drivers/enotas.js');
+      return new ENotasInvoiceProvider(ctx, config);
+    };
+  },
+  plugnotas(config: PlugNotasInvoiceConfig = {}): InvoiceProviderFactory {
+    return async (ctx) => {
+      const { PlugNotasInvoiceProvider } = await import('./invoice/drivers/plugnotas.js');
+      return new PlugNotasInvoiceProvider(ctx, config);
+    };
+  },
+  asaas(config: AsaasInvoiceConfig = {}): InvoiceProviderFactory {
+    return async (ctx) => {
+      const { AsaasInvoiceProvider } = await import('./invoice/drivers/asaas.js');
+      return new AsaasInvoiceProvider(ctx, config);
     };
   },
 };

@@ -103,8 +103,24 @@ Built-in providers:
 
 - **Focus** (`invoice.focus({ token })`) — NF-e / NFS-e / NFC-e across hundreds of
   municipalities via REST; no SDK dependency.
-- **Asaas** emits NFS-e natively — configure automatic emission per subscription in the
-  Asaas dashboard; the `invoice` option still works through any configured provider.
+- **eNotas** (`invoice.enotas({ apiKey })`) — NFS-e/NF-e via `ENOTAS_API_KEY`.
+- **PlugNotas** (`invoice.plugnotas({ apiKey })`) — NFS-e via `PLUGNOTAS_API_KEY`.
+- **Asaas** (`invoice.asaas({ apiKey })`) — **native NFS-e** through Asaas's own invoice
+  API, so a charge through Asaas with `invoice: true` uses the same gateway that took the
+  payment (also works as automatic emission per subscription configured in the Asaas
+  dashboard).
+
+```ts title="config/payments.ts"
+invoice: {
+  default: 'asaas',
+  providers: {
+    focus: invoice.focus({ token: env.get('FOCUS_NFE_TOKEN') }),
+    enotas: invoice.enotas({ apiKey: env.get('ENOTAS_API_KEY') }),
+    plugnotas: invoice.plugnotas({ apiKey: env.get('PLUGNOTAS_API_KEY') }),
+    asaas: invoice.asaas({ apiKey: env.get('ASAAS_API_KEY') }),
+  },
+}
+```
 
 <Callout type="info" title="More providers, or your own">
 The roadmap includes Tecnospeed, eNotas and PlugNotas adapters. Until then — or for any

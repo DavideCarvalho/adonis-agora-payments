@@ -1,15 +1,15 @@
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import type { WebhookEvent } from '../src/types.js';
 import {
+  discoverWebhookHandlers,
   isWebhookHandlerService,
   normalizeWebhookHandlerModule,
   resolveWebhookHandler,
-  discoverWebhookHandlers,
 } from '../src/webhook_handlers.js';
 import type { WebhookHandlerService } from '../src/webhook_handlers.js';
-import type { WebhookEvent } from '../src/types.js';
 
 const event = { id: 'e1', type: 'payment.succeeded', data: {}, raw: {} } as WebhookEvent;
 
@@ -66,7 +66,7 @@ describe('webhook handler discovery', () => {
     const resolved = await resolveWebhookHandler(Handler, container);
     await resolved(event);
     await resolved(event);
-    expect((await container.make(Handler) as Handler).calls).toBe(0); // container returned a fresh instance each make
+    expect(((await container.make(Handler)) as Handler).calls).toBe(0); // container returned a fresh instance each make
     expect(typeof resolved).toBe('function');
   });
 
@@ -86,12 +86,9 @@ describe('webhook handler discovery', () => {
       join(dir, 'subscription_canceled.ts'),
       `export default class H { static eventType = 'subscription.canceled'; handle() {} }`,
     );
-    await writeFile(join(dir, 'not_a_handler.ts'), `export const x = 1`);
+    await writeFile(join(dir, 'not_a_handler.ts'), 'export const x = 1');
     const found = await discoverWebhookHandlers(dir);
-    expect(found.map((f) => f.type).sort()).toEqual([
-      'payment.succeeded',
-      'subscription.canceled',
-    ]);
+    expect(found.map((f) => f.type).sort()).toEqual(['payment.succeeded', 'subscription.canceled']);
   });
 
   it('returns [] for a missing directory (convention is opt-in)', async () => {

@@ -61,6 +61,10 @@ export default defineConfig({
       focus: invoice.focus({
         token: env.get('FOCUS_NFE_TOKEN'),
       }),
+      // enotas: invoice.enotas({ apiKey: env.get('ENOTAS_API_KEY') }),
+      // plugnotas: invoice.plugnotas({ apiKey: env.get('PLUGNOTAS_API_KEY') }),
+      // Asaas NFS-e nativo — invoice: true numa charge Asaas emite pelo próprio Asaas:
+      // asaas: invoice.asaas({ apiKey: env.get('ASAAS_API_KEY') }),
     },
     defaults: {
       service: {

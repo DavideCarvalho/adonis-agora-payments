@@ -1,6 +1,6 @@
+import { pathToFileURL } from 'node:url';
 import type { HttpContext } from '@adonisjs/core/http';
 import type { ApplicationService, HttpRouterService } from '@adonisjs/core/types';
-import { pathToFileURL } from 'node:url';
 import { LucidBillingStore } from '../src/billing/lucid_billing_store.js';
 import { WebhookDispatcher } from '../src/billing/webhook_dispatcher.js';
 import type { WebhookDispatchMode } from '../src/billing/webhook_dispatcher.js';
@@ -11,11 +11,11 @@ import { InvoiceManager, resolveInvoiceProviders } from '../src/invoice/invoice_
 import { PaymentsManager, resolveDrivers } from '../src/payments_manager.js';
 import { setPayments } from '../src/services/main.js';
 import {
+  type DiscoveredWebhookHandler,
+  type WebhookHandlersBarrel,
   discoverWebhookHandlers,
   loadWebhookHandlersFromBarrel,
   resolveWebhookHandler,
-  type DiscoveredWebhookHandler,
-  type WebhookHandlersBarrel,
 } from '../src/webhook_handlers.js';
 
 /**
@@ -101,10 +101,7 @@ export default class PaymentsProvider {
       }
     }
     for (const discovered of await this.#discoverFolderHandlers()) {
-      handlers[discovered.type] = await resolveWebhookHandler(
-        discovered.entry,
-        this.app.container,
-      );
+      handlers[discovered.type] = await resolveWebhookHandler(discovered.entry, this.app.container);
     }
     return Object.keys(handlers).length > 0 ? handlers : undefined;
   }

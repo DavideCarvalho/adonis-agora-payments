@@ -59,6 +59,20 @@ interface AbacateSubscriptionResponse {
   nextBillingAt?: string;
 }
 
+/** The `POST /v2/transparents/create` response — inline PIX/Boleto, no redirect. */
+interface AbacateTransparentResponse {
+  id: string;
+  /** PIX: QR code image (base64 PNG). */
+  brCodeBase64?: string;
+  /** PIX copy-and-paste code (also the Boleto's alternative PIX). */
+  brCode?: string;
+  /** Boleto: bar code (linha digitável). */
+  barCode?: string;
+  /** Boleto: URL to view/print the PDF. */
+  url?: string;
+  expiresAt?: string;
+}
+
 /**
  * AbacatePay driver — Brazilian gateway for Pix and card payments with a developer-first
  * API (REST v2, `https://api.abacatepay.com/v2`). Uses `fetch` directly (no SDK
@@ -132,19 +146,73 @@ export class AbacateDriver implements PaymentsDriver {
     if (!input.customerId) {
       throw new Error('[payments] AbacatePay requires a customer for every charge.');
     }
-    const data = await this.#request<AbacateBillingResponse>('/billing/create', {
+    // Transparent checkout (`POST /v2/transparents/create`): PIX/Boleto inline, no
+    // redirect — the response carries the QR/barcode directly. Needs the payer's
+    // name + taxId, resolved from the charge's fiscal `customer` or the gateway customer.
+    const method = input.method ?? 'pix';
+    const customer = await this.#resolveTransparentCustomer(input);
+    const data = await this.#request<AbacateTransparentResponse>('/v2/transparents/create', {
       method: 'POST',
       body: {
-        customerId: input.customerId,
-        amount: toDecimal(input.amount),
-        ...(input.description !== undefined ? { description: input.description } : {}),
-        ...(input.method !== undefined ? { methods: [this.#mapMethod(input.method)] } : {}),
+        method: this.#mapMethod(method),
+        data: {
+          amount: input.amount,
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.externalReference !== undefined ? { externalId: input.externalReference } : {}),
+          ...(input.externalReference === undefined && input.idempotencyKey !== undefined
+            ? { externalId: input.idempotencyKey }
+            : {}),
+          customer,
+        },
       },
     });
-    const payment = this.#mapPayment(data, input.customerId);
+    const payment = this.#mapTransparentPayment(data, input);
     await emitInvoiceIfRequested(this.#invoiceCtx, input, payment, this);
     publishPaymentDiagnostics(payment);
     return payment;
+  }
+
+  /** The transparent checkout needs `{ name, taxId }` — from `input.customer` or the gateway customer. */
+  async #resolveTransparentCustomer(
+    input: ChargeInput,
+  ): Promise<{ name: string; taxId: string; email?: string }> {
+    if (input.customer?.name && input.customer.taxId) {
+      return {
+        name: input.customer.name,
+        taxId: input.customer.taxId,
+        ...(input.customer.email !== undefined ? { email: input.customer.email } : {}),
+      };
+    }
+    const customer = await this.findCustomer(input.customerId!);
+    if (!customer?.name || !customer.taxId) {
+      throw new Error(
+        '[payments] AbacatePay transparent checkout needs the payer name + taxId — pass `customer` on the charge, or create the gateway customer with them.',
+      );
+    }
+    return {
+      name: customer.name,
+      taxId: customer.taxId,
+      ...(customer.email !== undefined ? { email: customer.email } : {}),
+    };
+  }
+
+  #mapTransparentPayment(data: AbacateTransparentResponse, input: ChargeInput): Payment {
+    const method = input.method === 'boleto' ? 'boleto' : 'pix';
+    const result: Payment = {
+      id: data.id,
+      gatewayId: data.id,
+      provider: this.provider,
+      amount: { amount: input.amount, currency: 'brl' },
+      status: 'pending',
+      ...(input.customerId !== undefined ? { customerId: input.customerId } : {}),
+      method,
+      createdAt: new Date().toISOString(),
+      payload: data as unknown as Record<string, unknown>,
+    };
+    if (data.brCodeBase64) result.pixQrCode = data.brCodeBase64;
+    if (data.brCode) result.pixCopiaECola = data.brCode;
+    if (data.url) result.hostedUrl = data.url;
+    return result;
   }
 
   async findPayment(gatewayId: string): Promise<Payment | null> {

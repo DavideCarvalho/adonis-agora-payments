@@ -46,7 +46,7 @@ export interface WebhookHandlersHookOptions {
  */
 export function webhookHandlersHook(
   options: WebhookHandlersHookOptions = {},
-): (parent: any, hooksManager: any, indexGenerator: any) => void {
+): (parent: unknown, hooksManager: unknown, indexGenerator: IndexGenerator) => void {
   const source = options.source ?? 'app/payment_handlers';
   const importAlias = options.importAlias ?? '#payment_handlers';
   const output = options.output ?? GENERATED_WEBHOOK_HANDLERS_OUTPUT;
@@ -71,12 +71,15 @@ export function webhookHandlersHook(
         comment: true,
       });
     },
-  );
+  ) as (parent: unknown, hooksManager: unknown, indexGenerator: IndexGenerator) => void;
 }
 
 /** The default export is the hook itself, so `() => import('@adonis-agora/payments/hooks/webhook_handlers')`
  *  in `adonisrc.ts` resolves to a ready hook (the assembler calls it). Annotated
  *  explicitly so the declaration emit stays portable (same as collaboration's
  *  `codegen_init`). */
-// biome-ignore lint/suspicious/noExplicitAny: keeps the export assignable to the rcFile hooks typing without non-portable @poppinss types
-export default webhookHandlersHook() as (parent: any, hooksManager: any, indexGenerator: any) => void;
+export default webhookHandlersHook() as (
+  parent: unknown,
+  hooksManager: unknown,
+  indexGenerator: IndexGenerator,
+) => void;

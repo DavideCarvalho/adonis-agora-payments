@@ -6,24 +6,27 @@ import type { WebhookProcessor } from './webhook_processor.js';
  *
  * - `durable` — the event is dispatched as a fire-and-forget durable workflow run
  *   (`@adonis-agora/durable`), so processing survives crashes and retries deterministically.
+ * - `queue` — the event is dispatched as an `@adonisjs/queue` job (`queueDispatch`).
  * - `in-process` — the event runs inline (awaited); on failure it is retried with
  *   exponential backoff in the background.
- * - `auto` — uses `durable` when `@adonis-agora/durable` is installed, else `in-process`.
+ * - `auto` — uses `durable` when its provider is registered, else `queue` when the queue
+ *   provider is, else `in-process`.
  */
-export type WebhookDispatchMode = 'durable' | 'in-process' | 'auto';
+export type WebhookDispatchMode = 'durable' | 'queue' | 'in-process' | 'auto';
 
 export interface WebhookDispatcherOptions {
   processor: WebhookProcessor;
   /**
    * How webhooks are processed. `'auto'` (default) lazily resolves
    * `@adonis-agora/durable` and uses it when installed AND available (the app has the
-   * durable provider registered), falling back to `in-process`. `'durable'` requires
-   * durable (throws when missing). `'in-process'` never touches it.
+   * durable provider registered), else `@adonisjs/queue` when available, else
+   * `in-process`. `'durable'`/`'queue'` require their backend (throw when missing).
+   * `'in-process'` never touches either.
    */
   mode?: WebhookDispatchMode;
   /**
-   * In-process retry settings (exponential backoff). Ignored when durable processes the
-   * event, which relies on durable's own retries.
+   * In-process retry settings (exponential backoff). Ignored when durable/queue processes
+   * the event, which rely on their own retries.
    */
   retries?: {
     /** Max attempts including the first. Default 5. */
@@ -39,6 +42,12 @@ export interface WebhookDispatcherOptions {
    * to "installed" only. The provider injects the real check.
    */
   durableAvailable?: () => Promise<boolean>;
+  /**
+   * Dispatch a webhook event as an `@adonisjs/queue` job. The provider wires this (it owns
+   * the job class, its container binding and the queue-manager registration). Absent =
+   * queue mode is unavailable.
+   */
+  queueDispatch?: (event: WebhookEvent) => Promise<{ jobId?: string }>;
 }
 
 /** The minimal durable surface we use: a workflow class with a static `dispatch`. */

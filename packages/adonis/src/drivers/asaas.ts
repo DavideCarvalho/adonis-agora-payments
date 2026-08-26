@@ -284,9 +284,7 @@ export class AsaasDriver implements PaymentsDriver {
         : {}),
       // Checkout transparente de assinatura: cartão tokenizado cobrado a cada ciclo.
       ...(input.card !== undefined ? { creditCardToken: input.card.token } : {}),
-      ...(input.card?.holder !== undefined
-        ? { creditCardHolderInfo: input.card.holder }
-        : {}),
+      ...(input.card?.holder !== undefined ? { creditCardHolderInfo: input.card.holder } : {}),
       ...(input.card?.remoteIp !== undefined ? { remoteIp: input.card.remoteIp } : {}),
     };
     const data = await this.#request<AsaasSubscriptionResponse>('/subscriptions', {

@@ -151,7 +151,14 @@ describe('AsaasDriver', () => {
         externalReference: 'sub:local_1',
         card: {
           token: 'tok_123',
-          holder: { name: 'A', email: 'a@b.com', cpfCnpj: '123', postalCode: '000', addressNumber: '1', phone: '999' },
+          holder: {
+            name: 'A',
+            email: 'a@b.com',
+            cpfCnpj: '123',
+            postalCode: '000',
+            addressNumber: '1',
+            phone: '999',
+          },
           remoteIp: '1.2.3.4',
         },
       });

@@ -56,8 +56,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # NPM_TOKEN com package-write no escopo @adonis-agora. (O OIDC/trusted
           # publishing não está configurado para este repo ainda; enquanto isso o
-          # publish usa o token clássico. Quando o org habilitar trusted publishing
-          # pra `adonis-agora-payments`, basta esvaziar NODE_AUTH_TOKEN de novo.)
+          # publish usa o token clássico. `changesets/action` lê a env `NPM_TOKEN`
+          # — sem ela ele força OIDC, que aqui criaria só um stub. Quando o org
+          # habilitar trusted publishing pra `adonis-agora-payments`, é só remover
+          # a linha NPM_TOKEN/NODE_AUTH_TOKEN.)
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
 # trigger workflow registration

@@ -62,3 +62,5 @@ jobs:
           NODE_AUTH_TOKEN: ''
 
 # trigger workflow registration
+
+# payments initial release — trusted publishing via OIDC

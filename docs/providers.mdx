@@ -130,7 +130,7 @@ await payments.driver('credit_card').charge({
 - **Subscriptions**: Pix Automático — recurring Pix via webhooks, **no card**. Pass
   `startDate` to set the monthly charge day (`dayGenerateCharge`).
 - **Invoices**: no invoice concept — a charge *is* the billing record; use an invoice
-  provider with `invoice: true` if you need a fiscal note.
+  provider with `invoice: true` if you need an invoice.
 
 ```ts title="app/services/checkout_service.ts"
 await payments.driver('pix').charge({

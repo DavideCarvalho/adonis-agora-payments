@@ -1,13 +1,13 @@
 ---
 title: Invoices
-description: Emit fiscal invoices (NFe/NFSe) attached to a charge or subscription, through an invoice provider that is fully independent of the payment gateway.
+description: Emit invoices attached to a charge or subscription, through an invoice provider that is fully independent of the payment gateway.
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
 
-For Brazilian payment flows, a charge and its fiscal note (NFe/NFSe) are **two different
+For Brazilian payment flows, a charge and its invoice are **two different
 problems** — and this library keeps them two different providers. The payment goes through
-the gateway (Asaas, Woovi, …); the invoice goes through a fiscal provider (Focus,
+the gateway (Asaas, Woovi, …); the invoice goes through an invoice provider (Focus,
 Tecnospeed, …). The `invoice` option on a charge call **attaches** them: pay via Pix, emit
 the note via Focus, in one call.
 
@@ -46,11 +46,11 @@ await payments.driver('credit_card').charge({
 The charge succeeds or fails on its own — invoice emission is best-effort from the
 gateway's perspective, resolved right after the payment is created.
 
-### The payer's fiscal data
+### The payer's data
 
 The invoice recipient defaults to the customer's data. For a card checkout, `card.holder`
 (`cpfCnpj`, `name`, `email`) is the fallback, so a transparent checkout that also wants a
-fiscal note doesn't restate the holder:
+invoice doesn't restate the holder:
 
 ```ts title="app/services/checkout_service.ts"
 await payments.driver('credit_card').charge({

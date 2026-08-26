@@ -1,0 +1,80 @@
+# Getting started
+
+## Install
+
+```sh
+node ace add @adonis-agora/payments
+```
+
+This installs the package and runs the configure command, which:
+
+1. registers the `payments_provider` in `adonisrc.ts`;
+2. registers the ace commands (`make:billable`, `payments:webhook`, `payments:sync`);
+3. publishes `config/payments.ts`;
+4. publishes the billing migrations under `database/migrations/`;
+5. registers the payment env validations.
+
+## Configure
+
+Set your gateway credentials in `.env`:
+
+```ini
+STRIPE_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+WOOVI_APP_ID=your-woovi-app-id
+ASAAS_API_KEY=your-asaas-api-key
+ABACATE_API_KEY=your-abacate-api-key
+ABACATE_PUBLIC_KEY=your-abacate-public-key
+FOCUS_NFE_TOKEN=your-focus-token
+```
+
+## Run the migrations
+
+The billing layer persists subscriptions, payments and the webhook idempotency ledger:
+
+```sh
+node ace migration:run
+```
+
+## Register webhooks
+
+Each provider needs a webhook endpoint registered in its dashboard. See the exact URL
+and event list with:
+
+```sh
+node ace payments:webhook
+```
+
+The provider mounts `POST /payments/webhook/:provider` automatically.
+
+## Your first charge
+
+```ts
+import { getPayments } from '@adonis-agora/payments/services/main'
+
+const payments = getPayments()
+
+// Create a customer at the routed provider for `pix`
+const customer = await payments.driver('pix').createCustomer({
+  name: 'Jane Doe',
+  email: 'jane@example.com',
+  taxId: '123.456.789-00',
+})
+
+// Charge via Pix (Woovi) and emit an invoice through the default invoice provider
+const payment = await payments.driver('pix').charge({
+  customerId: customer.id,
+  amount: 1990, // R$ 19,90
+  invoice: true,
+})
+
+// payment.pixCopiaECola → the Pix copy-paste code to show the customer
+```
+
+## Next steps
+
+- [Configuration](./configuration) — providers, methods, invoices, billing.
+- [Providers](./providers) — Stripe, AbacatePay, Asaas, Woovi specifics.
+- [Billing](./billing) — subscriptions, trials, webhook sync.
+- [Invoices](./invoices) — emitting NFe/NFSe with the charge.
+- [Webhooks](./webhooks) — signature validation and processing.

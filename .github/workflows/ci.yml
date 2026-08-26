@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # Named on purpose: this is the same install the release job runs first, so a lockfile that
+      # drifted from a package.json fails HERE with an obvious label rather than deep inside a
+      # release. It cannot be the only guard, though — the changesets "version packages" PR is
+      # opened with GITHUB_TOKEN, and GitHub does not run `pull_request` workflows for those, so a
+      # drift introduced by versioning is only seen by this workflow's `push: master` run, after the
+      # merge. The prevention lives in the root `version-packages` script, which regenerates the
+      # lockfile as part of versioning so that PR is self-consistent by construction.
+      - name: Install (lockfile must be up to date)
+        run: pnpm install --frozen-lockfile
+
+      - run: pnpm lint
+
+      - run: pnpm typecheck
+
+      - run: pnpm test
+
+      - run: pnpm build

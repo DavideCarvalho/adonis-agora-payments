@@ -1,0 +1,220 @@
+import type {
+  CheckoutSession,
+  Customer,
+  Invoice,
+  InvoiceOptions,
+  Money,
+  Payment,
+  PaymentMethodName,
+  Refund,
+  Subscription,
+  WebhookEvent,
+} from './types.js';
+
+/**
+ * The provider-agnostic payment driver contract (Omnipay-style).
+ *
+ * Every gateway driver (Stripe, AbacatePay, Asaas, Woovi) implements this interface,
+ * normalizing its own API onto the shared domain types. The billing layer and application
+ * code depend only on this contract, so swapping gateways is a config change.
+ */
+export interface PaymentsDriver {
+  /** Stable provider name, e.g. `'stripe'`, `'abacate'`, `'asaas'`, `'woovi'`. */
+  readonly provider: string;
+
+  /**
+   * The payment methods this gateway supports (canonical names). Used by the router to
+   * reject a method the provider can't handle — e.g. routing `credit_card` to a Pix-only
+   * gateway (AbacatePay, Woovi) throws a clear error.
+   */
+  readonly supportedMethods: readonly PaymentMethodName[];
+
+  /**
+   * Optional capabilities beyond the core contract. A driver that lacks a capability
+   * still implements the method (it must — the interface demands it) but throws a clear
+   * "not supported" error; the manager checks this before delegating so callers discover
+   * the limitation early instead of at the gateway.
+   */
+  readonly capabilities?: {
+    /** Full refunds against a payment. Woovi/OpenPix lacks it. */
+    refunds?: boolean;
+    /** Lists gateway invoices. Woovi/OpenPix has no invoice concept. */
+    invoices?: boolean;
+    /** Recurring subscriptions. InfinitePay-style links lack it. */
+    subscriptions?: boolean;
+  };
+
+  // ── Customers ────────────────────────────────────────────────────────────────────────
+
+  /** Create a customer at the gateway. Returns the gateway customer. */
+  createCustomer(input: CreateCustomerInput): Promise<Customer>;
+  /** Look up a customer by its gateway id. */
+  findCustomer(customerId: string): Promise<Customer | null>;
+  /** Update customer details at the gateway. */
+  updateCustomer(customerId: string, input: UpdateCustomerInput): Promise<Customer>;
+
+  // ── Payments ─────────────────────────────────────────────────────────────────────────
+
+  /** Charge a customer (or a standalone amount) and return the payment. */
+  charge(input: ChargeInput): Promise<Payment>;
+  /** Find a payment by its gateway id. */
+  findPayment(gatewayId: string): Promise<Payment | null>;
+  /** Refund a payment, optionally a partial amount. */
+  refund(paymentGatewayId: string, amount?: Money): Promise<Refund>;
+
+  // ── Checkout ─────────────────────────────────────────────────────────────────────────
+
+  /** Create a hosted checkout session and return the redirect URL. */
+  createCheckout(input: CheckoutInput): Promise<CheckoutSession>;
+
+  // ── Subscriptions ────────────────────────────────────────────────────────────────────
+
+  /** Create a recurring subscription at the gateway. */
+  createSubscription(input: CreateSubscriptionInput): Promise<Subscription>;
+  /** Cancel a subscription (optionally immediately, skipping the grace period). */
+  cancelSubscription(
+    subscriptionGatewayId: string,
+    options?: { atPeriodEnd?: boolean },
+  ): Promise<Subscription>;
+  /** Update a subscription's amount/description at the gateway. */
+  updateSubscription(
+    subscriptionGatewayId: string,
+    input: UpdateSubscriptionInput,
+  ): Promise<Subscription>;
+  /** Find a subscription by its gateway id. */
+  findSubscription(gatewayId: string): Promise<Subscription | null>;
+
+  // ── Invoices ─────────────────────────────────────────────────────────────────────────
+
+  /** List invoices for a customer. */
+  listInvoices(customerId: string): Promise<Invoice[]>;
+
+  // ── Webhooks ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Verify the webhook signature and normalize the raw payload into a {@link WebhookEvent}.
+   * Throws when the signature is invalid.
+   */
+  parseWebhook(
+    rawBody: string,
+    headers: Record<string, string | string[] | undefined>,
+  ): WebhookEvent;
+}
+
+// ── Input types ─────────────────────────────────────────────────────────────────────────
+
+export interface CreateCustomerInput {
+  email?: string;
+  name?: string;
+  /** CPF/CNPJ (BR gateways) or tax id. */
+  taxId?: string;
+  /** Extra provider-specific fields, e.g. phone, address. */
+  metadata?: Record<string, unknown>;
+}
+
+export interface UpdateCustomerInput {
+  email?: string;
+  name?: string;
+  taxId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ChargeInput {
+  /** Gateway customer id. When absent, some gateways charge without a customer. */
+  customerId?: string;
+  amount: Money;
+  /** ISO 4217 code, lowercase (defaults to the driver's configured currency). */
+  currency?: string;
+  description?: string;
+  /** Payment method (e.g. `'pix'`, `'credit_card'`, `'boleto'`). Gateway-dependent. */
+  method?: string;
+  /** For card payments: the payment method/token id at the gateway. */
+  paymentMethodId?: string;
+  /**
+   * Checkout transparente: card tokenized in the frontend, plus the holder info most BR
+   * gateways require (Asaas `creditCardToken`/`creditCardHolderInfo`, Stripe
+   * `payment_method`). First-class so drivers map it without metadata hacks.
+   */
+  card?: {
+    token: string;
+    holder?: {
+      name: string;
+      email: string;
+      cpfCnpj: string;
+      postalCode: string;
+      addressNumber: string;
+      phone: string;
+    };
+    remoteIp?: string;
+  };
+  /**
+   * The payer's fiscal data — the single source used when an invoice is emitted with
+   * this charge. Falls back to `card.holder` (cpfCnpj/name/email) when absent, so a
+   * card checkout that also wants a fiscal note doesn't restate the holder.
+   */
+  customer?: {
+    name?: string;
+    taxId?: string;
+    email?: string;
+  };
+  /** Idempotency key — reusing it must not double-charge. */
+  idempotencyKey?: string;
+  /**
+   * Emit an invoice for this charge: `true` uses the default invoice provider, a string
+   * names one from `invoice.providers`, or pass {@link InvoiceOptions} for overrides.
+   */
+  invoice?: boolean | string | InvoiceOptions;
+  /** Extra provider-specific fields. */
+  metadata?: Record<string, unknown>;
+}
+
+export interface CheckoutInput {
+  /** Gateway customer id. */
+  customerId?: string;
+  amount: Money;
+  currency?: string;
+  description?: string;
+  successUrl: string;
+  cancelUrl?: string;
+  /** For subscription checkouts: the price/plan id. */
+  planId?: string;
+  /** Trial days for a subscription checkout. */
+  trialDays?: number;
+  /** Idempotency key — reusing it must not create a duplicate session. */
+  idempotencyKey?: string;
+  /** Emit an invoice for this checkout: `true`/name/options. */
+  invoice?: boolean | string | InvoiceOptions;
+  /** Extra provider-specific fields. */
+  metadata?: Record<string, unknown>;
+}
+
+export interface CreateSubscriptionInput {
+  customerId: string;
+  /** Price/plan id at the gateway. */
+  planId: string;
+  /** Amount in the currency's smallest unit (e.g. cents) — required by BR gateways. */
+  amount?: Money;
+  /** Billing cycle. Defaults to `'MONTHLY'` (Asaas, AbacatePay). */
+  cycle?: 'WEEKLY' | 'BIWEEKLY' | 'MONTHLY' | 'QUARTERLY' | 'SEMIANNUALLY' | 'YEARLY';
+  /** Payment method for the recurring charges (e.g. `'pix'`, `'credit_card'`). */
+  method?: string;
+  /** Description shown on the recurring charges. */
+  description?: string;
+  /** Trial days before the first charge. */
+  trialDays?: number;
+  /** First due date (ISO date) — required by some BR gateways (e.g. Asaas). */
+  startDate?: string;
+  /** Emit an invoice for this subscription's charges: `true`/name/options. */
+  invoice?: boolean | string | InvoiceOptions;
+  /** Extra provider-specific fields. */
+  metadata?: Record<string, unknown>;
+}
+
+export interface UpdateSubscriptionInput {
+  /** New amount in the currency's smallest unit. */
+  amount?: Money;
+  /** New description. */
+  description?: string;
+  /** Extra provider-specific fields. */
+  metadata?: Record<string, unknown>;
+}

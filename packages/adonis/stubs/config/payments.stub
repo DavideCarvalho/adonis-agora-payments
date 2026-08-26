@@ -1,0 +1,84 @@
+{{{
+  exports({ to: app.configPath('payments.ts') })
+}}}
+import env from '#start/env'
+import { defineConfig, payments, invoice } from '@adonis-agora/payments'
+
+export default defineConfig({
+  /**
+   * Default payment provider — a key of `providers`.
+   */
+  default: 'stripe',
+
+  /**
+   * Named payment providers. Each factory lazily imports its gateway SDK, so only the
+   * providers you actually use are loaded.
+   */
+  providers: {
+    stripe: payments.stripe({
+      apiKey: env.get('STRIPE_KEY'),
+      currency: 'brl',
+      // Required to verify webhook signatures (whsec_...):
+      webhookSecret: env.get('STRIPE_WEBHOOK_SECRET'),
+    }),
+    // abacate: payments.abacate({
+    //   apiKey: env.get('ABACATE_API_KEY'),
+    //   // HMAC secret that signs webhooks — reject unsigned requests in production:
+    //   webhookSecret: env.get('ABACATE_PUBLIC_KEY'),
+    // }),
+    // asaas: payments.asaas({
+    //   apiKey: env.get('ASAAS_API_KEY'),
+    //   sandbox: env.get('NODE_ENV') !== 'production',
+    //   // Shared token set in the Asaas dashboard — reject requests without it:
+    //   webhookToken: env.get('ASAAS_WEBHOOK_TOKEN'),
+    // }),
+    // woovi: payments.woovi({
+    //   appId: env.get('WOOVI_APP_ID'),
+    //   // Recommended RSA signature (x-webhook-signature):
+    //   webhookPublicKey: env.get('WOOVI_PUBLIC_KEY'),
+    // }),
+  },
+
+  /**
+   * Route a payment method to a provider (a key of `providers`). The charge call then
+   * resolves the driver per method: `payments.driver('pix').charge(...)`.
+   */
+  methods: {
+    pix: 'stripe',
+    credit_card: 'stripe',
+    // boleto: 'asaas',
+    // debit_card: 'asaas',
+    // undefined: 'asaas',
+  },
+
+  /**
+   * Invoice (NFe/NFSe) emission. Optional — only needed when you want to emit invoices
+   * for charges (e.g. `charge({ ..., invoice: true })`).
+   */
+  invoice: {
+    default: 'focus',
+    providers: {
+      focus: invoice.focus({
+        token: env.get('FOCUS_NFE_TOKEN'),
+      }),
+    },
+    defaults: {
+      service: {
+        description: 'Software license',
+      },
+    },
+  },
+
+  /**
+   * Billing (subscription) layer.
+   */
+  billing: {
+    enabled: true,
+    /**
+     * 'auto' uses @adonis-agora/durable to process webhooks when it is installed in the
+     * app, falling back to an in-process dispatcher otherwise. Set `false` to always use
+     * the in-process dispatcher, or `true` to require durable.
+     */
+    durable: 'auto',
+  },
+})

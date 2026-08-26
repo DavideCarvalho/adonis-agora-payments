@@ -1,0 +1,37 @@
+{
+  "name": "adonis-payments",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Billing library for the Agora AdonisJS ecosystem — multi-gateway payments (Stripe, AbacatePay, Asaas, Woovi) with a Cashier-style subscription billing layer.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DavideCarvalho/adonis-agora-payments.git"
+  },
+  "author": "Davi Carvalho <davi@goflip.ai>",
+  "packageManager": "pnpm@11.17.0",
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "changeset": "changeset",
+    "release": "pnpm --filter './packages/*' build && changeset publish",
+    "version-packages": "changeset version && pnpm install --lockfile-only && biome check --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "@changesets/changelog-github": "^0.7.0",
+    "@changesets/cli": "2.31.1",
+    "turbo": "2.10.9",
+    "typescript": "^5.4.0",
+    "unplugin-swc": "1.5.10",
+    "@swc/core": "1.15.47",
+    "vitest": "3.2.7"
+  }
+}

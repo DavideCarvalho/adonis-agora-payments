@@ -1,0 +1,28 @@
+{{#var billableName = string(entity.name).pascalCase().toString()}}
+{{#var billableFileName = string(entity.name).snakeCase().removeSuffix('model').toString() + '_model'}}
+{{{
+  exports({
+    to: app.makePath('app/models', entity.path, billableFileName + '.ts')
+  })
+}}}
+import { BaseModel, compose } from '@adonisjs/lucid/orm'
+import { column } from '@adonisjs/lucid/orm'
+import { withBillable } from '@adonis-agora/payments'
+
+/**
+ * {{ billableName }} — the billable model. Compose `withBillable()` to add the billing
+ * customer columns (billingCustomerId, billingProvider) and use the payments service
+ * to charge, subscribe and manage payment methods.
+ *
+ * ```ts
+ * const payments = await app.container.make(PaymentsManager)
+ * const driver = payments.driver('pix')
+ * const customer = await driver.createCustomer({ name: user.name, email: user.email })
+ * user.billingCustomerId = customer.id
+ * await user.save()
+ * ```
+ */
+export default class {{ billableName }} extends compose(BaseModel, withBillable()) {
+  @column({ isPrimary: true })
+  declare id: string
+}

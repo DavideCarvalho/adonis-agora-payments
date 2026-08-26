@@ -1,0 +1,136 @@
+{
+  "name": "@adonis-agora/payments",
+  "version": "0.1.0",
+  "description": "Billing library for AdonisJS — multi-gateway payments (Stripe, AbacatePay, Asaas, Woovi) with a Cashier-style subscription billing layer: Billable mixin, Lucid stores, idempotent webhook processing and an optional Durable-backed dispatcher. Part of the Agora ecosystem.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DavideCarvalho/adonis-agora-payments.git",
+    "directory": "packages/adonis"
+  },
+  "author": "Davi Carvalho <davi@goflip.ai>",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js",
+      "default": "./dist/src/index.js"
+    },
+    "./services/main": {
+      "types": "./dist/src/services/main.d.ts",
+      "import": "./dist/src/services/main.js",
+      "default": "./dist/src/services/main.js"
+    },
+    "./payments_provider": {
+      "types": "./dist/providers/payments_provider.d.ts",
+      "import": "./dist/providers/payments_provider.js",
+      "default": "./dist/providers/payments_provider.js"
+    },
+    "./configure": {
+      "types": "./dist/configure.d.ts",
+      "import": "./dist/configure.js",
+      "default": "./dist/configure.js"
+    },
+    "./commands": {
+      "types": "./dist/commands/main.d.ts",
+      "import": "./dist/commands/main.js",
+      "default": "./dist/commands/main.js"
+    },
+    "./testing": {
+      "types": "./dist/src/testing/index.d.ts",
+      "import": "./dist/src/testing/index.js",
+      "default": "./dist/src/testing/index.js"
+    },
+    "./telescope": {
+      "types": "./dist/src/telescope/index.d.ts",
+      "import": "./dist/src/telescope/index.js",
+      "default": "./dist/src/telescope/index.js"
+    },
+    "./drivers/asaas": {
+      "types": "./dist/src/drivers/asaas.d.ts",
+      "import": "./dist/src/drivers/asaas.js",
+      "default": "./dist/src/drivers/asaas.js"
+    },
+    "./drivers/stripe": {
+      "types": "./dist/src/drivers/stripe.d.ts",
+      "import": "./dist/src/drivers/stripe.js",
+      "default": "./dist/src/drivers/stripe.js"
+    },
+    "./drivers/abacate": {
+      "types": "./dist/src/drivers/abacate.d.ts",
+      "import": "./dist/src/drivers/abacate.js",
+      "default": "./dist/src/drivers/abacate.js"
+    },
+    "./drivers/woovi": {
+      "types": "./dist/src/drivers/woovi.d.ts",
+      "import": "./dist/src/drivers/woovi.js",
+      "default": "./dist/src/drivers/woovi.js"
+    },
+    "./types": {
+      "types": "./dist/src/types.d.ts",
+      "import": "./dist/src/types.js",
+      "default": "./dist/src/types.js"
+    }
+  },
+  "files": ["dist/", "README.md", "CHANGELOG.md"],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.json && pnpm run copy:stubs",
+    "copy:stubs": "mkdir -p dist/stubs/config dist/stubs/database/migrations dist/stubs/make/billable && cp -r stubs/config/. dist/stubs/config/ && cp -r stubs/database/migrations/. dist/stubs/database/migrations/ && cp -r stubs/make/billable/. dist/stubs/make/billable/",
+    "prepack": "pnpm run build",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": {
+    "@adonis-agora/durable": ">=0.1.0 <1.0.0",
+    "@adonisjs/core": "^7.3.0",
+    "@adonisjs/lucid": "^22.4.0",
+    "@woovi/node-sdk": "^1.0.0",
+    "stripe": "^17.0.0 || ^18.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@adonis-agora/durable": {
+      "optional": true
+    },
+    "@adonisjs/lucid": {
+      "optional": true
+    },
+    "@woovi/node-sdk": {
+      "optional": true
+    },
+    "stripe": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@adonisjs/core": "7.4.0",
+    "@adonisjs/lucid": "^22.4.0",
+    "@types/luxon": "^3.7.5",
+    "@types/node": "^20.0.0",
+    "@woovi/node-sdk": "^1.0.0",
+    "luxon": "^3.7.2",
+    "stripe": "^18.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "3.2.7"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "keywords": [
+    "adonisjs",
+    "adonis",
+    "payments",
+    "billing",
+    "subscriptions",
+    "stripe",
+    "abacatepay",
+    "asaas",
+    "woovi",
+    "openpix",
+    "pix",
+    "agora"
+  ]
+}

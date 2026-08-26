@@ -1,4 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+const createClientMock = vi.hoisted(() => ({
+  create: vi.fn(),
+  subscription: { create: vi.fn(), get: vi.fn() },
+  charge: { create: vi.fn() },
+  customer: { create: vi.fn() },
+}));
+
+vi.mock('@woovi/node-sdk', () => ({
+  createClient: () => createClientMock,
+}));
+
 import { WooviDriver } from '../src/drivers/woovi.js';
 
 describe('WooviDriver', () => {
@@ -47,5 +59,42 @@ describe('WooviDriver', () => {
     } finally {
       process.env.WOOVI_APP_ID = undefined;
     }
+  });
+
+  it('creates a Pix Automático subscription with the payer customer and pay-on-approval (DYNAMIC)', async () => {
+    createClientMock.subscription.create.mockResolvedValue({
+      subscription: {
+        globalID: 'UGF5bWVudFN1YnNjcmlwdGlvbjox',
+        status: 'ACTIVE',
+        value: 49.9,
+        dayGenerateCharge: 1,
+      },
+    });
+    const driver = new WooviDriver({ config: () => ({}) }, { appId: 'test' });
+
+    const subscription = await driver.createSubscription({
+      customerId: 'cus_1',
+      amount: 4990,
+      cycle: 'MONTHLY',
+      startDate: '2026-09-15',
+      customer: { name: 'Jane Doe', email: 'jane@example.com', taxId: '123.456.789-00' },
+    });
+
+    const payload = createClientMock.subscription.create.mock.calls[0]![0];
+    expect(payload).toMatchObject({
+      customer: { name: 'Jane Doe', email: 'jane@example.com', taxID: '12345678900' },
+      value: 49.9,
+      chargeType: 'DYNAMIC',
+      frequency: 'MONTHLY',
+    });
+    expect(payload.dayGenerateCharge).toBeGreaterThanOrEqual(1);
+    expect(subscription.gatewayId).toBe('UGF5bWVudFN1YnNjcmlwdGlvbjox');
+  });
+
+  it('throws a clear error when a Woovi subscription lacks the payer name/taxId', async () => {
+    const driver = new WooviDriver({ config: () => ({}) }, { appId: 'test' });
+    await expect(driver.createSubscription({ customerId: 'cus_1', amount: 4990 })).rejects.toThrow(
+      /name \+ taxId/,
+    );
   });
 });

@@ -164,17 +164,71 @@ export class WooviDriver implements PaymentsDriver {
   // ── Subscriptions (Pix Automático) ──────────────────────────────────────────────────
 
   async createSubscription(input: CreateSubscriptionInput): Promise<Subscription> {
+    // Woovi creates subscriptions with an inline customer (no customer-id flow).
+    const customer = await this.#resolveSubscriptionCustomer(input);
     const body: Record<string, unknown> = {
-      correlationID: input.customerId,
-      ...(input.amount !== undefined ? { value: toDecimal(input.amount) } : {}),
-      ...(this.#dayOfMonth(input.startDate) !== undefined
-        ? { dayGenerateCharge: this.#dayOfMonth(input.startDate) }
-        : {}),
+      customer,
+      value: toDecimal(input.amount ?? 0),
+      dayGenerateCharge: this.#dayOfMonth(input.startDate) ?? 1,
+      ...(input.cycle !== undefined ? { frequency: this.#mapFrequency(input.cycle) } : {}),
+      // Pix Automático journey 3 (pay-on-approval): `DYNAMIC` generates each charge and
+      // asks the payer to approve it. Override via `metadata.chargeType` if needed.
+      ...(input.metadata?.chargeType !== undefined
+        ? { chargeType: input.metadata.chargeType }
+        : { chargeType: 'DYNAMIC' }),
+      ...(input.metadata?.dayDue !== undefined ? { dayDue: input.metadata.dayDue } : {}),
     };
     const data = await this.#client.subscription.create(body);
-    const subscription = this.#mapSubscription(data);
+    // The SDK wraps the created subscription in `{ subscription }` (get/find return it bare).
+    const subscription = this.#mapSubscription(
+      (data as { subscription?: Record<string, unknown> }).subscription ??
+        (data as Record<string, unknown>),
+    );
     publishSubscriptionDiagnostics(subscription, 'subscription.created');
     return subscription;
+  }
+
+  /** Woovi's inline customer: `input.customer`, else the gateway customer (needs name+taxId). */
+  async #resolveSubscriptionCustomer(
+    input: CreateSubscriptionInput,
+  ): Promise<{ name: string; email: string; taxID: string; phone?: string }> {
+    if (input.customer?.name && input.customer.taxId) {
+      return {
+        name: input.customer.name,
+        email: input.customer.email ?? '',
+        taxID: input.customer.taxId.replace(/\D/g, ''),
+      };
+    }
+    if (input.customerId) {
+      const customer = await this.findCustomer(input.customerId);
+      if (customer?.name && customer.taxId) {
+        return {
+          name: customer.name,
+          email: customer.email ?? '',
+          taxID: customer.taxId.replace(/\D/g, ''),
+        };
+      }
+    }
+    throw new Error(
+      '[payments] Woovi subscription needs the payer name + taxId — pass `customer` on the subscription, or create the gateway customer with them.',
+    );
+  }
+
+  #mapFrequency(cycle: string): string {
+    switch (cycle) {
+      case 'WEEKLY':
+        return 'WEEKLY';
+      case 'MONTHLY':
+        return 'MONTHLY';
+      case 'QUARTERLY':
+        return 'TRIMONTHLY';
+      case 'SEMIANNUALLY':
+        return 'SEMIANNUALY';
+      case 'YEARLY':
+        return 'ANNUALY';
+      default:
+        return 'MONTHLY';
+    }
   }
 
   async cancelSubscription(

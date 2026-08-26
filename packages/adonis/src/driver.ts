@@ -226,6 +226,15 @@ export interface CreateSubscriptionInput {
    */
   card?: CardInput;
   /**
+   * The payer's fiscal/identity data. Gateways that create subscriptions with an inline
+   * customer (Woovi, AbacatePay) use it instead of a pre-created `customerId`.
+   */
+  customer?: {
+    name?: string;
+    email?: string;
+    taxId?: string;
+  };
+  /**
    * Your own reference echoed on the gateway subscription (and its generated charges) —
    * the stable id webhook handlers use to route a subscription payment back to your
    * local record. Asaas propagates it to every installment payment's `externalReference`.

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { LucidBillingStore } from '../../src/billing/lucid_billing_store.js';
 import type { PaymentsDriver } from '../../src/driver.js';
 import { ensureCustomer } from '../../src/ensure_customer.js';
-import { createIntegrationDatabase, type IntegrationDatabase } from './harness.js';
+import { type IntegrationDatabase, createIntegrationDatabase } from './harness.js';
 
 /**
  * The `billing_customers` mapping against real SQL.
@@ -61,10 +61,15 @@ describe('customer registry (integration)', () => {
   });
 
   it('keeps one owner s customers at different gateways apart', async () => {
-    await ensureCustomer(driver('cus_asaas_1', 'asaas'), undefined, { name: 'Ana' }, {
-      store,
-      owner: { type: 'User', id: 1 },
-    });
+    await ensureCustomer(
+      driver('cus_asaas_1', 'asaas'),
+      undefined,
+      { name: 'Ana' },
+      {
+        store,
+        owner: { type: 'User', id: 1 },
+      },
+    );
 
     // The same owner, two providers — which is exactly what a single column on the user row
     // cannot represent, and why `provider` is part of the lookup rather than a filter.

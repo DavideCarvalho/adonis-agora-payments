@@ -117,10 +117,7 @@ export class LucidBillingStore
   }
 
   async findCustomerByGatewayId(gatewayId: string): Promise<CustomerInstance | null> {
-    return (await this.#customerModel.findBy(
-      'gateway_id',
-      gatewayId,
-    )) as CustomerInstance | null;
+    return (await this.#customerModel.findBy('gateway_id', gatewayId)) as CustomerInstance | null;
   }
 
   async findCustomerByOwner(

@@ -2,6 +2,14 @@ import type { BillingStore } from './billing/billing_store.js';
 import type { BillingModels } from './billing/lucid_billing_store.js';
 import type { WebhookHandler } from './billing/webhook_processor.js';
 import type { PaymentsDriver } from './driver.js';
+import type { AdyenDriverConfig } from './drivers/adyen.js';
+import type { DodoDriverConfig } from './drivers/dodo.js';
+import type { LemonSqueezyDriverConfig } from './drivers/lemonsqueezy.js';
+import type { MercadoPagoDriverConfig } from './drivers/mercadopago.js';
+import type { MollieDriverConfig } from './drivers/mollie.js';
+import type { PaddleDriverConfig } from './drivers/paddle.js';
+import type { PayPalDriverConfig } from './drivers/paypal.js';
+import type { PolarDriverConfig } from './drivers/polar.js';
 import type { InvoiceProvider } from './invoice/invoice_provider.js';
 import type { InvoiceOptions, PaymentMethodName } from './types.js';
 import type { WebhookHandlerService } from './webhook_handlers.js';
@@ -87,6 +95,114 @@ export interface AsaasDriverConfig {
    * webhooks without the matching token header are rejected.
    */
   webhookToken?: string;
+}
+
+export interface PagarmeDriverConfig {
+  /**
+   * Pagar.me secret key (`sk_…`, `sk_test_…` in the sandbox). Sent as the username of an
+   * HTTP Basic header with an empty password. Defaults to `env.get('PAGARME_SECRET_KEY')`.
+   */
+  secretKey?: string;
+  /** Base URL of the Core API. Defaults to `https://api.pagar.me/core/v5`. */
+  baseUrl?: string;
+  /**
+   * Username of the optional HTTP Basic credentials you set on the webhook endpoint in the
+   * Pagar.me dashboard. Defaults to `env.get('PAGARME_WEBHOOK_USER')`. Pagar.me signs
+   * nothing — these credentials are the only authentication its webhooks offer, and when
+   * either is set the driver rejects requests that don't carry them.
+   */
+  webhookUser?: string;
+  /** Password of those webhook credentials. Defaults to `env.get('PAGARME_WEBHOOK_PASSWORD')`. */
+  webhookPassword?: string;
+  /**
+   * Default Pix expiry in seconds when a charge doesn't set `metadata.expiresIn`. Pagar.me
+   * requires `expires_in` on every Pix payment. Defaults to 86400 (24h).
+   */
+  pixExpiresIn?: number;
+  // No `currency`: Pagar.me is BRL-only, so there is nothing to choose.
+}
+
+export interface InfinitePayDriverConfig {
+  /**
+   * Your InfiniteTag — the merchant handle the public checkout endpoint identifies you by.
+   * This is not a secret key: InfinitePay's checkout API takes no credentials at all.
+   * Defaults to `env.get('INFINITEPAY_HANDLE')`. "Checkout Integrado" must be enabled in
+   * the InfinitePay app before links can be created.
+   */
+  handle?: string;
+  /** Base URL of the checkout API. Defaults to `https://api.checkout.infinitepay.io`. */
+  baseUrl?: string;
+  /**
+   * Where InfinitePay should POST the payment webhook. InfinitePay has **no global webhook
+   * registration** — the URL is sent per link — so without this (or
+   * `env.get('INFINITEPAY_WEBHOOK_URL')`) no webhook ever arrives. Point it at the
+   * library's route, e.g. `https://app.example.com/payments/webhook/infinitepay`, and
+   * consider adding an unguessable segment: the payload carries no signature.
+   */
+  webhookUrl?: string;
+  // No `currency`: InfinitePay is BRL-only.
+}
+
+export interface PagBankDriverConfig {
+  /** PagBank API token (Bearer). Defaults to `env.get('PAGBANK_TOKEN')`. */
+  token?: string;
+  /** Use the PagBank sandbox host. Defaults to `NODE_ENV !== 'production'`. */
+  sandbox?: boolean;
+  /**
+   * The token PagBank hashes into `x-authenticity-token` on webhooks. PagBank has no
+   * separate webhook secret — it is the same token that authenticates API calls — so this
+   * defaults to {@link PagBankDriverConfig.token} (or `env.get('PAGBANK_WEBHOOK_TOKEN')`),
+   * and webhook verification is on out of the box.
+   */
+  webhookToken?: string;
+  /**
+   * Whether to verify `x-authenticity-token` on incoming webhooks. Defaults to `true`.
+   *
+   * The only reason this exists: PagBank's sandbox does not always send the header, so a
+   * developer testing locally would otherwise be stuck. Setting it to `false` leaves the
+   * webhook endpoint accepting anything that can reach it — never do that in production.
+   */
+  verifyWebhooks?: boolean;
+  /**
+   * URLs PagBank notifies for the orders this driver creates (`notification_urls`).
+   * Usually one entry pointing at the lib-mounted `/payments/webhook/pagbank`. You can
+   * also configure it per account in the PagBank dashboard and leave this empty.
+   */
+  notificationUrls?: string[];
+}
+
+export interface EfiDriverConfig {
+  /** Efí OAuth client id. Defaults to `env.get('EFI_CLIENT_ID')`. */
+  clientId?: string;
+  /** Efí OAuth client secret. Defaults to `env.get('EFI_CLIENT_SECRET')`. */
+  clientSecret?: string;
+  /**
+   * The Pix key that receives the charges (`chave` on every `cob`). Defaults to
+   * `env.get('EFI_PIX_KEY')`. Required — the Pix API refuses a charge without one.
+   */
+  pixKey?: string;
+  /** Use the Efí homologation host (`pix-h`). Defaults to `NODE_ENV !== 'production'`. */
+  sandbox?: boolean;
+  /**
+   * The client certificate Efí's Pix API demands on **every** request, the token request
+   * included: a path to the `.p12` (or `.pem`) generated in the Efí dashboard, or its
+   * contents as a Buffer. Defaults to `env.get('EFI_CERTIFICATE')`.
+   *
+   * Mutual TLS cannot be expressed as a header, so this is not optional the way an API key
+   * is optional — without it (or a custom {@link EfiDriverConfig.fetch}) the driver
+   * refuses to boot.
+   */
+  certificate?: string | Buffer | Uint8Array;
+  /** Passphrase of the `.p12`, when you set one. Efí's default export has none. */
+  certificatePassphrase?: string;
+  /** Default `cob` expiry in seconds. Defaults to 3600 (one hour). */
+  expirationSeconds?: number;
+  /**
+   * A `fetch` to use instead of the certificate-bearing one the driver builds. The escape
+   * hatch for terminating mTLS somewhere else (a proxy, a pooled undici dispatcher) — and
+   * what the tests inject.
+   */
+  fetch?: typeof globalThis.fetch;
 }
 
 export interface FocusInvoiceConfig {
@@ -311,6 +427,96 @@ export const payments = {
       return new WooviDriver(ctx, config);
     };
   },
+  pagarme(config: PagarmeDriverConfig = {}): PaymentsDriverFactory {
+    return async (ctx) => {
+      const { PagarmeDriver } = await import('./drivers/pagarme.js');
+      return new PagarmeDriver(ctx, config);
+    };
+  },
+  infinitepay(config: InfinitePayDriverConfig = {}): PaymentsDriverFactory {
+    return async (ctx) => {
+      const { InfinitePayDriver } = await import('./drivers/infinitepay.js');
+      return new InfinitePayDriver(ctx, config);
+    };
+  },
+  pagbank(config: PagBankDriverConfig = {}): PaymentsDriverFactory {
+    return async (ctx) => {
+      const { PagBankDriver } = await import('./drivers/pagbank.js');
+      return new PagBankDriver(ctx, config);
+    };
+  },
+  efi(config: EfiDriverConfig = {}): PaymentsDriverFactory {
+    return async (ctx) => {
+      const { EfiDriver } = await import('./drivers/efi.js');
+      return new EfiDriver(ctx, config);
+    };
+  },
+  adyen(config: AdyenDriverConfig): PaymentsDriverFactory {
+    return async (ctx) => {
+      const { AdyenDriver } = await import('./drivers/adyen.js');
+      return new AdyenDriver(ctx, config);
+    };
+  },
+  dodo(config: DodoDriverConfig): PaymentsDriverFactory {
+    return async (ctx) => {
+      const { DodoDriver } = await import('./drivers/dodo.js');
+      return new DodoDriver(ctx, config);
+    };
+  },
+  lemonsqueezy(config: LemonSqueezyDriverConfig): PaymentsDriverFactory {
+    return async (ctx) => {
+      const { LemonSqueezyDriver } = await import('./drivers/lemonsqueezy.js');
+      return new LemonSqueezyDriver(ctx, config);
+    };
+  },
+  mercadopago(config: MercadoPagoDriverConfig): PaymentsDriverFactory {
+    return async (ctx) => {
+      const { MercadoPagoDriver } = await import('./drivers/mercadopago.js');
+      return new MercadoPagoDriver(ctx, config);
+    };
+  },
+  mollie(config: MollieDriverConfig): PaymentsDriverFactory {
+    return async (ctx) => {
+      const { MollieDriver } = await import('./drivers/mollie.js');
+      return new MollieDriver(ctx, config);
+    };
+  },
+  paddle(config: PaddleDriverConfig): PaymentsDriverFactory {
+    return async (ctx) => {
+      const { PaddleDriver } = await import('./drivers/paddle.js');
+      return new PaddleDriver(ctx, config);
+    };
+  },
+  paypal(config: PayPalDriverConfig): PaymentsDriverFactory {
+    return async (ctx) => {
+      const { PayPalDriver } = await import('./drivers/paypal.js');
+      return new PayPalDriver(ctx, config);
+    };
+  },
+  polar(config: PolarDriverConfig): PaymentsDriverFactory {
+    return async (ctx) => {
+      const { PolarDriver } = await import('./drivers/polar.js');
+      return new PolarDriver(ctx, config);
+    };
+  },
+};
+
+/**
+ * Config types for the drivers whose interfaces live in their own module.
+ *
+ * The four original drivers declare their config here; the later ones declare it beside the
+ * driver so each module type-checks on its own. Re-exported so both halves look identical
+ * from the outside.
+ */
+export type {
+  AdyenDriverConfig,
+  DodoDriverConfig,
+  LemonSqueezyDriverConfig,
+  MercadoPagoDriverConfig,
+  MollieDriverConfig,
+  PaddleDriverConfig,
+  PayPalDriverConfig,
+  PolarDriverConfig,
 };
 
 /**

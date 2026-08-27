@@ -54,7 +54,17 @@ export interface BillingStore<
 
   // ── Webhook idempotency ledger ───────────────────────────────────────────────────
 
-  /** Record a webhook event for idempotency. Returns null when the event was already recorded. */
+  /**
+   * Record a webhook event for idempotency.
+   *
+   * Returns `null` when this gateway event is already in flight or already
+   * processed — that is the guard that makes a gateway redelivery a no-op.
+   *
+   * An event whose previous attempt **failed** is claimed again and returned,
+   * so a retry actually re-runs it. Without that, the first failure would seal
+   * the ledger and every retry — in-process or durable — would short-circuit
+   * into doing nothing.
+   */
   recordWebhookEvent(event: {
     gatewayEventId: string;
     provider: string;

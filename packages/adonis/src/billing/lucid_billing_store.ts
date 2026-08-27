@@ -115,7 +115,15 @@ export class LucidBillingStore
     payload: Record<string, unknown>;
   }): Promise<WebhookEventInstance | null> {
     const existing = await this.#webhookEventModel.findBy('gateway_event_id', event.gatewayEventId);
-    if (existing) return null;
+    if (existing) {
+      // A previous attempt failed: claim it again so the retry re-runs. Anything
+      // else (in flight, or already processed) is a redelivery — stop here.
+      if (existing.status !== 'failed') return null;
+      existing.status = 'received';
+      existing.error = null;
+      await existing.save();
+      return existing;
+    }
     const row = new this.#webhookEventModel() as WebhookEventInstance;
     row.gatewayEventId = event.gatewayEventId;
     row.provider = event.provider;

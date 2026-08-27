@@ -99,6 +99,16 @@ describe('WooviDriver', () => {
     );
   });
 
+  it('refuses to update a subscription instead of reporting a change the gateway never saw', async () => {
+    createClientMock.subscription.get.mockClear();
+    const driver = new WooviDriver({ config: () => ({}) }, { appId: 'test' });
+
+    await expect(driver.updateSubscription('sub_1', { amount: 9990 })).rejects.toThrow(
+      /does not support updating a subscription/,
+    );
+    expect(createClientMock.subscription.get).not.toHaveBeenCalled();
+  });
+
   it('creates and lists subaccounts (OpenPix for Platforms)', async () => {
     createClientMock.subAccount = {
       create: vi.fn().mockResolvedValue({

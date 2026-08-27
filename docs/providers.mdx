@@ -17,13 +17,20 @@ A quick map of the differences that usually matter:
 | --- | --- | --- | --- | --- |
 | Methods | pix, card, boleto, undefined | pix, boleto, undefined | pix, boleto, card, debit | pix, undefined |
 | Subscriptions | recurring | recurring | native recurring | Pix Automático (no card) |
+| Subscription updates | description + metadata | amount + description | amount + description | none — throws |
 | Webhook auth | HMAC (SDK) | HMAC-SHA256 | shared token | RSA-SHA256 or HMAC |
 | `externalReference` | `metadata.external_reference` | — | `externalReference` (propagated) | `correlationID` |
 | Invoices | hosted | no concept (use a provider) | native NFS-e + provider | no concept (use a provider) |
 
 ## Stripe
 
-- **Methods**: pix, credit_card, boleto, undefined.
+- **Methods**: pix, credit_card, boleto, undefined. The charge's `method` becomes the
+  intent's `payment_method_types` (`pix` → `pix`, `boleto` → `boleto`, `credit_card` →
+  `card`), so the gateway creates what you asked for. Routing alone does not do it:
+  `payments.driver('pix')` picks the provider, `method: 'pix'` on the charge picks the
+  method. Omit `method` and the intent falls back to the account's dynamic payment
+  methods — Stripe's own default. Pix and boleto have to be enabled on a Brazilian Stripe
+  account first; the driver cannot tell you they are not, the gateway will.
 - **Setup**: `payments.stripe({ apiKey, currency })` — `STRIPE_KEY`; `currency` defaults
   to `brl`.
 - **Webhooks**: HMAC verified by the SDK's `constructEvent` — needs `webhookSecret`
@@ -31,12 +38,23 @@ A quick map of the differences that usually matter:
   `invoice.payment_succeeded`, `customer.subscription.*`.
 - **`externalReference`**: mapped into `metadata.external_reference` on the PaymentIntent
   and the subscription, and read back from the webhook payload.
+- **`idempotencyKey`**: sent as Stripe's `Idempotency-Key` request header on `charge` and
+  `createCheckout` — the only thing Stripe deduplicates on. It is also copied into
+  `metadata.idempotency_key`, because Stripe does not echo the header back on the object
+  and that copy is what lets `payment.payload` trace a charge to its key.
+- **Pix and boleto payloads**: a Pix intent comes back with `pixCode` (the BR Code the
+  payer copies) and `hostedUrl` (Stripe's instructions page); a boleto intent with
+  `hostedUrl` (the voucher page). `pixQrCodeImage` stays empty — Stripe returns a URL to
+  the PNG, not the base64 image that field promises.
 - **Subscriptions**: SDK-backed recurring billing — pass the Stripe Price id as `planId`.
+  `updateSubscription` applies the description and metadata; the amount needs the
+  subscription item id, which the shared input has no room for, so it is ignored.
 
 ```ts title="app/services/checkout_service.ts"
 await payments.driver('credit_card').charge({
   customerId: 'cus_123',
   amount: 1990,
+  method: 'credit_card',
   card: { token: 'tok_visa' },
   invoice: true,
 })
@@ -140,7 +158,9 @@ await payments.driver('credit_card').charge({
 - **`externalReference`**: maps to Woovi's `correlationID` — the id you pass comes back on
   the charge and its webhook, so it's your routing key.
 - **Subscriptions**: Pix Automático — recurring Pix via webhooks, **no card**. Pass
-  `startDate` to set the monthly charge day (`dayGenerateCharge`).
+  `startDate` to set the monthly charge day (`dayGenerateCharge`). They are **immutable**:
+  the API creates and reads them and nothing else, so `updateSubscription` throws instead
+  of pretending. To change an amount, cancel and create a new subscription.
 - **Invoices**: no invoice concept — a charge *is* the billing record; use an invoice
   provider with `invoice: true` if you need an invoice.
 

@@ -295,19 +295,16 @@ export class WooviDriver implements PaymentsDriver {
   }
 
   async updateSubscription(
-    subscriptionGatewayId: string,
-    input: UpdateSubscriptionInput,
+    _subscriptionGatewayId: string,
+    _input: UpdateSubscriptionInput,
   ): Promise<Subscription> {
-    // OpenPix subscriptions are immutable — best-effort: fetch and return with the new
-    // amount/description applied locally (the change takes effect on the next cycle by
-    // recreating the subscription in a real integration).
-    const data = await this.#client.subscription.get({ id: subscriptionGatewayId });
-    const updated: Record<string, unknown> = {
-      ...data,
-      ...(input.amount !== undefined ? { value: toDecimal(input.amount) } : {}),
-      ...(input.description !== undefined ? { comment: input.description } : {}),
-    };
-    return this.#mapSubscription(updated);
+    // OpenPix subscriptions are immutable: the API (and the SDK's subscription client)
+    // exposes only create and get. Returning a locally patched object would report
+    // success on a change the gateway never saw, while it keeps charging the old value.
+    throw new Error(
+      '[payments] Woovi/OpenPix does not support updating a subscription via API. ' +
+        'Cancel it and create a new one with the new amount, or keep the change on your own record.',
+    );
   }
 
   // ── Invoices ─────────────────────────────────────────────────────────────────────────

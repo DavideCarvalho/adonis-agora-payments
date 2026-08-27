@@ -97,6 +97,9 @@ export class StripeDriver implements PaymentsDriver {
   // ── Payments ─────────────────────────────────────────────────────────────────────────
 
   async charge(input: ChargeInput): Promise<Payment> {
+    // Without `payment_method_types` Stripe creates the intent with whatever the account's
+    // dashboard defaults are, so a charge routed as Pix could come back a card.
+    const methodType = this.#mapMethodToStripe(input.method);
     const params: Stripe.PaymentIntentCreateParams = {
       amount: input.amount,
       currency: input.currency ?? this.#currency,
@@ -104,18 +107,23 @@ export class StripeDriver implements PaymentsDriver {
       ...(input.description !== undefined ? { description: input.description } : {}),
       ...(input.paymentMethodId !== undefined ? { payment_method: input.paymentMethodId } : {}),
       ...(input.card !== undefined ? { payment_method: input.card.token } : {}),
+      ...(methodType !== undefined ? { payment_method_types: [methodType] } : {}),
       ...(input.metadata !== undefined
         ? { metadata: input.metadata as Record<string, string> }
         : {}),
-      ...(input.idempotencyKey !== undefined ? {} : {}),
     };
     if (input.idempotencyKey !== undefined) {
+      // Stripe never echoes the request header back on the object, so the metadata copy is
+      // what lets `payment.payload` trace a charge to the key that created it.
       params.metadata = { ...(params.metadata ?? {}), idempotency_key: input.idempotencyKey };
     }
     if (input.externalReference !== undefined) {
       params.metadata = { ...(params.metadata ?? {}), external_reference: input.externalReference };
     }
-    const intent = await this.#stripe.paymentIntents.create(params);
+    const intent = await this.#stripe.paymentIntents.create(
+      params,
+      this.#requestOptions(input.idempotencyKey),
+    );
     const payment = this.#mapPayment(intent);
     await emitInvoiceIfRequested(this.#invoiceCtx, input, payment, this);
     publishPaymentDiagnostics(payment);
@@ -185,7 +193,10 @@ export class StripeDriver implements PaymentsDriver {
             ],
           }),
     };
-    const session = await this.#stripe.checkout.sessions.create(params);
+    const session = await this.#stripe.checkout.sessions.create(
+      params,
+      this.#requestOptions(input.idempotencyKey),
+    );
     return {
       id: session.id,
       gatewayId: session.id,
@@ -384,6 +395,18 @@ export class StripeDriver implements PaymentsDriver {
     if (intent.status === 'succeeded') {
       result.paidAt = new Date(intent.created * 1000).toISOString();
     }
+    // A Pix/boleto intent is useless to the caller without what the payer has to act on;
+    // Stripe puts it under `next_action`. `image_url_png` is a URL, not the base64 PNG
+    // `pixQrCodeImage` promises, so it is deliberately not mapped there.
+    const pix = intent.next_action?.pix_display_qr_code;
+    if (pix?.data !== undefined) {
+      result.pixCode = pix.data;
+      result.pixCopiaECola = pix.data;
+    }
+    const hostedUrl =
+      pix?.hosted_instructions_url ??
+      intent.next_action?.boleto_display_details?.hosted_voucher_url;
+    if (hostedUrl !== null && hostedUrl !== undefined) result.hostedUrl = hostedUrl;
     return result;
   }
 
@@ -438,6 +461,32 @@ export class StripeDriver implements PaymentsDriver {
       data: event.data.object as unknown,
       raw: event as unknown as Record<string, unknown>,
     };
+  }
+
+  /**
+   * Canonical method → the Stripe `payment_method_types` entry that produces it. An
+   * unnamed (or unmappable) method leaves the intent on the account's dynamic payment
+   * methods, which is Stripe's own default rather than a silent substitution.
+   */
+  #mapMethodToStripe(method?: string): string | undefined {
+    switch (method) {
+      case 'pix':
+        return 'pix';
+      case 'boleto':
+        return 'boleto';
+      case 'credit_card':
+        return 'card';
+      default:
+        return undefined;
+    }
+  }
+
+  /**
+   * Stripe deduplicates on the `Idempotency-Key` request header, which the SDK takes as a
+   * request option — a key sent in the body retries into a second charge.
+   */
+  #requestOptions(idempotencyKey?: string): Stripe.RequestOptions | undefined {
+    return idempotencyKey !== undefined ? { idempotencyKey } : undefined;
   }
 
   #mapMethod(method: string): Payment['method'] {

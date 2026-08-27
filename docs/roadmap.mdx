@@ -1,6 +1,6 @@
 ---
 title: Roadmap
-description: What is still missing — Pix and Boleto on Stripe, subscription updates that silently no-op, partial refunds in the tables, splits beyond Asaas, fiscal invoice reconciliation and the dashboard UI.
+description: What is still missing — subscription amounts on Stripe, idempotency beyond charges, partial refunds in the tables, splits beyond Asaas, fiscal invoice reconciliation and the dashboard UI.
 icon: Map
 ---
 
@@ -10,24 +10,33 @@ per-gateway matrix.
 
 ## Gateways
 
-- **Pix and Boleto on Stripe.** The Stripe driver advertises `pix` and `boleto` in its supported
-  methods, so routing `pix: 'stripe'` passes the router's check — but `charge()` never sends
-  `payment_method_types`, so the PaymentIntent is created with the account's default method and the
-  returned `Payment` carries no Pix QR code or copy-and-paste payload. Until the driver maps the
-  method onto the intent (and reads `next_action` back), route Pix and Boleto to a Brazilian
-  gateway. See [Pix](/docs/payments/patterns/pix).
-- **Subscription updates that reach the gateway.** `updateSubscription` takes an amount, a
-  description and metadata. Asaas applies all of it. Stripe applies the description and metadata and
-  drops the amount on the floor — changing a price there needs the subscription item id, which the
-  input has no room for. Woovi patches the object in memory and returns it, so the call reports
-  success on a change the gateway never saw. Two things are missing: a plan/price field in the
-  input with proration handling, and a hard failure where a gateway cannot honor the update instead
-  of a fabricated `Subscription`.
-- **Outbound idempotency on Stripe.** `idempotencyKey` is written into the PaymentIntent metadata,
-  not sent as Stripe's `Idempotency-Key` request option, so a retried charge creates a second
-  PaymentIntent. AbacatePay, Asaas and Woovi all forward the key to a real gateway-side dedup field.
-  Stripe is the exception, and it is the one that breaks the guarantee described in
+- **The method a router routed.** `payments.driver('pix')` resolves the provider by method, but the
+  method itself only reaches the driver when the charge also carries `method: 'pix'` — the manager
+  hands back a driver, not a pre-configured one, so it has nothing to write the routed method onto.
+  Every driver that varies by method (Stripe's `payment_method_types`, Asaas' and AbacatePay's
+  `billingType`) reads it off the charge. Routing without it silently gets the gateway's default.
+  Threading the routed method through the manager would fix it for all four at once.
+- **Subscription amounts on Stripe.** `updateSubscription` takes an amount, a description and
+  metadata. Asaas and AbacatePay apply the amount and the description; Stripe applies the
+  description and metadata and drops the amount, because changing a price there needs the
+  subscription item id and the shared input has no room for it. What is missing is a plan/price
+  field on the input with proration handling. Woovi no longer fabricates a result here — it throws,
+  because OpenPix subscriptions are immutable.
+- **Subscription cancellation on Woovi.** OpenPix exposes create and get for subscriptions and
+  nothing else, so `cancelSubscription` fetches the subscription and returns it with the status
+  patched to `canceled` locally — the same fabricated success `updateSubscription` used to report.
+  Cancelling has to happen in the Woovi dashboard today. The driver should refuse the call the way
+  it refuses an update, which is a behavior change for anyone relying on the silent version.
+- **Outbound idempotency beyond charges.** Stripe now sends `Idempotency-Key` as a request option on
+  `charge` and `createCheckout`, the two inputs that carry an `idempotencyKey`. `refund`,
+  `createCustomer`, `createSubscription` and `updateSubscription` have no key in the shared
+  contract at all, on any driver, so a retried subscription creation can still duplicate at the
+  gateway. Adding one means every driver honoring it, not just Stripe — see
   [Idempotency](/docs/payments/concepts/idempotency).
+- **A method on checkout and on subscriptions.** `CheckoutInput` has no `method`, so a Stripe
+  checkout session is always created with the account's default methods.
+  `CreateSubscriptionInput.method` exists and Stripe ignores it — a Stripe subscription bills
+  whatever the Price and the customer's default payment method say.
 - **Partial refunds on AbacatePay.** `refund()` accepts an amount and ignores it — every call is a
   full refund at the gateway.
 - **More gateways.** Only Stripe, AbacatePay, Asaas and Woovi ship. The driver contract is the
@@ -74,16 +83,22 @@ See [Invoices](/docs/payments/invoices).
 
 ## Coverage
 
-AbacatePay, Asaas and Woovi each have a driver test suite that exercises the request bodies against
-a stubbed gateway. Stripe has none, which is why the routing and idempotency gaps above sit in the
-one driver most apps reach for first. The harness the other suites use is documented in
-[Testing](/docs/payments/testing).
+All four gateways now have a driver test suite that exercises the request bodies against a stubbed
+gateway — Stripe's fakes the SDK client and asserts what reaches each call, including the request
+options the idempotency key rides in. None of them touch a real gateway, so anything that depends on
+account configuration (whether Pix and boleto are enabled on a Stripe account, for one) is
+unverified here. The harness the suites use is documented in [Testing](/docs/payments/testing).
 
 ## Not planned
 
 - **Refunds on Woovi.** OpenPix has no refund API. The driver throws a clear error and declares the
   missing capability so the router rejects the call before it reaches the network — that is the
   intended behavior, not a placeholder.
+- **Subscription updates on Woovi.** Same shape: OpenPix subscriptions are immutable, so
+  `updateSubscription` throws and tells you to cancel and recreate. It is not behind a finer-grained
+  capability flag — `capabilities.subscriptions` stays `true` because Woovi does create and read
+  subscriptions, and splitting the flag per operation would have to reach the webhook event
+  filtering and every driver that declares it.
 - **Gateway-specific features behind the shared contract.** Things only one gateway has (Woovi
   subaccounts, for instance) stay on the concrete driver class rather than being widened into the
   interface, so the shared contract keeps meaning the same thing everywhere.

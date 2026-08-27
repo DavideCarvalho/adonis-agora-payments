@@ -51,6 +51,8 @@ payments.stripe({ apiKey?, currency, webhookSecret? })   // currency is required
 payments.abacate({ apiKey?, publicKey?, webhookSecret? })
 payments.asaas({ apiKey?, sandbox?, webhookToken? })
 payments.woovi({ appId?, baseUrl?, webhookSecret?, webhookPublicKey? })
+payments.pagarme({ secretKey?, baseUrl?, webhookUser?, webhookPassword?, pixExpiresIn? })
+payments.infinitepay({ handle?, baseUrl?, webhookUrl? })   // checkout links only
 ```
 
 | Driver | Env fallbacks |
@@ -59,9 +61,12 @@ payments.woovi({ appId?, baseUrl?, webhookSecret?, webhookPublicKey? })
 | AbacatePay | `ABACATE_API_KEY`, `ABACATE_PUBLIC_KEY` |
 | Asaas | `ASAAS_API_KEY`, `ASAAS_WEBHOOK_ACCESS_TOKEN` (or `ASAAS_WEBHOOK_TOKEN`) |
 | Woovi | `WOOVI_APP_ID`, `WOOVI_WEBHOOK_SECRET`, `WOOVI_WEBHOOK_PUBLIC_KEY` |
+| Pagar.me | `PAGARME_SECRET_KEY`, `PAGARME_WEBHOOK_USER`, `PAGARME_WEBHOOK_PASSWORD` |
+| InfinitePay | `INFINITEPAY_HANDLE`, `INFINITEPAY_WEBHOOK_URL` |
 
 The env names are a convenience for when you pass nothing — not a contract. Pass the value and your
-own naming wins. `sandbox` defaults to `NODE_ENV !== 'production'`; `currency` defaults to `'brl'`.
+own naming wins. `sandbox` defaults to `NODE_ENV !== 'production'`. `currency` has **no** default on
+a multi-currency gateway — it is required, and the driver refuses to boot without it.
 
 ### Invoice provider factories
 

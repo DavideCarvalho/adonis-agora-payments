@@ -12,23 +12,80 @@ export type Money = number;
 /** ISO 4217 currency code, lowercase (e.g. `'brl'`, `'usd'`). */
 export type Currency = string;
 
-export type BillingStatus = 'pending' | 'paid' | 'failed' | 'refunded' | 'canceled' | 'disputed';
+/**
+ * Where a payment stands.
+ *
+ * `authorized` is NOT `paid`: the funds are held on the customer's card and nothing has
+ * moved until a capture. Card gateways that separate the two (Razorpay, Square, Adyen,
+ * PayPal) had no name for it, so it collapsed into `pending` — which understates it — or
+ * `paid`, which grants access against money that can still evaporate.
+ */
+export type BillingStatus =
+  | 'pending'
+  | 'authorized'
+  | 'paid'
+  | 'failed'
+  | 'refunded'
+  | 'canceled'
+  | 'disputed';
 
+/**
+ * `paused` is a real state, not a flavour of `active`: the subscription exists, will bill
+ * again, and must NOT entitle the subscriber right now. Mapping it to `active` — which
+ * several gateways forced — grants access to someone who is not paying.
+ */
 export type SubscriptionStatus =
   | 'trialing'
   | 'active'
+  | 'paused'
   | 'past_due'
   | 'incomplete'
   | 'canceled'
   | 'ended';
 
-export type PaymentMethodType = 'card' | 'pix' | 'boleto' | 'debit_card' | 'unknown';
+/** How a payment was actually paid, as reported back on a {@link Payment}. */
+export type PaymentMethodType =
+  | 'card'
+  | 'pix'
+  | 'boleto'
+  | 'debit_card'
+  | 'wallet'
+  | 'bank_transfer'
+  | 'bank_debit'
+  | 'upi'
+  | 'bnpl'
+  | 'voucher'
+  | 'unknown';
 
 /**
  * Canonical payment method names used to route charges to a provider (`config.methods`).
  * `undefined` means "let the customer choose at checkout" (gateway's `UNDEFINED`).
+ *
+ * These are CATEGORIES, not brands, and deliberately so. Enumerating every local method a
+ * gateway offers — iDEAL, Bancontact, EPS, Przelewy24, BLIK, TWINT, MB Way, Multibanco,
+ * Klarna, paysafecard, and a new one every quarter — is a union that never closes, and a
+ * union that never closes cannot make routing a typo fail at the manager, which is the only
+ * reason this type is closed at all.
+ *
+ * So route by category and name the brand where it belongs: the gateway's own field, via
+ * `metadata`. `bank_transfer` covers the push-from-your-bank methods (iDEAL, Bancontact,
+ * Multibanco, Trustly); `bank_debit` the pull-from-your-account ones (SEPA Direct Debit,
+ * ACH); `wallet` the stored-balance and device wallets (PayPal, Apple Pay, Google Pay);
+ * `bnpl` the buy-now-pay-later ones; `upi` is named outright because in India it is the
+ * default way people pay, not a local alternative.
  */
-export type PaymentMethodName = 'pix' | 'credit_card' | 'debit_card' | 'boleto' | 'undefined';
+export type PaymentMethodName =
+  | 'pix'
+  | 'credit_card'
+  | 'debit_card'
+  | 'boleto'
+  | 'wallet'
+  | 'bank_transfer'
+  | 'bank_debit'
+  | 'upi'
+  | 'bnpl'
+  | 'voucher'
+  | 'undefined';
 
 export interface MoneyAmount {
   amount: Money;

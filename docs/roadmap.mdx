@@ -22,11 +22,6 @@ per-gateway matrix.
   subscription item id and the shared input has no room for it. What is missing is a plan/price
   field on the input with proration handling. Woovi no longer fabricates a result here — it throws,
   because OpenPix subscriptions are immutable.
-- **Subscription cancellation on Woovi.** OpenPix exposes create and get for subscriptions and
-  nothing else, so `cancelSubscription` fetches the subscription and returns it with the status
-  patched to `canceled` locally — the same fabricated success `updateSubscription` used to report.
-  Cancelling has to happen in the Woovi dashboard today. The driver should refuse the call the way
-  it refuses an update, which is a behavior change for anyone relying on the silent version.
 - **Outbound idempotency beyond charges.** Stripe now sends `Idempotency-Key` as a request option on
   `charge` and `createCheckout`, the two inputs that carry an `idempotencyKey`. `refund`,
   `createCustomer`, `createSubscription` and `updateSubscription` have no key in the shared

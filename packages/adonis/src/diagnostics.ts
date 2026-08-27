@@ -38,6 +38,7 @@ export const PAYMENTS_DIAGNOSTIC_EVENTS = [
   'payment.succeeded',
   'payment.failed',
   'payment.refunded',
+  'payment.disputed',
   'payment.updated',
   'invoice.emitted',
   'webhook.received',
@@ -148,6 +149,16 @@ export interface PaymentRefundedPayload {
   amount: number;
   currency: string;
 }
+/**
+ * A chargeback. Same shape as a refund because the same facts identify it — but it is not a
+ * refund: nobody at your end decided to give the money back.
+ */
+export interface PaymentDisputedPayload {
+  gatewayId: string;
+  provider: string;
+  amount: number;
+  currency: string;
+}
 export interface PaymentUpdatedPayload {
   gatewayId: string;
   provider: string;
@@ -186,6 +197,7 @@ export interface PaymentsDiagnosticPayloads {
   'payment.succeeded': PaymentSucceededPayload;
   'payment.failed': PaymentFailedPayload;
   'payment.refunded': PaymentRefundedPayload;
+  'payment.disputed': PaymentDisputedPayload;
   'payment.updated': PaymentUpdatedPayload;
   'invoice.emitted': InvoiceEmittedPayload;
   'webhook.received': WebhookReceivedPayload;

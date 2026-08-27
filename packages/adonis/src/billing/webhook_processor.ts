@@ -97,6 +97,9 @@ export class WebhookProcessor {
         return this.#onPaymentFailed(event);
       case 'payment.refunded':
         return this.#onPaymentRefunded(event);
+      case 'payment.disputed':
+        return this.#onPaymentDisputed(event);
+
       case 'subscription.created':
       case 'subscription.updated':
         return this.#onSubscriptionChanged(event);
@@ -181,6 +184,46 @@ export class WebhookProcessor {
       });
     }
     publishPayments('payment.refunded', {
+      gatewayId,
+      provider: event.provider,
+      amount,
+      currency,
+    });
+  }
+
+  /**
+   * A chargeback: the customer's bank has pulled the money back.
+   *
+   * The one webhook that takes revenue AWAY, and until now the library had no name for it —
+   * `BillingStatus` carried `'disputed'` while nothing could ever set it, so a dispute
+   * arrived as an unknown type, passed through unprocessed, and the payment row went on
+   * saying `paid`. The app found out from its bank statement.
+   *
+   * Deliberately does NOT invent the resolution event. A dispute that is later won or lost
+   * is reported differently by every gateway, and a canonical type no driver emits is worse
+   * than none — those arrive as `payment.updated`.
+   */
+  async #onPaymentDisputed(event: WebhookEvent): Promise<void> {
+    if (!isPaymentWebhookData(event.data)) {
+      throw new Error(`[payments] Malformed payment.disputed payload for event ${event.id}.`);
+    }
+    const { gatewayId, amount, currency } = event.data;
+    const existing = await this.#store.findPaymentByGatewayId(gatewayId);
+    if (existing) {
+      await this.#store.savePayment({
+        gatewayId,
+        provider: event.provider,
+        status: 'disputed',
+        amount,
+        currency,
+        ...(existing.customerId !== undefined ? { customerId: existing.customerId } : {}),
+        ...(existing.subscriptionId !== undefined
+          ? { subscriptionId: existing.subscriptionId }
+          : {}),
+        payload: event.raw,
+      });
+    }
+    publishPayments('payment.disputed', {
       gatewayId,
       provider: event.provider,
       amount,

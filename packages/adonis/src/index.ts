@@ -85,6 +85,7 @@ export {
 export type {
   PaymentsDiagnosticEvent,
   PaymentsDiagnosticPayloads,
+  PaymentDisputedPayload,
 } from './diagnostics.js';
 export { WebhookProcessor } from './billing/webhook_processor.js';
 export type { WebhookHandler } from './billing/webhook_processor.js';

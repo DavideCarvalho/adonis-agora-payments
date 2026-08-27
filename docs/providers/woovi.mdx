@@ -16,9 +16,12 @@ import { Callout } from 'fumadocs-ui/components/callout';
 - **`externalReference`**: maps to Woovi's `correlationID` — the id you pass comes back on
   the charge and its webhook, so it's your routing key.
 - **Subscriptions**: Pix Automático — recurring Pix via webhooks, **no card**. Pass
-  `startDate` to set the monthly charge day (`dayGenerateCharge`). They are **immutable**:
-  the API creates and reads them and nothing else, so `updateSubscription` throws instead
-  of pretending. To change an amount, cancel and create a new subscription.
+  `startDate` to set the monthly charge day (`dayGenerateCharge`). They are **write-once**:
+  the API creates and reads them and nothing else, so both `updateSubscription` and
+  `cancelSubscription` throw instead of pretending. Cancel in the Woovi dashboard and
+  reconcile your own record — the payer can also revoke a Pix Automático authorization at
+  their own bank, which arrives as a webhook. To change an amount, cancel and create a new
+  subscription.
 - **Invoices**: no invoice concept — a charge *is* the billing record; use an invoice
   provider with `invoice: true` if you need an invoice.
 

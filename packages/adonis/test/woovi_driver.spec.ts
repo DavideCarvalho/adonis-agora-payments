@@ -109,6 +109,22 @@ describe('WooviDriver', () => {
     expect(createClientMock.subscription.get).not.toHaveBeenCalled();
   });
 
+  it('refuses to cancel a subscription instead of canceling it only locally', async () => {
+    createClientMock.subscription.get.mockClear();
+    const driver = new WooviDriver({ config: () => ({}) }, { appId: 'test' });
+
+    // This used to fetch, flip status to INACTIVE on the local copy, publish
+    // `subscription.canceled`, and return it — so the billing row went to canceled, the app
+    // stopped entitling the customer, and Woovi carried on charging them.
+    await expect(driver.cancelSubscription('sub_1')).rejects.toThrow(
+      /does not support canceling a subscription/,
+    );
+    expect(
+      createClientMock.subscription.get,
+      'a refusal must not even reach the gateway',
+    ).not.toHaveBeenCalled();
+  });
+
   it('creates and lists subaccounts (OpenPix for Platforms)', async () => {
     createClientMock.subAccount = {
       create: vi.fn().mockResolvedValue({

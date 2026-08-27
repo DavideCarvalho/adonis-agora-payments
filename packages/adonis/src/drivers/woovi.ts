@@ -276,13 +276,19 @@ export class WooviDriver implements PaymentsDriver {
   }
 
   async cancelSubscription(
-    subscriptionGatewayId: string,
+    _subscriptionGatewayId: string,
     _options?: { atPeriodEnd?: boolean },
   ): Promise<Subscription> {
-    const data = await this.#client.subscription.get({ id: subscriptionGatewayId });
-    const subscription = this.#mapSubscription({ ...data, status: 'INACTIVE' });
-    publishSubscriptionDiagnostics(subscription, 'subscription.canceled');
-    return subscription;
+    // The SDK's subscription client exposes only `create` and `get` — there is no cancel,
+    // and there is no delete. This used to fetch the subscription, flip `status` to
+    // INACTIVE on the local copy, PUBLISH `subscription.canceled`, and return it: the
+    // billing row went to canceled, the app stopped entitling the customer, and Woovi
+    // carried on charging them. Both halves wrong, from one call that reported success.
+    throw new Error(
+      '[payments] Woovi/OpenPix does not support canceling a subscription via API. ' +
+        'Cancel it in the Woovi dashboard, then reconcile your own record — a Pix Automático ' +
+        'authorization can also be revoked by the payer at their bank.',
+    );
   }
 
   async findSubscription(gatewayId: string): Promise<Subscription | null> {

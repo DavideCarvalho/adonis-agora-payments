@@ -23,7 +23,20 @@ export interface HttpRequestOptions {
   fetch?: typeof globalThis.fetch;
   /** Base URL the path is resolved against. */
   baseUrl: string;
+  /**
+   * Milliseconds before the request is aborted. Defaults to 30s; pass `0` to disable.
+   *
+   * `fetch` has no timeout of its own, so without this a gateway that accepts the
+   * connection and then stops talking holds the call open indefinitely. That is bad in a
+   * charge and worse inside the webhook route, where the gateway on the other side is
+   * waiting to decide whether to redeliver — and where the request that never returns also
+   * never releases its slot.
+   */
+  timeoutMs?: number;
 }
+
+/** 30 seconds: long enough for a slow gateway, short enough that a hung one is not forever. */
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
  * Thin `fetch` wrapper shared by the fetch-based drivers (Asaas, AbacatePay, Woovi,
@@ -50,8 +63,29 @@ export async function httpRequest<T>(path: string, options: HttpRequestOptions):
     requestInit.body = JSON.stringify(options.body);
   }
 
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const controller = timeoutMs > 0 ? new AbortController() : undefined;
+  const timer =
+    controller !== undefined ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
+  if (controller !== undefined) requestInit.signal = controller.signal;
+
   const doFetch = options.fetch ?? globalThis.fetch;
-  const response = await doFetch(`${options.baseUrl}${path}`, requestInit);
+  let response: Response;
+  try {
+    response = await doFetch(`${options.baseUrl}${path}`, requestInit);
+  } catch (error) {
+    // An abort is indistinguishable from a network error to the caller unless it is named.
+    // A driver that reports "fetch failed" for a timeout sends whoever is debugging it
+    // looking for a connectivity problem that is not there.
+    if (controller?.signal.aborted) {
+      throw new Error(
+        `[payments] HTTP request to ${options.baseUrl}${path} timed out after ${timeoutMs}ms.`,
+      );
+    }
+    throw error;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 
   if (!response.ok) {
     const text = await response.text();

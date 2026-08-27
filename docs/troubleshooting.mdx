@@ -35,13 +35,14 @@ Work through this order:
 2. **Is there a handler for that type?** The processor syncs what it understands and runs a handler
    only if one is registered for that **normalized** type. A handler keyed on `PAYMENT_RECEIVED`
    never fires; the normalized name is `payment.succeeded`.
-3. **Is the folder actually discovered?** `app/payment_handlers/` needs the codegen hook:
+3. **Does the file export what discovery looks for?** A handler is found only when its **default
+   export** is a class with `static eventType` and a `handle` method, or an object `{ type, handle }`.
+   A named export, a missing `eventType`, or a typo in the event name are all silent — the file is
+   imported and skipped.
 
-   ```ts title="adonisrc.ts"
-   hooks: { init: [() => import('@adonis-agora/payments/hooks/webhook_handlers')] }
-   ```
-
-   Without it the barrel is not generated and the runtime scan is the only fallback.
+   Discovery itself needs no wiring: the provider reads the generated barrel when the Assembler hook
+   is registered (`node ace add` does that), and falls back to scanning `app/payment_handlers/` when
+   it is not.
 4. **Did the handler throw?** Check `billing_webhook_events.status` — `failed` with an `error`
    column means it ran and threw, and the dispatcher is retrying.
 

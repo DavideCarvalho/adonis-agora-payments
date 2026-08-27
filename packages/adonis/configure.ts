@@ -5,10 +5,13 @@ import { stubsRoot } from './stubs/main.js';
  * `node ace configure @adonis-agora/payments` — auto-wires the package:
  *
  * 1. registers the payments service provider in `adonisrc.ts`;
- * 2. publishes `config/payments.ts`;
- * 3. publishes the Lucid migrations for the billing tables (run `node ace migration:run`;
+ * 2. registers the Assembler `init` hook that generates the `app/payment_handlers/`
+ *    barrel (discovery works without it — the provider falls back to a runtime scan —
+ *    but the barrel removes that scan from boot);
+ * 3. publishes `config/payments.ts`;
+ * 4. publishes the Lucid migrations for the billing tables (run `node ace migration:run`;
  *    delete the file if you only use payments without the billing layer);
- * 4. registers the env validations for the payment providers.
+ * 5. registers the env validations for the payment providers.
  */
 export async function configure(command: Configure) {
   const codemods = await command.createCodemods();
@@ -17,6 +20,7 @@ export async function configure(command: Configure) {
   await codemods.updateRcFile((rcFile: any) => {
     rcFile.addProvider('@adonis-agora/payments/payments_provider');
     rcFile.addCommand('@adonis-agora/payments/commands');
+    rcFile.addAssemblerHook('init', '@adonis-agora/payments/hooks/webhook_handlers');
   });
 
   const stubs = stubsRoot();

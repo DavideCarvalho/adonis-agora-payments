@@ -139,13 +139,12 @@ export default class PaymentSucceededHandler {
 }
 ```
 
-Discovery is durable-style: an Assembler `init` hook generates a barrel of the folder at
-build/dev time (the file watcher re-runs it), with a runtime scan as fallback. Register the
-hook once:
+Nothing else to wire. The provider discovers the folder at boot and registers what it finds.
 
-```ts title="adonisrc.ts"
-hooks: { init: [() => import('@adonis-agora/payments/hooks/webhook_handlers')] }
-```
+Discovery is durable-style: `node ace add` registers an Assembler `init` hook that generates a barrel
+of the folder at build and dev time (the file watcher re-runs it), and the provider falls back to a
+**runtime scan** when no barrel exists — so the convention works either way, and the hook only saves
+the scan.
 
 A service class form (`static eventType` + `handle`) is resolved through the container, so
 constructor injection just works.

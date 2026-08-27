@@ -60,7 +60,11 @@ export interface PaymentsDriver {
   /** Find a payment by its gateway id. */
   findPayment(gatewayId: string): Promise<Payment | null>;
   /** Refund a payment, optionally a partial amount. */
-  refund(paymentGatewayId: string, amount?: Money): Promise<Refund>;
+  refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund>;
 
   // ── Checkout ─────────────────────────────────────────────────────────────────────────
 
@@ -111,6 +115,14 @@ export interface PaymentsDriver {
 // ── Input types ─────────────────────────────────────────────────────────────────────────
 
 export interface CreateCustomerInput {
+  /**
+   * Idempotency key — reusing it must not perform the operation twice.
+   *
+   * A driver whose gateway has no deduplication mechanism must REFUSE this rather than
+   * accept and ignore it: silently dropping it turns a caller's retry guarantee into a
+   * second charge, a second refund, or a second subscription.
+   */
+  idempotencyKey?: string;
   email?: string;
   name?: string;
   /** CPF/CNPJ (BR gateways) or tax id. */
@@ -248,6 +260,14 @@ export interface CheckoutInput {
 }
 
 export interface CreateSubscriptionInput {
+  /**
+   * Idempotency key — reusing it must not perform the operation twice.
+   *
+   * A driver whose gateway has no deduplication mechanism must REFUSE this rather than
+   * accept and ignore it: silently dropping it turns a caller's retry guarantee into a
+   * second charge, a second refund, or a second subscription.
+   */
+  idempotencyKey?: string;
   customerId: string;
   /** Price/plan id at the gateway. */
   planId: string;
@@ -291,6 +311,14 @@ export interface CreateSubscriptionInput {
 }
 
 export interface UpdateSubscriptionInput {
+  /**
+   * Idempotency key — reusing it must not perform the operation twice.
+   *
+   * A driver whose gateway has no deduplication mechanism must REFUSE this rather than
+   * accept and ignore it: silently dropping it turns a caller's retry guarantee into a
+   * second charge, a second refund, or a second subscription.
+   */
+  idempotencyKey?: string;
   /** New amount in the currency's smallest unit. */
   amount?: Money;
   /** New description. */

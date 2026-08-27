@@ -98,6 +98,7 @@ export type {
   BillingListQuery,
   CustomerListItem,
   PaymentListItem,
+  SubscriptionListItem,
   WebhookEventListItem,
   WebhookEventBreakdownLine,
 } from './billing/billing_store.js';

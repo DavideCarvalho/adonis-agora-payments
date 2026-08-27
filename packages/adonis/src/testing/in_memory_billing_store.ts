@@ -4,6 +4,7 @@ import type {
   BillingStore,
   CustomerListItem,
   PaymentListItem,
+  SubscriptionListItem,
   WebhookEventBreakdownLine,
   WebhookEventListItem,
 } from '../billing/billing_store.js';
@@ -35,6 +36,8 @@ export interface InMemorySubscriptionRow {
   trialEndsAt: Date | null;
   endsAt: Date | null;
   payload: Record<string, unknown>;
+  /** Insertion timestamp — the Lucid row has one, and the list query orders by it. */
+  createdAt: Date;
 }
 
 export interface InMemoryPaymentRow {
@@ -229,9 +232,37 @@ export class InMemoryBillingStore
       trialEndsAt: sub.trialEndsAt ?? null,
       endsAt: sub.endsAt ?? null,
       payload: sub.payload ?? {},
+      // Preserved across upserts: a subscription's creation time is when it was FIRST
+      // recorded, not when its status last changed, or every update would reorder the list.
+      createdAt: existing?.createdAt ?? this.#now(),
     };
     this.subscriptions.set(sub.gatewayId, row);
     return row;
+  }
+
+  async listSubscriptions(query: BillingListQuery): Promise<SubscriptionListItem[]> {
+    const matching = [...this.subscriptions.values()].filter(
+      (row) => query.status === undefined || row.status === query.status,
+    );
+    return this.#page(matching, query).map((row) => ({
+      id: row.id,
+      gatewayId: row.gatewayId,
+      provider: row.provider,
+      status: row.status,
+      planId: row.planId,
+      customerId: row.customerId ?? null,
+      trialEndsAt: row.trialEndsAt,
+      endsAt: row.endsAt,
+      createdAt: row.createdAt,
+    }));
+  }
+
+  async countSubscriptions(query: BillingCountQuery): Promise<number> {
+    let count = 0;
+    for (const row of this.subscriptions.values()) {
+      if (this.#matchesCount(row, query)) count += 1;
+    }
+    return count;
   }
 
   async findSubscriptionByGatewayId(gatewayId: string): Promise<InMemorySubscriptionRow | null> {

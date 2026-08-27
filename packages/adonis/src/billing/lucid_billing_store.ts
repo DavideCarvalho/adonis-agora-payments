@@ -6,6 +6,7 @@ import type {
   BillingStore,
   CustomerListItem,
   PaymentListItem,
+  SubscriptionListItem,
   WebhookEventBreakdownLine,
   WebhookEventListItem,
 } from './billing_store.js';
@@ -176,6 +177,33 @@ export class LucidBillingStore
     row.payload = sub.payload ?? {};
     await row.save();
     return row;
+  }
+
+  async listSubscriptions(query: BillingListQuery): Promise<SubscriptionListItem[]> {
+    const builder = this.#subscriptionModel.query().orderBy('created_at', 'desc');
+    if (query.status !== undefined) builder.where('status', query.status);
+    const rows = (await builder
+      .limit(clampLimit(query.limit))
+      .offset(clampOffset(query.offset))) as SubscriptionInstance[];
+    return rows.map((row) => ({
+      id: String(row.id),
+      gatewayId: row.gatewayId,
+      provider: row.provider,
+      status: row.status,
+      planId: row.planId,
+      customerId: row.customerId ?? null,
+      trialEndsAt: toDate(row.trialEndsAt),
+      endsAt: toDate(row.endsAt),
+      createdAt: toDate(row.createdAt),
+    }));
+  }
+
+  async countSubscriptions(query: BillingCountQuery): Promise<number> {
+    const builder = this.#subscriptionModel.query().count('* as total').pojo();
+    if (query.status !== undefined) builder.where('status', query.status);
+    if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
+    if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
+    return toCount(await builder);
   }
 
   async findSubscriptionByGatewayId(gatewayId: string): Promise<SubscriptionInstance | null> {

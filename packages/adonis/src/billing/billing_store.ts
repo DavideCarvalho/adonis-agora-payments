@@ -44,6 +44,19 @@ export interface CustomerListItem {
   createdAt: Date | null;
 }
 
+/** One `billing_subscriptions` row, normalized for reading. See {@link PaymentListItem}. */
+export interface SubscriptionListItem {
+  id: string;
+  gatewayId: string;
+  provider: string;
+  status: string;
+  planId: string;
+  customerId: string | null;
+  trialEndsAt: Date | null;
+  endsAt: Date | null;
+  createdAt: Date | null;
+}
+
 /** One `billing_webhook_events` row, normalized for reading. See {@link PaymentListItem}. */
 export interface WebhookEventListItem {
   id: string;
@@ -167,6 +180,18 @@ export interface BillingStore<
   }): Promise<SubscriptionRow>;
 
   findSubscriptionByGatewayId(gatewayId: string): Promise<SubscriptionRow | null>;
+
+  /**
+   * Page through subscriptions, newest first, optionally filtered by status.
+   *
+   * `countActiveSubscriptions()` answers "how many", which is the wrong question on any day
+   * something is wrong: the operational ones are WHICH subscriptions are `past_due`, and
+   * which are `paused` — a count cannot name a customer to email.
+   */
+  listSubscriptions(query: BillingListQuery): Promise<SubscriptionListItem[]>;
+
+  /** How many subscriptions match a status and/or a creation window. */
+  countSubscriptions(query: BillingCountQuery): Promise<number>;
 
   // ── Payments ─────────────────────────────────────────────────────────────────────
 

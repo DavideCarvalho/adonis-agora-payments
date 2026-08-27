@@ -1,4 +1,5 @@
 import { createHash, createHmac, verify as cryptoVerify, timingSafeEqual } from 'node:crypto';
+import { headerValue } from './http.js';
 
 /**
  * Shared webhook-auth primitives for the drivers. Every gateway signs webhooks
@@ -124,4 +125,67 @@ export function verifyPagBankAuthenticityToken(
   if (received === undefined || received === '') return false;
   const expected = createHash('sha256').update(`${token}-${rawBody}`, 'utf8').digest('hex');
   return safeCompare(received.toLowerCase(), expected);
+}
+
+/**
+ * Verify a [Standard Webhooks](https://www.standardwebhooks.com/) signature.
+ *
+ * The scheme: sign `` `${webhook-id}.${webhook-timestamp}.${rawBody}` `` with HMAC-SHA256,
+ * base64. The `webhook-signature` header carries a SPACE-SEPARATED list of `v1,<sig>` — a
+ * list, because a secret being rotated is signed with both keys at once, so checking only
+ * the first entry breaks every rotation.
+ *
+ * `keyEncoding` is the part that bites, and neither vendor documents it — both derivations
+ * below were read out of their own SDK source:
+ *
+ * - `'base64'` (the spec default) — strip the `whsec_` prefix and base64-DECODE the rest.
+ *   Dodo Payments does this.
+ * - `'raw'` — use the secret's UTF-8 bytes as-is, `whsec_` prefix included. Polar does this
+ *   (its SDK base64-encodes the secret before handing it to the reference library, which
+ *   decodes it straight back).
+ *
+ * Getting it wrong fails closed — every signature mismatches — so the cost is a rejected
+ * webhook, not an accepted forgery. Which is why each driver pins its own derivation with a
+ * test that signs using the OTHER one and asserts rejection.
+ *
+ * `toleranceSeconds` bounds replay. It defaults to 5 minutes, the spec's own recommendation;
+ * pass `0` to skip the check. Note the idempotency ledger already makes a replayed event a
+ * no-op — this is the outer guard, not the only one.
+ */
+export function verifyStandardWebhookSignature(options: {
+  rawBody: string;
+  headers: Record<string, string | string[] | undefined>;
+  secret: string;
+  keyEncoding: 'base64' | 'raw';
+  toleranceSeconds?: number;
+  /** Overridable clock, so the tolerance is testable. */
+  now?: Date;
+}): boolean {
+  const id = headerValue(options.headers, 'webhook-id');
+  const timestamp = headerValue(options.headers, 'webhook-timestamp');
+  const signature = headerValue(options.headers, 'webhook-signature');
+  if (!id || !timestamp || !signature) return false;
+
+  const tolerance = options.toleranceSeconds ?? 300;
+  if (tolerance > 0) {
+    const sent = Number(timestamp);
+    if (!Number.isFinite(sent)) return false;
+    const nowSeconds = Math.floor((options.now ?? new Date()).getTime() / 1000);
+    if (Math.abs(nowSeconds - sent) > tolerance) return false;
+  }
+
+  const key =
+    options.keyEncoding === 'raw'
+      ? Buffer.from(options.secret, 'utf8')
+      : Buffer.from(options.secret.replace(/^whsec_/, ''), 'base64');
+  const expected = createHmac('sha256', key)
+    .update(`${id}.${timestamp}.${options.rawBody}`, 'utf8')
+    .digest('base64');
+
+  // Every `v1,<sig>` entry is checked: during a secret rotation the gateway signs with both
+  // the old and the new key, and only one of them can match.
+  return signature
+    .split(' ')
+    .filter((part) => part.startsWith('v1,'))
+    .some((part) => safeCompare(part.slice(3), expected));
 }

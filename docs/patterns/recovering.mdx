@@ -117,19 +117,21 @@ subscriptions are not activated by it. After a large reconcile, diff against you
 replay the events from the gateway dashboard so the normal path runs and the handlers fire.
 </Callout>
 
-Two queries worth running on a schedule to notice the gap before a customer does:
+One command worth running on a schedule to notice the gap before a customer does — it counts the
+events the dispatcher gave up on, and the charges that were created and never confirmed:
 
-```sql
--- Events the dispatcher gave up on
-SELECT provider, type, error, count(*)
-FROM billing_webhook_events
-WHERE status = 'failed' AND created_at > now() - interval '1 day'
-GROUP BY 1, 2, 3;
-
--- Charges that never confirmed
-SELECT count(*) FROM billing_payments
-WHERE status = 'pending' AND created_at < now() - interval '2 hours';
+```sh
+node ace payments:health
 ```
+
+It exits non-zero when either is non-zero. To read the failures themselves, page the ledger — the
+handler's error message survives nowhere else:
+
+```ts
+const failures = await store.listWebhookEvents({ status: 'failed', limit: 20 })
+```
+
+See [Health checks](/docs/payments/production#health-checks).
 
 A `failed` event is **claimable again**, so once the underlying cause is fixed, replaying it from the
 gateway dashboard re-runs it properly. See [Idempotency](/docs/payments/concepts/idempotency).

@@ -1,6 +1,6 @@
 ---
 title: CLI
-description: The four ace commands — scaffolding a billable model and a webhook handler, printing (or creating) the webhook endpoints, and reconciling the local tables with a gateway.
+description: The five ace commands — scaffolding a billable model and a webhook handler, printing (or creating) the webhook endpoints, reporting the health of the billing install, and reconciling the local tables with a gateway.
 icon: SquareTerminal
 ---
 
@@ -12,6 +12,7 @@ node ace list | grep -E 'payments|billable|webhook-handler'
 # make:webhook-handler
 # payments:webhook
 # payments:sync
+# payments:health
 ```
 
 ## `payments:webhook`
@@ -71,7 +72,7 @@ node ace payments:sync --all --provider=stripe
 | Flag | Meaning |
 | --- | --- |
 | `--customer` | one gateway customer id |
-| `--all` | every customer in `billing_customers` |
+| `--all` | every gateway customer id recorded in `billing_customers` |
 | `--provider` | which configured provider to sync (default: the configured default) |
 
 It pulls the customer's invoices from the gateway and upserts the **paid** ones into
@@ -87,12 +88,50 @@ Two guards fail fast rather than doing nothing quietly: neither `--customer` nor
 rather than a silent no-op, and a gateway with no invoice concept (Woovi/OpenPix) is refused up
 front by the capability check instead of listing nothing.
 
+<Callout type="warn" title="`--all` reads a table the library does not populate">
+`billing_customers` is created by the migration, but nothing in the library writes to it — the
+[billable mixin](/docs/payments/billing) stores the gateway customer id on **your** model. Unless
+your app fills that table itself, `--all` finds nothing to sync. Use `--customer` with the ids you
+hold, and iterate your own billable rows.
+</Callout>
+
 <Callout type="warn" title="Sync writes to billing tables, not to your business logic">
 It brings `billing_payments` back in line with the gateway. It does **not** run your webhook
 handlers, so credits are not granted and subscriptions are not activated by it. After a large
 reconcile, check what your own tables are missing — or replay the events from the gateway dashboard
 so the handlers run through the normal path.
 </Callout>
+
+## `payments:health`
+
+The scheduled check for the three failures a billing install has that nothing throws on.
+
+```sh
+node ace payments:health
+node ace payments:health --window=48 --json
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--stuck-after` | minutes an event may sit unfinished before it counts as stuck (default 15) |
+| `--unconfirmed-after` | minutes a charge may stay pending before it counts as unconfirmed (default 120) |
+| `--window` | hours that failures are counted over (default 24) |
+| `--json` | print the report as JSON |
+
+```text
+0  Events claimed but unfinished for over 15m
+2  Events the dispatcher gave up on in the last 24h
+     Handlers threw and retries ran out; those events never took effect.
+1  Charges created over 2h ago and still pending
+     Charges are being created but never confirmed — the shape of a webhook endpoint that
+     stopped being reachable.
+  stripe payment.succeeded: 2 failed
+```
+
+It **exits non-zero** when any count is non-zero, so a cron entry or a container healthcheck pages
+on it without parsing the output. The same report is a function — `billingHealth(store)` — for a
+scheduled job that ships it to your metrics. See
+[Health checks](/docs/payments/production#health-checks).
 
 ## `make:billable`
 

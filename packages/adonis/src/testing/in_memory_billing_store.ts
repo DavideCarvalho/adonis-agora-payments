@@ -1,4 +1,12 @@
-import type { BillingStore } from '../billing/billing_store.js';
+import type {
+  BillingCountQuery,
+  BillingListQuery,
+  BillingStore,
+  PaymentListItem,
+  WebhookEventBreakdownLine,
+  WebhookEventListItem,
+} from '../billing/billing_store.js';
+import { clampLimit, clampOffset } from '../billing/list_query.js';
 
 /** A minimal in-memory row shape (mirrors the Lucid models' columns). */
 export interface InMemorySubscriptionRow {
@@ -24,6 +32,8 @@ export interface InMemoryPaymentRow {
   subscriptionId: string | null;
   paidAt: Date | null;
   payload: Record<string, unknown>;
+  /** Insertion timestamp — the Lucid rows have one, and the list queries order by it. */
+  createdAt: Date;
 }
 
 export interface InMemoryWebhookEventRow {
@@ -34,6 +44,10 @@ export interface InMemoryWebhookEventRow {
   status: 'received' | 'processed' | 'failed';
   payload: Record<string, unknown>;
   error: string | null;
+  /** Insertion timestamp — the Lucid rows have one, and the list queries order by it. */
+  createdAt: Date;
+  /** Last-write timestamp, bumped by `markWebhookProcessed`/`markWebhookFailed`. */
+  updatedAt: Date;
 }
 
 /** A plain in-memory metered-usage row (mirrors the Lucid model's columns). */
@@ -66,6 +80,43 @@ export class InMemoryBillingStore
   usageEvents: Map<string, InMemoryUsageEventRow> = new Map();
 
   #nextId = 1;
+
+  /** Overridable clock so a test can pin `createdAt`/`updatedAt`. Defaults to the wall clock. */
+  now: () => Date = () => new Date();
+
+  #now(): Date {
+    return this.now();
+  }
+
+  /**
+   * The `BillingCountQuery` filter, applied identically for both count/breakdown reads.
+   *
+   * A window the store silently ignored would report a healthy zero, which is the one wrong
+   * answer an alert must never get — so both bounds are applied here, in one place, rather
+   * than re-derived per method.
+   */
+  #matchesCount(row: { status: string; createdAt: Date }, query: BillingCountQuery): boolean {
+    if (query.status !== undefined && row.status !== query.status) return false;
+    if (query.createdBefore !== undefined && row.createdAt >= query.createdBefore) return false;
+    if (query.createdAfter !== undefined && row.createdAt < query.createdAfter) return false;
+    return true;
+  }
+
+  /**
+   * Newest first: `createdAt` descending, ties broken by insertion order descending.
+   *
+   * The tie-break matters — several rows written inside the same millisecond is the normal
+   * case in a test, and `sort` alone would leave them in whatever order the map yields.
+   * `Array.prototype.sort` is stable, so reversing first and sorting after gives
+   * last-inserted-first within a tie. Mirrors the Lucid store's `order by created_at desc`.
+   */
+  #page<Row extends { createdAt: Date }>(rows: Iterable<Row>, query: BillingListQuery): Row[] {
+    const sorted = [...rows]
+      .reverse()
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    const offset = clampOffset(query.offset);
+    return sorted.slice(offset, offset + clampLimit(query.limit));
+  }
 
   async saveSubscription(sub: {
     gatewayId: string;
@@ -120,6 +171,7 @@ export class InMemoryBillingStore
       subscriptionId: payment.subscriptionId ?? null,
       paidAt: payment.paidAt ?? null,
       payload: payment.payload ?? {},
+      createdAt: existing?.createdAt ?? this.#now(),
     };
     this.payments.set(payment.gatewayId, row);
     return row;
@@ -127,6 +179,32 @@ export class InMemoryBillingStore
 
   async findPaymentByGatewayId(gatewayId: string): Promise<InMemoryPaymentRow | null> {
     return this.payments.get(gatewayId) ?? null;
+  }
+
+  async listPayments(query: BillingListQuery): Promise<PaymentListItem[]> {
+    const matching = [...this.payments.values()].filter(
+      (row) => query.status === undefined || row.status === query.status,
+    );
+    return this.#page(matching, query).map((row) => ({
+      id: row.id,
+      gatewayId: row.gatewayId,
+      provider: row.provider,
+      status: row.status,
+      amount: row.amount,
+      currency: row.currency,
+      customerId: row.customerId,
+      subscriptionId: row.subscriptionId,
+      paidAt: row.paidAt,
+      createdAt: row.createdAt,
+    }));
+  }
+
+  async countPayments(query: BillingCountQuery): Promise<number> {
+    let count = 0;
+    for (const row of this.payments.values()) {
+      if (this.#matchesCount(row, query)) count += 1;
+    }
+    return count;
   }
 
   async recordWebhookEvent(event: {
@@ -142,8 +220,10 @@ export class InMemoryBillingStore
       if (existing.status !== 'failed') return null;
       existing.status = 'received';
       existing.error = null;
+      existing.updatedAt = this.#now();
       return existing;
     }
+    const now = this.#now();
     const row: InMemoryWebhookEventRow = {
       id: `wh_${this.#nextId++}`,
       gatewayEventId: event.gatewayEventId,
@@ -152,6 +232,8 @@ export class InMemoryBillingStore
       status: 'received',
       payload: event.payload,
       error: null,
+      createdAt: now,
+      updatedAt: now,
     };
     this.webhookEvents.set(event.gatewayEventId, row);
     return row;
@@ -161,6 +243,7 @@ export class InMemoryBillingStore
     for (const row of this.webhookEvents.values()) {
       if (row.id === id) {
         row.status = 'processed';
+        row.updatedAt = this.#now();
         return;
       }
     }
@@ -171,9 +254,63 @@ export class InMemoryBillingStore
       if (row.id === id) {
         row.status = 'failed';
         row.error = error;
+        row.updatedAt = this.#now();
         return;
       }
     }
+  }
+
+  async listWebhookEvents(query: BillingListQuery): Promise<WebhookEventListItem[]> {
+    const matching = [...this.webhookEvents.values()].filter(
+      (row) => query.status === undefined || row.status === query.status,
+    );
+    return this.#page(matching, query).map((row) => ({
+      id: row.id,
+      gatewayEventId: row.gatewayEventId,
+      provider: row.provider,
+      type: row.type,
+      status: row.status,
+      error: row.error,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    }));
+  }
+
+  async findWebhookEventByGatewayEventId(
+    gatewayEventId: string,
+  ): Promise<WebhookEventListItem | null> {
+    const row = this.webhookEvents.get(gatewayEventId);
+    if (!row) return null;
+    return {
+      id: row.id,
+      gatewayEventId: row.gatewayEventId,
+      provider: row.provider,
+      type: row.type,
+      status: row.status,
+      error: row.error,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  async countWebhookEvents(query: BillingCountQuery): Promise<number> {
+    let count = 0;
+    for (const row of this.webhookEvents.values()) {
+      if (this.#matchesCount(row, query)) count += 1;
+    }
+    return count;
+  }
+
+  async webhookEventBreakdown(query: BillingCountQuery): Promise<WebhookEventBreakdownLine[]> {
+    const totals = new Map<string, WebhookEventBreakdownLine>();
+    for (const row of this.webhookEvents.values()) {
+      if (!this.#matchesCount(row, query)) continue;
+      const key = `${row.provider}\u0000${row.type}`;
+      const line = totals.get(key);
+      if (line) line.count += 1;
+      else totals.set(key, { provider: row.provider, type: row.type, count: 1 });
+    }
+    return [...totals.values()].sort((a, b) => b.count - a.count);
   }
 
   async recordUsage(event: {

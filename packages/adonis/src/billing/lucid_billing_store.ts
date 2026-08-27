@@ -1,6 +1,14 @@
 import type { NormalizeConstructor } from '@adonisjs/core/types/helpers';
 import { DateTime } from 'luxon';
-import type { BillingStore } from './billing_store.js';
+import type {
+  BillingCountQuery,
+  BillingListQuery,
+  BillingStore,
+  PaymentListItem,
+  WebhookEventBreakdownLine,
+  WebhookEventListItem,
+} from './billing_store.js';
+import { clampLimit, clampOffset } from './list_query.js';
 import {
   BillingPayment as DefaultPayment,
   BillingSubscription as DefaultSubscription,
@@ -17,6 +25,27 @@ export interface BillingModels {
   paymentModel?: NormalizeConstructor<typeof DefaultPayment>;
   webhookEventModel?: NormalizeConstructor<typeof DefaultWebhookEvent>;
   usageEventModel?: NormalizeConstructor<typeof DefaultUsageEvent>;
+}
+
+/** Lucid hands back Luxon `DateTime`s; the read SPI speaks plain `Date`. */
+function toDate(value: DateTime | null | undefined): Date | null {
+  return value ? value.toJSDate() : null;
+}
+
+/**
+ * Read a single aggregate row.
+ *
+ * Every aggregate query below must go through `.pojo()`. A model query builder hydrates
+ * its rows into model INSTANCES, and a value with no matching column — `count(*) as total`
+ * — is not assigned to the instance; it is tucked into `$extras`. Reading `row.total` off
+ * the instance therefore yields `undefined`, which `?? 0` then turns into a confident,
+ * silent zero. `.pojo()` opts out of hydration and hands back the raw row.
+ *
+ * Counts also come back as strings on some drivers (Postgres `bigint`), hence the `Number`.
+ */
+function toCount(rows: unknown): number {
+  const first = (rows as Array<{ total?: string | number }> | undefined)?.[0];
+  return Number(first?.total ?? 0);
 }
 
 type SubscriptionInstance = InstanceType<typeof DefaultSubscription>;
@@ -108,6 +137,34 @@ export class LucidBillingStore
     return row as PaymentInstance | null;
   }
 
+  async listPayments(query: BillingListQuery): Promise<PaymentListItem[]> {
+    const builder = this.#paymentModel.query().orderBy('created_at', 'desc');
+    if (query.status !== undefined) builder.where('status', query.status);
+    const rows = (await builder
+      .limit(clampLimit(query.limit))
+      .offset(clampOffset(query.offset))) as PaymentInstance[];
+    return rows.map((row) => ({
+      id: String(row.id),
+      gatewayId: row.gatewayId,
+      provider: row.provider,
+      status: row.status,
+      amount: Number(row.amount),
+      currency: row.currency,
+      customerId: row.customerId ?? null,
+      subscriptionId: row.subscriptionId ?? null,
+      paidAt: toDate(row.paidAt),
+      createdAt: toDate(row.createdAt),
+    }));
+  }
+
+  async countPayments(query: BillingCountQuery): Promise<number> {
+    const builder = this.#paymentModel.query().count('* as total').pojo();
+    if (query.status !== undefined) builder.where('status', query.status);
+    if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
+    if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
+    return toCount(await builder);
+  }
+
   async recordWebhookEvent(event: {
     gatewayEventId: string;
     provider: string;
@@ -152,6 +209,77 @@ export class LucidBillingStore
     }
   }
 
+  async listWebhookEvents(query: BillingListQuery): Promise<WebhookEventListItem[]> {
+    const builder = this.#webhookEventModel.query().orderBy('created_at', 'desc');
+    if (query.status !== undefined) builder.where('status', query.status);
+    const rows = (await builder
+      .limit(clampLimit(query.limit))
+      .offset(clampOffset(query.offset))) as WebhookEventInstance[];
+    return rows.map((row) => ({
+      id: String(row.id),
+      gatewayEventId: row.gatewayEventId,
+      provider: row.provider,
+      type: row.type,
+      status: row.status,
+      error: row.error ?? null,
+      createdAt: toDate(row.createdAt),
+      updatedAt: toDate(row.updatedAt),
+    }));
+  }
+
+  async findWebhookEventByGatewayEventId(
+    gatewayEventId: string,
+  ): Promise<WebhookEventListItem | null> {
+    const row = (await this.#webhookEventModel.findBy(
+      'gateway_event_id',
+      gatewayEventId,
+    )) as WebhookEventInstance | null;
+    if (!row) return null;
+    return {
+      id: String(row.id),
+      gatewayEventId: row.gatewayEventId,
+      provider: row.provider,
+      type: row.type,
+      status: row.status,
+      error: row.error ?? null,
+      createdAt: toDate(row.createdAt),
+      updatedAt: toDate(row.updatedAt),
+    };
+  }
+
+  async countWebhookEvents(query: BillingCountQuery): Promise<number> {
+    const builder = this.#webhookEventModel.query().count('* as total').pojo();
+    if (query.status !== undefined) builder.where('status', query.status);
+    if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
+    if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
+    return toCount(await builder);
+  }
+
+  async webhookEventBreakdown(query: BillingCountQuery): Promise<WebhookEventBreakdownLine[]> {
+    const builder = this.#webhookEventModel
+      .query()
+      .select('provider', 'type')
+      .count('* as total')
+      .groupBy('provider', 'type')
+      .orderBy('total', 'desc')
+      .pojo();
+    if (query.status !== undefined) builder.where('status', query.status);
+    if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
+    if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
+    // Through `unknown`: the query builder is typed as yielding model instances, but a
+    // grouped `select(...).count(...)` yields aggregate rows, which do not overlap with it.
+    const rows = (await builder) as unknown as Array<{
+      provider: string;
+      type: string;
+      total: string | number;
+    }>;
+    return rows.map((row) => ({
+      provider: row.provider,
+      type: row.type,
+      count: Number(row.total),
+    }));
+  }
+
   async recordUsage(event: {
     subscriptionId?: string | null;
     customerId?: string;
@@ -182,7 +310,8 @@ export class LucidBillingStore
       .query()
       .select('meter')
       .sum('quantity as quantity')
-      .groupBy('meter');
+      .groupBy('meter')
+      .pojo();
     if (query.subscriptionId !== undefined) builder.where('subscription_id', query.subscriptionId);
     else if (query.customerId !== undefined) builder.where('customer_id', query.customerId);
     if (query.meter !== undefined) builder.where('meter', query.meter);
@@ -196,20 +325,24 @@ export class LucidBillingStore
   }
 
   async revenue(query: { from?: Date; to?: Date }): Promise<number> {
-    const builder = this.#paymentModel.query().where('status', 'paid').sum('amount as total');
+    const builder = this.#paymentModel
+      .query()
+      .where('status', 'paid')
+      .sum('amount as total')
+      .pojo();
     if (query.from !== undefined) builder.where('paid_at', '>=', query.from);
     if (query.to !== undefined) builder.where('paid_at', '<', query.to);
-    const rows = await builder;
-    const total = (rows[0] as { total?: string | number } | undefined)?.total;
-    return Number(total ?? 0);
+    return toCount(await builder);
   }
 
   async countActiveSubscriptions(): Promise<number> {
-    const count = await this.#subscriptionModel
-      .query()
-      .whereIn('status', ['active', 'trialing'])
-      .count('* as total');
-    return Number((count[0] as { total?: string | number } | undefined)?.total ?? 0);
+    return toCount(
+      await this.#subscriptionModel
+        .query()
+        .whereIn('status', ['active', 'trialing'])
+        .count('* as total')
+        .pojo(),
+    );
   }
 }
 

@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import type { NormalizeConstructor } from '@adonisjs/core/types/helpers';
-import { BaseModel, column } from '@adonisjs/lucid/orm';
+import { BaseModel, beforeCreate, column } from '@adonisjs/lucid/orm';
 import type { DateTime } from 'luxon';
 
 /**
@@ -8,6 +9,17 @@ import type { DateTime } from 'luxon';
  * calling the gateway API.
  */
 export class BillingPayment extends BaseModel {
+  /**
+   * The `id` column is a `uuid` with no database-side default (see the published
+   * migration), so nothing but this hook fills it. Generating it here rather than in the
+   * migration keeps every supported dialect working — `gen_random_uuid()` is Postgres-only
+   * — and means an app that already ran the migration needs no new one.
+   */
+  @beforeCreate()
+  static assignUuid(row: BillingPayment): void {
+    if (!row.id) row.id = randomUUID();
+  }
+
   @column({ isPrimary: true })
   declare id: string;
 

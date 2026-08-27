@@ -1,0 +1,135 @@
+import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import type { OverviewMetric, PeriodPreset } from '../client/payments-client';
+import { paymentsClient } from '../client/payments-client';
+import { formatCents, formatCount } from './money';
+import { Panel, QueryState } from './shell';
+import { Segmented } from './ui/segmented';
+
+const PERIODS: ReadonlyArray<{ value: PeriodPreset; label: string }> = [
+  { value: '24h', label: '24h' },
+  { value: '7d', label: '7 days' },
+  { value: '30d', label: '30 days' },
+  { value: '90d', label: '90 days' },
+];
+
+/**
+ * Which metrics are money and which are plain counts.
+ *
+ * `billingOverview` returns a flat `{ key, label, value }` list where `revenue` happens to be cents
+ * and everything else happens not to be. Rendering that list uniformly would print `123456` for
+ * R$ 1.234,56 or `R$ 12,00` for twelve subscriptions, so the distinction is made HERE, by key,
+ * rather than guessed from the number.
+ */
+function isMoneyMetric(metric: OverviewMetric): boolean {
+  return metric.key === 'revenue';
+}
+
+/** `Usage · api_calls` reads better as its meter name once it is under a "Usage" heading. */
+function isUsageMetric(metric: OverviewMetric): boolean {
+  return metric.key.startsWith('meter:');
+}
+
+function meterName(metric: OverviewMetric): string {
+  return metric.key.slice('meter:'.length);
+}
+
+function Stat({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+}) {
+  return (
+    <div className="rise rounded border border-line bg-panel p-4">
+      <p className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</p>
+      <p className="mono tnum mt-2 text-2xl text-zinc-100">{value}</p>
+      {hint !== undefined && <p className="mt-1 text-[11px] text-zinc-500">{hint}</p>}
+    </div>
+  );
+}
+
+export function Overview() {
+  const [period, setPeriod] = useState<PeriodPreset>('30d');
+  const query = useQuery({
+    queryKey: ['overview', period],
+    queryFn: () => paymentsClient.overview(period),
+  });
+
+  const data = query.data;
+  const usage = data?.metrics.filter(isUsageMetric) ?? [];
+  const headline = data?.metrics.filter((m) => !isUsageMetric(m)) ?? [];
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Segmented
+          aria-label="Period"
+          options={PERIODS}
+          value={period}
+          onChange={(value) => setPeriod(value)}
+        />
+        {data !== undefined && (
+          <p className="mono text-[11px] text-zinc-500">
+            {new Date(data.period.from).toLocaleString()} →{' '}
+            {new Date(data.period.to).toLocaleString()}
+          </p>
+        )}
+      </div>
+
+      <QueryState query={query} empty={false}>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {headline.map((metric) => (
+            <Stat
+              key={metric.key}
+              label={metric.key === 'revenue' ? 'Revenue' : metric.label}
+              value={
+                isMoneyMetric(metric)
+                  ? formatCents(metric.value, data?.currency ?? 'BRL')
+                  : formatCount(metric.value)
+              }
+              {...(metric.key === 'revenue'
+                ? { hint: 'Paid payments settled in this window.' }
+                : {})}
+              {...(metric.key === 'active_subscriptions'
+                ? { hint: 'Includes trialing. Not windowed — a live count.' }
+                : {})}
+            />
+          ))}
+        </div>
+
+        <Panel
+          title="Usage"
+          subtitle="Metered consumption recorded in this window, per meter."
+          className="mt-4"
+        >
+          {usage.length === 0 ? (
+            <p className="p-4 text-sm text-zinc-500">No metered usage recorded in this window.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-line text-left text-[10px] uppercase tracking-wider text-zinc-500">
+                  <th className="px-4 py-2 font-normal">Meter</th>
+                  <th className="px-4 py-2 text-right font-normal">Quantity</th>
+                </tr>
+              </thead>
+              <tbody>
+                {usage.map((metric) => (
+                  <tr key={metric.key} className="border-b border-line-soft last:border-0">
+                    <td className="mono px-4 py-2 text-zinc-300">{meterName(metric)}</td>
+                    <td className="mono tnum px-4 py-2 text-right text-zinc-100">
+                      {formatCount(metric.value)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Panel>
+      </QueryState>
+    </div>
+  );
+}

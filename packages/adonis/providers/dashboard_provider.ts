@@ -1,0 +1,330 @@
+import { readFile } from 'node:fs/promises';
+import { basename, resolve as resolvePath } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { HttpContext } from '@adonisjs/core/http';
+import type { ApplicationService, HttpRouterService } from '@adonisjs/core/types';
+import type { BillingStore } from '../src/billing/billing_store.js';
+import {
+  type ResolvedDashboardAuth,
+  SESSION_COOKIE_NAME,
+  performLogin,
+  performSession,
+  readSession,
+} from '../src/dashboard/auth.js';
+import {
+  type PaymentsDashboardConfig,
+  type ResolvedPaymentsDashboardConfig,
+  resolveConfig,
+} from '../src/dashboard/define_config.js';
+import {
+  type ApiRequest,
+  type ApiResponse,
+  type Deps,
+  overview,
+  payments,
+  webhookEvents,
+} from '../src/dashboard/handlers.js';
+import { renderLoginPage } from '../src/dashboard/login_page.js';
+import { contentTypeFor, renderIndexHtml } from '../src/dashboard/spa.js';
+import { getBillingStore } from '../src/services/main.js';
+
+/**
+ * Directory of the built SPA (`dist/assets/spa`, copied in by `copy:spa` — see `package.json`),
+ * relative to this compiled provider (`dist/providers`). Resolved lazily (not at module scope) for
+ * the same reason `@adonis-agora/durable`'s dashboard provider resolves its SPA directory lazily:
+ * `fileURLToPath` throws on any non-`file:` `import.meta.url`, which would make this provider
+ * unimportable under a test runner that doesn't use real file URLs.
+ *
+ * NOTE this reads BUILT ASSETS FROM DISK. The provider never imports `@adonis-agora/payments-dashboard`
+ * — that package is a devDependency of this one purely so the workspace build orders them.
+ */
+let spaDir: string | undefined;
+function spaDirectory(): string {
+  spaDir ??= fileURLToPath(new URL('../assets/spa/', import.meta.url));
+  return spaDir;
+}
+
+/**
+ * Mounts the payments dashboard into an AdonisJS app: the `@adonis-agora/payments-dashboard` React
+ * SPA plus a JSON API over the resolved {@link BillingStore}, served under a configurable path.
+ *
+ * Everything it serves is a store read — there are NO gateway calls and no control actions, which is
+ * why this console is so much smaller than durable's.
+ *
+ * Routes (relative to the configured `path`, default `/payments-dashboard`):
+ * - `GET  /`                     -> the dashboard SPA's `index.html`
+ * - `GET  /assets/:file`         -> the SPA's hashed JS/CSS bundle
+ * - `GET  /api/overview`         -> `billingOverview()` metrics for a period
+ * - `GET  /api/payments`         -> a page of `billing_payments` (status filter)
+ * - `GET  /api/webhook-events`   -> a page of `billing_webhook_events` (status filter)
+ *
+ * Plus, when `dashboardAuth` is configured, `GET|POST <path>/login`, `POST <path>/session` and
+ * `GET <path>/logout`.
+ *
+ * With `enabled: false` this provider registers NOTHING — not the SPA, not the API, not the auth
+ * routes. The dashboard is then completely absent from the app's route table.
+ */
+export default class PaymentsDashboardProvider {
+  constructor(protected app: ApplicationService) {}
+
+  /** Warn once so a throwing `login`/`session` hook doesn't spam the logs on every failed attempt. */
+  private warnedOnHookThrow = false;
+
+  async boot() {
+    const config = resolveConfig(
+      this.app.config.get<PaymentsDashboardConfig>('payments_dashboard', {}),
+    );
+    if (!config.enabled) return;
+
+    // Route registration can't happen synchronously in `boot()`: the router singleton isn't
+    // committed until the app's "booted" hooks run, which fire strictly AFTER every provider's
+    // own `boot()`. Same note `@adonis-agora/durable`'s dashboard provider carries.
+    await this.app.booted(async () => {
+      const router = await this.app.container.make('router');
+      this.registerRoutes(router, config);
+    });
+  }
+
+  private registerRoutes(router: HttpRouterService, config: ResolvedPaymentsDashboardConfig): void {
+    const apiBase = `${config.path}/api`;
+
+    // Built-in `dashboardAuth` (Mode A `session` and/or Mode B `login`, opt-in). Registered ONLY
+    // when configured. These endpoints are public (behind NEITHER guard): they MINT the session
+    // the guard checks for.
+    if (config.dashboardAuth) {
+      this.registerAuthRoutes(router, config, config.dashboardAuth);
+    }
+
+    this.registerSpaRoutes(router, config, apiBase);
+
+    const json = (handler: (d: Deps, req: ApiRequest) => Promise<ApiResponse>) => {
+      return async (ctx: HttpContext) => {
+        if (!(await this.enforce(config, ctx, 'api'))) return;
+        let store: BillingStore;
+        try {
+          store = getBillingStore();
+        } catch (error) {
+          // The billing layer is off (or the app hasn't booted it). That is a deployment state,
+          // not a bug in the request — say so with a 503 rather than a stack-trace-shaped 500.
+          return ctx.response.status(503).json({
+            error: error instanceof Error ? error.message : 'billing store unavailable',
+          });
+        }
+        try {
+          const result = await handler({ store, currency: config.currency }, toApiRequest(ctx));
+          return ctx.response.status(result.status).json(result.body);
+        } catch (error) {
+          return ctx.response
+            .status(500)
+            .json({ error: error instanceof Error ? error.message : 'internal error' });
+        }
+      };
+    };
+
+    router.get(`${apiBase}/overview`, json(overview)).as('payments_dashboard.overview');
+    router.get(`${apiBase}/payments`, json(payments)).as('payments_dashboard.payments');
+    router
+      .get(`${apiBase}/webhook-events`, json(webhookEvents))
+      .as('payments_dashboard.webhook_events');
+  }
+
+  /** Mount the React SPA at `config.path` plus its hashed asset bundle. */
+  private registerSpaRoutes(
+    router: HttpRouterService,
+    config: ResolvedPaymentsDashboardConfig,
+    apiBase: string,
+  ): void {
+    const indexPath = config.path === '' ? '/' : config.path;
+
+    router
+      .get(indexPath, async (ctx: HttpContext) => {
+        if (!(await this.enforce(config, ctx, 'page'))) return;
+        let html: string;
+        try {
+          html = await readFile(resolvePath(spaDirectory(), 'index.html'), 'utf8');
+        } catch {
+          return ctx.response
+            .status(404)
+            .send(
+              'The payments dashboard SPA is not built. Run `pnpm --filter @adonis-agora/payments-dashboard build` (or the package build) to emit dist/spa.',
+            );
+        }
+        return ctx.response
+          .header('content-type', 'text/html; charset=utf-8')
+          .header('cache-control', 'no-store, must-revalidate')
+          .send(renderIndexHtml(html, config.path, apiBase, config.currency));
+      })
+      .as('payments_dashboard.index');
+
+    router
+      .get(`${config.path}/assets/:file`, async (ctx: HttpContext) => {
+        if (!(await this.enforce(config, ctx, 'page'))) return;
+        const file = basename(String(ctx.params.file));
+        const root = resolvePath(spaDirectory(), 'assets');
+        const assetPath = resolvePath(root, file);
+        if (!assetPath.startsWith(root)) return ctx.response.status(404).send('');
+        let bytes: Buffer;
+        try {
+          bytes = await readFile(assetPath);
+        } catch {
+          return ctx.response.status(404).send('');
+        }
+        return ctx.response
+          .header('content-type', contentTypeFor(file))
+          .header('cache-control', 'public, max-age=31536000, immutable')
+          .send(bytes);
+      })
+      .as('payments_dashboard.assets');
+  }
+
+  /**
+   * Mount the built-in `dashboardAuth` endpoints under `basePath`. All are public (no guard): they
+   * create/destroy the session the {@link enforce} guard checks for.
+   *
+   * - `GET  <base>/login`   -> the server-rendered login page (Mode B only).
+   * - `POST <base>/login`   -> verifies credentials via the host `login` hook and mints the cookie.
+   * - `POST <base>/session` -> Mode A: verifies the HOST APP's own auth (off the raw request) via
+   *    the `session` hook and mints the cookie. `204` on success, uniform `401` on denial.
+   * - `GET  <base>/logout`  -> clears the cookie and redirects to the login page (Mode B) or the
+   *    dashboard root (Mode A only).
+   */
+  private registerAuthRoutes(
+    router: HttpRouterService,
+    config: ResolvedPaymentsDashboardConfig,
+    auth: ResolvedDashboardAuth,
+  ): void {
+    const loginPath = `${config.path}/login`;
+    const sessionPath = `${config.path}/session`;
+    const logoutPath = `${config.path}/logout`;
+
+    if (auth.login) {
+      router
+        .get(loginPath, async (ctx) => {
+          ctx.response.header('content-type', 'text/html; charset=utf-8');
+          ctx.response.header('cache-control', 'no-store, must-revalidate');
+          return ctx.response.send(renderLoginPage(config.path));
+        })
+        .as('payments_dashboard.login.page');
+
+      router
+        .post(loginPath, async (ctx) => {
+          const outcome = await performLogin(auth, ctx.request.body(), config.path);
+          if (outcome.kind === 'bad-request') {
+            return ctx.response.status(400).json({ error: outcome.message });
+          }
+          if (outcome.kind === 'unauthorized') {
+            await this.warnHookThrow(outcome.hookError);
+            return ctx.response.status(401).json({ error: outcome.message });
+          }
+          this.writeSessionCookie(ctx, auth, outcome.cookieValue);
+          return ctx.response.status(200).json({ redirectTo: outcome.redirectTo });
+        })
+        .as('payments_dashboard.login.submit');
+    }
+
+    if (auth.session) {
+      router
+        .post(sessionPath, async (ctx) => {
+          const outcome = await performSession(auth, ctx.request.request);
+          if (outcome.kind === 'unauthorized') {
+            await this.warnHookThrow(outcome.hookError);
+            return ctx.response.status(401).json({ error: 'unauthorized' });
+          }
+          this.writeSessionCookie(ctx, auth, outcome.cookieValue);
+          return ctx.response.status(204).send('');
+        })
+        .as('payments_dashboard.session.mint');
+    }
+
+    router
+      .get(logoutPath, async (ctx) => {
+        ctx.response.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
+        return ctx.response.redirect().toPath(auth.login ? loginPath : config.path || '/');
+      })
+      .as('payments_dashboard.logout');
+  }
+
+  private async warnHookThrow(hookError: unknown): Promise<void> {
+    if (hookError === undefined || this.warnedOnHookThrow) return;
+    this.warnedOnHookThrow = true;
+    const message = hookError instanceof Error ? hookError.message : String(hookError);
+    const logger = await this.app.container.make('logger');
+    logger.warn(`dashboardAuth login/session hook threw; treating as denial. ${message}`);
+  }
+
+  /**
+   * Run the guards for a dashboard resource. Composes the `authorize` hook (bearer token/custom)
+   * with the optional `dashboardAuth` session guard — BOTH must pass:
+   *
+   * 1. `authorize` fails -> `403`.
+   * 2. `dashboardAuth` configured AND no valid session -> for a `page` request, redirect `302` to
+   *    the login page (Mode B) carrying a sanitized `returnTo`, or a `401` notice (Mode A only);
+   *    for an `api` request, `401 { error: 'unauthorized', auth: { modes } }`.
+   *
+   * Returns `false` (and has already written the response) when the request must short-circuit.
+   */
+  private async enforce(
+    config: ResolvedPaymentsDashboardConfig,
+    ctx: HttpContext,
+    mode: 'page' | 'api',
+  ): Promise<boolean> {
+    const allowed = await config.authorize(ctx);
+    if (!allowed) {
+      if (!ctx.response.getHeader('location')) {
+        ctx.response.status(403).json({ error: 'forbidden' });
+      }
+      return false;
+    }
+
+    const auth = config.dashboardAuth;
+    if (!auth) return true;
+
+    const session = readSession(auth, this.readSessionCookie(ctx));
+    if (session) return true;
+
+    if (mode === 'page') {
+      if (auth.login) {
+        const returnTo = ctx.request.url(true);
+        ctx.response.redirect().withQs('returnTo', returnTo).toPath(`${config.path}/login`);
+        return false;
+      }
+      // Mode A only: there's no login page to send the browser to — this deployment expects the
+      // host app to mint a session via `POST <path>/session` before ever navigating here.
+      ctx.response
+        .status(401)
+        .header('content-type', 'text/html; charset=utf-8')
+        .header('cache-control', 'no-store, must-revalidate')
+        .send(
+          '<!doctype html><html><body style="font-family:ui-monospace,monospace;background:#09090b;color:#e7e7ea;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><p>Open this console from your application.</p></body></html>',
+        );
+      return false;
+    }
+    ctx.response.status(401).json({ error: 'unauthorized', auth: { modes: auth.modes } });
+    return false;
+  }
+
+  private readSessionCookie(ctx: HttpContext): string | undefined {
+    const value = ctx.request.plainCookie(SESSION_COOKIE_NAME, undefined, false);
+    return typeof value === 'string' && value !== '' ? value : undefined;
+  }
+
+  private writeSessionCookie(ctx: HttpContext, auth: ResolvedDashboardAuth, value: string): void {
+    ctx.response.plainCookie(SESSION_COOKIE_NAME, value, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: ctx.request.secure(),
+      path: '/',
+      maxAge: Math.floor(auth.ttlMs / 1000),
+      encode: false,
+    });
+  }
+}
+
+/** Adapt an AdonisJS `HttpContext` to the framework-light {@link ApiRequest}. */
+function toApiRequest(ctx: HttpContext): ApiRequest {
+  return {
+    params: ctx.params as Record<string, string | undefined>,
+    query: ctx.request.qs() as Record<string, string | string[] | undefined>,
+    body: ctx.request.body(),
+  };
+}

@@ -20,13 +20,43 @@ The configure command publishes a migration creating four tables:
 
 | Table | Purpose |
 | --- | --- |
-| `billing_customers` | the polymorphic link between your users and their gateway customers |
+| `billing_customers` | a polymorphic link table for your users' gateway customers — **not written by the library** (see below) |
 | `billing_subscriptions` | subscriptions — `status`, `plan_id`, `trial_ends_at`, `ends_at` |
 | `billing_payments` | every payment, keyed by **gateway id** |
 | `billing_webhook_events` | the **idempotency ledger**, keyed by gateway event id |
 
-The last one is the heart: it's what makes every redelivery a no-op instead of a
+`billing_webhook_events` is the heart: it's what makes every redelivery a no-op instead of a
 double-grant.
+
+`billing_customers` is the exception — the migration creates it, but nothing in the library writes
+to it. The [Billable mixin](#the-billable-model) keeps the gateway customer id on **your** model,
+which is where the library reads it from. The table is there for apps that want a separate
+polymorphic mapping (one user, several gateways); if you do not fill it yourself, it stays empty and
+`payments:sync --all` finds nothing.
+
+## Reading the billing tables
+
+Query the store, not the tables. The store is a configured seam — an app can point `billing.store`
+at its own implementation — so code that reaches around it into `billing_payments` breaks the moment
+someone does. Everything the library records is readable through it:
+
+```ts
+await store.findPaymentByGatewayId(gatewayId)          // one payment
+await store.listPayments({ status: 'failed', limit: 20 })
+await store.countPayments({ status: 'pending', createdBefore: cutoff })
+
+await store.findWebhookEventByGatewayEventId(eventId)  // one ledger row, with its error
+await store.listWebhookEvents({ status: 'failed' })
+await store.webhookEventBreakdown({ status: 'failed' }) // grouped by provider + type
+
+await store.revenue({ from, to })                       // cents
+await store.countActiveSubscriptions()
+await store.usageReport({ subscriptionId, from, to })
+```
+
+Two aggregates sit on top of those: `billingOverview(store, { from, to })` for the KPI row a
+dashboard renders, and [`billingHealth(store)`](/docs/payments/production#health-checks) for the
+three operational checks — both plain functions over the same store.
 
 ## The Billable model
 

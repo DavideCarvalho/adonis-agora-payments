@@ -1,27 +1,62 @@
 {
   "$schema": "https://biomejs.dev/schemas/1.9.0/schema.json",
-  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
   "files": {
     "ignoreUnknown": false,
-    "ignore": ["dist/**", "node_modules/**", ".turbo/**", "coverage/**", "**/*.stub"]
+    "ignore": [
+      "dist/**",
+      "node_modules/**",
+      ".turbo/**",
+      "coverage/**",
+      "**/*.stub",
+      "**/test/integration/__generated__/**"
+    ]
   },
-  "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
   "javascript": {
-    "formatter": { "quoteStyle": "single", "semicolons": "always", "trailingCommas": "all" }
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "always",
+      "trailingCommas": "all"
+    }
   },
   "linter": {
     "enabled": true,
     "rules": {
       "recommended": true,
-      "complexity": { "noBannedTypes": "off", "noStaticOnlyClass": "off" },
-      "style": { "noNonNullAssertion": "off", "useImportType": "off" },
-      "suspicious": { "noExplicitAny": "warn", "noEmptyInterface": "off" }
+      "complexity": {
+        "noBannedTypes": "off",
+        "noStaticOnlyClass": "off"
+      },
+      "style": {
+        "noNonNullAssertion": "off",
+        "useImportType": "off"
+      },
+      "suspicious": {
+        "noExplicitAny": "warn",
+        "noEmptyInterface": "off"
+      }
     }
   },
   "overrides": [
     {
       "include": ["**/test/**", "**/*.spec.ts", "**/*.test.ts"],
-      "linter": { "rules": { "suspicious": { "noExplicitAny": "off" } } }
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noExplicitAny": "off"
+          }
+        }
+      }
     }
   ]
 }

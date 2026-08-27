@@ -1,0 +1,38 @@
+{{{
+  exports({ to: app.configPath('payments_dashboard.ts') })
+}}}
+import { defineConfig } from '@adonis-agora/payments/dashboard'
+
+/**
+ * Configuration for the @adonis-agora/payments dashboard.
+ *
+ * By default the dashboard is open OUTSIDE production, and in production it
+ * requires a bearer token equal to \`PAYMENTS_DASHBOARD_TOKEN\` (deny if unset).
+ * Replace \`authorize\` with your own guard (session, role, IP allow-list, …).
+ *
+ * Set \`enabled: false\` to remove it entirely — no routes are registered at all.
+ *
+ * \`dashboardAuth\` is an ADDITIVE, optional session gate on top of \`authorize\` —
+ * a signed cookie minted via a built-in login page (Mode B: \`login\`) and/or a
+ * "open the console from your app" endpoint (Mode A: \`session\`). At least one
+ * of the two is required when \`dashboardAuth\` is set.
+ */
+export default defineConfig({
+  // enabled: true,
+  // path: '/payments-dashboard',
+  // currency: 'BRL',
+  // authorize: (ctx) => ctx.auth.user?.isAdmin === true,
+  // dashboardAuth: {
+  //   secret: env.get('PAYMENTS_DASHBOARD_SECRET'),
+  //   ttl: '8h',
+  //   // Mode B — standalone login page.
+  //   login: async (username, password) => {
+  //     if (username === 'admin' && password === env.get('PAYMENTS_DASHBOARD_PASSWORD')) {
+  //       return { id: 'admin', name: 'Admin' }
+  //     }
+  //     return null
+  //   },
+  //   // Mode A — mint a session for an already-authenticated host request.
+  //   // session: async (request) => (request.user?.isAdmin ? { id: request.user.id } : null),
+  // },
+})

@@ -30,8 +30,8 @@ passes there, it is the credential or the body — not the payload.
 Work through this order:
 
 1. **Was it a redelivery?** `process()` returns `false` for an event whose id is already
-   `received` or `processed`. Check `billing_webhook_events` for that gateway event id — this is the
-   ledger doing its job, not a bug.
+   `received` or `processed`. `await store.findWebhookEventByGatewayEventId(id)` shows which — this
+   is the ledger doing its job, not a bug.
 2. **Is there a handler for that type?** The processor syncs what it understands and runs a handler
    only if one is registered for that **normalized** type. A handler keyed on `PAYMENT_RECEIVED`
    never fires; the normalized name is `payment.succeeded`.
@@ -43,25 +43,31 @@ Work through this order:
    Discovery itself needs no wiring: the provider reads the generated barrel when the Assembler hook
    is registered (`node ace add` does that), and falls back to scanning `app/payment_handlers/` when
    it is not.
-4. **Did the handler throw?** Check `billing_webhook_events.status` — `failed` with an `error`
-   column means it ran and threw, and the dispatcher is retrying.
+4. **Did the handler throw?** `await store.findWebhookEventByGatewayEventId(id)` — `failed` with an
+   `error` means it ran and threw, and the dispatcher is retrying. `node ace payments:health` counts
+   them across the whole install.
 
 ## A customer paid but never got access
 
-The chain has four links. Check them in order, because each rules out the ones after it:
+The chain has four links. Check them in order, because each rules out the ones after it. Take the
+event id and the payment id from the gateway's dashboard and ask the store:
 
-```sql
--- 1. Did the event arrive at all?
-SELECT * FROM billing_webhook_events WHERE payload::text LIKE '%<gateway id>%';
+```ts title="a repl or a throwaway ace command"
+import { getBillingStore } from '@adonis-agora/payments/services/main'
 
--- 2. Did the billing layer sync it?
-SELECT * FROM billing_payments WHERE gateway_id = '<gateway id>';
+const store = getBillingStore()
+
+// 1. Did the event arrive at all?
+const event = await store.findWebhookEventByGatewayEventId('<gateway event id>')
+
+// 2. Did the billing layer sync it?
+const payment = await store.findPaymentByGatewayId('<gateway payment id>')
 ```
 
-- **No ledger row** → the gateway never called, or the request was rejected before the processor.
+- **`event` is `null`** → the gateway never called, or the request was rejected before the processor.
   Check the gateway dashboard's delivery log and your access logs.
-- **Ledger row, status `failed`** → your handler threw. The `error` column has the message.
-- **Ledger row `processed`, no grant in your tables** → the handler ran without doing the work.
+- **`event.status === 'failed'`** → your handler threw. `event.error` has the message.
+- **`event.status === 'processed'`, no grant in your tables** → the handler ran without doing the work.
   Usually a missing `externalReference`: the handler's `if (!ref) return` short-circuits silently.
   Look at the charge — was the reference set when it was created?
 

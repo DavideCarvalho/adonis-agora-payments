@@ -1,0 +1,141 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Aviary console tokens ──────────────────────────────────────────────────────────────────────
+   Copied from `@adonis-agora/durable-dashboard`'s `src/app/index.css`. The neutrals, the status hues
+   and the spacing are IDENTICAL across every Agora console; `--accent` is the single per-console
+   variable. If you change anything here, change it in every other console in the same session — a
+   token that lands in one console only is invisible until someone puts two screenshots side by side.
+   ──────────────────────────────────────────────────────────────────────────────────────────────── */
+:root {
+  /* Shared. Identical in every console. Do not tune per console. */
+  --bg: #09090b;
+  --panel: #0c0c0f;
+  --panel-2: #101017; /* elevated surface: modal/dialog, drawer, popover, menu */
+  --line: #1c1c22;
+  --line-soft: #16161a;
+  --text: #e7e7ea;
+  --muted: #76767f;
+
+  /* Status. Semantic, never decorative — the `.s-*` hues below are built from these. */
+  --good: #34d399;
+  --warn: #fbbf24;
+  --bad: #f87171;
+  --live: #60a5fa;
+
+  /* Per console. This is the ONLY line that differs between them.
+     Payments takes cyan-teal (187): far from `--good` emerald (160) so a MONEY figure never reads
+     as a health signal, far from durable's lime (82) and telescope's magenta (300), and — unlike a
+     green or gold accent — it does not quietly imply "paid" next to a FAILED row. */
+  --accent: #22d3ee;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Faint blueprint grid + top glow — atmosphere, not noise. */
+.app-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: radial-gradient(
+      900px 400px at 78% -8%,
+      color-mix(in srgb, var(--accent) 8%, transparent),
+      transparent 70%
+    ), linear-gradient(to right, var(--line-soft) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--line-soft) 1px, transparent 1px);
+  background-size: 100% 100%, 44px 44px, 44px 44px;
+  mask-image: linear-gradient(to bottom, black, black 60%, transparent);
+  opacity: 0.5;
+}
+
+.mono {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Status hues ────────────────────────────────────────────────────────────────────────────────
+   Payment statuses. `paid` is the only green: money that arrived. */
+.s-paid {
+  color: var(--good);
+}
+.s-pending {
+  /* Awaiting the gateway — calm slate, not an alarm. */
+  color: #94a3b8;
+}
+.s-failed {
+  color: var(--bad);
+}
+.s-refunded {
+  color: #a78bfa;
+}
+.s-canceled {
+  color: #71717a;
+}
+
+/* Webhook-ledger statuses. */
+.s-received {
+  /* Claimed, handler not finished — in flight. */
+  color: var(--live);
+}
+.s-processed {
+  color: var(--good);
+}
+/* `failed` reuses the payment hue above deliberately: in BOTH ledgers red means "this did not
+   happen and nobody is retrying it". */
+
+.s-unknown {
+  color: var(--muted);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent);
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.rise {
+  animation: rise 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #26262c;
+  border: 3px solid var(--bg);
+  border-radius: 999px;
+}

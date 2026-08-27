@@ -28,6 +28,11 @@
       "import": "./dist/providers/payments_provider.js",
       "default": "./dist/providers/payments_provider.js"
     },
+    "./dashboard_provider": {
+      "types": "./dist/providers/dashboard_provider.d.ts",
+      "import": "./dist/providers/dashboard_provider.js",
+      "default": "./dist/providers/dashboard_provider.js"
+    },
     "./configure": {
       "types": "./dist/configure.d.ts",
       "import": "./dist/configure.js",
@@ -82,17 +87,24 @@
       "types": "./dist/src/types.d.ts",
       "import": "./dist/src/types.js",
       "default": "./dist/src/types.js"
+    },
+    "./dashboard": {
+      "types": "./dist/src/dashboard/index.d.ts",
+      "import": "./dist/src/dashboard/index.js",
+      "default": "./dist/src/dashboard/index.js"
     }
   },
   "files": ["dist/", "README.md", "CHANGELOG.md"],
   "sideEffects": false,
   "scripts": {
-    "build": "tsc -p tsconfig.json && pnpm run copy:stubs",
+    "build": "tsc -p tsconfig.json && pnpm run copy:stubs && pnpm run copy:spa",
     "copy:stubs": "mkdir -p dist/stubs/config dist/stubs/database/migrations dist/stubs/make/billable dist/stubs/make/webhook_handler && cp -r stubs/config/. dist/stubs/config/ && cp -r stubs/database/migrations/. dist/stubs/database/migrations/ && cp -r stubs/make/billable/. dist/stubs/make/billable/ && cp -r stubs/make/webhook_handler/. dist/stubs/make/webhook_handler/",
+    "copy:spa": "mkdir -p dist/assets && rm -rf dist/assets/spa && cp -r ../dashboard/dist/spa dist/assets/spa",
     "prepack": "pnpm run build",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:integration": "vitest run -c vitest.integration.config.ts"
   },
   "peerDependencies": {
     "@adonis-agora/durable": ">=0.1.0 <1.0.0",
@@ -116,13 +128,17 @@
     }
   },
   "devDependencies": {
+    "@adonis-agora/payments-dashboard": "workspace:*",
     "@adonisjs/assembler": "^8.5.0",
     "@adonisjs/core": "7.4.0",
     "@adonisjs/lucid": "^22.4.0",
+    "@testcontainers/postgresql": "^12.1.0",
     "@types/luxon": "^3.7.5",
     "@types/node": "^20.0.0",
+    "@types/pg": "^8.23.1",
     "@woovi/node-sdk": "^1.0.0",
     "luxon": "^3.7.2",
+    "pg": "^8.23.0",
     "stripe": "^18.0.0",
     "typescript": "^5.4.0",
     "vitest": "3.2.7"
@@ -142,6 +158,7 @@
     "woovi",
     "openpix",
     "pix",
+    "dashboard",
     "agora"
   ]
 }

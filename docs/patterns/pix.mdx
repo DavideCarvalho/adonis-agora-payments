@@ -37,8 +37,8 @@ export async function startPixCheckout(user: User, plan: Plan) {
 
   return {
     order,
-    qrImage: payment.pixQrCode,        // base64 image, when the gateway returns one
-    copyPaste: payment.pixCopiaECola,  // the BR code to show as text
+    qrImage: payment.pixQrCodeImage,  // base64 PNG, when the gateway returns one
+    copyPaste: payment.pixCode,       // the BR code to show as text
   }
 }
 ```
@@ -89,8 +89,8 @@ remembering — it is **propagated to every installment** of a subscription's ch
 the driver fetches `/payments/:id/pixQrCode` right after and fills both fields for you:
 
 ```ts
-payment.pixCopiaECola   // the BR code
-payment.pixQrCode       // base64 image
+payment.pixCode         // the BR code the customer copies
+payment.pixQrCodeImage  // base64 PNG of the QR
 ```
 
 If that follow-up fails the charge still succeeds — you get a `pending` payment with no QR, which is
@@ -177,7 +177,7 @@ await driver.createCustomer({ name: user.fullName, email: user.email, taxId: use
 **Pix only, plus boleto.** No credit card: routing `credit_card` here throws at the manager, not at
 the gateway. See [Routing](/docs/payments/concepts/routing).
 
-**What comes back** is the QR inline — `brCodeBase64` → `pixQrCode`, `brCode` → `pixCopiaECola` — or,
+**What comes back** is the QR inline — `brCodeBase64` → `pixQrCodeImage`, `brCode` → `pixCode` — or,
 for boleto, a hosted URL in `hostedUrl`.
 
 </Tab>

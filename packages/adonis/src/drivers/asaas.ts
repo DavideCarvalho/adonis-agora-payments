@@ -202,8 +202,14 @@ export class AsaasDriver implements PaymentsDriver {
           payload?: string | null;
           expirationDate?: string | null;
         }>(`/payments/${data.id}/pixQrCode`);
-        if (qr.payload) payment.pixCopiaECola = qr.payload;
-        if (qr.encodedImage) payment.pixQrCode = qr.encodedImage;
+        if (qr.payload) {
+          payment.pixCode = qr.payload;
+          payment.pixCopiaECola = qr.payload;
+        }
+        if (qr.encodedImage) {
+          payment.pixQrCodeImage = qr.encodedImage;
+          payment.pixQrCode = qr.encodedImage;
+        }
       } catch {
         // QR code é best-effort — a cobrança já existe.
       }
@@ -275,7 +281,9 @@ export class AsaasDriver implements PaymentsDriver {
       status: 'open',
       amount: { amount: fromDecimal(data.value), currency: 'brl' },
       customerId: data.customer,
-      ...(data.pixCopiaECola !== undefined ? { pixCopiaECola: data.pixCopiaECola } : {}),
+      ...(data.pixCopiaECola !== undefined
+        ? { pixCode: data.pixCopiaECola, pixCopiaECola: data.pixCopiaECola }
+        : {}),
     };
   }
 
@@ -441,8 +449,14 @@ export class AsaasDriver implements PaymentsDriver {
     };
     if (method !== undefined && method !== 'unknown') result.method = method;
     if (data.subscription !== undefined) result.subscriptionId = data.subscription;
-    if (data.pixQrCode !== undefined) result.pixQrCode = data.pixQrCode;
-    if (data.pixCopiaECola !== undefined) result.pixCopiaECola = data.pixCopiaECola;
+    if (data.pixQrCode !== undefined) {
+      result.pixQrCodeImage = data.pixQrCode;
+      result.pixQrCode = data.pixQrCode;
+    }
+    if (data.pixCopiaECola !== undefined) {
+      result.pixCode = data.pixCopiaECola;
+      result.pixCopiaECola = data.pixCopiaECola;
+    }
     if (data.invoiceUrl !== undefined) result.hostedUrl = data.invoiceUrl;
     if (data.paymentDate !== undefined) {
       const paidAt = this.#toIso(data.paymentDate);

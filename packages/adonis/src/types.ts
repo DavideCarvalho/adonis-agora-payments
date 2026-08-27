@@ -61,8 +61,26 @@ export interface Payment {
   payload: Record<string, unknown>;
   createdAt: string;
   paidAt?: string;
-  /** Pix QR code / copy-paste code when the gateway provides one. */
+  /**
+   * Base64-encoded PNG of the Pix QR code, when the gateway returns one.
+   * Render it directly (`data:image/png;base64,${pixQrCodeImage}`) — it is an image,
+   * not something the customer can copy.
+   */
+  pixQrCodeImage?: string;
+  /**
+   * The Pix BR Code (EMV payload) — the plain-text string behind the QR code, and the
+   * one the customer copies and pastes into their bank app ("Pix copia e cola").
+   */
+  pixCode?: string;
+  /**
+   * @deprecated Misleading name — it holds the QR **image**, not a code. Use {@link Payment.pixQrCodeImage}.
+   * Still populated with the same value for backward compatibility.
+   */
   pixQrCode?: string;
+  /**
+   * @deprecated Portuguese name for the BR Code payload. Use {@link Payment.pixCode}.
+   * Still populated with the same value for backward compatibility.
+   */
   pixCopiaECola?: string;
   /** URL to a hosted checkout/charge page when the gateway provides one. */
   hostedUrl?: string;
@@ -87,6 +105,13 @@ export interface CheckoutSession {
   provider: string;
   /** URL to redirect the customer to (hosted checkout). */
   url: string;
+  /**
+   * Pix BR Code (EMV payload) for a checkout the gateway settles over Pix — the
+   * string the payer copies. Same field as {@link Payment.pixCode}.
+   */
+  pixCode?: string;
+  /** @deprecated Renamed to {@link CheckoutSession.pixCode}. Still populated. */
+  pixCopiaECola?: string;
   status: 'open' | 'complete' | 'expired';
   amount?: MoneyAmount;
   /** The subscription created by this checkout, when it was a subscription checkout. */

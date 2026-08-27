@@ -1,0 +1,330 @@
+---
+title: Card
+description: A credit card charge without the card ever reaching your server — tokenize in the browser, send the token, and let the webhook decide. The shared shape, then exactly what Stripe and Asaas each map it to, why Asaas demands the holder block, and what happens when you route credit_card to a gateway that has no cards.
+icon: CreditCard
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+**The card number never touches your server.** The browser sends it straight to the gateway's
+tokenizer — Stripe.js, or Asaas' tokenization endpoint — and gets back an opaque string. That string
+is the only thing your controller ever sees, the only thing you send to `charge()`, and the only
+thing worth logging. Every example on this page starts from a token that already exists.
+
+This is not a style preference. A PAN that reaches your process reaches your logs, your APM, your
+error tracker and your database backups, and it drags all of them into PCI scope. Tokenize in the
+browser and the gateway carries that weight instead.
+
+```ts
+// Never — this is a PCI incident with extra steps
+await driver.charge({ amount: 4990, metadata: { number: '4111...', cvv: '123' } })
+
+// The token the browser got back
+await driver.charge({ amount: 4990, card: { token: cardTokenFromFrontend } })
+```
+
+## The shape that is the same everywhere
+
+```ts title="app/services/checkout_service.ts"
+import { getPayments } from '@adonis-agora/payments'
+
+export async function chargeCard(user: User, plan: Plan, cardToken: string, ip: string) {
+  const driver = getPayments().driver('credit_card')
+
+  const order = await Order.create({
+    userId: user.id,
+    planId: plan.id,
+    total: plan.priceCents,
+    status: 'awaiting_payment',
+  })
+
+  const payment = await driver.charge({
+    customerId: user.billingCustomerId!,
+    amount: order.total,               // integer cents
+    method: 'credit_card',
+    description: plan.name,
+    externalReference: order.id,       // ← how the webhook finds this order
+    idempotencyKey: `order:${order.id}`,
+    card: {
+      token: cardToken,                // tokenized in the browser
+      remoteIp: ip,
+    },
+  })
+
+  return { order, payment }
+}
+```
+
+`payment.status` is `'pending'`. A card charge is not settled because the API call returned — it is
+settled when the gateway says so on your webhook. See
+[The payment lifecycle](/docs/payments/concepts/lifecycle).
+
+<Callout title="card.token or paymentMethodId — pick one">
+`ChargeInput` accepts both. They mean the same thing and both land on the same gateway field, but
+the two drivers resolve a collision in **opposite directions**: Stripe applies `paymentMethodId`
+first and lets `card.token` overwrite it; Asaas applies `card.token` first and lets `paymentMethodId`
+overwrite it. Passing both is how you charge a card you did not mean to. Pass one.
+
+Prefer `card` — it is the only one that carries `holder` and `remoteIp`.
+</Callout>
+
+## What each gateway needs
+
+<Tabs items={['Stripe', 'Asaas']}>
+<Tab value="Stripe">
+
+**The token becomes `payment_method` on the PaymentIntent.** That is the whole mapping — either
+input reaches the same field:
+
+```ts
+await getPayments().driver('credit_card').charge({
+  customerId: user.stripeCustomerId!,
+  amount: 4990,
+  description: 'Plano Pro',
+  externalReference: order.id,
+  paymentMethodId: 'pm_1QAbc...',        // → payment_method
+  // …or, identically:
+  // card: { token: 'pm_1QAbc...' },     // → payment_method
+})
+```
+
+**No holder block, no IP.** Stripe already holds the billing details on the PaymentMethod you
+created in the browser, so `card.holder` and `card.remoteIp` are accepted by the type and ignored by
+this driver. They are not an error — they simply go nowhere. Set the billing details when you create
+the PaymentMethod client-side.
+
+**Your reference goes into metadata**, not a first-class field: `externalReference` →
+`metadata.external_reference`, and `idempotencyKey` → `metadata.idempotency_key`. Read it back from
+there in the webhook rather than parsing the description.
+
+**The intent is created, not confirmed.** The driver calls `paymentIntents.create` and returns
+whatever status Stripe hands back, which it normalizes like this:
+
+| Stripe `intent.status` | normalized `payment.status` |
+| --- | --- |
+| `succeeded` | `paid` |
+| `requires_payment_method`, `requires_action`, `processing` | `pending` |
+| `canceled` | `canceled` |
+| anything else (incl. `requires_confirmation`) | `failed` |
+
+<Callout type="warn" title="Do not act on the returned status">
+An intent that still needs confirmation, or a 3-D Secure step, is not a decline — but it does not
+normalize to `pending` either. Confirm the intent in your Stripe.js flow, and let the
+`payment.succeeded` / `payment.failed` webhook be the thing your business logic listens to. This is
+the same rule as everywhere else in this library; cards just make it easier to get wrong.
+</Callout>
+
+**Currency** defaults to the driver's configured currency (`brl` unless you set it), so pass
+`currency` explicitly if this gateway serves more than one.
+
+</Tab>
+<Tab value="Asaas">
+
+**Three fields, and the holder block is not optional in practice:**
+
+```ts title="app/services/checkout_service.ts"
+const payment = await getPayments().driver('credit_card').charge({
+  customerId: user.billingCustomerId!,   // Asaas requires a customer on every charge
+  amount: 4990,
+  method: 'credit_card',
+  description: 'Plano Pro',
+  externalReference: order.id,
+  card: {
+    token: cardTokenFromFrontend,        // → creditCardToken
+    holder: {                            // → creditCardHolderInfo
+      name: user.fullName,
+      email: user.email,
+      cpfCnpj: user.cpfCnpj,
+      postalCode: user.postalCode,
+      addressNumber: user.addressNumber,
+      phone: user.phone,
+    },
+    remoteIp: request.ip(),              // → remoteIp
+  },
+})
+```
+
+**Every field of `holder` is required by the type** — `name`, `email`, `cpfCnpj`, `postalCode`,
+`addressNumber`, `phone`. There is no partial holder. TypeScript will not let you send five of six.
+
+**Why Asaas wants all of it.** Two reasons, and both are worth knowing before you decide to skip it:
+
+1. **Anti-fraud.** Asaas scores the transaction on the holder's identity and address against the
+   card's, plus the payer's IP. A charge with no holder info and no `remoteIp` is scored blind and
+   is far more likely to come back declined — a decline you will read as "the card was refused" when
+   what happened is that you gave the gateway nothing to work with. `remoteIp` must be the *payer's*
+   address (`request.ip()`), never your server's.
+2. **The fiscal note.** When the same charge asks for an invoice, the payer's fiscal data is
+   resolved from `customer` first and **falls back to `card.holder`** — `cpfCnpj` → taxId, plus name
+   and email. So a card checkout that also emits an NFS-e does not restate the payer:
+
+   ```ts
+   await driver.charge({
+     customerId: user.billingCustomerId!,
+     amount: 4990,
+     card: { token: cardToken, holder, remoteIp: request.ip() },
+     invoice: true,                       // taxId comes from holder.cpfCnpj
+   })
+   ```
+
+   See [Invoices](/docs/payments/invoices).
+
+**`billingType` is inferred, so you can omit `method`.** The driver decides the charge is a card
+charge when *any* of these is true:
+
+```ts
+input.method === 'credit_card' || input.paymentMethodId !== undefined || input.card !== undefined
+```
+
+Any one of them sets `billingType: 'CREDIT_CARD'`. Passing `card` without `method` works — but pass
+`method: 'credit_card'` anyway, because it is what routes the call to the right gateway in the first
+place.
+
+**A customer is mandatory.** No `customerId` and the driver throws before any request goes out:
+
+```text
+[payments] Asaas requires a customer for every charge.
+```
+
+**A due date is still sent** — Asaas charges always carry one, defaulting to 7 days out. Override
+with `metadata.dueDate` as `YYYY-MM-DD`. It rarely matters for a card, which is captured
+immediately, but it is on the payload.
+
+**Your reference** is Asaas' own `externalReference`, and on subscriptions it is propagated to every
+installment. See [Subscriptions](/docs/payments/patterns/subscriptions).
+
+</Tab>
+</Tabs>
+
+## The differences at a glance
+
+| | Stripe | Asaas |
+| --- | --- | --- |
+| `card.token` lands in | `payment_method` | `creditCardToken` |
+| `paymentMethodId` lands in | `payment_method` | `creditCardToken` |
+| Which wins when both are passed | `card.token` | `paymentMethodId` |
+| `card.holder` | **ignored** | → `creditCardHolderInfo`, all 6 fields required |
+| `card.remoteIp` | **ignored** | → `remoteIp` (the payer's IP) |
+| Customer required | no | **yes** |
+| Your reference lands in | `metadata.external_reference` | `externalReference` |
+| Method is | explicit `payment_method_types` on the intent | inferred → `billingType: CREDIT_CARD` |
+| Debit card | no | yes (`debit_card`) |
+| Refunds | yes | yes |
+
+## Routing `credit_card`
+
+Your service asks for a **method**, never a gateway, so the choice of card processor is one line of
+config:
+
+```ts title="config/payments.ts"
+export default defineConfig({
+  default: 'asaas',
+  providers: {
+    stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY') }),
+    asaas: payments.asaas({ apiKey: env.get('ASAAS_API_KEY') }),
+    woovi: payments.woovi({ appId: env.get('WOOVI_APP_ID') }),
+  },
+  methods: {
+    pix: 'woovi',
+    credit_card: 'stripe',   // ← swap to 'asaas' and nothing else changes
+    boleto: 'asaas',
+    undefined: 'asaas',
+  },
+})
+```
+
+```ts
+getPayments().driver('credit_card')   // → whichever provider methods.credit_card names
+```
+
+**Two of the four gateways have no cards at all.** Woovi/OpenPix is Pix-only, and AbacatePay does
+Pix and boleto. Pointing `credit_card` at either is a config error, and the manager catches it when
+you ask for the driver — before a single byte reaches the gateway:
+
+```ts
+// methods: { credit_card: 'woovi' }
+getPayments().driver('credit_card')
+```
+
+```text
+[payments] Driver "woovi" does not support payment method "credit_card".
+Supported methods: pix, undefined.
+Route "credit_card" to a different provider in config.methods.
+```
+
+```ts
+// methods: { credit_card: 'abacate' }
+getPayments().driver('credit_card')
+```
+
+```text
+[payments] Driver "abacate" does not support payment method "credit_card".
+Supported methods: pix, boleto, undefined.
+Route "credit_card" to a different provider in config.methods.
+```
+
+<Callout title="Naming the gateway skips the check">
+The guard fires only when you route a **method**. `getPayments().driver('woovi')` hands you the
+Woovi driver with no method to validate, and the failure moves to the gateway's own error later.
+Ask for `'credit_card'`, not for a provider name — see [Routing](/docs/payments/concepts/routing).
+</Callout>
+
+Forgetting the routing entry altogether is its own error, and it lists what is available:
+
+```text
+[payments] "credit_card" is neither a configured provider nor a method routed in
+config.methods. Configured providers: stripe, asaas, woovi. Known methods: pix,
+credit_card, debit_card, boleto, undefined.
+```
+
+## Declines arrive on the webhook
+
+A card that is refused does not throw at `charge()` — the charge is accepted, and the refusal comes
+back as `payment.failed`, exactly like every other outcome in this library:
+
+```ts title="app/payment_handlers/payment_failed.ts"
+export default class PaymentFailedHandler {
+  static readonly eventType = 'payment.failed'
+
+  async handle(event: WebhookEvent): Promise<void> {
+    const data = event.data as { externalReference?: string; reason?: string }
+    const order = await Order.findBy('id', data.externalReference)
+    if (!order) return
+
+    await order.merge({ status: 'payment_failed' }).save()
+    await this.mail.send(new CardDeclined(order, data.reason))
+  }
+}
+```
+
+Do not suspend or cancel on the first decline. Cards expire, issuers refuse transiently, and a limit
+resets tomorrow — retry with escalation instead. The dunning ladder lives in
+[Recovering](/docs/payments/patterns/recovering), and where handlers belong is
+[Reacting to payments](/docs/payments/patterns/reacting-to-payments).
+
+## Refunds
+
+Both card gateways support refunds, but the code that offers the button should not assume it —
+capability-check first, so a later routing change to a gateway without refunds fails loudly at your
+boundary instead of at the gateway:
+
+```ts title="app/services/refund_service.ts"
+const payments = getPayments()
+const driver = payments.driver(payment.provider)
+
+payments.assertCapability(driver, 'refunds')
+
+const refund = await driver.refund(payment.gatewayId, partialAmountCents)
+```
+
+`refund(gatewayId)` refunds in full; an amount in cents refunds partially. And, as always, the
+refund **confirms by webhook** — revoke access on `payment.refunded`, not on the API response. See
+[Recovering](/docs/payments/patterns/recovering).
+
+## Recurring cards
+
+Everything above is a one-off charge. A card that should be charged every month is a different call
+— `createSubscription()` takes the same `CardInput`, so the gateway keeps the token and re-charges
+it each cycle without you storing anything. See
+[Subscriptions](/docs/payments/patterns/subscriptions).

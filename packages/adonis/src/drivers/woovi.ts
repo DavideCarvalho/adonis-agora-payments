@@ -201,7 +201,7 @@ export class WooviDriver implements PaymentsDriver {
       url: '',
       status: 'open',
       amount: { amount: input.amount, currency: 'brl' },
-      ...(brCode !== '' ? { pixCopiaECola: brCode } : {}),
+      ...(brCode !== '' ? { pixCode: brCode, pixCopiaECola: brCode } : {}),
     };
   }
 
@@ -370,7 +370,7 @@ export class WooviDriver implements PaymentsDriver {
   #mapPayment(data: Record<string, unknown>): Payment {
     const value = typeof data.value === 'number' ? data.value : 0;
     const status = String(data.status ?? 'ACTIVE').toUpperCase();
-    const pixQrCode =
+    const brCode =
       (data.pixQrCode as { brCode?: string } | undefined)?.brCode ??
       (data.brCode as { brCode?: string } | undefined)?.brCode;
     return {
@@ -384,7 +384,7 @@ export class WooviDriver implements PaymentsDriver {
           : status === 'EXPIRED' || status === 'CANCELED' || status === 'REJECTED'
             ? 'canceled'
             : 'pending',
-      ...(pixQrCode !== undefined ? { pixCopiaECola: pixQrCode } : {}),
+      ...(brCode !== undefined ? { pixCode: brCode, pixCopiaECola: brCode } : {}),
       ...(typeof data.correlationID === 'string' ? { customerId: data.correlationID } : {}),
       payload: data,
       createdAt: typeof data.createdAt === 'string' ? data.createdAt : new Date().toISOString(),

@@ -53,8 +53,8 @@ await payments.driver('credit_card').charge({
   `checkout.completed`, `checkout.refunded`, `subscription.completed/renewed/cancelled`.
 - **Subscriptions**: recurring — no transparent checkout for the recurring charge yet.
 - **Transparent checkout**: `charge` uses `POST /v2/transparents/create` — PIX and Boleto
-  inline, no redirect. The response carries the QR (`brCodeBase64` → `pixQrCode`,
-  `brCode` → `pixCopiaECola`) or the barcode (`url` → `hostedUrl`). Needs the payer's
+  inline, no redirect. The response carries the QR (`brCodeBase64` → `pixQrCodeImage`,
+  `brCode` → `pixCode`) or the barcode (`url` → `hostedUrl`). Needs the payer's
   `name` + `taxId` — pass them via the charge's `customer` block or create the gateway
   customer with them.
 

@@ -222,6 +222,20 @@ export interface PaymentsConfig {
     /** Queue name the `'queue'` dispatcher enqueues to. Defaults to the queue's default. */
     queue?: string;
     /**
+     * Which half of a split deployment this process is.
+     *
+     * - `'all'` (default) — one process receives webhooks and processes them.
+     * - `'api'` — mount the webhook route, validate and hand off; never process.
+     *   App handlers are not resolved here, because they run on the worker.
+     * - `'worker'` — do not mount the route; process what the API half enqueued.
+     *
+     * Splitting requires a dispatcher with a channel between the halves, so
+     * `'api'`/`'worker'` demand an explicit `dispatcher` of `'durable'` or
+     * `'queue'`. `'in-process'` has no channel — it calls the processor directly —
+     * and `'auto'` is too vague to split on, so both are refused at boot.
+     */
+    role?: 'all' | 'api' | 'worker';
+    /**
      * Where the billing layer persists — subscriptions, payments, the idempotency
      * ledger and usage events.
      *

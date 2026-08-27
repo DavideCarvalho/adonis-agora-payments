@@ -1,20 +1,89 @@
 ---
 title: Roadmap
-description: Where the payments library is headed — drivers hardening, splits & subaccounts, dashboard and more invoice coverage.
+description: What is still missing — Pix and Boleto on Stripe, subscription updates that silently no-op, partial refunds in the tables, splits beyond Asaas, fiscal invoice reconciliation and the dashboard UI.
 icon: Map
 ---
 
-- **Invoice providers** — Focus, eNotas, PlugNotas, Asaas native NFS-e and Tecnospeed ship
-  today (or [write your own](/docs/payments/custom-providers) with the exported building blocks)
-- **BR drivers hardening** — AbacatePay transparent checkout (PIX/Boleto) and Woovi Pix
-  Automático journey 3 (pay-on-approval, `DYNAMIC`) are shipped
-- **Webhook business logic** — the three options (folder, `billing.handlers`, events) are
-  shipped; next: an out-of-the-box `@OnDiagnostic` durable trigger example once the
-  durable event-trigger release lands
-- **Commands** — `payments:webhook --create` (Stripe) and `payments:sync --all`
-  (reconcile every customer) are shipped
-- **Usage-based billing** — metered subscriptions shipped (`billing_usage_events`,
-  `recordUsage`/`usageReport`, and the period **metered bill** via `meteredBill`); next:
-  auto-invoice the metered amount
-- **Dashboard** — headless `billingOverview` data foundation shipped (revenue, active subscriptions, usage per meter); next: the dashboard SPA (Agora dashboard pattern)
-- **Splits & subaccounts** — Asaas split and Woovi subaccounts are shipped
+This page lists what the library does **not** do yet, and why each gap matters. Anything that
+already works lives in the guides — start at [Providers](/docs/payments/providers) for the
+per-gateway matrix.
+
+## Gateways
+
+- **Pix and Boleto on Stripe.** The Stripe driver advertises `pix` and `boleto` in its supported
+  methods, so routing `pix: 'stripe'` passes the router's check — but `charge()` never sends
+  `payment_method_types`, so the PaymentIntent is created with the account's default method and the
+  returned `Payment` carries no Pix QR code or copy-and-paste payload. Until the driver maps the
+  method onto the intent (and reads `next_action` back), route Pix and Boleto to a Brazilian
+  gateway. See [Pix](/docs/payments/patterns/pix).
+- **Subscription updates that reach the gateway.** `updateSubscription` takes an amount, a
+  description and metadata. Asaas applies all of it. Stripe applies the description and metadata and
+  drops the amount on the floor — changing a price there needs the subscription item id, which the
+  input has no room for. Woovi patches the object in memory and returns it, so the call reports
+  success on a change the gateway never saw. Two things are missing: a plan/price field in the
+  input with proration handling, and a hard failure where a gateway cannot honor the update instead
+  of a fabricated `Subscription`.
+- **Outbound idempotency on Stripe.** `idempotencyKey` is written into the PaymentIntent metadata,
+  not sent as Stripe's `Idempotency-Key` request option, so a retried charge creates a second
+  PaymentIntent. AbacatePay, Asaas and Woovi all forward the key to a real gateway-side dedup field.
+  Stripe is the exception, and it is the one that breaks the guarantee described in
+  [Idempotency](/docs/payments/concepts/idempotency).
+- **Partial refunds on AbacatePay.** `refund()` accepts an amount and ignores it — every call is a
+  full refund at the gateway.
+- **More gateways.** Only Stripe, AbacatePay, Asaas and Woovi ship. The driver contract is the
+  extension point in the meantime, and a driver you write is a first-class citizen of the router and
+  the billing layer — see [Custom providers](/docs/payments/custom-providers).
+
+## What the billing tables do not record
+
+- **Partial refunds skew revenue.** A `payment.refunded` webhook overwrites the payment row's status
+  with `refunded` and its amount with the refunded amount. `revenue()` sums rows with status `paid`,
+  so a partially refunded charge leaves revenue entirely and its original amount is lost. The tables
+  need a refunded amount and a partial state so the arithmetic can subtract instead of drop.
+- **Splits are not attributed.** A split charge stores the full amount on one row; who received what
+  is only in the gateway payload. Per-recipient reporting is on the app today — the manual pattern
+  is in [Marketplace splits](/docs/payments/patterns/marketplace-splits).
+- **Fiscal invoices are not persisted.** An emitted NFS-e is returned inline and never written
+  anywhere, which is the root of the next section.
+
+## Splits beyond Asaas
+
+`split` sits on the shared charge input, but only the Asaas driver reads it. Stripe, AbacatePay and
+Woovi ignore it silently — no error, no split. Woovi models recipients as subaccounts and the driver
+can create, find and list them, but a charge cannot be pointed at one, so the subaccounts are
+inert as far as the charge path is concerned. The point of a shared input is that a marketplace can
+change gateways as a config change; today it cannot.
+
+## Fiscal invoices
+
+Invoice providers expose `emit` and `find`. Nothing in the library ever calls `find`, and there is
+no `cancel`. NFS-e issuance is asynchronous at every provider — `emit` returns a pending note that
+becomes issued (or rejected) minutes later — so an app has to poll the provider itself to learn the
+outcome, with no place to store it. Three pieces are missing: persistence for emitted notes,
+reconciliation of their status, and cancellation, which is a legal requirement rather than a nicety.
+See [Invoices](/docs/payments/invoices).
+
+## Billing layer
+
+- **Auto-invoice the metered amount.** `meteredBill` and `meteredBillForSubscription` price a
+  period's usage, and that is where it stops — nothing charges the overage or emits an invoice for
+  it. The cron, the charge and the guard against billing a period twice are yours to write. See
+  [Metered billing](/docs/payments/patterns/metered-billing).
+- **A dashboard UI.** `billingOverview` is headless by design and returns aggregate metrics, but no
+  UI ships with the package. See [Billing dashboard](/docs/payments/patterns/dashboard).
+
+## Coverage
+
+AbacatePay, Asaas and Woovi each have a driver test suite that exercises the request bodies against
+a stubbed gateway. Stripe has none, which is why the routing and idempotency gaps above sit in the
+one driver most apps reach for first. The harness the other suites use is documented in
+[Testing](/docs/payments/testing).
+
+## Not planned
+
+- **Refunds on Woovi.** OpenPix has no refund API. The driver throws a clear error and declares the
+  missing capability so the router rejects the call before it reaches the network — that is the
+  intended behavior, not a placeholder.
+- **Gateway-specific features behind the shared contract.** Things only one gateway has (Woovi
+  subaccounts, for instance) stay on the concrete driver class rather than being widened into the
+  interface, so the shared contract keeps meaning the same thing everywhere.

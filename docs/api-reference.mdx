@@ -211,8 +211,10 @@ interface Payment {
   payload: Record<string, unknown>    // the untouched gateway response
   createdAt: string
   paidAt?: string
-  pixQrCode?: string
-  pixCopiaECola?: string
+  pixQrCodeImage?: string             // base64 PNG of the Pix QR code
+  pixCode?: string                    // the BR Code (EMV payload) the customer copies
+  pixQrCode?: string                  // @deprecated alias of pixQrCodeImage
+  pixCopiaECola?: string              // @deprecated alias of pixCode
   hostedUrl?: string
   subscriptionId?: string
   invoice?: Invoice

@@ -91,6 +91,38 @@ process restart: a deploy in the middle of the backoff window drops the pending 
 and queue backends do. Choose accordingly for money paths.
 </Callout>
 
+### Splitting api and worker
+
+`billing.role` splits the deployment in two. The api half receives webhooks, validates and hands
+them off; the worker half processes them:
+
+```ts title="config/payments.ts — the api pods"
+billing: { dispatcher: 'durable', role: 'api' }
+```
+
+```ts title="config/payments.ts — the worker pods"
+billing: { dispatcher: 'durable', role: 'worker' }
+```
+
+A `'worker'` process does **not** mount `/payments/webhook/:provider` — it consumes what the api half
+enqueued, so nothing can deliver to it directly. An `'api'` process skips resolving your handlers
+entirely, since they run on the other side.
+
+<Callout type="warn" title="Splitting needs a dispatcher with a channel">
+`'in-process'` calls the processor inline: an `'api'` process would quietly process everything
+itself and a `'worker'` would sit idle. `'auto'` can silently resolve to it. Both are refused at
+boot when `role` is set, so a split deployment cannot come up half-wired:
+
+```text
+[payments] billing.role is "api", which splits receiving from processing — but
+billing.dispatcher is "auto", which has no channel between the two halves.
+Set dispatcher to "durable" or "queue", or drop billing.role.
+```
+</Callout>
+
+Leaving `role` unset keeps one process doing both, which is the right shape until webhook volume or
+deploy independence actually forces the split.
+
 ### The worker the dispatcher depends on
 
 `'durable'` and `'queue'` move processing out of the web process, which means something has to be
@@ -204,6 +236,7 @@ replay window is longer.
 - [ ] Webhook endpoints registered in each dashboard (`node ace payments:webhook`)
 - [ ] `billing.dispatcher` names the backend you actually run — not `'auto'`
 - [ ] The matching worker is running (`durable:work` / `queue:listen`) if the dispatcher is not `in-process`
+- [ ] If the deployment is split, `billing.role` is set per process and the dispatcher has a channel
 - [ ] Migrations run; `billing_webhook_events` has a retention floor, not an aggressive prune
 - [ ] Handlers dispatch rather than grant inline
 - [ ] Every grant has an **inner** idempotency guard at the database

@@ -31,8 +31,10 @@ A quick map of the differences that usually matter:
   method. Omit `method` and the intent falls back to the account's dynamic payment
   methods — Stripe's own default. Pix and boleto have to be enabled on a Brazilian Stripe
   account first; the driver cannot tell you they are not, the gateway will.
-- **Setup**: `payments.stripe({ apiKey, currency })` — `STRIPE_KEY`; `currency` defaults
-  to `brl`.
+- **Setup**: `payments.stripe({ apiKey, currency })` — `STRIPE_KEY`; `currency` is
+  **required** (lowercase ISO 4217) and the driver refuses to boot without it. Stripe bills
+  in whatever you hand it, so a default would be a guess at the app's country, and a wrong
+  guess charges instead of failing. The BRL-only gateways below take no such option.
 - **Webhooks**: HMAC verified by the SDK's `constructEvent` — needs `webhookSecret`
   (`STRIPE_WEBHOOK_SECRET`). Events `checkout.session.completed`,
   `invoice.payment_succeeded`, `customer.subscription.*`.

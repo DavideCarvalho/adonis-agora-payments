@@ -22,7 +22,7 @@ import { defineConfig, payments } from '@adonis-agora/payments'
 export default defineConfig({
   default: 'stripe',
   providers: {
-    stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY') }),
+    stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY'), currency: 'brl' }),
   },
 })
 ```

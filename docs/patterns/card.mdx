@@ -115,8 +115,8 @@ normalize to `pending` either. Confirm the intent in your Stripe.js flow, and le
 the same rule as everywhere else in this library; cards just make it easier to get wrong.
 </Callout>
 
-**Currency** defaults to the driver's configured currency (`brl` unless you set it), so pass
-`currency` explicitly if this gateway serves more than one.
+**Currency** falls back to the driver's configured currency, which Stripe requires you to set — pass
+`currency` on the charge when a single app bills in more than one.
 
 </Tab>
 <Tab value="Asaas">
@@ -221,7 +221,7 @@ config:
 export default defineConfig({
   default: 'asaas',
   providers: {
-    stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY') }),
+    stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY'), currency: 'brl' }),
     asaas: payments.asaas({ apiKey: env.get('ASAAS_API_KEY') }),
     woovi: payments.woovi({ appId: env.get('WOOVI_APP_ID') }),
   },

@@ -15,7 +15,7 @@ vi.mock('stripe', () => ({ default: vi.fn(() => stripeMock) }));
 import { StripeDriver } from '../src/drivers/stripe.js';
 
 function makeDriver() {
-  return new StripeDriver({ config: () => ({}) }, { apiKey: 'sk_test' });
+  return new StripeDriver({ config: () => ({}) }, { apiKey: 'sk_test', currency: 'eur' });
 }
 
 /** A PaymentIntent with only the fields the driver's mapper reads. */
@@ -36,6 +36,26 @@ function intent(overrides: Record<string, unknown> = {}) {
 describe('StripeDriver', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('refuses to boot without a currency instead of guessing one', () => {
+    // A multi-currency gateway has no safe default: the wrong guess charges and succeeds.
+    expect(
+      () =>
+        new StripeDriver({ config: () => ({}) }, { apiKey: 'sk_test' } as unknown as {
+          apiKey: string;
+          currency: string;
+        }),
+    ).toThrow(/Driver "stripe" has no currency configured/);
+  });
+
+  it('charges in the configured currency', async () => {
+    stripeMock.paymentIntents.create.mockResolvedValue(intent({ currency: 'eur' }));
+    const driver = makeDriver();
+
+    await driver.charge({ customerId: 'cus_1', amount: 1990 });
+
+    expect(stripeMock.paymentIntents.create.mock.calls[0]![0].currency).toBe('eur');
   });
 
   it('sends the idempotency key as the request option, not only as metadata', async () => {

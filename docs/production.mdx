@@ -30,6 +30,7 @@ providers: {
   }),
   stripe: payments.stripe({
     apiKey: env.get('STRIPE_KEY'),
+    currency: 'brl',                                     // required — no default
     webhookSecret: env.get('STRIPE_WEBHOOK_SECRET'),     // Stripe always requires it
   }),
 }

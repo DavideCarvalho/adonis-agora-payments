@@ -2,8 +2,24 @@
 '@adonis-agora/payments': minor
 ---
 
-Three gateway calls that reported a success the gateway never performed now do the real thing, or
-refuse.
+Four places where the config said one thing and the money did another. Three gateway calls that
+reported a success the gateway never performed now do the real thing, or refuse — and Stripe no
+longer picks a currency for you.
+
+**Breaking config change: `currency` is required on Stripe.** It defaulted to `'brl'`, so an app in
+the euro area that never set it charged in reais — silently, successfully, with nothing in the flow
+saying so. Stripe bills in whatever you hand it, which makes any default a guess at the app's
+country, and the wrong guess does not fail. The driver now refuses to boot without one:
+
+```
+[payments] Driver "stripe" has no currency configured. Set `currency` in
+config/payments.ts — a multi-currency gateway has no safe default.
+```
+
+**To migrate:** add `currency` to your Stripe provider in `config/payments.ts` —
+`payments.stripe({ apiKey: env.get('STRIPE_KEY'), currency: 'brl' })` keeps today's behavior
+explicitly. The type makes it required, so `tsc` finds it before boot does. Asaas, AbacatePay and
+Woovi are BRL-only, take no currency option, and are unchanged.
 
 **Stripe sends the idempotency key as a request header.** `idempotencyKey` was written into the
 PaymentIntent's metadata, which Stripe does not deduplicate on — a retried charge created a second

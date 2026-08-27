@@ -52,8 +52,18 @@ export class StripeDriver implements PaymentsDriver {
         '[payments] Stripe driver requires an API key. Set `STRIPE_KEY` env or pass `apiKey` to `payments.stripe()`.',
       );
     }
+    // Boot is the last honest place to catch this: Stripe accepts any currency, so a
+    // default would silently bill an app in a country it never chose. The constructor
+    // (not the factory) enforces it because `./drivers/stripe` is a public entry point
+    // too — one boundary every path crosses, next to the api-key check above.
+    if (!config.currency) {
+      throw new Error(
+        '[payments] Driver "stripe" has no currency configured. ' +
+          'Set `currency` in config/payments.ts — a multi-currency gateway has no safe default.',
+      );
+    }
     this.#stripe = new Stripe(apiKey);
-    this.#currency = config.currency ?? 'brl';
+    this.#currency = config.currency;
     this.#webhookSecret = config.webhookSecret ?? process.env.STRIPE_WEBHOOK_SECRET;
   }
 

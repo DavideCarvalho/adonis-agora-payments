@@ -50,8 +50,12 @@ export interface InvoiceContext {
 export interface StripeDriverConfig {
   /** Stripe secret key. Defaults to `env.get('STRIPE_KEY')`. */
   apiKey?: string;
-  /** Default currency. Defaults to `'brl'`. */
-  currency?: string;
+  /**
+   * Currency for charges that don't name one (lowercase ISO 4217). **Required** — Stripe
+   * bills in whatever you tell it to, so a default here would be a guess at which country
+   * the app charges in, and a wrong guess succeeds silently.
+   */
+  currency: string;
   /**
    * Webhook signing secret (`whsec_...`) used to verify `stripe-signature`. Defaults
    * to `env.get('STRIPE_WEBHOOK_SECRET')`. Required to parse Stripe webhooks.
@@ -151,7 +155,7 @@ export interface WooviDriverConfig {
  * export default defineConfig({
  *   default: 'stripe',
  *   providers: {
- *     stripe: payments.stripe(),
+ *     stripe: payments.stripe({ currency: 'usd' }),
  *     asaas: payments.asaas({ sandbox: true }),
  *   },
  *   invoice: {
@@ -283,7 +287,7 @@ export function defineConfig<const T extends PaymentsConfig>(config: T): T {
 
 /** Built-in driver factories. Each lazily imports its gateway SDK. */
 export const payments = {
-  stripe(config: StripeDriverConfig = {}): PaymentsDriverFactory {
+  stripe(config: StripeDriverConfig): PaymentsDriverFactory {
     return async (ctx) => {
       const { StripeDriver } = await import('./drivers/stripe.js');
       return new StripeDriver(ctx, config);

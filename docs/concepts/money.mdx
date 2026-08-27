@@ -56,13 +56,25 @@ crossed a boundary it should not have.
 ## Currency
 
 Lowercase ISO 4217, everywhere: `'brl'`, `'usd'`, `'eur'`. A charge that does not name one falls
-back to the driver's configured currency, which for Stripe defaults to `'brl'`:
+back to the driver's configured currency, and on a multi-currency gateway that currency is
+**required** — there is no default:
 
 ```ts
 providers: {
-  stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY'), currency: 'brl' }),
+  stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY'), currency: 'eur' }),
 }
 ```
+
+Leave it out and the driver refuses to boot:
+
+```
+[payments] Driver "stripe" has no currency configured. Set `currency` in
+config/payments.ts — a multi-currency gateway has no safe default.
+```
+
+That is deliberate. Stripe bills in whatever currency you hand it, so a default would be a guess at
+which country the app charges in — and the wrong guess does not fail, it charges. A startup error
+you read once is cheaper than a euro-area app quietly taking reais.
 
 The Brazilian gateways are BRL-only and do not take the option at all.
 

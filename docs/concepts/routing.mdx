@@ -117,7 +117,7 @@ deliberately conservative: an undeclared capability is an unproven one.
 
 ```ts
 providers: {
-  stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY') }),
+  stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY'), currency: 'brl' }),
   woovi:  payments.woovi({ appId: env.get('WOOVI_APP_ID') }),
 }
 ```
@@ -139,7 +139,7 @@ export default defineConfig({
   default: 'asaas',
   providers: {
     woovi: payments.woovi({ appId: env.get('WOOVI_APP_ID') }),
-    stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY') }),
+    stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY'), currency: 'brl' }),
     asaas: payments.asaas({ apiKey: env.get('ASAAS_API_KEY') }),
   },
   methods: {

@@ -91,6 +91,38 @@ process restart: a deploy in the middle of the backoff window drops the pending 
 and queue backends do. Choose accordingly for money paths.
 </Callout>
 
+### Splitting api and worker
+
+`billing.role` splits the deployment in two. The api half receives webhooks, validates and hands
+them off; the worker half processes them:
+
+```ts title="config/payments.ts — the api pods"
+billing: { dispatcher: 'durable', role: 'api' }
+```
+
+```ts title="config/payments.ts — the worker pods"
+billing: { dispatcher: 'durable', role: 'worker' }
+```
+
+A `'worker'` process does **not** mount `/payments/webhook/:provider` — it consumes what the api half
+enqueued, so nothing can deliver to it directly. An `'api'` process skips resolving your handlers
+entirely, since they run on the other side.
+
+<Callout type="warn" title="Splitting needs a dispatcher with a channel">
+`'in-process'` calls the processor inline: an `'api'` process would quietly process everything
+itself and a `'worker'` would sit idle. `'auto'` can silently resolve to it. Both are refused at
+boot when `role` is set, so a split deployment cannot come up half-wired:
+
+```text
+[payments] billing.role is "api", which splits receiving from processing — but
+billing.dispatcher is "auto", which has no channel between the two halves.
+Set dispatcher to "durable" or "queue", or drop billing.role.
+```
+</Callout>
+
+Leaving `role` unset keeps one process doing both, which is the right shape until webhook volume or
+deploy independence actually forces the split.
+
 ### The worker the dispatcher depends on
 
 `'durable'` and `'queue'` move processing out of the web process, which means something has to be
@@ -103,14 +135,14 @@ node ace queue:listen   # dispatcher: 'queue'
 
 This is the deployment mistake that hides best: the webhook endpoint keeps answering `200`, the
 ledger keeps filling up, and no handler ever runs. Add the worker to your process manager alongside
-the web process, and alert on `billing_webhook_events` rows stuck in `received`:
+the web process, and alert on events that were claimed and never finished:
 
-```sql
-SELECT count(*) FROM billing_webhook_events
-WHERE status = 'received' AND created_at < now() - interval '15 minutes';
+```sh
+node ace payments:health
 ```
 
-A non-zero count there means events were claimed and nothing finished them.
+A non-zero **stuck** count means exactly that — something claimed the event and nothing consumed it.
+See [Health checks](#health-checks) below.
 
 ## Respond fast
 
@@ -153,17 +185,58 @@ confirmation**. A `charge.created` rate that stays healthy while `payment.succee
 cliff is a broken webhook endpoint, and nothing else in the system will tell you. Alert on the ratio,
 not on either number.
 
-Two queries worth having as a scheduled check:
+## Health checks
 
-```sql
--- Events stuck in `failed` — the dispatcher exhausted its retries
-SELECT provider, type, count(*) FROM billing_webhook_events
-WHERE status = 'failed' AND created_at > now() - interval '1 day'
-GROUP BY 1, 2;
+Three failures in a billing install are silent — nothing throws, the endpoint keeps answering `200`,
+and the first person to notice is a customer. `payments:health` asks about all three:
 
--- Charges that never confirmed
-SELECT count(*) FROM billing_payments
-WHERE status = 'pending' AND created_at < now() - interval '2 hours';
+```sh
+node ace payments:health
+```
+
+| Check | What a non-zero count means |
+| --- | --- |
+| **Stuck** — claimed over 15m ago, never finished | Nothing is consuming the dispatcher. The worker is not running. |
+| **Failed** — dispatcher gave up, last 24h | Handlers threw and retries ran out; those events never took effect. |
+| **Unconfirmed** — charges created over 2h ago, still pending | Charges are being created and never confirmed — a webhook endpoint that stopped being reachable. |
+
+It exits **non-zero** when anything is wrong, so a cron entry or a container healthcheck can page on
+it without parsing output. Thresholds are flags — `--stuck-after=5` (minutes),
+`--unconfirmed-after=30` (minutes), `--window=48` (hours) — and `--json` prints the machine-readable
+form for a metrics shipper:
+
+```sh
+node ace payments:health --window=48 --json
+```
+
+The same report is available in code, so a scheduled job can ship it wherever your alerts live:
+
+```ts title="app/jobs/billing_health_job.ts"
+import { inject } from '@adonisjs/core'
+import { billingHealth, LucidBillingStore } from '@adonis-agora/payments'
+
+@inject()
+export default class BillingHealthJob {
+  constructor(private store: LucidBillingStore) {}
+
+  async handle() {
+    const report = await billingHealth(this.store)
+    if (report.healthy) return
+
+    for (const check of report.checks.filter((check) => !check.healthy)) {
+      logger.error({ check: check.key, count: check.count }, check.hint)
+    }
+    // report.failures groups the failed events by provider and type, worst first
+  }
+}
+```
+
+To read the failures themselves — the handler's error message survives nowhere else — page the
+ledger:
+
+```ts
+const failures = await store.listWebhookEvents({ status: 'failed', limit: 20 })
+// [{ gatewayEventId, provider, type, error, createdAt }, ...]
 ```
 
 ## Reconcile on a schedule
@@ -204,6 +277,7 @@ replay window is longer.
 - [ ] Webhook endpoints registered in each dashboard (`node ace payments:webhook`)
 - [ ] `billing.dispatcher` names the backend you actually run — not `'auto'`
 - [ ] The matching worker is running (`durable:work` / `queue:listen`) if the dispatcher is not `in-process`
+- [ ] If the deployment is split, `billing.role` is set per process and the dispatcher has a channel
 - [ ] Migrations run; `billing_webhook_events` has a retention floor, not an aggressive prune
 - [ ] Handlers dispatch rather than grant inline
 - [ ] Every grant has an **inner** idempotency guard at the database

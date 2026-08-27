@@ -4,6 +4,7 @@
   "pages": [
     "index",
     "pix",
+    "card",
     "subscriptions",
     "reacting-to-payments",
     "metered-billing",

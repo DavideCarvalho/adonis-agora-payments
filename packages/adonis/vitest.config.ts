@@ -7,6 +7,8 @@ export default defineConfig({
     environment: 'node',
     globals: true,
     include: ['test/**/*.{spec,test}.ts'],
+    // The integration suite needs Docker; it has its own config and script.
+    exclude: ['test/integration/**'],
     pool: 'forks',
   },
 });

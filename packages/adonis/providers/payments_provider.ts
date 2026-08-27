@@ -1,7 +1,14 @@
 import { pathToFileURL } from 'node:url';
 import type { HttpContext } from '@adonisjs/core/http';
 import type { ApplicationService, HttpRouterService } from '@adonisjs/core/types';
+import type { BillingStore } from '../src/billing/billing_store.js';
 import { LucidBillingStore } from '../src/billing/lucid_billing_store.js';
+import {
+  assertRoleIsDispatchable,
+  resolveDispatchMode,
+  resolveRole,
+} from '../src/billing/resolve_dispatch.js';
+import { isInjectableAsLucid, resolveBillingStore } from '../src/billing/resolve_store.js';
 import { WebhookDispatcher } from '../src/billing/webhook_dispatcher.js';
 import type { WebhookDispatchMode } from '../src/billing/webhook_dispatcher.js';
 import { WebhookProcessor } from '../src/billing/webhook_processor.js';
@@ -9,7 +16,7 @@ import type { WebhookHandler } from '../src/billing/webhook_processor.js';
 import type { BillingHandlers, PaymentsConfig } from '../src/define_config.js';
 import { InvoiceManager, resolveInvoiceProviders } from '../src/invoice/invoice_manager.js';
 import { PaymentsManager, resolveDrivers } from '../src/payments_manager.js';
-import { setPayments } from '../src/services/main.js';
+import { setBillingStore, setPayments } from '../src/services/main.js';
 import {
   type DiscoveredWebhookHandler,
   type WebhookHandlersBarrel,
@@ -64,25 +71,54 @@ export default class PaymentsProvider {
       // Resolve the manager here so `setPayments` runs and `getPayments()` works for
       // services that read it during boot — after every provider has registered.
       await this.app.container.make(PaymentsManager);
-      const router = await this.app.container.make('router');
-      this.#registerWebhookRoute(router);
+      // A 'worker' process consumes what the api half enqueued; it must not also
+      // advertise an endpoint gateways could deliver to.
+      if (resolveRole(config) !== 'worker') {
+        const router = await this.app.container.make('router');
+        this.#registerWebhookRoute(router);
+      }
     });
   }
 
   async #buildBillingLayer(config: PaymentsConfig): Promise<void> {
-    const store = new LucidBillingStore();
-    const handlers = await this.#resolveAllHandlers(config.billing?.handlers);
+    const mode = resolveDispatchMode(config);
+    const role = resolveRole(config);
+    assertRoleIsDispatchable(role, mode);
+
+    const store = await this.#resolveBillingStore(config);
+    // On an 'api' process the handlers run on the worker, so resolving them here
+    // would scan the folder and build services this process never calls.
+    const handlers =
+      role === 'api' ? undefined : await this.#resolveAllHandlers(config.billing?.handlers);
     const processor = new WebhookProcessor({
       store,
       ...(handlers !== undefined ? { handlers } : {}),
     });
     this.#webhook = new WebhookDispatcher({
       processor,
-      mode: this.#resolveMode(config),
+      mode,
       // In 'auto', durable is used only when its engine is resolvable in the app
       // (i.e. the durable provider is registered) — not merely installed.
       durableAvailable: () => this.#isDurableAvailable(),
     });
+  }
+
+  /**
+   * The billing store from `config.billing.store`, defaulting to Lucid over the
+   * published tables.
+   *
+   * The resolved store is published on `services/main` (which reaches any store) and,
+   * when it is the Lucid one, bound in the container so a service can `@inject()` it
+   * like any other dependency.
+   */
+  async #resolveBillingStore(config: PaymentsConfig): Promise<BillingStore> {
+    const store = await resolveBillingStore(config);
+
+    setBillingStore(store);
+    if (isInjectableAsLucid(store)) {
+      this.app.container.singleton(LucidBillingStore, () => store);
+    }
+    return store;
   }
 
   /**
@@ -141,12 +177,6 @@ export default class PaymentsProvider {
   }
 
   /** Map `billing.durable` (`'auto' | boolean`) onto the dispatcher's mode. */
-  #resolveMode(config: PaymentsConfig): WebhookDispatchMode {
-    const setting = config.billing?.durable ?? 'auto';
-    if (setting === true) return 'durable';
-    if (setting === false) return 'in-process';
-    return 'auto';
-  }
 
   #registerWebhookRoute(router: HttpRouterService) {
     router

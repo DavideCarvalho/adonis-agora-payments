@@ -40,3 +40,27 @@ jobs:
       - run: pnpm test
 
       - run: pnpm build
+
+  # The unit suite exercises the billing layer through the in-memory store, which is a
+  # hand-written reimplementation of the store contract — so it can only ever prove the CALLERS
+  # right. Two bugs lived under it for the package's whole life: the models never generated their
+  # uuid `id` (so every insert failed on Postgres), and Lucid puts aggregates in `$extras` rather
+  # than on the model instance (so `revenue()` always returned a silent zero). This job is what
+  # keeps that class of bug from coming back.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Starts its own throwaway Postgres through testcontainers (the runner ships Docker), and
+      # creates the tables by running the published migration stub rather than a copy of it.
+      - run: pnpm --filter @adonis-agora/payments test:integration

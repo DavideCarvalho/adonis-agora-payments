@@ -1,10 +1,12 @@
-export { defineConfig, payments, invoice } from './define_config.js';
+export { defineConfig, payments, invoice, billingStores } from './define_config.js';
 export type {
   PaymentsConfig,
   PaymentsContext,
   PaymentsDriverFactory,
   InvoiceContext,
   InvoiceProviderFactory,
+  BillingStoreContext,
+  BillingStoreFactory,
   StripeDriverConfig,
   AbacateDriverConfig,
   AsaasDriverConfig,
@@ -66,11 +68,29 @@ export type {
 export { WebhookProcessor } from './billing/webhook_processor.js';
 export type { WebhookHandler } from './billing/webhook_processor.js';
 export { LucidBillingStore, lucidBillingStore } from './billing/lucid_billing_store.js';
+export { resolveBillingStore } from './billing/resolve_store.js';
 export type { BillingModels } from './billing/lucid_billing_store.js';
-export type { BillingStore } from './billing/billing_store.js';
+export type {
+  BillingStore,
+  BillingCountQuery,
+  BillingListQuery,
+  PaymentListItem,
+  WebhookEventListItem,
+  WebhookEventBreakdownLine,
+} from './billing/billing_store.js';
+export {
+  BILLING_LIST_DEFAULT_LIMIT,
+  BILLING_LIST_MAX_LIMIT,
+} from './billing/list_query.js';
 export { BillingUsageEvent } from './billing/mixins/with_usage_event.js';
 export { billingOverview } from './billing/billing_overview.js';
 export type { BillingOverview, BillingOverviewMetric } from './billing/billing_overview.js';
+export { billingHealth } from './billing/billing_health.js';
+export type {
+  BillingHealth,
+  BillingHealthCheck,
+  BillingHealthOptions,
+} from './billing/billing_health.js';
 export { meteredBill, meteredBillForSubscription } from './billing/metered_bill.js';
 export type { MeterRate, MeteredBill, MeteredBillLine } from './billing/metered_bill.js';
 export type {

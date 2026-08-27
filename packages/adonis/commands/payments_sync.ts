@@ -1,7 +1,6 @@
 import { BaseCommand, flags } from '@adonisjs/core/ace';
 import type { CommandOptions } from '@adonisjs/core/types/ace';
-import db from '@adonisjs/lucid/services/db';
-import { LucidBillingStore } from '../src/billing/lucid_billing_store.js';
+import { resolveBillingStore } from '../src/billing/resolve_store.js';
 import type { PaymentsConfig } from '../src/define_config.js';
 import { PaymentsManager } from '../src/payments_manager.js';
 
@@ -48,7 +47,10 @@ export default class PaymentsSync extends BaseCommand {
     // Some gateways (Woovi/OpenPix) have no invoice concept — fail early with a clear
     // message instead of listing nothing.
     manager.assertCapability(driver, 'invoices');
-    const store = new LucidBillingStore();
+    // The CONFIGURED store, not a fresh Lucid one: an app that pointed `billing.store`
+    // somewhere else would otherwise have its reconcile write to a database the rest of
+    // the billing layer never reads.
+    const store = await resolveBillingStore(config);
 
     const customers = this.customer ? [this.customer] : await this.#listCustomers();
     if (customers.length === 0) {
@@ -88,13 +90,20 @@ export default class PaymentsSync extends BaseCommand {
     this.logger.success(`Synced ${synced} paid invoice(s) across ${customers.length} customer(s).`);
   }
 
-  /** Gateway customer ids from the `billing_customers` table (best-effort). */
+  /**
+   * Gateway customer ids from the `billing_customers` table.
+   *
+   * A failure here is NOT swallowed: an unreadable table used to be reported as
+   * "billing_customers is empty", which reads as "nothing to do" and hides a broken
+   * reconcile behind a success message.
+   */
   async #listCustomers(): Promise<string[]> {
-    try {
-      const rows = await db.from('billing_customers').select('gateway_id');
-      return (rows as Array<{ gateway_id: string }>).map((row) => row.gateway_id);
-    } catch {
-      return [];
-    }
+    // Imported here, not at module scope: `@adonisjs/lucid/services/db` resolves the
+    // container the moment it is imported, so a top-level import makes merely LOADING this
+    // command file depend on a booted app — which is a boot-order hazard, and made the
+    // commands barrel impossible to import from a test.
+    const { default: db } = await import('@adonisjs/lucid/services/db');
+    const rows = await db.from('billing_customers').select('gateway_id');
+    return (rows as Array<{ gateway_id: string }>).map((row) => row.gateway_id);
   }
 }

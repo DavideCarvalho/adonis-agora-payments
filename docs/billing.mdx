@@ -20,13 +20,43 @@ The configure command publishes a migration creating four tables:
 
 | Table | Purpose |
 | --- | --- |
-| `billing_customers` | the polymorphic link between your users and their gateway customers |
+| `billing_customers` | a polymorphic link table for your users' gateway customers — **not written by the library** (see below) |
 | `billing_subscriptions` | subscriptions — `status`, `plan_id`, `trial_ends_at`, `ends_at` |
 | `billing_payments` | every payment, keyed by **gateway id** |
 | `billing_webhook_events` | the **idempotency ledger**, keyed by gateway event id |
 
-The last one is the heart: it's what makes every redelivery a no-op instead of a
+`billing_webhook_events` is the heart: it's what makes every redelivery a no-op instead of a
 double-grant.
+
+`billing_customers` is the exception — the migration creates it, but nothing in the library writes
+to it. The [Billable mixin](#the-billable-model) keeps the gateway customer id on **your** model,
+which is where the library reads it from. The table is there for apps that want a separate
+polymorphic mapping (one user, several gateways); if you do not fill it yourself, it stays empty and
+`payments:sync --all` finds nothing.
+
+## Reading the billing tables
+
+Query the store, not the tables. The store is a configured seam — an app can point `billing.store`
+at its own implementation — so code that reaches around it into `billing_payments` breaks the moment
+someone does. Everything the library records is readable through it:
+
+```ts
+await store.findPaymentByGatewayId(gatewayId)          // one payment
+await store.listPayments({ status: 'failed', limit: 20 })
+await store.countPayments({ status: 'pending', createdBefore: cutoff })
+
+await store.findWebhookEventByGatewayEventId(eventId)  // one ledger row, with its error
+await store.listWebhookEvents({ status: 'failed' })
+await store.webhookEventBreakdown({ status: 'failed' }) // grouped by provider + type
+
+await store.revenue({ from, to })                       // cents
+await store.countActiveSubscriptions()
+await store.usageReport({ subscriptionId, from, to })
+```
+
+Two aggregates sit on top of those: `billingOverview(store, { from, to })` for the KPI row a
+dashboard renders, and [`billingHealth(store)`](/docs/payments/production#health-checks) for the
+three operational checks — both plain functions over the same store.
 
 ## The Billable model
 
@@ -207,23 +237,74 @@ for overage is then emitted via the invoice provider or an Asaas/Stripe charge.
 calls, so it is fast, works headless, and is trivially testable:
 
 ```ts title="app/controllers/billing_dashboard_controller.ts"
+import { inject } from '@adonisjs/core'
 import { billingOverview, LucidBillingStore } from '@adonis-agora/payments'
 
-const overview = await billingOverview(new LucidBillingStore(), {
-  from: DateTime.now().startOf('month').toJSDate(),
-  to: DateTime.now().toJSDate(),
-})
+@inject()
+export default class BillingDashboardController {
+  constructor(private store: LucidBillingStore) {}
+
+  async index() {
+    return billingOverview(this.store, {
+      from: DateTime.now().startOf('month').toJSDate(),
+      to: DateTime.now().toJSDate(),
+    })
+  }
+}
 
 // overview.period  → { from, to }
 // overview.metrics → [
-//   { key: 'revenue',              label: 'Revenue (cents)',    value: 1_284_900 },
+//   { key: 'revenue',              label: 'Revenue (cents)',      value: 1_284_900 },
 //   { key: 'active_subscriptions', label: 'Active subscriptions', value: 212 },
-//   { key: 'meter:api_calls',      label: 'Usage · api_calls',  value: 481_230 },
+//   { key: 'meter:api_calls',      label: 'Usage · api_calls',    value: 481_230 },
 // ]
 ```
 
 Revenue is the sum of **paid** payments in the window, in cents — format at the edge, and never
 divide before you have finished adding. See [Money](/docs/payments/concepts/money).
+
+## The billing store
+
+Everything above persists through a `BillingStore`. You do not construct one: the provider resolves
+it at boot and **binds it in the container**, so it injects like any other dependency:
+
+```ts title="app/services/usage_service.ts"
+import { inject } from '@adonisjs/core'
+import { LucidBillingStore } from '@adonis-agora/payments'
+
+@inject()
+export default class UsageService {
+  constructor(private store: LucidBillingStore) {}
+}
+```
+
+The default is Lucid over the tables the configure command published — that is what makes the
+billing layer work with no configuration at all. Name it only when you want different models behind
+it:
+
+```ts title="config/payments.ts"
+import { billingStores, defineConfig } from '@adonis-agora/payments'
+
+export default defineConfig({
+  // ...
+  billing: {
+    store: billingStores.lucid({ models: { usageEventModel: MyUsageEvent } }),
+  },
+})
+```
+
+<Callout title="A custom store is reached through the service, not the container">
+`billing.store` takes any factory returning a `BillingStore`, so an app can persist somewhere else
+entirely. The container binds the `LucidBillingStore` token only when the resolved store actually is
+one — injecting that token otherwise would hand back something the annotation does not describe. For
+a custom store, read it from the service:
+
+```ts
+import { getBillingStore } from '@adonis-agora/payments/services/main'
+
+const store = getBillingStore()
+```
+</Callout>
 
 ## Mixins
 

@@ -123,18 +123,7 @@ export default class PaymentSucceededHandler {
 
 ## The happy path, end to end
 
-```text
-your app ──charge()──▶ gateway (PENDING)
-   ▲                        │
-   │  webhook (paid)        │
-   └──parseWebhook──────────┘
-       │
-       ├─ validate signature  (forged callbacks rejected)
-       ├─ ledger the event    (redeliveries are no-ops)
-       ├─ sync billing tables (billing_payments/subscriptions)
-       ├─ run your handler    (grant credits / activate)
-       └─ publish diagnostics (agora:payments:payment.succeeded)
-```
+<PaymentFlow />
 
 <Cards>
   <Card title="Getting Started" href="/docs/payments/getting-started" description="Install, configure a gateway, run the migrations, register webhooks and make your first charge." />

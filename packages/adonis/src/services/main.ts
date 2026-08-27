@@ -1,3 +1,4 @@
+import type { BillingStore } from '../billing/billing_store.js';
 import { PaymentsManager } from '../payments_manager.js';
 
 /**
@@ -18,6 +19,29 @@ export function getPayments(): PaymentsManager {
 /** Set by the provider once the manager is built. */
 export function setPayments(manager: PaymentsManager): void {
   payments = manager;
+}
+
+/**
+ * The billing store the provider resolved from `config.billing.store` — the Lucid
+ * store over the published tables unless the app configured another one.
+ *
+ * `@inject()`-ing `LucidBillingStore` covers the default case; this accessor is what
+ * reaches a **custom** store, which has no class to use as a DI token.
+ */
+let billingStore: BillingStore | undefined;
+
+export function getBillingStore(): BillingStore {
+  if (!billingStore) {
+    throw new Error(
+      '[payments] The billing store is not ready yet. Make sure the PaymentsProvider is registered, the app has booted, and `billing.enabled` is not false.',
+    );
+  }
+  return billingStore;
+}
+
+/** Set by the provider once the store is resolved. */
+export function setBillingStore(store: BillingStore): void {
+  billingStore = store;
 }
 
 export default getPayments;

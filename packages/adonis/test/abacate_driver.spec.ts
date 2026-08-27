@@ -47,8 +47,11 @@ describe('AbacateDriver', () => {
     expect(body.data.externalId).toBe('pay_1');
 
     expect(payment.gatewayId).toBe('tr_1');
-    expect(payment.pixQrCode).toBe('iVBORw0KGgo=');
-    expect(payment.pixCopiaECola).toContain('00020126580014');
+    expect(payment.pixQrCodeImage).toBe('iVBORw0KGgo=');
+    expect(payment.pixCode).toContain('00020126580014');
+    // Deprecated aliases stay populated with the same values for existing consumers.
+    expect(payment.pixQrCode).toBe(payment.pixQrCodeImage);
+    expect(payment.pixCopiaECola).toBe(payment.pixCode);
     expect(payment.hostedUrl).toBe('https://pay.abacatepay.com/tr_1');
     expect(payment.status).toBe('pending');
   });

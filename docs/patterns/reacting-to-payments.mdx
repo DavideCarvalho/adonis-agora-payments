@@ -1,0 +1,264 @@
+---
+title: Reacting to payments
+description: Where the business logic lives — the convention folder, billing.handlers in the config, a diagnostics subscriber, or a durable workflow that subscribes itself — what each does when it throws, and how to make the grant safe to run twice.
+icon: Webhook
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+The mounted webhook route validates the signature, ledgers the event and syncs the billing tables.
+What it cannot do is grant the thing the customer bought — that is yours, and it has four homes.
+
+They all run the same contract, `(event) => void | Promise<void>`. They differ in **where the code
+lives** and, much more importantly, **what happens when it throws**.
+
+| | Declared in | On throw | Reach for it when |
+| --- | --- | --- | --- |
+| Convention folder | `app/payment_handlers/<event>.ts` | ledger `failed` → retried | the default; one file per event |
+| `billing.handlers` | `config/payments.ts` | ledger `failed` → retried | you want the wiring visible in one place |
+| Diagnostics subscriber | `start/payments.ts` | **swallowed** | decoupled reactions you can afford to lose |
+| Durable workflow | `app/workflows/` | checkpointed → resumed | the grant is multi-step, slow, or must survive a deploy |
+
+<Callout type="warn" title="Only three of the four are retried">
+A throwing `onDiagnostic` subscriber does **not** fail the webhook. By the time the event is
+published it is already ledgered and the route has moved on, so nothing retries it. Use events for
+analytics, notifications and side reactions — never for the grant itself.
+</Callout>
+
+## The four, side by side
+
+The same job — a Pix payment confirmed, credits granted — written four ways.
+
+<Tabs items={['Convention folder', 'billing.handlers', 'Diagnostics', 'Durable workflow']}>
+<Tab value="Convention folder">
+
+Scaffold a file per event; the provider discovers it:
+
+```sh
+node ace make:webhook-handler payment.succeeded
+```
+
+```ts title="app/payment_handlers/payment_succeeded.ts"
+import { inject } from '@adonisjs/core'
+import type { WebhookEvent } from '@adonis-agora/payments'
+import { DateTime } from 'luxon'
+import Order from '#models/order'
+import GrantService from '#services/grant_service'
+
+@inject()
+export default class PaymentSucceededHandler {
+  static readonly eventType = 'payment.succeeded'
+
+  constructor(private grants: GrantService) {}
+
+  async handle(event: WebhookEvent): Promise<void> {
+    const orderId = (event.data as { externalReference?: string }).externalReference
+    if (!orderId) return
+
+    // The inner idempotency guard — see below.
+    const updated = await Order.query()
+      .where('id', orderId)
+      .andWhere('status', 'awaiting_payment')
+      .update({ status: 'paid', paidAt: DateTime.now() })
+
+    if (updated[0] === 0) return
+
+    await this.grants.grantFor(orderId)
+  }
+}
+```
+
+Register the codegen hook once so the folder is discovered:
+
+```ts title="adonisrc.ts"
+hooks: { init: [() => import('@adonis-agora/payments/hooks/webhook_handlers')] }
+```
+
+The class form (`static eventType` + `handle`) is resolved through the container, so constructor
+injection just works. Discovery generates a barrel at build and dev time, with a runtime scan as the
+fallback.
+
+**Throwing marks the event `failed` in the ledger and the dispatcher retries it.**
+
+</Tab>
+<Tab value="billing.handlers">
+
+The same handler, wired explicitly in the config instead of found by convention:
+
+```ts title="config/payments.ts"
+import { defineConfig, payments } from '@adonis-agora/payments'
+import PaymentSucceededHandler from '#payment_handlers/payment_succeeded'
+
+export default defineConfig({
+  default: 'asaas',
+  providers: { asaas: payments.asaas({ apiKey: env.get('ASAAS_API_KEY') }) },
+  methods: { pix: 'asaas' },
+
+  billing: {
+    dispatcher: 'durable',
+    handlers: {
+      // A DI service class — the library resolves it and calls `.handle(event)`.
+      'payment.succeeded': PaymentSucceededHandler,
+
+      // Or a plain function, for logic that needs no injection.
+      'payment.refunded': async (event) => {
+        const ref = (event.data as { externalReference?: string }).externalReference
+        if (ref) await revokeAccessFor(ref)
+      },
+    },
+  },
+})
+```
+
+Identical runtime behaviour to the folder — same contract, same retry on throw. The trade is
+discoverability: the config shows every handler at a glance, and the folder keeps each one next to
+its own tests. Pick one and stay with it; using both for the same event type means the config wins
+and the file looks live while doing nothing.
+
+</Tab>
+<Tab value="Diagnostics">
+
+Every milestone is published on the `@adonis-agora/diagnostics` bus as `agora:payments:<event>`.
+Subscribe from a preloaded file:
+
+```ts title="start/payments.ts"
+import { onDiagnostic } from '@adonis-agora/diagnostics'
+import Order from '#models/order'
+
+onDiagnostic('payments', 'payment.succeeded', async ({ payload }) => {
+  // payload.externalReference is the reference you set on the charge
+  const order = await Order.find(payload.externalReference)
+  if (order) await sendReceipt(order)
+})
+
+// Regex-free, but you can subscribe to as many as you like
+onDiagnostic('payments', 'payment.failed', ({ payload }) => {
+  metrics.increment('payments.failed', { provider: payload.provider })
+})
+```
+
+Framework-agnostic — the same call works in HTTP, workers and ace commands — and completely
+decoupled from the charge call site.
+
+<Callout type="warn" title="Fire-and-forget, by design">
+The event fires *after* the ledger has recorded the webhook. A subscriber that throws does not fail
+the webhook, is not marked failed, and is not retried. That is the right shape for a receipt email
+or a metric, and the wrong shape for granting credits.
+</Callout>
+
+</Tab>
+<Tab value="Durable workflow">
+
+When `@adonis-agora/durable` is installed, a workflow can **subscribe itself** to the diagnostics
+bus — no handler file, no config entry, no dispatch call:
+
+```ts title="app/workflows/process_payment_workflow.ts"
+import { BaseWorkflow, OnDiagnostic, type WorkflowCtx } from '@adonis-agora/durable'
+
+@OnDiagnostic({ lib: 'payments', event: 'payment.succeeded' })
+export default class ProcessPaymentWorkflow extends BaseWorkflow {
+  static workflow = { name: 'process-payment', version: '1' }
+
+  async run(ctx: WorkflowCtx, input: { externalReference?: string; gatewayId: string }) {
+    if (!input.externalReference) return { skipped: 'no reference' }
+
+    // Each step is checkpointed: a crash or deploy resumes here, it does not re-run.
+    const order = await ctx.localStep('claim-order', async () => {
+      const updated = await Order.query()
+        .where('id', input.externalReference!)
+        .andWhere('status', 'awaiting_payment')
+        .update({ status: 'paid', paidAt: DateTime.now() })
+      return updated[0] > 0 ? input.externalReference : null
+    })
+
+    if (!order) return { skipped: 'already granted' }
+
+    await ctx.localStep('grant-credits', () => grantCreditsFor(order))
+    await ctx.localStep('send-receipt', () => sendReceiptFor(order))
+
+    return { granted: order }
+  }
+}
+```
+
+The run input **is the event payload**, so `externalReference`, `gatewayId`, `amount` and `provider`
+arrive without you unpacking anything.
+
+The decorator can also widen:
+
+```ts
+@OnDiagnostic({ lib: 'payments', event: 'payment.succeeded' })  // exact
+@OnDiagnostic({ lib: 'payments', event: /^payment\./ })         // every payment.* event
+@OnDiagnostic({ lib: 'payments' })                              // every payments event
+```
+
+Prefer this over a handler that calls `dispatch()` by hand: the subscription is declared next to the
+work, and there is no second file whose only job is a one-line forward.
+
+</Tab>
+</Tabs>
+
+## The dispatcher is a separate decision
+
+Which of the four you use decides **where the code lives**. `billing.dispatcher` decides **what
+carries the webhook** — and therefore whether a retry survives a restart:
+
+```ts title="config/payments.ts"
+billing: { dispatcher: 'durable' }
+```
+
+| | Survives a restart |
+| --- | --- |
+| `'auto'` (default) | depends on what it picked — durable, then queue, then in-process |
+| `'durable'` | yes |
+| `'queue'` | yes |
+| `'in-process'` | no — 5 retries with backoff, lost on deploy |
+
+`'auto'` degrades **silently**: an app that meant to run durable and forgot to register its provider
+falls back to in-process and nothing says so. Name the backend in production. See
+[Production](/docs/payments/production).
+
+## The inner idempotency guard
+
+The [ledger](/docs/payments/concepts/idempotency) already stops a redelivery of the same event. It
+does **not** make your grant idempotent — two different events can legitimately describe the same
+fact, a reconcile can replay, a second code path can exist.
+
+The guard belongs at the database, as a conditional write:
+
+```ts
+const updated = await Order.query()
+  .where('id', orderId)
+  .andWhere('status', 'awaiting_payment')   // ← only possible once
+  .update({ status: 'paid', paidAt: DateTime.now() })
+
+if (updated[0] === 0) return   // someone else already claimed it
+```
+
+A read-then-write races itself under concurrent delivery:
+
+```ts
+// Wrong: two deliveries can both read 'awaiting_payment' before either writes.
+const order = await Order.find(orderId)
+if (order.status === 'paid') return
+order.status = 'paid'
+await order.save()
+```
+
+A unique index on the grant works just as well — `(order_id, kind)` on a credits table, an upsert,
+anything whose second execution is a no-op *at the database*.
+
+## Choosing
+
+- **Grant credits, activate a subscription, anything the customer paid for** → folder or
+  `billing.handlers`, ideally dispatching to a durable workflow. Retried on failure.
+- **Multi-step, slow, or must survive a deploy** → a durable workflow with `@OnDiagnostic`. Each step
+  checkpointed.
+- **Receipts, metrics, Slack pings, analytics** → a diagnostics subscriber. Cheap, decoupled, and
+  losing one is survivable.
+- **A response shape the mounted route cannot produce** → your own controller with
+  `new WebhookProcessor({ store, driver, handlers })`. See [Webhooks](/docs/payments/webhooks).
+
+Whatever you pick, keep the handler fast. Webhooks that hold the connection time out, and a timeout
+means a redelivery — safe, thanks to the ledger, but slow to converge.

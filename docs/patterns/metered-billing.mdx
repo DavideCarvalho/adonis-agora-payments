@@ -1,0 +1,151 @@
+---
+title: Metered billing
+description: Record consumption as it happens, roll it up per meter for a period, price it against per-meter rates with an included allowance, and charge the overage exactly once.
+icon: Gauge
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Usage-based plans split into three steps that are deliberately separate: recording, reporting and
+pricing. Each is a plain store call, so none of them needs a gateway.
+
+## 1. Record as it happens
+
+```ts title="app/services/usage_service.ts"
+import { LucidBillingStore } from '@adonis-agora/payments'
+
+// The store is a plain object over the billing models — construct it, or pass
+// your own models with `new LucidBillingStore({ usageEventModel: MyUsageEvent })`.
+const store = new LucidBillingStore()
+
+export default class UsageService {
+  async recordApiCall(subscriptionId: string) {
+    await store.recordUsage({ subscriptionId, meter: 'api_calls', quantity: 1 })
+  }
+
+  async recordStorage(subscriptionId: string, gigabytes: number) {
+    await store.recordUsage({ subscriptionId, meter: 'storage_gb', quantity: gigabytes })
+  }
+}
+```
+
+Rows land in `billing_usage_events`. Meter names are yours — the library never validates them, and
+a meter nobody prices is simply ignored later.
+
+<Callout title="One row per event, not a running total">
+Recording increments rather than a counter is what makes the period boundary meaningful: you can
+re-roll any window after the fact, and a late-arriving event lands in the period it belongs to.
+</Callout>
+
+## 2. Roll up a period
+
+```ts
+const usage = await store.usageReport({
+  subscriptionId: subscription.id,
+  from: periodStart,
+  to: periodEnd,
+})
+// [{ meter: 'api_calls', quantity: 412 }, { meter: 'storage_gb', quantity: 18 }]
+```
+
+`usageReport` also filters by `customerId` and `meter`, so the same call backs a per-customer
+dashboard or a single-meter chart.
+
+## 3. Price it
+
+`meteredBill` turns a report into money, with a per-unit rate and an optional included allowance:
+
+```ts title="app/jobs/close_billing_period.ts"
+import { meteredBillForSubscription } from '@adonis-agora/payments'
+
+const bill = await meteredBillForSubscription(store, {
+  subscriptionId: subscription.id,
+  from: periodStart,
+  to: periodEnd,
+  rates: [
+    { meter: 'api_calls', rate: 0.5, included: 1000 },  // 1000 free, then R$ 0,005 each
+    { meter: 'storage_gb', rate: 200 },                 // R$ 2,00 per GB
+  ],
+})
+
+// bill.lines → [{ meter: 'api_calls', quantity: 412, billable: 0, amount: 0 }, …]
+// bill.total → cents to charge
+```
+
+Each line carries `quantity` (what was consumed), `billable` (what exceeded the allowance) and
+`amount` (`billable × rate`, in cents). `rate` is **cents per unit** and may be fractional — `0.5` is
+half a cent per call — while the resulting `amount` is a whole number of cents.
+
+A meter with usage but no matching rate is **skipped**, not billed at zero. That is deliberate: an
+unpriced meter is usually an instrumentation meter, and silently charging for it would be worse than
+ignoring it. It also means a typo in a rate's `meter` name produces a bill of zero rather than an
+error — worth asserting on `bill.lines.length` in a test.
+
+## 4. Charge the overage
+
+```ts title="app/jobs/close_billing_period.ts"
+if (bill.total > 0) {
+  const period = periodEnd.toISODate()
+
+  await getPayments().driver('pix').charge({
+    customerId: subscription.customerId,
+    amount: bill.total,
+    description: `Consumo · ${periodStart.toISODate()} – ${period}`,
+    externalReference: `overage:${subscription.id}:${period}`,
+    idempotencyKey: `overage:${subscription.id}:${period}`,
+  })
+}
+```
+
+<Callout type="warn" title="Key both on the period, never on `now`">
+`externalReference` and `idempotencyKey` derive from the subscription and the period end — so a job
+that runs twice, or is replayed after a failure, charges **once**. A key built from a timestamp or a
+random value protects nothing.
+</Callout>
+
+## Putting it on a schedule
+
+```ts title="app/workflows/close_period_workflow.ts"
+import { BaseWorkflow, type WorkflowCtx } from '@adonis-agora/durable'
+
+export default class ClosePeriodWorkflow extends BaseWorkflow {
+  static workflow = { name: 'close-billing-period', version: '1' }
+  static schedule = { cron: '0 3 1 * *' }   // 03:00 on the 1st
+
+  async run(ctx: WorkflowCtx) {
+    const subscriptions = await ctx.localStep('list-active', () => listActiveSubscriptions())
+
+    for (const subscription of subscriptions) {
+      // One checkpointed step per subscription: a crash resumes at the one that failed
+      // instead of re-charging everyone who already succeeded.
+      await ctx.localStep(`bill-${subscription.id}`, () => billPeriodFor(subscription))
+    }
+  }
+}
+```
+
+The per-subscription step matters more than it looks: without it, a failure halfway through a
+thousand subscriptions means re-running the whole list, and only the period-derived idempotency key
+stands between you and a thousand duplicate charges. With it, the completed ones replay their saved
+result and only the failure re-executes.
+
+## Testing it
+
+The in-memory store mirrors the real one, so the whole chain runs with no database:
+
+```ts title="tests/unit/metered_bill.spec.ts"
+import { InMemoryBillingStore, meteredBillForSubscription } from '@adonis-agora/payments/testing'
+
+const store = new InMemoryBillingStore()
+await store.recordUsage({ subscriptionId: 'sub_1', meter: 'api_calls', quantity: 1400 })
+
+const bill = await meteredBillForSubscription(store, {
+  subscriptionId: 'sub_1',
+  from: start,
+  to: end,
+  rates: [{ meter: 'api_calls', rate: 0.5, included: 1000 }],
+})
+
+assert.equal(bill.lines[0].billable, 400)   // 1400 − 1000 included
+assert.equal(bill.total, 200)               // 400 × 0.5 cents
+```

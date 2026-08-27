@@ -1,0 +1,14 @@
+{
+  "title": "Patterns",
+  "icon": "BookOpen",
+  "pages": [
+    "index",
+    "pix",
+    "subscriptions",
+    "reacting-to-payments",
+    "metered-billing",
+    "marketplace-splits",
+    "recovering",
+    "dashboard"
+  ]
+}

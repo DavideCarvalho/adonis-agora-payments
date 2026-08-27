@@ -1,0 +1,145 @@
+---
+title: Billing dashboard
+description: The headless overview — revenue, active subscriptions and usage per meter from store queries alone, what each metric counts, and how to render it without leaking cents into the arithmetic.
+icon: LayoutDashboard
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+`billingOverview` is the data contract a billing dashboard renders. It is **pure store queries** — no
+gateway calls — so it is fast, works headless, and needs no network in tests.
+
+```ts title="app/controllers/billing_dashboard_controller.ts"
+import type { HttpContext } from '@adonisjs/core/http'
+import { billingOverview, LucidBillingStore } from '@adonis-agora/payments'
+import { DateTime } from 'luxon'
+
+const store = new LucidBillingStore()
+
+export default class BillingDashboardController {
+  async index({ request }: HttpContext) {
+    const from = DateTime.fromISO(request.input('from')).startOf('day')
+    const to = DateTime.fromISO(request.input('to')).endOf('day')
+
+    return billingOverview(store, { from: from.toJSDate(), to: to.toJSDate() })
+  }
+}
+```
+
+## What comes back
+
+```ts
+{
+  period: { from: Date, to: Date },
+  metrics: [
+    { key: 'revenue',              label: 'Revenue (cents)',      value: 1_284_900 },
+    { key: 'active_subscriptions', label: 'Active subscriptions', value: 212 },
+    { key: 'meter:api_calls',      label: 'Usage · api_calls',    value: 481_230 },
+    { key: 'meter:storage_gb',     label: 'Usage · storage_gb',   value: 3_042 },
+  ]
+}
+```
+
+A flat list rather than a fixed object, because the meters are yours — one entry per meter that saw
+usage in the window, keyed `meter:<name>`.
+
+| Metric | Counts |
+| --- | --- |
+| `revenue` | the sum of **paid** payments whose `paidAt` falls in the window, in cents |
+| `active_subscriptions` | subscriptions currently `active` **or** `trialing` — not windowed |
+| `meter:<name>` | quantity consumed for that meter in the window |
+
+Two details worth knowing before you put a number on a screen:
+
+<Callout type="warn" title="Revenue windows on paidAt, not on when the charge was created">
+A Pix charge created on the 31st and paid on the 1st counts toward the **second** month. That is
+almost always what you want from a revenue figure, and almost never what a `created_at` filter would
+have given you — so do not reimplement this with your own query and expect the same total.
+</Callout>
+
+<Callout type="warn" title="active_subscriptions ignores the period, and includes trials">
+It is a current count, not a historical one — the same number regardless of `from`/`to` — and a
+subscription still in its trial is counted. Label it as "now" in the UI, and split trials out
+yourself if you bill on converted subscribers:
+
+```ts
+const paying = await db
+  .from('billing_subscriptions')
+  .where('status', 'active')
+  .count('* as total')
+```
+</Callout>
+
+## Rendering it
+
+Revenue is cents. Divide once, in the formatter, and never in the arithmetic:
+
+```tsx title="app/components/billing_overview.tsx"
+const money = (cents: number) =>
+  new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cents / 100)
+
+export function BillingOverview({ overview }: { overview: BillingOverview }) {
+  return (
+    <dl>
+      {overview.metrics.map((metric) => (
+        <div key={metric.key}>
+          <dt>{metric.label}</dt>
+          <dd>
+            {metric.key === 'revenue'
+              ? money(metric.value)
+              : metric.value.toLocaleString('pt-BR')}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+```
+
+See [Money](/docs/payments/concepts/money) for why the division belongs there and nowhere else.
+
+## Going beyond it
+
+`billingOverview` is deliberately small — the metrics almost every dashboard opens with. Anything
+richer is an ordinary query against tables you own:
+
+```ts
+// Revenue by provider, to see what each gateway is actually carrying
+const byProvider = await db
+  .from('billing_payments')
+  .where('status', 'paid')
+  .whereBetween('created_at', [from, to])
+  .select('provider')
+  .sum('amount as total')
+  .groupBy('provider')
+
+// New versus churned subscriptions in the window
+const churn = await db
+  .from('billing_subscriptions')
+  .whereBetween('ends_at', [from, to])
+  .count('* as churned')
+```
+
+## Testing it
+
+The in-memory store makes the whole thing a unit test:
+
+```ts title="tests/unit/billing_overview.spec.ts"
+import { billingOverview } from '@adonis-agora/payments'
+import { InMemoryBillingStore } from '@adonis-agora/payments/testing'
+
+const store = new InMemoryBillingStore()
+await store.savePayment({
+  gatewayId: 'pi_1',
+  provider: 'stripe',
+  status: 'paid',
+  amount: 1990,
+  currency: 'brl',
+  paidAt: new Date(),
+})
+
+const overview = await billingOverview(store, { from, to })
+const revenue = overview.metrics.find((metric) => metric.key === 'revenue')
+
+assert.equal(revenue?.value, 1990)
+```

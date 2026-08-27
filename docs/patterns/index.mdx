@@ -1,0 +1,65 @@
+---
+title: Patterns
+description: A cookbook of the flows this library exists for — Pix and subscriptions per gateway, where business logic lives, metered billing, marketplace splits, recovery and a dashboard.
+icon: BookOpen
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+Each page below is a complete flow you can adapt, with the gateway differences shown side by side
+rather than averaged into a generic example — because the differences are the part that costs you an
+afternoon.
+
+## The two habits every pattern assumes
+
+**Set `externalReference` on everything.** It is the string the gateway echoes back, and it is the
+only thing tying a confirmation to your own row. A charge created without one produces a webhook your
+handler cannot route, and the failure is a silent `return`. See
+[The payment lifecycle](/docs/payments/concepts/lifecycle).
+
+**Put business logic in a handler, not next to the `charge()` call.** The charge returns `PENDING`;
+nothing has been paid. Granting anything there gives the product away to whoever starts a checkout
+and walks off. See [Reacting to payments](/docs/payments/patterns/reacting-to-payments).
+
+<Callout title="Every example is integer cents">
+`1990` is R$ 19,90. Never a float, never a decimal — see [Money](/docs/payments/concepts/money).
+</Callout>
+
+## The patterns
+
+<Cards>
+  <Card title="Pix" href="/docs/payments/patterns/pix" description="A one-off Pix charge through Asaas, Woovi or AbacatePay — what each one needs, and what comes back." />
+  <Card title="Subscriptions" href="/docs/payments/patterns/subscriptions" description="Recurring billing per gateway — trials, tokenized cards, Pix Automático, upgrades and cancellation." />
+  <Card title="Reacting to payments" href="/docs/payments/patterns/reacting-to-payments" description="The four homes for business logic — the folder, the config, diagnostics, and a durable workflow — and how to choose." />
+  <Card title="Metered billing" href="/docs/payments/patterns/metered-billing" description="Record usage as it happens, price the period, charge the overage exactly once." />
+  <Card title="Marketplace splits" href="/docs/payments/patterns/marketplace-splits" description="Share a charge across wallets with Asaas splits or Woovi subaccounts." />
+  <Card title="Recovering" href="/docs/payments/patterns/recovering" description="Dunning a failed payment, refunding, and reconciling after an outage." />
+  <Card title="Billing dashboard" href="/docs/payments/patterns/dashboard" description="The headless overview — revenue, active subscriptions and usage per meter." />
+</Cards>
+
+## Picking a gateway per flow
+
+The routing table is where these decisions land. A common Brazilian setup splits by what each
+gateway is actually best at:
+
+```ts title="config/payments.ts"
+export default defineConfig({
+  default: 'asaas',
+  providers: {
+    woovi: payments.woovi({ appId: env.get('WOOVI_APP_ID') }),
+    stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY') }),
+    asaas: payments.asaas({ apiKey: env.get('ASAAS_API_KEY') }),
+  },
+  methods: {
+    pix: 'woovi',           // best Pix rates
+    credit_card: 'stripe',  // best card tooling
+    boleto: 'asaas',
+    debit_card: 'asaas',
+    undefined: 'asaas',
+  },
+})
+```
+
+Your services then name the **method**, never the gateway — so moving Pix from Woovi to Asaas is one
+line of config. See [Routing](/docs/payments/concepts/routing).

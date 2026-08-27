@@ -10,18 +10,20 @@ import { Callout } from 'fumadocs-ui/components/callout';
 gateway calls — so it is fast, works headless, and needs no network in tests.
 
 ```ts title="app/controllers/billing_dashboard_controller.ts"
+import { inject } from '@adonisjs/core'
 import type { HttpContext } from '@adonisjs/core/http'
 import { billingOverview, LucidBillingStore } from '@adonis-agora/payments'
 import { DateTime } from 'luxon'
 
-const store = new LucidBillingStore()
-
+@inject()
 export default class BillingDashboardController {
+  constructor(private store: LucidBillingStore) {}
+
   async index({ request }: HttpContext) {
     const from = DateTime.fromISO(request.input('from')).startOf('day')
     const to = DateTime.fromISO(request.input('to')).endOf('day')
 
-    return billingOverview(store, { from: from.toJSDate(), to: to.toJSDate() })
+    return billingOverview(this.store, { from: from.toJSDate(), to: to.toJSDate() })
   }
 }
 ```

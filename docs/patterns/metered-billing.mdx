@@ -12,22 +12,25 @@ pricing. Each is a plain store call, so none of them needs a gateway.
 ## 1. Record as it happens
 
 ```ts title="app/services/usage_service.ts"
+import { inject } from '@adonisjs/core'
 import { LucidBillingStore } from '@adonis-agora/payments'
 
-// The store is a plain object over the billing models — construct it, or pass
-// your own models with `new LucidBillingStore({ usageEventModel: MyUsageEvent })`.
-const store = new LucidBillingStore()
-
+@inject()
 export default class UsageService {
+  constructor(private store: LucidBillingStore) {}
+
   async recordApiCall(subscriptionId: string) {
-    await store.recordUsage({ subscriptionId, meter: 'api_calls', quantity: 1 })
+    await this.store.recordUsage({ subscriptionId, meter: 'api_calls', quantity: 1 })
   }
 
   async recordStorage(subscriptionId: string, gigabytes: number) {
-    await store.recordUsage({ subscriptionId, meter: 'storage_gb', quantity: gigabytes })
+    await this.store.recordUsage({ subscriptionId, meter: 'storage_gb', quantity: gigabytes })
   }
 }
 ```
+
+The provider binds the store in the container, so it injects like any other dependency — you never
+construct it. See [The billing store](/docs/payments/billing#the-billing-store).
 
 Rows land in `billing_usage_events`. Meter names are yours — the library never validates them, and
 a meter nobody prices is simply ignored later.

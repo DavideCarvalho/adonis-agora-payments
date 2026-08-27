@@ -1,3 +1,5 @@
+import type { BillingStore } from './billing/billing_store.js';
+import type { BillingModels } from './billing/lucid_billing_store.js';
 import type { WebhookHandler } from './billing/webhook_processor.js';
 import type { PaymentsDriver } from './driver.js';
 import type { InvoiceProvider } from './invoice/invoice_provider.js';
@@ -13,6 +15,20 @@ export type PaymentsDriverFactory = (ctx: PaymentsContext) => Promise<PaymentsDr
 
 /** A lazy factory that builds an {@link InvoiceProvider} (Focus, Tecnospeed, eNotas, PlugNotas). */
 export type InvoiceProviderFactory = (ctx: InvoiceContext) => Promise<InvoiceProvider>;
+
+/**
+ * A lazy factory that builds the {@link BillingStore} the billing layer persists through.
+ * Omit `billing.store` entirely and the Lucid store over the published tables is used.
+ */
+export type BillingStoreFactory = (
+  ctx: BillingStoreContext,
+) => BillingStore | Promise<BillingStore>;
+
+/** Context handed to the billing-store factory when the provider resolves it. */
+export interface BillingStoreContext {
+  /** Lazy access to the package's own config. */
+  config: () => PaymentsConfig;
+}
 
 /** `config.billing.handlers` — normalized webhook event type → handler. */
 export type BillingHandlers = Record<string, WebhookHandler | WebhookHandlerService>;
@@ -206,6 +222,21 @@ export interface PaymentsConfig {
     /** Queue name the `'queue'` dispatcher enqueues to. Defaults to the queue's default. */
     queue?: string;
     /**
+     * Where the billing layer persists — subscriptions, payments, the idempotency
+     * ledger and usage events.
+     *
+     * Omit it: the Lucid store over the published billing tables is the default, and
+     * the provider binds it in the container so services can `@inject()` it.
+     *
+     * ```ts
+     * import { billingStores } from '@adonis-agora/payments'
+     *
+     * // Same as omitting it, but with your own models:
+     * store: billingStores.lucid({ models: { usageEventModel: MyUsageEvent } })
+     * ```
+     */
+    store?: BillingStoreFactory;
+    /**
      * Business webhook handlers run INSIDE the lib-mounted `/payments/webhook/:provider`
      * route, by the {@link WebhookProcessor}. Errors mark the event failed in the ledger
      * and trigger the dispatcher's retry. An alternative to subscribing to the
@@ -260,6 +291,19 @@ export const payments = {
     return async (ctx) => {
       const { WooviDriver } = await import('./drivers/woovi.js');
       return new WooviDriver(ctx, config);
+    };
+  },
+};
+
+/**
+ * Built-in billing-store factories. The Lucid store is the default, so this only
+ * needs naming when you swap the models it reads and writes.
+ */
+export const billingStores = {
+  lucid(config: { models?: BillingModels } = {}): BillingStoreFactory {
+    return async () => {
+      const { LucidBillingStore } = await import('./billing/lucid_billing_store.js');
+      return new LucidBillingStore(config.models ?? {});
     };
   },
 };

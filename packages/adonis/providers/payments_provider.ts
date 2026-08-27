@@ -1,7 +1,9 @@
 import { pathToFileURL } from 'node:url';
 import type { HttpContext } from '@adonisjs/core/http';
 import type { ApplicationService, HttpRouterService } from '@adonisjs/core/types';
+import type { BillingStore } from '../src/billing/billing_store.js';
 import { LucidBillingStore } from '../src/billing/lucid_billing_store.js';
+import { isInjectableAsLucid, resolveBillingStore } from '../src/billing/resolve_store.js';
 import { WebhookDispatcher } from '../src/billing/webhook_dispatcher.js';
 import type { WebhookDispatchMode } from '../src/billing/webhook_dispatcher.js';
 import { WebhookProcessor } from '../src/billing/webhook_processor.js';
@@ -9,7 +11,7 @@ import type { WebhookHandler } from '../src/billing/webhook_processor.js';
 import type { BillingHandlers, PaymentsConfig } from '../src/define_config.js';
 import { InvoiceManager, resolveInvoiceProviders } from '../src/invoice/invoice_manager.js';
 import { PaymentsManager, resolveDrivers } from '../src/payments_manager.js';
-import { setPayments } from '../src/services/main.js';
+import { setBillingStore, setPayments } from '../src/services/main.js';
 import {
   type DiscoveredWebhookHandler,
   type WebhookHandlersBarrel,
@@ -70,7 +72,7 @@ export default class PaymentsProvider {
   }
 
   async #buildBillingLayer(config: PaymentsConfig): Promise<void> {
-    const store = new LucidBillingStore();
+    const store = await this.#resolveBillingStore(config);
     const handlers = await this.#resolveAllHandlers(config.billing?.handlers);
     const processor = new WebhookProcessor({
       store,
@@ -83,6 +85,24 @@ export default class PaymentsProvider {
       // (i.e. the durable provider is registered) — not merely installed.
       durableAvailable: () => this.#isDurableAvailable(),
     });
+  }
+
+  /**
+   * The billing store from `config.billing.store`, defaulting to Lucid over the
+   * published tables.
+   *
+   * The resolved store is published on `services/main` (which reaches any store) and,
+   * when it is the Lucid one, bound in the container so a service can `@inject()` it
+   * like any other dependency.
+   */
+  async #resolveBillingStore(config: PaymentsConfig): Promise<BillingStore> {
+    const store = await resolveBillingStore(config);
+
+    setBillingStore(store);
+    if (isInjectableAsLucid(store)) {
+      this.app.container.singleton(LucidBillingStore, () => store);
+    }
+    return store;
   }
 
   /**

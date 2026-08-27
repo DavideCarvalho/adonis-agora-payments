@@ -115,6 +115,9 @@ when it throws*:
 | Diagnostics events | `onDiagnostic(...)` | **swallowed** (fire-and-forget) | decoupled reactions, observability |
 | Own controller | your route | you control it | full response-shape control |
 
+Each is worked through — with per-gateway code and a durable workflow that subscribes itself via
+`@OnDiagnostic` — in [Reacting to payments](/docs/payments/patterns/reacting-to-payments).
+
 ### 1. Convention folder `app/payment_handlers/` (default)
 
 Drop a file per event; the provider auto-discovers it. Scaffold:

@@ -1,0 +1,239 @@
+---
+title: Subscriptions
+description: Recurring billing per gateway — tokenized cards on Asaas and Stripe, Pix Automático on Woovi, what each one needs to actually start charging, plus trials, upgrades and cancellation.
+icon: RefreshCw
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+A subscription is created at the gateway; the billing layer keeps `billing_subscriptions` in sync
+from the webhooks after that. What you own is creating it correctly — and the gateways differ enough
+here that a generic example would be wrong for all of them.
+
+## The shape that is the same everywhere
+
+```ts title="app/services/subscribe_service.ts"
+const subscription = await getPayments().driver('credit_card').createSubscription({
+  customerId: user.billingCustomerId!,
+  planId: 'plan_pro',
+  amount: 4990,                          // integer cents
+  cycle: 'MONTHLY',
+  externalReference: `sub:${local.id}`,  // ← echoed on the subscription AND its charges
+})
+```
+
+<Callout type="warn" title="Set externalReference on the subscription, not just on charges">
+A subscription generates a webhook per charge, month after month. Without a reference on the
+subscription, the charge for month three arrives carrying gateway ids and nothing of yours.
+</Callout>
+
+## What each gateway needs
+
+<Tabs items={['Asaas', 'Woovi', 'Stripe', 'AbacatePay']}>
+<Tab value="Asaas">
+
+Native recurring billing, and the most complete of the four: card, Pix or boleto, with a real
+transparent-checkout card flow.
+
+```ts title="app/services/subscribe_service.ts"
+const subscription = await getPayments().driver('credit_card').createSubscription({
+  customerId: user.billingCustomerId!,
+  planId: 'plan_pro',
+  amount: 4990,
+  cycle: 'MONTHLY',
+  method: 'credit_card',
+  description: 'Plano Pro — mensal',
+  startDate: '2026-09-01',                 // ← becomes nextDueDate
+  externalReference: `sub:${local.id}`,
+  card: {
+    token: cardTokenFromFrontend,          // tokenized in the browser
+    holder: {
+      name: user.fullName,
+      email: user.email,
+      cpfCnpj: user.cpfCnpj,
+      postalCode: user.postalCode,
+      addressNumber: user.addressNumber,
+      phone: user.phone,
+    },
+    remoteIp: request.ip(),
+  },
+})
+```
+
+**`startDate` is what makes it charge.** It maps to Asaas' `nextDueDate`; without it the subscription
+exists and generates nothing. This is the single most common "my subscription never charges" cause —
+see [Troubleshooting](/docs/payments/troubleshooting).
+
+**The card never touches your server.** The frontend tokenizes with Asaas, you send the token plus
+the holder block the gateway requires (it is also what the NFS-e needs).
+
+**`externalReference` is propagated to every installment.** The webhook for the third monthly charge
+still carries `sub:<id>`, so it routes home with no parsing. This is Asaas' best feature for this
+library's model.
+
+**Cancellation is immediate** — Asaas has no period-end flag, so `atPeriodEnd` is ignored:
+
+```ts
+await driver.cancelSubscription(subscription.gatewayId)
+```
+
+If you sell "access until the end of the period", keep that end date in your own row and enforce it
+yourself.
+
+</Tab>
+<Tab value="Woovi">
+
+**Pix Automático — recurring Pix, no card.** The payer approves a recurring authorization and each
+cycle generates a charge against it.
+
+```ts title="app/services/subscribe_service.ts"
+const subscription = await getPayments().driver('pix').createSubscription({
+  customerId: user.billingCustomerId ?? '',
+  planId: 'plan_pro',
+  amount: 4990,
+  cycle: 'MONTHLY',
+  startDate: '2026-09-15',        // ← only the day is used: dayGenerateCharge = 15
+  externalReference: `sub:${local.id}`,
+  // Woovi builds the subscription with an INLINE customer, not a customer id.
+  customer: {
+    name: user.fullName,
+    email: user.email,
+    taxId: user.cpfCnpj,
+  },
+})
+```
+
+**The customer is inline.** Woovi does not take a customer id here — it wants `{ name, email, taxId }`
+on the call. The driver resolves it from `input.customer`, falling back to looking up the gateway
+customer; if neither has a name and taxId it throws.
+
+**`startDate` becomes a day of month.** Only the day is read, as `dayGenerateCharge` — pass
+`'2026-09-15'` and every charge generates on the 15th. Omitted, it defaults to the 1st.
+
+**Journey 3 by default.** The driver sends `chargeType: 'DYNAMIC'` — pay-on-approval, where each
+charge is generated and the payer approves it. Override through metadata if your account is set up
+differently:
+
+```ts
+metadata: { chargeType: 'FIXED', dayDue: 5 }
+```
+
+**No card, and no refunds.** If you need either, route them to a different gateway.
+
+</Tab>
+<Tab value="Stripe">
+
+SDK-backed recurring billing, and the one place `planId` means a real gateway object:
+
+```ts title="app/services/subscribe_service.ts"
+const subscription = await getPayments().driver('credit_card').createSubscription({
+  customerId: user.billingCustomerId!,
+  planId: 'price_1234',            // ← a Stripe Price id, not your own plan name
+  trialDays: 14,
+  externalReference: `sub:${local.id}`,
+})
+```
+
+**`planId` is a Stripe Price id.** On the Brazilian gateways it is your own label and `amount` is
+what matters; here it identifies the price object and `amount` is redundant.
+
+**Your reference lands in `metadata.external_reference`** on the subscription, and is read back off
+the webhook payload.
+
+**Cancellation supports the period end**, unlike Asaas:
+
+```ts
+await driver.cancelSubscription(subscription.gatewayId, { atPeriodEnd: true })
+```
+
+</Tab>
+<Tab value="AbacatePay">
+
+Recurring is supported, but **the transparent checkout is not** — the recurring charge does not go
+through the inline PIX/Boleto flow that one-off charges use.
+
+```ts title="app/services/subscribe_service.ts"
+const subscription = await getPayments().driver('pix').createSubscription({
+  customerId: user.billingCustomerId!,
+  planId: 'plan_pro',
+  amount: 4990,
+  cycle: 'MONTHLY',
+  externalReference: `sub:${local.id}`,
+  customer: { name: user.fullName, email: user.email, taxId: user.cpfCnpj },
+})
+```
+
+Webhook events are `subscription.completed`, `subscription.renewed` and `subscription.cancelled`,
+normalized onto the usual `subscription.*` types.
+
+For a card-backed subscription, route `credit_card` elsewhere — AbacatePay has no card support and
+the manager will tell you so before any request goes out.
+
+</Tab>
+</Tabs>
+
+## The differences at a glance
+
+| | Asaas | Woovi | Stripe | AbacatePay |
+| --- | --- | --- | --- | --- |
+| Card subscriptions | yes, tokenized | **no** | yes | no |
+| Pix subscriptions | yes | Pix Automático | — | yes |
+| Customer | id, required | **inline object** | id | id + fiscal data |
+| `planId` means | your label | your label | a **Stripe Price id** | your label |
+| First charge needs | **`startDate`** | `startDate` → day of month | `trialDays` optional | — |
+| Reference on each charge | **propagated** | on the subscription | metadata | metadata |
+| Cancel at period end | no — immediate | — | yes | — |
+
+## Trials
+
+`trialDays` delays the first charge:
+
+```ts
+await driver.createSubscription({ customerId, planId: 'plan_pro', amount: 4990, trialDays: 14 })
+```
+
+The gateway reports the trial window back on the subscription, and the billing layer mirrors it into
+`billing_subscriptions.trial_ends_at` on `subscription.created`/`updated`. Read your own row rather
+than recomputing dates — it is what the webhooks keep true.
+
+## Upgrading mid-cycle
+
+Update the gateway, then let the webhook confirm before you apply the change locally:
+
+```ts title="app/services/subscribe_service.ts"
+await getPayments().driver('credit_card').updateSubscription(subscription.gatewayId, {
+  amount: 9990,
+  description: 'Pro → Business',
+})
+
+await local.merge({ pendingPlanId: 'plan_business' }).save()
+```
+
+```ts title="app/payment_handlers/subscription_updated.ts"
+static readonly eventType = 'subscription.updated'
+
+async handle(event: WebhookEvent) {
+  const ref = (event.data as { externalReference?: string }).externalReference
+  const local = await Subscription.findBy('id', stripPrefix(ref))
+  if (!local?.pendingPlanId) return
+
+  await local.merge({ planId: local.pendingPlanId, pendingPlanId: null }).save()
+}
+```
+
+Applying the new plan on the API response instead would hand the customer the upgrade even when the
+gateway rejected the change.
+
+## Cancelling
+
+```ts
+const driver = getPayments().driver(subscription.provider)
+getPayments().assertCapability(driver, 'subscriptions')
+
+await driver.cancelSubscription(subscription.gatewayId, { atPeriodEnd: true })
+```
+
+`atPeriodEnd` is honoured by Stripe and ignored by Asaas, which cancels immediately. Revoke access on
+the `subscription.canceled` webhook rather than on this call — see
+[Reacting to payments](/docs/payments/patterns/reacting-to-payments).

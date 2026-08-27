@@ -1,0 +1,153 @@
+---
+title: Recovering
+description: When a payment does not go through — dunning a failed subscription charge, refunding where the gateway supports it, and reconciling the billing tables after an outage.
+icon: RotateCcw
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Three flows that all start from something going wrong, and all end at the same place: your tables
+telling the truth again.
+
+## Dunning — a subscription charge failed
+
+`payment.failed` arrives with a reason. Escalate rather than suspending on the first failure — cards
+expire, banks decline transiently, and a customer suspended by a temporary decline is a support
+ticket:
+
+```ts title="app/payment_handlers/payment_failed.ts"
+import { inject } from '@adonisjs/core'
+import type { WebhookEvent } from '@adonis-agora/payments'
+
+@inject()
+export default class PaymentFailedHandler {
+  static readonly eventType = 'payment.failed'
+
+  constructor(private access: AccessService, private mail: MailService) {}
+
+  async handle(event: WebhookEvent): Promise<void> {
+    const data = event.data as { externalReference?: string; reason?: string }
+    const subscription = await Subscription.findBy('id', stripPrefix(data.externalReference))
+    if (!subscription) return
+
+    const attempts = subscription.failedAttempts + 1
+    await subscription.merge({ failedAttempts: attempts, status: 'past_due' }).save()
+
+    if (attempts >= 3) {
+      await this.access.suspend(subscription.id)
+      await this.mail.send(new SubscriptionSuspended(subscription, data.reason))
+    } else {
+      await this.mail.send(new PaymentFailed(subscription, attempts))
+    }
+  }
+}
+```
+
+<Callout type="warn" title="Reset the counter on recovery">
+Without a reset in the `payment.succeeded` handler, a customer who fails once in March and once in
+July is one decline away from suspension forever.
+
+```ts
+await subscription.merge({ failedAttempts: 0, status: 'active' }).save()
+```
+</Callout>
+
+## Refunds
+
+Not every gateway has them. Check the capability before you render the button, not after the user
+clicks it:
+
+```ts title="app/services/refund_service.ts"
+const payments = getPayments()
+const driver = payments.driver(payment.provider)
+
+payments.assertCapability(driver, 'refunds')   // throws on Woovi/OpenPix
+
+const refund = await driver.refund(payment.gatewayId, partialAmountCents)
+```
+
+`refund(gatewayId)` refunds in full; passing an amount refunds partially, in cents.
+
+The refund **confirms by webhook** like everything else — revoke on `payment.refunded`, not on the
+API response:
+
+```ts title="app/payment_handlers/payment_refunded.ts"
+static readonly eventType = 'payment.refunded'
+
+async handle(event: WebhookEvent) {
+  const ref = (event.data as { externalReference?: string }).externalReference
+  if (!ref) return
+
+  const updated = await Order.query()
+    .where('id', ref)
+    .andWhere('status', 'paid')      // the inner guard, again
+    .update({ status: 'refunded' })
+
+  if (updated[0] === 0) return
+  await this.grants.revokeFor(ref)
+}
+```
+
+Gateways without refunds:
+
+| Gateway | Refunds |
+| --- | --- |
+| Stripe | yes |
+| Asaas | yes |
+| AbacatePay | yes |
+| Woovi / OpenPix | **no** — no refund API |
+
+For Woovi, a refund is an out-of-band Pix transfer you make yourself; record it in your own tables
+and revoke access there, because no webhook is coming.
+
+## Reconciling after an outage
+
+Webhooks are reliable, not infallible. After a deploy that dropped events, a gateway incident, or a
+change someone made by hand in a dashboard, `payments:sync` pulls paid invoices back into the billing
+tables:
+
+```sh
+node ace payments:sync --all
+node ace payments:sync --customer=cus_123 --provider=stripe
+```
+
+<Callout type="warn" title="Sync repairs billing tables, not your business logic">
+It upserts into `billing_payments`. It does **not** run your handlers, so credits are not granted and
+subscriptions are not activated by it. After a large reconcile, diff against your own tables — or
+replay the events from the gateway dashboard so the normal path runs and the handlers fire.
+</Callout>
+
+Two queries worth running on a schedule to notice the gap before a customer does:
+
+```sql
+-- Events the dispatcher gave up on
+SELECT provider, type, error, count(*)
+FROM billing_webhook_events
+WHERE status = 'failed' AND created_at > now() - interval '1 day'
+GROUP BY 1, 2, 3;
+
+-- Charges that never confirmed
+SELECT count(*) FROM billing_payments
+WHERE status = 'pending' AND created_at < now() - interval '2 hours';
+```
+
+A `failed` event is **claimable again**, so once the underlying cause is fixed, replaying it from the
+gateway dashboard re-runs it properly. See [Idempotency](/docs/payments/concepts/idempotency).
+
+## The signal that catches a broken endpoint
+
+The hardest failure to notice is the one where nothing errors: your webhook URL stops being
+reachable, charges keep being created, and no confirmation ever arrives. Neither table looks wrong on
+its own.
+
+Alert on the **ratio**:
+
+```ts title="start/payments.ts"
+import { onDiagnostic } from '@adonis-agora/diagnostics'
+
+onDiagnostic('payments', 'charge.created', () => metrics.increment('payments.charge_created'))
+onDiagnostic('payments', 'payment.succeeded', () => metrics.increment('payments.confirmed'))
+```
+
+A `charge.created` rate that holds while `payment.succeeded` falls off a cliff is a broken endpoint,
+and nothing else in the system will tell you. See [Production](/docs/payments/production).

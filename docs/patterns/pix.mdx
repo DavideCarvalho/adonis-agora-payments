@@ -1,0 +1,225 @@
+---
+title: Pix
+description: A one-off Pix charge end to end — the shared shape, then exactly what Asaas, Woovi and AbacatePay each require, what each returns, and the errors each one throws when something is missing.
+icon: QrCode
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+Pix is the flow most Brazilian apps start with, and the three gateways that serve it disagree on
+almost every detail: whether a customer is required, where your reference goes, what the QR looks
+like coming back. The library normalizes the **result**; it cannot normalize away what each gateway
+*demands* on the way in.
+
+## The shape that is the same everywhere
+
+```ts title="app/services/checkout_service.ts"
+import { ensureCustomer, getPayments } from '@adonis-agora/payments'
+
+export async function startPixCheckout(user: User, plan: Plan) {
+  const driver = getPayments().driver('pix')
+
+  const order = await Order.create({
+    userId: user.id,
+    planId: plan.id,
+    total: plan.priceCents,
+    status: 'awaiting_payment',
+  })
+
+  const payment = await driver.charge({
+    customerId: user.billingCustomerId!,
+    amount: order.total,               // integer cents
+    description: plan.name,
+    externalReference: order.id,       // ← how the webhook finds this order
+    idempotencyKey: `order:${order.id}`,
+  })
+
+  return {
+    order,
+    qrImage: payment.pixQrCode,        // base64 image, when the gateway returns one
+    copyPaste: payment.pixCopiaECola,  // the BR code to show as text
+  }
+}
+```
+
+`payment.status` is `'pending'`. It stays pending until the gateway calls your webhook — see
+[Reacting to payments](/docs/payments/patterns/reacting-to-payments).
+
+## What each gateway needs
+
+<Tabs items={['Asaas', 'Woovi', 'AbacatePay']}>
+<Tab value="Asaas">
+
+**Requires a customer.** A charge without `customerId` throws before any request goes out:
+
+```text
+[payments] Asaas requires a customer for every charge.
+```
+
+```ts title="app/services/checkout_service.ts"
+const driver = getPayments().driver('pix')   // routed to asaas
+
+// Reuse the stored gateway customer, or create one.
+const customer = await ensureCustomer(driver, user.billingCustomerId, {
+  name: user.fullName,
+  email: user.email,
+  taxId: user.cpfCnpj,
+})
+if (customer.id !== user.billingCustomerId) {
+  user.billingCustomerId = customer.id
+  await user.save()
+}
+
+const payment = await driver.charge({
+  customerId: customer.id,
+  amount: 1990,
+  description: 'Plano Pro',
+  externalReference: order.id,
+  // Asaas charges have a due date. Default: 7 days out.
+  metadata: { dueDate: '2026-09-15' },
+})
+```
+
+**Your reference** goes to Asaas' own `externalReference` field, and — this is the one worth
+remembering — it is **propagated to every installment** of a subscription's charges. See
+[Subscriptions](/docs/payments/patterns/subscriptions).
+
+**The QR takes a second call.** Asaas does not return the Pix payload when the charge is created, so
+the driver fetches `/payments/:id/pixQrCode` right after and fills both fields for you:
+
+```ts
+payment.pixCopiaECola   // the BR code
+payment.pixQrCode       // base64 image
+```
+
+If that follow-up fails the charge still succeeds — you get a `pending` payment with no QR, which is
+worth handling in the UI rather than assuming.
+
+**Due date** defaults to 7 days from now. Override it with `metadata.dueDate` as `YYYY-MM-DD`.
+
+</Tab>
+<Tab value="Woovi">
+
+**No customer required.** Woovi's model is charge-first; `customerId` is optional and, when given, is
+the Woovi customer id.
+
+```ts title="app/services/checkout_service.ts"
+const payment = await getPayments().driver('pix').charge({
+  amount: 1990,
+  description: 'Plano Pro',
+  externalReference: order.id,   // ← becomes Woovi's correlationID
+})
+```
+
+**Your reference is the `correlationID`.** This is Woovi's primary identifier for a charge, not a
+side field: it comes back on the charge and on every webhook, and it is what you route on. The driver
+maps `externalReference` → `correlationID`, falling back to `idempotencyKey`, and finally to a
+generated value.
+
+<Callout type="warn" title="Always pass externalReference on Woovi">
+Without it (and without `idempotencyKey`) the driver generates a throwaway `correlationID`. The
+charge works and the webhook arrives carrying an id that means nothing to you — the confirmation has
+no way home.
+</Callout>
+
+**Creating a customer first** is still possible when you want Woovi to hold the payer's data:
+
+```ts
+const customer = await driver.createCustomer({
+  name: user.fullName,
+  email: user.email,
+  taxId: user.cpfCnpj,     // sent as taxID { type: 'BR:CPF' }
+})
+```
+
+**No refunds.** Woovi/OpenPix has no refund API — `refund()` throws. Check before you offer the
+button:
+
+```ts
+getPayments().assertCapability(driver, 'refunds')   // throws on Woovi
+```
+
+</Tab>
+<Tab value="AbacatePay">
+
+**Requires a customer, and the payer's name + taxId.** AbacatePay's charge is a *transparent
+checkout* (`POST /v2/transparents/create`) — PIX or Boleto inline, no redirect — and the gateway
+needs to know who is paying:
+
+```ts title="app/services/checkout_service.ts"
+const payment = await getPayments().driver('pix').charge({
+  customerId: user.billingCustomerId!,
+  amount: 1990,
+  description: 'Plano Pro',
+  externalReference: order.id,
+  // The payer's fiscal data — required by the transparent checkout.
+  customer: { name: user.fullName, taxId: user.cpfCnpj, email: user.email },
+})
+```
+
+The `customer` block is resolved first; when it is absent the driver looks the gateway customer up
+and uses its `name`/`taxId`. If neither has them, it throws with the fix in the message:
+
+```text
+[payments] AbacatePay transparent checkout needs the payer name + taxId — pass
+`customer` on the charge, or create the gateway customer with them.
+```
+
+So either create the gateway customer complete:
+
+```ts
+await driver.createCustomer({ name: user.fullName, email: user.email, taxId: user.cpfCnpj })
+```
+
+…or pass `customer` per charge. Passing it per charge is cheaper — it skips a lookup.
+
+**Pix only, plus boleto.** No credit card: routing `credit_card` here throws at the manager, not at
+the gateway. See [Routing](/docs/payments/concepts/routing).
+
+**What comes back** is the QR inline — `brCodeBase64` → `pixQrCode`, `brCode` → `pixCopiaECola` — or,
+for boleto, a hosted URL in `hostedUrl`.
+
+</Tab>
+</Tabs>
+
+## The differences at a glance
+
+| | Asaas | Woovi | AbacatePay |
+| --- | --- | --- | --- |
+| Customer required | yes | no | yes |
+| Payer name + taxId required | no | no | **yes** |
+| Your reference lands in | `externalReference` | `correlationID` | `externalId` |
+| Propagated to subscription charges | **yes** | — | — |
+| QR returned by the create call | no — a second call fetches it | yes | yes |
+| Due date | 7 days, `metadata.dueDate` to override | — | — |
+| Refunds | yes | **no** | yes |
+| Other methods | boleto, card, debit | — | boleto |
+
+## Showing the QR
+
+The normalized fields are the same regardless of which gateway served the charge, which is the point:
+
+```tsx title="app/components/pix_checkout.tsx"
+export function PixCheckout({ qrImage, copyPaste }: { qrImage?: string; copyPaste?: string }) {
+  return (
+    <>
+      {qrImage && <img alt="QR code Pix" src={`data:image/png;base64,${qrImage}`} />}
+      {copyPaste && (
+        <button type="button" onClick={() => navigator.clipboard.writeText(copyPaste)}>
+          Copiar código Pix
+        </button>
+      )}
+    </>
+  )
+}
+```
+
+Both are optional in the type because a gateway can legitimately fail to return one. Render the
+copy-paste code as the fallback — it always works, and it is what most people use anyway.
+
+## Then wait for the webhook
+
+Nothing above moved money. The order stays `awaiting_payment` until a `payment.succeeded` arrives —
+see [Reacting to payments](/docs/payments/patterns/reacting-to-payments) for where that logic lives
+and how to make it safe to run twice.

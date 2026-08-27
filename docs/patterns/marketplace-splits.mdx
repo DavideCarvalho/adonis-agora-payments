@@ -1,0 +1,112 @@
+---
+title: Marketplace splits
+description: Share a charge across recipients — Asaas splits by percent or fixed amount, Woovi subaccounts keyed by Pix key — and the integer arithmetic that keeps a computed split summing to the total.
+icon: Split
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+
+When the money does not all belong to you — a marketplace, a platform taking a cut, a booking site
+paying a venue — the gateway can divide the charge at settlement instead of you moving money
+afterwards.
+
+<Tabs items={['Asaas', 'Woovi']}>
+<Tab value="Asaas">
+
+Pass `split` on the charge. Each entry names a wallet and its share, by percent, by fixed amount, or
+both:
+
+```ts title="app/services/checkout_service.ts"
+const payment = await getPayments().driver('pix').charge({
+  customerId: buyer.billingCustomerId!,
+  amount: 10_000,                       // R$ 100,00
+  description: `Pedido ${order.id}`,
+  externalReference: order.id,
+  split: [
+    { walletId: seller.asaasWalletId, percentualValue: 90 },   // 90% to the seller
+    { walletId: partner.asaasWalletId, fixedValue: 500 },      // R$ 5,00 to the partner
+  ],
+})
+```
+
+`percentualValue` is a percent (0–100). `fixedValue` is **cents**, like every other amount in this
+library — the driver converts it to the decimal Asaas expects, so you never write `5.00`.
+
+Whatever is not split stays with the account that owns the API key. The split applies to the charge,
+so it flows through to a subscription's generated charges too.
+
+</Tab>
+<Tab value="Woovi">
+
+Woovi models recipients as **subaccounts**, created ahead of time and keyed by a Pix key rather than
+attached per charge:
+
+```ts title="app/services/marketplace_service.ts"
+import { WooviDriver } from '@adonis-agora/payments/drivers/woovi'
+
+const driver = getPayments().driver('woovi') as WooviDriver
+
+const subAccount = await driver.createSubAccount({
+  pixKey: seller.pixKey,
+  name: seller.displayName,
+})
+
+seller.wooviSubAccountId = subAccount.id
+await seller.save()
+```
+
+```ts
+const existing = await driver.findSubAccount(seller.wooviSubAccountId)
+```
+
+The cast is deliberate: `createSubAccount`/`findSubAccount` are Woovi-specific and sit outside the
+shared `PaymentsDriver` contract, because no other gateway has the concept. That is the honest way to
+reach a gateway feature the abstraction does not cover — see
+[Custom providers](/docs/payments/custom-providers) for the other options.
+
+</Tab>
+</Tabs>
+
+## Computing a split yourself
+
+When the shares come from your own pricing rather than a flat percentage, do the arithmetic in
+integers and give the rounding remainder to one recipient:
+
+```ts title="app/services/split_service.ts"
+import type { Money } from '@adonis-agora/payments'
+
+export function splitAmount(total: Money, shares: number[]): Money[] {
+  const parts = shares.map((share) => Math.floor(total * share))
+  const remainder = total - parts.reduce((sum, part) => sum + part, 0)
+  parts[0] += remainder      // the remainder has to land somewhere — pick deliberately
+  return parts
+}
+
+splitAmount(1000, [0.333, 0.333, 0.334])   // [334, 333, 333] — sums to exactly 1000
+```
+
+<Callout type="warn" title="Never round each share independently">
+`Math.round(total * share)` per recipient can sum to more or less than the total, and the gateway
+will reject the split — or worse, accept it and settle a cent you did not have. Floor everything, then
+assign the remainder once. See [Money](/docs/payments/concepts/money).
+</Callout>
+
+## Reconciling after the fact
+
+Splits settle at the gateway, so your `billing_payments` row records the **full** charge — the split
+is in `payment.payload`, not in the normalized fields. If you need per-recipient reporting, write your
+own rows when you create the charge:
+
+```ts
+await SplitLine.createMany(
+  split.map((entry) => ({
+    orderId: order.id,
+    walletId: entry.walletId,
+    amount: entry.fixedValue ?? Math.floor(order.total * (entry.percentualValue! / 100)),
+  })),
+)
+```
+
+Then confirm them on `payment.succeeded`, the same way you confirm the order itself — see
+[Reacting to payments](/docs/payments/patterns/reacting-to-payments).

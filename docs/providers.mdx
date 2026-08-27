@@ -1,6 +1,7 @@
 ---
 title: Providers
 description: Gateway specifics for Stripe, AbacatePay, Asaas and Woovi — supported methods, webhook events, subscriptions, externalReference routing and invoice behavior.
+icon: Landmark
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
@@ -156,5 +157,5 @@ await payments.driver('pix').charge({
 Every gateway can echo back a string you choose. Set it to your local payment id
 (`payment.id`, `sub:<subscriptionId>`), and the webhook's normalized
 `event.data.externalReference` routes the confirmation back to the right row — no parsing
-gateway-specific payloads. See [Webhooks → externalReference](./webhooks#routing-payments-back-to-your-records-externalreference).
+gateway-specific payloads. See [Webhooks → externalReference](/docs/payments/webhooks#routing-payments-back-to-your-records-externalreference).
 </Callout>

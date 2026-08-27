@@ -1,6 +1,7 @@
 ---
 title: Custom providers
 description: Write a custom payment or invoice provider as a plain config factory, using the exported building blocks — httpRequest, toDecimal, emitInvoiceIfRequested, ensureCustomer, webhook security helpers.
+icon: Puzzle
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
@@ -240,6 +241,6 @@ and the rest of the library (routing, invoices, webhooks) works unchanged.
 <Callout type="info" title="Drivers are just objects">
 Because a driver is a plain object (interface + declared metadata), testing a custom driver
 is trivial: instantiate it, call the methods, assert the normalized shapes. No mock
-framework needed for the contract itself — the [testing kit](./testing) covers the billing
+framework needed for the contract itself — the [testing kit](/docs/payments/testing) covers the billing
 layer on top of it.
 </Callout>

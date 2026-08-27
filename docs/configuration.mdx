@@ -1,6 +1,7 @@
 ---
 title: Configuration
 description: The config/payments.ts reference — named providers built with lazy factories, method routing with capability checks, the invoice section, and the billing layer (durable webhook processing, business handlers).
+icon: Settings2
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
@@ -66,7 +67,7 @@ ecosystem's conventional names. It's a convenience default, not a contract: pass
 `apiKey`/`webhookToken`/… explicitly and your naming wins.
 
 The webhook credentials are what make the mounted route **enforce** signatures — see
-[Webhooks → Validation](./webhooks#validation-per-provider).
+[Webhooks → Validation](/docs/payments/webhooks#validation-per-provider).
 
 ## Methods — routing a payment method to a provider
 
@@ -111,7 +112,7 @@ invoice: {
 ```
 
 A charge then asks for emission with `invoice: true` (default provider) or a named one.
-See [Invoices](./invoices) for the full option surface.
+See [Invoices](/docs/payments/invoices) for the full option surface.
 
 ## Billing — the subscription layer
 
@@ -121,13 +122,10 @@ When enabled, the provider wires the store, the processor and the dispatcher.
 ```ts title="config/payments.ts"
 billing: {
   enabled: true,
-  /**
-   * 'auto' — process webhooks through @adonis-agora/durable when its provider is
-   * registered in the app, falling back to an in-process dispatcher with retries.
-   * true — require durable (throw when missing).
-   * false — always use the in-process dispatcher.
-   */
-  durable: 'auto',
+  /** How a validated webhook is processed — name the backend you actually run. */
+  dispatcher: 'durable',
+  /** Queue name for the 'queue' dispatcher. Defaults to the queue's own default. */
+  queue: 'webhooks',
   /**
    * Business webhook handlers run inside the mounted route. A DI service class (the
    * lib calls its `.handle(event)`) or a plain function.
@@ -139,19 +137,37 @@ billing: {
 }
 ```
 
-### `durable` — webhooks survive restarts
+### `dispatcher` — how a webhook gets processed
 
-Webhook processing is exactly the kind of work that must not be lost when a deploy or a
-crash interrupts it. `'auto'` (the default) uses `@adonis-agora/durable` when its engine is
-actually resolvable in the app — durable checkpoints every step, so a webhook half-way
-through a handler resumes where it stopped instead of re-running. Without durable, the
-fallback is an in-process dispatcher with exponential-backoff retries.
+Webhook processing is exactly the kind of work that must not be lost when a deploy or a crash
+interrupts it. Four backends:
+
+| Value | Behaviour |
+| --- | --- |
+| `'auto'` (default) | `@adonis-agora/durable` when its provider is registered; else `@adonisjs/queue` when installed; else in-process |
+| `'durable'` | a durable workflow run — **throws when durable is missing** |
+| `'queue'` | an `@adonisjs/queue` job — throws when the queue provider is missing |
+| `'in-process'` | inline, retrying in the background with exponential backoff |
+
+`'auto'` is the friendly default and it is also silent: an app that expected durable and forgot to
+register its provider degrades to in-process without saying so. In production, name the backend —
+then a missing dependency is a boot error rather than a surprise. See
+[Production](/docs/payments/production).
+
+The in-process fallback retries 5 times with exponential backoff (500 ms base, capped at 30 s),
+which covers a transient failure but does **not** survive a process restart. Durable and queue do.
+
+<Callout title="`durable` is the legacy alias">
+`durable: 'auto' | true | false` still works and maps onto `dispatcher` — `true` is `'durable'`,
+`false` is `'in-process'`. New config should use `dispatcher`, which is the only way to reach the
+queue backend.
+</Callout>
 
 ### `handlers` — where your business logic runs
 
 The route validates the signature, syncs the billing tables, then runs **your** logic. Two
 equivalent authoring forms (plus a third — the `app/payment_handlers/` folder — covered
-in [Webhooks](./webhooks#running-your-business-logic)):
+in [Webhooks](/docs/payments/webhooks#running-your-business-logic)):
 
 - A **DI service class** — the lib resolves it from the container and calls its
   `handle(event)` method. Inject whatever you need; no boilerplate:
@@ -180,5 +196,5 @@ handler failures surface instead of being silently swallowed.
 <Callout type="info" title="The money-flow pattern">
 Webhooks must respond fast. The recommended shape is: the handler only **dispatches a
 durable workflow** (durable owns retry + exactly-once) and returns — never doing the heavy
-grant inline. See [Webhooks → The money-flow pattern](./webhooks#the-money-flow-pattern-handlers-dispatch-to-durable).
+grant inline. See [Webhooks → The money-flow pattern](/docs/payments/webhooks#the-money-flow-pattern-handlers-dispatch-to-durable).
 </Callout>

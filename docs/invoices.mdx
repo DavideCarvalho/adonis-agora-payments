@@ -1,6 +1,7 @@
 ---
 title: Invoices
 description: Emit invoices attached to a charge or subscription, through an invoice provider that is fully independent of the payment gateway.
+icon: FileText
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
@@ -125,5 +126,5 @@ invoice: {
 <Callout type="info" title="More providers, or your own">
 The roadmap includes Tecnospeed, eNotas and PlugNotas adapters. Until then — or for any
 other provider — custom providers are plain factories implementing the `InvoiceProvider`
-contract (`emit(input)`, `find(id)`). See [Custom providers](./custom-providers).
+contract (`emit(input)`, `find(id)`). See [Custom providers](/docs/payments/custom-providers).
 </Callout>

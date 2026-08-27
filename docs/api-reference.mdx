@@ -1,0 +1,397 @@
+---
+title: API reference
+description: Every config option, driver method, exported helper, domain type, event and command — from source.
+icon: BookMarked
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+The complete public surface of `@adonis-agora/payments`.
+
+## `config/payments.ts`
+
+```ts
+defineConfig({
+  default?: string
+  providers?: Record<string, PaymentsDriverFactory>
+  methods?: Partial<Record<PaymentMethodName, string>>
+
+  invoice?: {
+    default?: string
+    providers?: Record<string, InvoiceProviderFactory>
+    defaults?: { service?: {...}; tax?: Record<string, unknown> }
+  }
+
+  billing?: {
+    enabled?: boolean
+    dispatcher?: 'auto' | 'durable' | 'queue' | 'in-process'
+    queue?: string
+    durable?: 'auto' | boolean       // legacy alias for dispatcher
+    handlers?: Record<string, WebhookHandler | WebhookHandlerService>
+  }
+})
+```
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `default` | first configured provider | used by `driver()` with no argument |
+| `providers` | — | name → lazy factory; the SDK loads only when called |
+| `methods` | — | method → provider name, checked against `supportedMethods` |
+| `billing.enabled` | `true` | `false` skips the store, processor and dispatcher wiring |
+| `billing.dispatcher` | `'auto'` | name the backend explicitly in production |
+| `billing.queue` | the queue's default | only used by the `'queue'` dispatcher |
+| `billing.handlers` | `{}` | normalized event type → handler or DI service class |
+
+`defineConfig` is a typed identity — every option is checked as you write it.
+
+### Driver factories
+
+```ts
+payments.stripe({ apiKey?, currency?, webhookSecret? })
+payments.abacate({ apiKey?, publicKey?, webhookSecret? })
+payments.asaas({ apiKey?, sandbox?, webhookToken? })
+payments.woovi({ appId?, baseUrl?, webhookSecret?, webhookPublicKey? })
+```
+
+| Driver | Env fallbacks |
+| --- | --- |
+| Stripe | `STRIPE_KEY`, `STRIPE_WEBHOOK_SECRET` |
+| AbacatePay | `ABACATE_API_KEY`, `ABACATE_PUBLIC_KEY` |
+| Asaas | `ASAAS_API_KEY`, `ASAAS_WEBHOOK_ACCESS_TOKEN` (or `ASAAS_WEBHOOK_TOKEN`) |
+| Woovi | `WOOVI_APP_ID`, `WOOVI_WEBHOOK_SECRET`, `WOOVI_WEBHOOK_PUBLIC_KEY` |
+
+The env names are a convenience for when you pass nothing — not a contract. Pass the value and your
+own naming wins. `sandbox` defaults to `NODE_ENV !== 'production'`; `currency` defaults to `'brl'`.
+
+### Invoice provider factories
+
+```ts
+invoice.focus({ token?, baseUrl? })
+invoice.enotas({ apiKey?, baseUrl? })
+invoice.plugnotas({ apiKey?, baseUrl? })
+invoice.asaas({ apiKey?, sandbox? })
+invoice.tecnospeed({ token?, baseUrl? })
+```
+
+Env fallbacks: `FOCUS_NFE_TOKEN`, `ENOTAS_API_KEY`, `PLUGNOTAS_API_KEY`, `ASAAS_API_KEY`,
+`TECNOSPEED_TOKEN`.
+
+## `PaymentsManager`
+
+```ts
+import { getPayments } from '@adonis-agora/payments/services/main'
+
+const payments = getPayments()
+```
+
+| Method | Returns |
+| --- | --- |
+| `driver(methodOrName?)` | `PaymentsDriver` — by method, by provider name, or the default |
+| `invoice(name?)` | `InvoiceProvider` — throws when none is configured |
+| `assertCapability(driver, capability)` | `void` — throws when the driver lacks it |
+
+`capability` is `'refunds' \| 'invoices' \| 'subscriptions'`.
+
+Also exported: `resolveDrivers(config, invoices?)` — builds the driver map from a config, for tests
+and custom bootstraps.
+
+## `PaymentsDriver`
+
+```ts
+interface PaymentsDriver {
+  readonly provider: string
+  readonly supportedMethods: readonly PaymentMethodName[]
+  readonly capabilities?: { refunds?: boolean; invoices?: boolean; subscriptions?: boolean }
+
+  createCustomer(input: CreateCustomerInput): Promise<Customer>
+  findCustomer(customerId: string): Promise<Customer | null>
+  updateCustomer(customerId: string, input: UpdateCustomerInput): Promise<Customer>
+
+  charge(input: ChargeInput): Promise<Payment>
+  findPayment(gatewayId: string): Promise<Payment | null>
+  refund(paymentGatewayId: string, amount?: Money): Promise<Refund>
+
+  createCheckout(input: CheckoutInput): Promise<CheckoutSession>
+
+  createSubscription(input: CreateSubscriptionInput): Promise<Subscription>
+  cancelSubscription(gatewayId: string, options?: { atPeriodEnd?: boolean }): Promise<Subscription>
+  updateSubscription(gatewayId: string, input: UpdateSubscriptionInput): Promise<Subscription>
+  findSubscription(gatewayId: string): Promise<Subscription | null>
+
+  listInvoices(customerId: string): Promise<Invoice[]>
+
+  parseWebhook(rawBody: string, headers: Record<string, string | string[] | undefined>): WebhookEvent
+}
+```
+
+### `ChargeInput`
+
+```ts
+{
+  amount: Money                       // required — integer cents
+  customerId?: string
+  currency?: string
+  description?: string
+  method?: string
+  paymentMethodId?: string
+  card?: CardInput
+  customer?: { name?: string; taxId?: string; email?: string }   // the payer's fiscal data
+  idempotencyKey?: string             // guards the OUTBOUND call
+  externalReference?: string          // routes the INBOUND webhook to your row
+  split?: Array<{ walletId: string; percentualValue?: number; fixedValue?: number }>
+  invoice?: boolean | string | InvoiceOptions
+  metadata?: Record<string, unknown>
+}
+```
+
+### `CreateSubscriptionInput`
+
+```ts
+{
+  customerId: string
+  planId: string
+  amount?: Money                      // required by the BR gateways
+  cycle?: 'WEEKLY' | 'BIWEEKLY' | 'MONTHLY' | 'QUARTERLY' | 'SEMIANNUALLY' | 'YEARLY'
+  method?: string
+  description?: string
+  trialDays?: number
+  startDate?: string                  // ISO date — required by Asaas
+  card?: CardInput
+  customer?: { name?: string; email?: string; taxId?: string }
+  externalReference?: string
+  invoice?: boolean | string | InvoiceOptions
+  metadata?: Record<string, unknown>
+}
+```
+
+### `CardInput` and `CheckoutInput`
+
+```ts
+interface CardInput {
+  token: string                       // tokenized in the browser
+  holder?: { name; email; cpfCnpj; postalCode; addressNumber; phone }
+  remoteIp?: string
+}
+
+interface CheckoutInput {
+  amount: Money
+  successUrl: string
+  customerId?: string
+  currency?: string
+  description?: string
+  cancelUrl?: string
+  planId?: string
+  trialDays?: number
+  idempotencyKey?: string
+  invoice?: boolean | string | InvoiceOptions
+  metadata?: Record<string, unknown>
+}
+```
+
+## Domain types
+
+```ts
+type Money = number         // integer, smallest currency unit
+type Currency = string      // lowercase ISO 4217
+interface MoneyAmount { amount: Money; currency: Currency }
+
+type BillingStatus = 'pending' | 'paid' | 'failed' | 'refunded' | 'canceled' | 'disputed'
+type SubscriptionStatus = 'trialing' | 'active' | 'past_due' | 'incomplete' | 'canceled' | 'ended'
+type PaymentMethodType = 'card' | 'pix' | 'boleto' | 'debit_card' | 'unknown'
+type PaymentMethodName = 'pix' | 'credit_card' | 'debit_card' | 'boleto' | 'undefined'
+
+interface Payment {
+  id: string
+  gatewayId: string
+  provider: string
+  amount: MoneyAmount
+  status: BillingStatus
+  customerId?: string
+  method?: PaymentMethodType
+  payload: Record<string, unknown>    // the untouched gateway response
+  createdAt: string
+  paidAt?: string
+  pixQrCode?: string
+  pixCopiaECola?: string
+  hostedUrl?: string
+  subscriptionId?: string
+  invoice?: Invoice
+}
+
+interface Subscription {
+  id: string; gatewayId: string; provider: string; customerId: string
+  status: SubscriptionStatus; planId: string; amount?: MoneyAmount
+  trialEndsAt?: string; endsAt?: string
+  currentPeriodStart?: string; currentPeriodEnd?: string
+  payload: Record<string, unknown>; createdAt: string
+}
+
+interface Invoice {
+  id: string; gatewayId: string; provider: string
+  status: 'draft' | 'open' | 'paid' | 'void' | 'uncollectible'
+        | 'issued' | 'pending' | 'failed' | 'canceled'
+  amount: MoneyAmount; createdAt: string
+  customerId?: string; subscriptionId?: string
+  number?: string; key?: string; hostedPdfUrl?: string; issuedAt?: string
+  payload: Record<string, unknown>
+}
+
+interface WebhookEvent<T = unknown> {
+  id: string                          // stable — the idempotency key
+  provider: string
+  type: string
+  createdAt?: string
+  data: T                             // normalized
+  raw: Record<string, unknown>        // untouched
+}
+
+interface Customer { id: string; email?: string; name?: string; taxId?: string; metadata?: Record<string, unknown> }
+interface Refund { id: string; gatewayId: string; provider: string; amount: MoneyAmount; status: 'succeeded' | 'pending' | 'failed'; createdAt: string }
+interface CheckoutSession { id: string; gatewayId: string; provider: string; url: string; status: 'open' | 'complete' | 'expired'; amount?: MoneyAmount; subscriptionId?: string; customerId?: string }
+```
+
+### `InvoiceOptions`
+
+```ts
+{
+  provider?: string
+  service?: { description?: string; code?: string; cityServiceCode?: string }
+  tax?: Record<string, unknown>
+  customer?: { name?: string; taxId?: string; email?: string; address?: Record<string, unknown> }
+  metadata?: Record<string, unknown>
+}
+```
+
+## Webhook processing
+
+```ts
+class WebhookProcessor {
+  constructor(options: {
+    store: BillingStore
+    driver?: PaymentsDriver
+    handlers?: Record<string, WebhookHandler>
+  })
+
+  /** false ⇒ redelivery, nothing ran. Throws ⇒ ledger marked failed. */
+  process(event: WebhookEvent): Promise<boolean>
+}
+
+type WebhookHandler = (event: WebhookEvent) => void | Promise<void>
+```
+
+Normalized event types: `payment.succeeded`, `payment.failed`, `payment.refunded`,
+`payment.updated`, `subscription.created`, `subscription.updated`, `subscription.canceled`.
+
+### `BillingStore`
+
+```ts
+interface BillingStore {
+  saveSubscription(sub): Promise<SubscriptionRow>
+  findSubscriptionByGatewayId(gatewayId): Promise<SubscriptionRow | null>
+
+  savePayment(payment): Promise<PaymentRow>
+  findPaymentByGatewayId(gatewayId): Promise<PaymentRow | null>
+
+  recordWebhookEvent(event): Promise<WebhookEventRow | null>   // null ⇒ redelivery
+  markWebhookProcessed(id): Promise<void>
+  markWebhookFailed(id, error): Promise<void>
+
+  recordUsage(event): Promise<UsageEventRow>
+  usageReport(query): Promise<Array<{ meter: string; quantity: number }>>
+
+  revenue(query: { from?: Date; to?: Date }): Promise<number>
+  countActiveSubscriptions(): Promise<number>
+}
+```
+
+<Callout title="recordWebhookEvent claims a failed event again">
+`null` means in flight or already processed — a redelivery. An event whose previous attempt
+**failed** is claimed again and returned, which is what lets a retry actually re-run it. See
+[Idempotency](/docs/payments/concepts/idempotency).
+</Callout>
+
+Implementations: `LucidBillingStore` / `lucidBillingStore()`, and `InMemoryBillingStore` from
+`@adonis-agora/payments/testing`.
+
+## Billing helpers
+
+```ts
+billingOverview(store, { from: Date; to: Date }): Promise<BillingOverview>
+// → { period, metrics: [{ key, label, value }] }
+//   revenue (cents) · active_subscriptions · meter:<name> per meter
+
+meteredBill(usage, rates): MeteredBill
+meteredBillForSubscription(store, { subscriptionId, from, to, rates }): Promise<MeteredBill>
+
+interface MeterRate     { meter: string; rate: number; included?: number }
+interface MeteredBillLine { meter: string; quantity: number; billable: number; amount: number }
+interface MeteredBill   { lines: MeteredBillLine[]; total: number }
+```
+
+Usage for a meter with no matching rate is ignored rather than billed at zero.
+
+Mixins: `withBillable()`, `withSubscription()`, `withPayment()`, `withUsageEvent()`,
+`withWebhookEvent()`.
+
+## Building blocks for custom drivers
+
+```ts
+httpRequest<T>(path, options: HttpRequestOptions): Promise<T>
+headerValue(headers, name): string | undefined
+isNotFound(error): boolean
+
+toDecimal(cents: Money): number
+fromDecimal(value: number): Money
+
+ensureCustomer(driver, existingId, input): Promise<Customer>
+emitInvoice(ctx, options): Promise<Invoice>
+emitInvoiceIfRequested(ctx, input, payment, driver): Promise<void>
+```
+
+Webhook security helpers (from `@adonis-agora/payments/webhook_security`): `safeCompare`,
+`verifyHmacSignature`, `verifyRsaSha256Signature`, `requireMatchingCredential`.
+
+See [Custom providers](/docs/payments/custom-providers).
+
+## Diagnostics
+
+```ts
+PAYMENTS_DIAGNOSTIC_EVENTS          // the runtime catalog
+publishPayments(event, payload)
+claimPaymentsDiagnostics()
+isPaymentsDiagnosticClaimed(event)
+tracePayments(...)
+```
+
+Events: `charge.created`, `charge.refunded`, `subscription.created`, `subscription.updated`,
+`subscription.canceled`, `payment.succeeded`, `payment.failed`, `payment.refunded`,
+`payment.updated`, `invoice.emitted`, `webhook.received`, `webhook.processed`, `webhook.failed`.
+See [Diagnostics](/docs/payments/diagnostics).
+
+## Testing kit
+
+```ts
+import { FakePaymentsDriver, InMemoryBillingStore, MutableClock } from '@adonis-agora/payments/testing'
+
+new FakePaymentsDriver({ provider?, webhookEvents? })
+//   .chargeCalls, .refundCalls, … — every call recorded
+new InMemoryBillingStore()
+new MutableClock()   // .advance(ms)
+```
+
+See [Testing](/docs/payments/testing).
+
+## Routes and commands
+
+| Route | Purpose |
+| --- | --- |
+| `POST /payments/webhook/:provider` | mounted by the provider; validates, ledgers, syncs, dispatches |
+
+| Command | Flags |
+| --- | --- |
+| `payments:webhook` | `--provider=<name>` · `--create` (Stripe) |
+| `payments:sync` | `--customer=<id>` · `--all` · `--provider=<name>` |
+| `make:billable <model>` | |
+| `make:webhook-handler <event>` | |
+
+See [CLI](/docs/payments/cli).

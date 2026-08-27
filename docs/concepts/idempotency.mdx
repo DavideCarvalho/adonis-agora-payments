@@ -1,0 +1,131 @@
+---
+title: Idempotency
+description: Why gateways redeliver, what the ledger guarantees and what it does not, why the event is recorded before any work runs, how a failed event is retried, and where your own inner guard belongs.
+icon: ShieldCheck
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Every gateway redelivers webhooks. Not as an error path — as normal operation:
+
+- your endpoint timed out, or answered non-2xx;
+- a deploy dropped the connection mid-request;
+- someone hit "resend" in the dashboard;
+- an ops script replayed a day of events after an outage.
+
+So "trust only the webhook" is only a workable rule if receiving the same webhook twice is safe. That
+is what the ledger is for.
+
+## The ordering is the guarantee
+
+`billing_webhook_events` is keyed by the **gateway's** event id, and it is written **before any work
+runs**:
+
+```text
+event arrives
+  └─ recordWebhookEvent(event.id)
+       ├─ already there, not failed?  →  stop. return false. nothing else happens.
+       └─ claimed
+            ├─ built-in sync
+            ├─ your handler
+            └─ mark processed
+```
+
+Because the claim happens first, a redelivery never reaches the sync and never reaches your handler.
+The idempotency is a property of the *order*, not of anything the handler does.
+
+```ts
+const first  = await processor.process(event)   // true  — processed
+const second = await processor.process(event)   // false — redelivery, no-op
+```
+
+That boolean is the whole contract, and it is worth asserting in your tests.
+
+## A failed event is claimable again
+
+There are three ledger states, and the difference between two of them is what makes retries work:
+
+| Status | Meaning | A new attempt |
+| --- | --- | --- |
+| `received` | claimed, in flight | is a redelivery — refused |
+| `processed` | finished successfully | is a redelivery — refused |
+| `failed` | the previous attempt threw | **claims it again and re-runs** |
+
+Without that last row, the first failure would seal the ledger and every retry — in-process or
+durable — would short-circuit on the claim and silently do nothing, which looks exactly like a
+webhook that was never delivered.
+
+So a throwing handler is not a lost event: it marks the ledger `failed`, and the dispatcher's retry
+picks it back up. Errors surface instead of being swallowed.
+
+## What the ledger does not guarantee
+
+It is the **outer** defence, and it is not the only one you need.
+
+- **It does not protect against two different event ids for the same fact.** A gateway that sends
+  `PAYMENT_RECEIVED` and later `PAYMENT_CONFIRMED` for one payment sends two distinct ids, and both
+  are legitimately new.
+- **It does not protect a handler with side effects outside your database.** An email sent before a
+  later step throws is sent again on the retry.
+- **It does not make your grant idempotent.** It makes the *event* processed once, which is not the
+  same as making `credits += 100` safe.
+
+The inner defence is a guard in your own logic, and it should be a database constraint rather than a
+read-then-write:
+
+```ts
+// Outer: the ledger already stopped the redelivery.
+// Inner: the transition itself is only possible once.
+const updated = await Order.query()
+  .where('id', orderId)
+  .andWhere('status', 'awaiting_payment')   // ← the guard
+  .update({ status: 'paid' })
+
+if (updated[0] === 0) return   // already paid; nothing to grant
+
+await grantCredits(orderId)
+```
+
+A conditional update, a unique index on `(order_id, kind)` for the grant, an upsert — anything whose
+second execution is a no-op *at the database*. Defence in depth, not redundancy: the two layers fail
+in different ways.
+
+<Callout type="warn" title="Diagnostics subscribers get no ledger protection at all">
+By the time `agora:payments:payment.succeeded` is published, the event is already ledgered and the
+route has moved on. A throwing `onDiagnostic` subscriber does not fail the webhook and is not
+retried. Use events for reactions you can afford to lose — and handlers, or a durable workflow, for
+anything you cannot. See [Diagnostics](/docs/payments/diagnostics).
+</Callout>
+
+## The outbound half — `idempotencyKey`
+
+The ledger protects what comes *in*. `idempotencyKey` protects what goes *out*: reusing it on a
+charge must not create a second charge at the gateway.
+
+```ts
+await driver.charge({
+  customerId,
+  amount: order.total,
+  idempotencyKey: `order:${order.id}:attempt:1`,
+  externalReference: order.id,
+})
+```
+
+Derive it from something stable, not from a timestamp or a random value — a key that changes on every
+retry protects nothing. And keep it distinct from `externalReference`: one guards against duplicate
+charges, the other routes webhooks back to your record. See
+[The payment lifecycle](/docs/payments/concepts/lifecycle).
+
+## Testing it
+
+This is the property most worth a test, and it is one line:
+
+```ts
+const processor = new WebhookProcessor({ store, driver, handlers })
+
+expect(await processor.process(event)).toBe(true)
+expect(await processor.process(event)).toBe(false)   // redelivery
+expect(granted).toHaveLength(1)                       // and it did not double-grant
+```
+
+See [Testing](/docs/payments/testing).

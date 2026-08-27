@@ -1,0 +1,190 @@
+---
+title: Production
+description: The operational checklist — webhook secrets that must not be optional, choosing a dispatcher, responding fast, sandbox flags, reconciliation, what to watch, and the deploy-day failure modes.
+icon: ServerCog
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Everything in the quickstart runs against a sandbox with an in-process dispatcher. This page is the
+gap between that and money moving.
+
+## Set every webhook credential
+
+This is the one that must not be skipped.
+
+The library treats signature verification as **opt-in for the gateways where signing is optional**
+(Asaas, AbacatePay, Woovi) so that local development works without configuring a dashboard. In
+production that same leniency means an **unauthenticated endpoint**: anyone who can reach the URL
+can POST a payload claiming a payment happened, and your handler will grant it.
+
+```ts title="config/payments.ts"
+providers: {
+  asaas: payments.asaas({
+    apiKey: env.get('ASAAS_API_KEY'),
+    webhookToken: env.get('ASAAS_WEBHOOK_TOKEN'),        // ← not optional in production
+  }),
+  woovi: payments.woovi({
+    appId: env.get('WOOVI_APP_ID'),
+    webhookPublicKey: env.get('WOOVI_WEBHOOK_PUBLIC_KEY'),
+  }),
+  stripe: payments.stripe({
+    apiKey: env.get('STRIPE_KEY'),
+    webhookSecret: env.get('STRIPE_WEBHOOK_SECRET'),     // Stripe always requires it
+  }),
+}
+```
+
+Make them required in your env validation so a deploy without them fails at boot rather than at the
+first forged callback:
+
+```ts title="start/env.ts"
+ASAAS_WEBHOOK_TOKEN: Env.schema.string(),
+STRIPE_WEBHOOK_SECRET: Env.schema.string(),
+```
+
+For Woovi, prefer `webhookPublicKey` (RSA-SHA256) over the deprecated per-webhook HMAC. When both
+are set the public key wins and the HMAC is ignored. See
+[Webhooks → Validation](/docs/payments/webhooks#validation-per-provider).
+
+## Turn off sandbox deliberately
+
+`sandbox` on the Asaas drivers defaults to `NODE_ENV !== 'production'`. That is convenient and it is
+implicit — a staging environment running with `NODE_ENV=production` talks to the **real** gateway.
+Be explicit where it matters:
+
+```ts
+asaas: payments.asaas({
+  apiKey: env.get('ASAAS_API_KEY'),
+  sandbox: env.get('PAYMENTS_SANDBOX', false),
+}),
+```
+
+Use different API keys per environment regardless. A sandbox key pointed at production fails loudly;
+a production key pointed at staging charges real cards.
+
+## Choose a dispatcher on purpose
+
+`billing.dispatcher` decides how a validated webhook is processed:
+
+| Value | Behaviour |
+| --- | --- |
+| `'auto'` (default) | durable when its provider is registered; else `@adonisjs/queue` when installed; else in-process |
+| `'durable'` | a durable workflow run — **throws at boot when durable is missing** |
+| `'queue'` | an `@adonisjs/queue` job — throws when the queue provider is missing |
+| `'in-process'` | inline, with exponential-backoff retries in the background |
+
+`'auto'` is the friendly default and it is also **silent**: an app that expected durable and forgot
+to register its provider degrades to in-process and never says so. In production, name the backend
+you actually run:
+
+```ts title="config/payments.ts"
+billing: { dispatcher: 'durable' }
+```
+
+Then a missing durable provider is a boot error, which is where you want to find out.
+
+<Callout title="What in-process retries do and do not survive">
+The in-process dispatcher retries in the background with exponential backoff — 5 attempts, 500 ms
+base, capped at 30 s. That covers a transient database or gateway failure. It does **not** survive a
+process restart: a deploy in the middle of the backoff window drops the pending retries. Durable
+and queue backends do. Choose accordingly for money paths.
+</Callout>
+
+## Respond fast
+
+A webhook endpoint that holds the connection while a grant runs is a webhook endpoint that times
+out, and a timeout means the gateway redelivers — which is safe, thanks to the
+[ledger](/docs/payments/concepts/idempotency), but wasteful and slow to converge.
+
+The handler's job is to **hand off**:
+
+```ts
+async handle(event: WebhookEvent) {
+  await ProcessPaymentWorkflow.dispatch({ externalReference: ref }, { runId: `pay:${event.id}` })
+}
+```
+
+Keep out of the handler: sending email, calling third-party APIs, generating PDFs, anything that
+takes seconds. Those belong in the workflow or job the handler dispatches.
+
+## Watch the right events
+
+Every milestone is on the [diagnostics bus](/docs/payments/diagnostics), which is where alerting
+belongs. Three are worth paging on:
+
+```ts title="start/payments.ts"
+import { onDiagnostic } from '@adonis-agora/diagnostics'
+
+// A handler threw. The ledger says failed and the dispatcher is retrying.
+onDiagnostic('payments', 'webhook.failed', ({ payload }) => {
+  logger.error({ event: payload }, 'payments webhook failed')
+})
+
+// Payments failing in a cluster means a gateway incident, not a customer problem.
+onDiagnostic('payments', 'payment.failed', ({ payload }) => {
+  metrics.increment('payments.failed', { provider: payload.provider })
+})
+```
+
+The signal that is hardest to see and most worth building: **charges created without a matching
+confirmation**. A `charge.created` rate that stays healthy while `payment.succeeded` falls off a
+cliff is a broken webhook endpoint, and nothing else in the system will tell you. Alert on the ratio,
+not on either number.
+
+Two queries worth having as a scheduled check:
+
+```sql
+-- Events stuck in `failed` — the dispatcher exhausted its retries
+SELECT provider, type, count(*) FROM billing_webhook_events
+WHERE status = 'failed' AND created_at > now() - interval '1 day'
+GROUP BY 1, 2;
+
+-- Charges that never confirmed
+SELECT count(*) FROM billing_payments
+WHERE status = 'pending' AND created_at < now() - interval '2 hours';
+```
+
+## Reconcile on a schedule
+
+Webhooks are reliable, not infallible: an outage window, a dashboard edit, a gateway incident.
+`payments:sync` pulls paid invoices back into the billing tables:
+
+```sh
+node ace payments:sync --all
+```
+
+Run it nightly. Remember what it does **not** do: it writes billing rows, it does not run your
+handlers, so it will not grant anything. After a large reconcile, compare against your own tables —
+or replay the events from the gateway dashboard so the normal path runs. See [CLI](/docs/payments/cli).
+
+## Migrations and the ledger
+
+The billing migrations create `billing_customers`, `billing_subscriptions`, `billing_payments`,
+`billing_webhook_events` and `billing_usage_events`. `billing_webhook_events` is the one with an
+operational profile: it grows with every event, forever, and it is what makes redeliveries safe.
+
+Do not prune it aggressively. A gateway can redeliver an event days later, and a pruned id is an id
+that will be processed a second time. Ninety days is a reasonable floor; longer if your gateway's
+replay window is longer.
+
+## Secrets
+
+- **Gateway API keys** — full account access. Environment-injected, never in the repo, rotated on a
+  schedule.
+- **Webhook secrets** — whoever holds one can forge a confirmed payment. Same treatment.
+- **Rotation** — most dashboards let you keep two signing secrets briefly. Roll them one at a time:
+  add the new one, deploy, remove the old.
+
+## Before you ship
+
+- [ ] Every configured provider has its webhook credential set, and env validation requires it
+- [ ] `sandbox` is explicit, and keys differ per environment
+- [ ] Webhook endpoints registered in each dashboard (`node ace payments:webhook`)
+- [ ] `billing.dispatcher` names the backend you actually run — not `'auto'`
+- [ ] Migrations run; `billing_webhook_events` has a retention floor, not an aggressive prune
+- [ ] Handlers dispatch rather than grant inline
+- [ ] Every grant has an **inner** idempotency guard at the database
+- [ ] Alerting on `webhook.failed`, and on the `charge.created` ÷ `payment.succeeded` ratio
+- [ ] `payments:sync --all` scheduled
+- [ ] Someone has watched an end-to-end payment succeed in production

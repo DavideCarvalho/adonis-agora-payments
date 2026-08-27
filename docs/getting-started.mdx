@@ -1,6 +1,7 @@
 ---
 title: Getting started
 description: Install @adonis-agora/payments, configure a gateway, run the billing migrations, register webhooks and make your first charge in about five minutes.
+icon: Rocket
 ---
 
 import { Steps, Step } from 'fumadocs-ui/components/steps';
@@ -116,7 +117,7 @@ actually moves, the gateway calls your webhook endpoint, and the library:
 4. runs **your business logic** (grant the credits, activate the subscription).
 
 That last step is where the app's value lives, and it has three equivalent homes —
-[documented in depth in Webhooks](./webhooks#running-your-business-logic). The fastest
+[documented in depth in Webhooks](/docs/payments/webhooks#running-your-business-logic). The fastest
 path to something real is the convention folder:
 
 ```sh
@@ -142,14 +143,14 @@ hooks: { init: [() => import('@adonis-agora/payments/hooks/webhook_handlers')] }
 <Callout type="info" title="Never trust a payment until the webhook">
 A `PENDING` charge is a *promise*, not revenue. Grant access only after the gateway
 confirms via webhook — that's the guarantee the processor's idempotency ledger exists to
-make safe. See [Webhooks](./webhooks) and [Billing](./billing) for the details.
+make safe. See [Webhooks](/docs/payments/webhooks) and [Billing](/docs/payments/billing) for the details.
 </Callout>
 
 ## Next steps
 
-- [Configuration](./configuration) — providers, method routing, invoices, the billing layer.
-- [Providers](./providers) — Stripe, AbacatePay, Asaas, Woovi specifics.
-- [Webhooks](./webhooks) — signature validation, idempotency, and the three ways to run your business logic.
-- [Billing](./billing) — subscriptions, trials, the billable mixins.
-- [Invoices](./invoices) — emitting invoices with the charge.
-- [Diagnostics](./diagnostics) — every milestone on the observability bus.
+- [Configuration](/docs/payments/configuration) — providers, method routing, invoices, the billing layer.
+- [Providers](/docs/payments/providers) — Stripe, AbacatePay, Asaas, Woovi specifics.
+- [Webhooks](/docs/payments/webhooks) — signature validation, idempotency, and the three ways to run your business logic.
+- [Billing](/docs/payments/billing) — subscriptions, trials, the billable mixins.
+- [Invoices](/docs/payments/invoices) — emitting invoices with the charge.
+- [Diagnostics](/docs/payments/diagnostics) — every milestone on the observability bus.

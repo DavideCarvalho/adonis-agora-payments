@@ -1,0 +1,163 @@
+---
+title: Routing
+description: How a payment method becomes a gateway — the driver contract, the manager's three resolution rules, the capability checks that fail early, and why the SDKs load lazily.
+icon: Route
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+The customer picks the method. Your code does not know at write time whether this charge will be a
+Pix QR code or a card, and it should not have to. `config.methods` maps each canonical method to a
+provider, and the manager resolves it:
+
+```ts title="config/payments.ts"
+methods: {
+  pix: 'woovi',
+  credit_card: 'stripe',
+  boleto: 'asaas',
+  debit_card: 'asaas',
+  undefined: 'asaas',    // the customer chooses at checkout
+}
+```
+
+```ts
+getPayments().driver('pix')      // → the Woovi driver
+getPayments().driver('stripe')   // → by provider name
+getPayments().driver()           // → config.default
+```
+
+## The three resolution rules
+
+`driver(methodOrName?)` answers in this order:
+
+1. **No argument** → the provider named by `config.default`, or the first configured one.
+2. **A configured provider name** → that driver, directly. No method check applies, because you did
+   not route a method.
+3. **Otherwise, a payment method** → the provider `config.methods` routes it to, **and** a check that
+   the provider actually supports that method.
+
+Anything that matches none of the three throws immediately, naming what *is* configured:
+
+```text
+[payments] "pagseguro" is neither a configured provider nor a method routed in
+config.methods. Configured providers: stripe, asaas. Known methods: pix,
+credit_card, debit_card, boleto, undefined.
+```
+
+That is the design goal for the whole routing layer: a misconfiguration should fail at the manager,
+in your own stack trace, with the fix in the message — not three network hops later as a `400` from
+someone else's API.
+
+## The contract every gateway implements
+
+```ts
+interface PaymentsDriver {
+  readonly provider: string
+  readonly supportedMethods: readonly PaymentMethodName[]
+  readonly capabilities?: { refunds?: boolean; invoices?: boolean; subscriptions?: boolean }
+
+  createCustomer(input): Promise<Customer>
+  findCustomer(customerId): Promise<Customer | null>
+  updateCustomer(customerId, input): Promise<Customer>
+
+  charge(input): Promise<Payment>
+  findPayment(gatewayId): Promise<Payment | null>
+  refund(paymentGatewayId, amount?): Promise<Refund>
+
+  createCheckout(input): Promise<CheckoutSession>
+
+  createSubscription(input): Promise<Subscription>
+  cancelSubscription(gatewayId, options?): Promise<Subscription>
+  updateSubscription(gatewayId, input): Promise<Subscription>
+  findSubscription(gatewayId): Promise<Subscription | null>
+
+  listInvoices(customerId): Promise<Invoice[]>
+
+  parseWebhook(rawBody, headers): WebhookEvent
+}
+```
+
+Every method returns a **normalized domain type** — `Payment`, `Subscription`, `Invoice` — with the
+gateway's untouched response tucked into `payload`. Application code reads the normalized fields;
+`payload` is the escape hatch for the one gateway-specific field you occasionally need.
+
+## Two declarations that fail early
+
+`supportedMethods` and `capabilities` exist so a limitation is discovered at the boundary rather
+than at the gateway.
+
+**`supportedMethods`** is checked when routing resolves a method:
+
+```text
+[payments] Driver "abacate" does not support payment method "credit_card".
+Supported methods: pix, boleto, undefined.
+Route "credit_card" to a different provider in config.methods.
+```
+
+**`capabilities`** is checked before delegating an operation that not every gateway has:
+
+```ts
+const driver = payments.driver('pix')
+payments.assertCapability(driver, 'refunds')   // throws on Woovi/OpenPix — no refunds
+await driver.refund(payment.gatewayId)
+```
+
+A driver missing a capability still *implements* the method — the interface demands it — and throws
+a clear "not supported" error. `assertCapability` surfaces that one step earlier, which is what
+`payments:sync` and `payments:webhook` use to avoid advertising events a gateway will never send.
+
+<Callout title="Capabilities are opt-in, so check rather than assume">
+A driver that declares no `capabilities` object is treated as supporting none of them. That is
+deliberately conservative: an undeclared capability is an unproven one.
+</Callout>
+
+## Providers are lazy factories
+
+`providers` maps a name to a **factory**, not to an instance:
+
+```ts
+providers: {
+  stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY') }),
+  woovi:  payments.woovi({ appId: env.get('WOOVI_APP_ID') }),
+}
+```
+
+Each built-in factory imports its gateway SDK **inside the thunk**. Configure four gateways and
+charge only Pix through Woovi, and the Stripe SDK is never loaded into memory. That is what lets
+every gateway SDK be an optional peer dependency: you install the ones you configure, and you pay
+the import cost only for the ones you call.
+
+It is also why a custom driver is a factory rather than a class — see
+[Custom providers](/docs/payments/custom-providers).
+
+## Routing in practice
+
+The common Brazilian setup splits by method, because each gateway is genuinely better at something:
+
+```ts title="config/payments.ts"
+export default defineConfig({
+  default: 'asaas',
+  providers: {
+    woovi: payments.woovi({ appId: env.get('WOOVI_APP_ID') }),
+    stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY') }),
+    asaas: payments.asaas({ apiKey: env.get('ASAAS_API_KEY') }),
+  },
+  methods: {
+    pix: 'woovi',           // best Pix rates
+    credit_card: 'stripe',  // best card tooling
+    boleto: 'asaas',
+    debit_card: 'asaas',
+    undefined: 'asaas',
+  },
+})
+```
+
+The service layer that consumes this never names a gateway:
+
+```ts title="app/services/checkout_service.ts"
+const payment = await getPayments()
+  .driver(order.method)      // 'pix' | 'credit_card' | 'boleto'
+  .charge({ customerId, amount: order.total, externalReference: order.id })
+```
+
+Moving Pix from Woovi to Asaas is one line of config, and this service does not change.

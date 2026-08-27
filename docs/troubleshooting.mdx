@@ -1,0 +1,186 @@
+---
+title: Troubleshooting
+description: The symptoms that actually happen — webhooks returning 400, handlers that never run, double grants, routing errors, missing invoices — and how to tell the causes apart quickly.
+icon: LifeBuoy
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Sorted by how often they come up.
+
+## The webhook returns `400`
+
+Signature validation failed. In order of likelihood:
+
+1. **The credential is missing or wrong.** Check that the value in `config/payments.ts` matches the
+   one in the gateway dashboard — they are different strings per environment, and a staging secret
+   in production fails every request.
+2. **The raw body was modified.** Every scheme signs the **bytes**, so any middleware that
+   reserializes JSON before the driver sees it invalidates the signature. A body parser that
+   rewrites, a proxy that reformats, a logging middleware that re-emits — all break it.
+3. **Woovi is checking the wrong scheme.** When `webhookPublicKey` is set it is enforced and
+   `webhookSecret` is ignored. Setting only the deprecated HMAC while the gateway sends
+   `x-webhook-signature` fails every time.
+
+Confirm which by pointing the gateway at a staging endpoint with verification unconfigured. If it
+passes there, it is the credential or the body — not the payload.
+
+## The webhook returns `200` but nothing happened
+
+Work through this order:
+
+1. **Was it a redelivery?** `process()` returns `false` for an event whose id is already
+   `received` or `processed`. Check `billing_webhook_events` for that gateway event id — this is the
+   ledger doing its job, not a bug.
+2. **Is there a handler for that type?** The processor syncs what it understands and runs a handler
+   only if one is registered for that **normalized** type. A handler keyed on `PAYMENT_RECEIVED`
+   never fires; the normalized name is `payment.succeeded`.
+3. **Is the folder actually discovered?** `app/payment_handlers/` needs the codegen hook:
+
+   ```ts title="adonisrc.ts"
+   hooks: { init: [() => import('@adonis-agora/payments/hooks/webhook_handlers')] }
+   ```
+
+   Without it the barrel is not generated and the runtime scan is the only fallback.
+4. **Did the handler throw?** Check `billing_webhook_events.status` — `failed` with an `error`
+   column means it ran and threw, and the dispatcher is retrying.
+
+## A customer paid but never got access
+
+The chain has four links. Check them in order, because each rules out the ones after it:
+
+```sql
+-- 1. Did the event arrive at all?
+SELECT * FROM billing_webhook_events WHERE payload::text LIKE '%<gateway id>%';
+
+-- 2. Did the billing layer sync it?
+SELECT * FROM billing_payments WHERE gateway_id = '<gateway id>';
+```
+
+- **No ledger row** → the gateway never called, or the request was rejected before the processor.
+  Check the gateway dashboard's delivery log and your access logs.
+- **Ledger row, status `failed`** → your handler threw. The `error` column has the message.
+- **Ledger row `processed`, no grant in your tables** → the handler ran without doing the work.
+  Usually a missing `externalReference`: the handler's `if (!ref) return` short-circuits silently.
+  Look at the charge — was the reference set when it was created?
+
+<Callout title="Set externalReference on every charge">
+It is the only thing tying a gateway confirmation back to your row. A charge created without one
+produces a webhook your handler cannot route, and the failure is a silent `return`. See
+[The payment lifecycle](/docs/payments/concepts/lifecycle).
+</Callout>
+
+## A customer was granted twice
+
+The ledger prevents a *redelivery* from double-granting. It does not make your grant idempotent —
+see [Idempotency](/docs/payments/concepts/idempotency). Two events legitimately describing the same
+fact (`PAYMENT_RECEIVED` then `PAYMENT_CONFIRMED`) have different ids and both pass the ledger.
+
+The fix is an inner guard at the database, not a check in application code:
+
+```ts
+const updated = await Order.query()
+  .where('id', orderId)
+  .andWhere('status', 'awaiting_payment')   // ← the guard
+  .update({ status: 'paid' })
+
+if (updated[0] === 0) return
+```
+
+A read-then-write (`if (order.status === 'paid') return`) races itself under concurrent delivery.
+
+## `Driver "x" does not support payment method "y"`
+
+Routing sent a method to a gateway that does not handle it — AbacatePay and Woovi are Pix-first and
+have no credit card. Route it elsewhere:
+
+```ts title="config/payments.ts"
+methods: {
+  pix: 'woovi',
+  credit_card: 'stripe',   // not 'woovi'
+}
+```
+
+This is the check firing correctly. Being told at the manager, with the supported list in the
+message, is the whole point — the alternative is an opaque `400` from the gateway.
+
+## `"x" is neither a configured provider nor a method routed in config.methods`
+
+`driver('x')` was given something that is neither a key of `providers` nor a routed method. Usually a
+typo, or a method that was never routed. The error lists what *is* configured.
+
+Remember `driver()` with no argument uses `config.default`, and a provider name **bypasses** the
+method capability check — `driver('woovi')` returns the driver without validating any method,
+because you did not route one.
+
+## `No invoice providers configured`
+
+A charge with `invoice: true` needs an `invoice.providers` section. The payment gateway and the
+invoice provider are independent — configuring Asaas for payments does not configure it for invoices:
+
+```ts title="config/payments.ts"
+invoice: {
+  default: 'focus',
+  providers: { focus: invoice.focus({ token: env.get('FOCUS_NFE_TOKEN') }) },
+}
+```
+
+## The charge succeeded but no invoice was emitted
+
+Emission is resolved right after the payment is created and is **best-effort from the charge's
+perspective** — the charge does not fail because the note did not come out. Check
+`agora:payments:invoice.emitted` on the diagnostics bus: no event means emission did not complete.
+
+The usual cause is missing payer data. The recipient defaults to the customer's details and falls
+back to `card.holder`; a Pix charge for a customer with no `taxId` has neither:
+
+```ts
+await driver.charge({
+  customerId,
+  amount: 1990,
+  customer: { name, taxId, email },   // ← the payer's fiscal data
+  invoice: true,
+})
+```
+
+## Subscriptions are created but never charge
+
+Most Brazilian gateways need a first due date. Without `startDate`, Asaas in particular creates the
+subscription and generates nothing:
+
+```ts
+await driver.createSubscription({
+  customerId,
+  planId: 'plan_pro',
+  amount: 4990,
+  startDate: '2026-09-01',   // ← required
+})
+```
+
+For a card subscription, `card` must also be present — otherwise there is nothing to charge each
+cycle.
+
+## Amounts are off by a factor of 100
+
+Something passed reais where cents were expected. `1990` is R$ 19,90; `19.90` is nineteen cents,
+rounded. `toDecimal`/`fromDecimal` are for driver implementations only — application code should
+never call them. See [Money](/docs/payments/concepts/money).
+
+## Durable is installed but webhooks run in-process
+
+`dispatcher: 'auto'` falls back silently when durable's provider is not **registered in the app** —
+installing the package is not enough. Set `dispatcher: 'durable'` to make the fallback a boot error
+instead of a surprise. See [Production](/docs/payments/production).
+
+## Events stuck in `failed`
+
+The dispatcher exhausted its retries, or a restart dropped an in-process backoff window. The `error`
+column has the reason. Once the underlying cause is fixed, replay from the gateway dashboard: a
+`failed` event is claimable again, so the redelivery re-runs it properly.
+
+<Callout title="When nothing here fits">
+Reduce to the smallest case: the [testing kit](/docs/payments/testing) runs the whole
+webhook → processor → handler path with a fake driver and an in-memory store, no gateway and no
+database. If it works there and not in your app, the difference is configuration or middleware —
+not the library.
+</Callout>

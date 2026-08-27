@@ -136,7 +136,14 @@ export class InMemoryBillingStore
     payload: Record<string, unknown>;
   }): Promise<InMemoryWebhookEventRow | null> {
     const existing = this.webhookEvents.get(event.gatewayEventId);
-    if (existing) return null;
+    if (existing) {
+      // Mirrors LucidBillingStore: a failed attempt is claimable again so the
+      // retry re-runs; in-flight and processed events are redeliveries.
+      if (existing.status !== 'failed') return null;
+      existing.status = 'received';
+      existing.error = null;
+      return existing;
+    }
     const row: InMemoryWebhookEventRow = {
       id: `wh_${this.#nextId++}`,
       gatewayEventId: event.gatewayEventId,

@@ -1,0 +1,112 @@
+---
+title: Money
+description: Why every amount is an integer of the smallest currency unit, where the decimal conversion lives, how currency is resolved, and the arithmetic rules that keep a bill from being off by a cent.
+icon: Coins
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+```ts
+type Money = number      // the smallest unit — cents for BRL and USD
+type Currency = string   // ISO 4217, lowercase: 'brl', 'usd'
+
+interface MoneyAmount { amount: Money; currency: Currency }
+```
+
+`1990` is R$ 19,90. That is the only representation the library accepts, and it is not a style
+preference.
+
+## Why not a decimal
+
+`0.1 + 0.2 !== 0.3` in every language with IEEE-754 doubles, JavaScript included. A billing system
+that adds line items in floats accumulates error, and the error surfaces as a total that is one cent
+off — the class of bug that is discovered by a customer, argued about in a support thread, and
+reproduced only in aggregate.
+
+Integers do not have that problem. Adding, comparing and summing cents is exact. Money only becomes
+a decimal at the very edge, when a gateway API demands one.
+
+<Callout type="warn" title="`amount * 1.1` is not a 10% increase">
+Multiplying cents by a float reintroduces exactly what integers avoided, because the result is a
+float again. Round explicitly, and decide the direction on purpose:
+
+```ts
+const withFee = Math.round(amount * 1.1)   // not `amount * 1.1`
+```
+</Callout>
+
+## Where the decimal conversion lives
+
+Stripe works in cents. The Brazilian gateways — Asaas, AbacatePay, Woovi — work in decimal reais. The
+whole mapping is two functions, used only inside driver implementations:
+
+```ts
+import { toDecimal, fromDecimal } from '@adonis-agora/payments'
+
+toDecimal(1990)    // 19.9   — cents → the gateway's decimal
+fromDecimal(19.9)  // 1990   — the gateway's decimal → cents
+```
+
+`fromDecimal` rounds, which is what makes a round trip stable: a gateway that answers `19.900000001`
+still becomes `1990`.
+
+Application code should never call either. If you find yourself converting in a service, the amount
+crossed a boundary it should not have.
+
+## Currency
+
+Lowercase ISO 4217, everywhere: `'brl'`, `'usd'`, `'eur'`. A charge that does not name one falls
+back to the driver's configured currency, which for Stripe defaults to `'brl'`:
+
+```ts
+providers: {
+  stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY'), currency: 'brl' }),
+}
+```
+
+The Brazilian gateways are BRL-only and do not take the option at all.
+
+Amounts and currencies travel together in `MoneyAmount` rather than as a bare number, so a value
+that reaches a total or a report cannot lose the unit it was denominated in:
+
+```ts
+payment.amount            // { amount: 1990, currency: 'brl' }
+payment.amount.amount      // 1990
+```
+
+## Formatting for humans
+
+Formatting is a presentation concern and the library does none of it. Convert once, at the edge:
+
+```ts
+const format = (money: MoneyAmount) =>
+  new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: money.currency.toUpperCase(),
+  }).format(money.amount / 100)
+
+format({ amount: 1990, currency: 'brl' })   // 'R$ 19,90'
+```
+
+Divide by 100 in the formatter and nowhere else. A `19.9` floating around a service layer is an
+amount waiting to be added to something.
+
+## Splitting an amount
+
+Percentage splits are where integers earn their keep. Compute the parts, then give the remainder to
+one recipient — never round each part independently and hope the sum matches:
+
+```ts
+function split(total: Money, shares: number[]): Money[] {
+  const parts = shares.map((share) => Math.floor(total * share))
+  const remainder = total - parts.reduce((sum, part) => sum + part, 0)
+  parts[0] += remainder            // the rounding remainder has to land somewhere
+  return parts
+}
+
+split(1000, [0.333, 0.333, 0.334])  // [334, 333, 333] — sums to exactly 1000
+```
+
+The gateway's own split (Asaas' `split` array on a charge) takes percentages or fixed amounts and
+does this arithmetic on its side — but the same rule applies to any total you compute yourself,
+including a [metered bill](/docs/payments/billing).

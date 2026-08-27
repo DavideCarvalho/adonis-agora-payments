@@ -1,0 +1,138 @@
+---
+title: The payment lifecycle
+description: From charge to revenue — what a PENDING payment actually is, the five things the webhook route does in order, where your business logic belongs, and how externalReference routes a confirmation back to your row.
+icon: GitBranch
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+```text
+your app ──charge()──▶ gateway            payment.status = 'pending'
+                          │                ↑ nothing has been paid
+                          │
+              the customer scans / approves
+                          │
+your app ◀──webhook───────┘
+   ├─ validate the signature      forged callbacks rejected
+   ├─ ledger the event            redeliveries stop here
+   ├─ sync the billing tables     billing_payments / billing_subscriptions
+   ├─ run your handler            grant credits, activate the subscription
+   └─ publish diagnostics         agora:payments:payment.succeeded
+```
+
+## `charge()` does not move money
+
+It creates a charge **at the gateway** and returns a `Payment` whose status is `'pending'`, carrying
+whatever the customer needs in order to pay:
+
+```ts
+const payment = await getPayments().driver('pix').charge({
+  customerId: customer.id,
+  amount: 1990,
+  externalReference: order.id,
+})
+
+payment.status          // 'pending'
+payment.pixCopiaECola   // the copy-paste code to show
+payment.pixQrCode       // the QR image
+payment.hostedUrl       // a hosted page, for gateways that use one
+```
+
+Everything after that is out of your process. The customer opens their bank app, or does not. The
+card is approved, or declined. You find out when the gateway tells you.
+
+<Callout type="warn" title="A PENDING charge is not revenue">
+Granting access on the return value of `charge()` gives away the product to anyone who starts a
+checkout and walks away. It is the most expensive mistake available in this domain, and it is easy
+to make because the code reads as if it worked. Grant on `payment.succeeded`, from the webhook.
+</Callout>
+
+## What the webhook route does, in order
+
+The provider mounts `POST /payments/webhook/:provider` and hands the request to the matching driver.
+The order below is the whole design, and each step depends on the one before it:
+
+1. **Validate the signature.** The driver verifies the gateway's scheme — HMAC, RSA, or a shared
+   token, always timing-safe — and throws on failure. A forged callback never reaches your data.
+2. **Normalize.** The gateway's own event (`PAYMENT_RECEIVED`, `checkout.session.completed`,
+   `PIX_AUTOMATIC_COBR_COMPLETED`) becomes a canonical `payment.succeeded` with a stable `id`.
+3. **Ledger it — before any work.** The event id is written to `billing_webhook_events`. Already
+   there and not failed? This is a redelivery; processing stops and returns `false`. See
+   [Idempotency](/docs/payments/concepts/idempotency).
+4. **Sync.** The normalized event is upserted into `billing_payments` and `billing_subscriptions`,
+   so your database mirrors the gateway without you writing a sync query.
+5. **Run your handler, then mark processed.** Your business logic runs, and the ledger row is marked
+   `processed` only after it returns. A throw marks it `failed` and the dispatcher retries.
+
+Step 3 happening before step 5 is the guarantee: a redelivery never reaches your handler at all.
+
+## The normalized event types
+
+Every gateway maps onto seven:
+
+| Type | Means |
+| --- | --- |
+| `payment.succeeded` | the money moved |
+| `payment.failed` | the attempt failed |
+| `payment.refunded` | a refund completed |
+| `payment.updated` | a payment changed in some other way |
+| `subscription.created` | a recurring subscription now exists |
+| `subscription.updated` | its status or period changed |
+| `subscription.canceled` | it ended |
+
+An event type the processor does not recognize passes through: it is ledgered, no built-in sync runs,
+and a handler runs if one is registered. Unknown does not mean dropped.
+
+## `externalReference` — how a confirmation finds your row
+
+A webhook carries the **gateway's** ids. Your business logic needs **yours**. `externalReference` is
+the string you choose, the gateway echoes back, and the library surfaces on the normalized event:
+
+```ts title="app/services/checkout_service.ts"
+const order = await Order.create({ total: 1990, status: 'awaiting_payment' })
+
+await getPayments().driver('pix').charge({
+  customerId,
+  amount: order.total,
+  externalReference: order.id,     // ← comes back on every webhook for this charge
+})
+```
+
+```ts title="app/payment_handlers/payment_succeeded.ts"
+async handle(event: WebhookEvent) {
+  const orderId = (event.data as { externalReference?: string }).externalReference
+  if (!orderId) return
+  await grantAccessFor(orderId)
+}
+```
+
+Each gateway stores it in its own field, and the driver normalizes both directions:
+
+| Gateway | Field |
+| --- | --- |
+| Asaas | `externalReference` — **propagated to every installment** of a subscription's charges |
+| Woovi | `correlationID` |
+| Stripe | `metadata.external_reference` |
+| AbacatePay | carried in metadata |
+
+The Asaas propagation is the one that saves real work: the webhook for the third monthly charge of a
+subscription still carries the reference you set when you created it, so it routes back to your
+subscription row without you parsing anything gateway-specific.
+
+<Callout title="externalReference is not idempotencyKey">
+They look similar and solve opposite problems. `idempotencyKey` protects the **outbound** call — reusing
+it must not create a second charge at the gateway. `externalReference` is for **inbound** routing —
+it is how a webhook finds your record. Set both; they are not substitutes.
+</Callout>
+
+## Where your business logic goes
+
+The route guarantees security and sync. Granting the thing the customer bought is yours, and it has
+four homes with genuinely different failure behaviour — a file in `app/payment_handlers/`, an entry
+in `billing.handlers`, a diagnostics subscriber, or your own controller. The difference that matters
+is what happens when it throws. See
+[Webhooks → Running your business logic](/docs/payments/webhooks#running-your-business-logic--four-options).
+
+The shape to aim for either way: the handler **dispatches** durable work and returns. Webhooks must
+answer fast, and money work must survive a crash — so the handler's job is to hand off, not to grant
+inline.

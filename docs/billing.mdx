@@ -1,6 +1,7 @@
 ---
 title: Billing
 description: The Cashier-style subscription layer — billable Lucid mixins, the billing tables, an idempotent webhook processor that keeps local rows in sync with the gateway, and durable-backed dispatch.
+icon: ReceiptText
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
@@ -109,31 +110,43 @@ onDiagnostic('payments', 'payment.succeeded', ({ payload }) => {
 
 This is the outer idempotency defense. For the money-critical paths, add an inner one too
 (a `WHERE status = pending` update, a unique index on the grant) — defense in depth, not
-redundancy. See [Webhooks → The lifecycle](./webhooks#the-lifecycle-of-a-webhook).
+redundancy. See [Webhooks → The lifecycle](/docs/payments/webhooks#the-lifecycle-of-a-webhook).
 
 <Callout type="info" title="`externalReference` is your routing key">
 Sync keeps the *billing tables* correct, but your business logic needs *your* ids. The
 `externalReference` you set on the charge/subscription comes back on the webhook and routes
 the confirmation to your own `Payment`/`Subscription` rows. See
-[Webhooks → externalReference](./webhooks#routing-payments-back-to-your-records-externalreference).
+[Webhooks → externalReference](/docs/payments/webhooks#routing-payments-back-to-your-records-externalreference).
 </Callout>
 
-## Durable integration — webhooks survive restarts
+## The dispatcher — how a webhook survives a restart
 
-A webhook half-way through granting credits is exactly the work that must not be lost on a
-deploy or crash. By default (`billing.durable = 'auto'`), webhooks are processed as
-**durable workflow runs** when `@adonis-agora/durable` is installed *and* its provider is
-registered in the app:
+A webhook half-way through granting credits is exactly the work that must not be lost on a deploy or
+a crash. `billing.dispatcher` chooses what carries it:
 
-- every step is checkpointed — a crash resumes where it stopped instead of re-running;
-- retries are deterministic, not best-effort.
+| Value | Behaviour | Survives a restart |
+| --- | --- | --- |
+| `'auto'` (default) | durable when its provider is registered; else `@adonisjs/queue` when installed; else in-process | depends on what it picked |
+| `'durable'` | a durable workflow run — throws when durable is missing | yes |
+| `'queue'` | an `@adonisjs/queue` job — throws when the queue is missing | yes |
+| `'in-process'` | inline, retrying in the background | no |
 
-Without durable, the fallback is an in-process dispatcher that retries with exponential
-backoff (max 5 attempts, base 500 ms, capped at 30 s) — so a transient failure never loses
-a payment notification, though it doesn't survive a process restart the way durable does.
+The in-process fallback retries up to 5 times with exponential backoff (500 ms base, capped at
+30 s). That covers a transient database or gateway failure. It does not survive a deploy: the
+pending backoff window dies with the process.
 
-Set `billing.durable: false` to force the in-process dispatcher, or `true` to require
-durable (throwing when it's missing).
+A retry works because the [ledger](/docs/payments/concepts/idempotency) lets a **failed** event be
+claimed again — a genuine redelivery is still refused, but an attempt that threw is re-runnable. That
+is what makes "a throwing handler is retried" true rather than aspirational.
+
+<Callout type="warn" title="Name the dispatcher in production">
+`'auto'` degrades silently. An app that meant to run durable and forgot to register its provider
+falls back to in-process and nothing says so. Setting `dispatcher: 'durable'` turns that into a boot
+error, which is where you want to find out. See [Production](/docs/payments/production).
+</Callout>
+
+`billing.durable` is the legacy alias — `true` maps to `'durable'`, `false` to `'in-process'` — and
+cannot reach the queue backend.
 
 ## Usage-based billing — metered subscriptions
 
@@ -187,6 +200,30 @@ const bill = await meteredBillForSubscription(store, {
 
 This is the "how much to bill for what was consumed" half of a metered plan — the invoice
 for overage is then emitted via the invoice provider or an Asaas/Stripe charge.
+
+## The billing overview — the dashboard's data
+
+`billingOverview` aggregates the KPIs a billing dashboard renders, from the store alone. No gateway
+calls, so it is fast, works headless, and is trivially testable:
+
+```ts title="app/controllers/billing_dashboard_controller.ts"
+import { billingOverview, LucidBillingStore } from '@adonis-agora/payments'
+
+const overview = await billingOverview(new LucidBillingStore(), {
+  from: DateTime.now().startOf('month').toJSDate(),
+  to: DateTime.now().toJSDate(),
+})
+
+// overview.period  → { from, to }
+// overview.metrics → [
+//   { key: 'revenue',              label: 'Revenue (cents)',    value: 1_284_900 },
+//   { key: 'active_subscriptions', label: 'Active subscriptions', value: 212 },
+//   { key: 'meter:api_calls',      label: 'Usage · api_calls',  value: 481_230 },
+// ]
+```
+
+Revenue is the sum of **paid** payments in the window, in cents — format at the edge, and never
+divide before you have finished adding. See [Money](/docs/payments/concepts/money).
 
 ## Mixins
 

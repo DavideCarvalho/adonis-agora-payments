@@ -1,0 +1,147 @@
+---
+title: CLI
+description: The four ace commands — scaffolding a billable model and a webhook handler, printing (or creating) the webhook endpoints, and reconciling the local tables with a gateway.
+icon: SquareTerminal
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+```sh
+node ace list | grep -E 'payments|billable|webhook-handler'
+# make:billable
+# make:webhook-handler
+# payments:webhook
+# payments:sync
+```
+
+## `payments:webhook`
+
+Prints the endpoint URL and the event list for every configured provider — the two things each
+gateway dashboard asks for.
+
+```sh
+node ace payments:webhook
+node ace payments:webhook --provider=asaas
+```
+
+```text
+[asaas] (asaas)
+  URL: https://your.app/payments/webhook/asaas
+  Events: PAYMENT_CREATED, PAYMENT_RECEIVED, PAYMENT_OVERDUE, PAYMENT_REFUNDED,
+          SUBSCRIPTION_CREATED, SUBSCRIPTION_UPDATED, SUBSCRIPTION_DELETED
+```
+
+The event list is **filtered by the resolved driver's capabilities**, so a Woovi provider never
+advertises refund events and a gateway without subscriptions never advertises subscription events.
+It resolves the real driver rather than reading a table by config key, so a
+[custom provider](/docs/payments/custom-providers) extending a built-in reports the right list too.
+
+Stripe is the one gateway whose endpoints can be created over its API:
+
+```sh
+node ace payments:webhook --create
+```
+
+This needs `STRIPE_KEY` in the environment, creates the endpoint with the full event list, and
+echoes the signing secret for you to put in `.env`:
+
+```text
+Created Stripe webhook endpoint we_1abc…
+Webhook signing secret (add to .env):
+  STRIPE_WEBHOOK_SECRET=whsec_…
+```
+
+<Callout title="The URL comes from your app's configured base URL">
+It is built with the app's URL helper, so a wrong host in the output means `APP_URL` (or your
+equivalent) is wrong — worth fixing before pasting the endpoint into a dashboard.
+</Callout>
+
+## `payments:sync`
+
+Reconciles the local billing tables with a gateway. This is the repair tool for the two situations
+webhooks cannot cover: an outage during which events were dropped, and a change made by hand in the
+gateway dashboard.
+
+```sh
+node ace payments:sync --customer=cus_123
+node ace payments:sync --all
+node ace payments:sync --all --provider=stripe
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--customer` | one gateway customer id |
+| `--all` | every customer in `billing_customers` |
+| `--provider` | which configured provider to sync (default: the configured default) |
+
+It pulls the customer's invoices from the gateway and upserts the **paid** ones into
+`billing_payments`. Non-paid invoices are counted and skipped — a pending invoice is not a payment,
+and the reconciler will not invent one.
+
+```text
+  cus_123: 7 invoice(s), 5 synced, 2 skipped (non-paid)
+Synced 5 paid invoice(s) across 1 customer(s).
+```
+
+Two guards fail fast rather than doing nothing quietly: neither `--customer` nor `--all` is an error
+rather than a silent no-op, and a gateway with no invoice concept (Woovi/OpenPix) is refused up
+front by the capability check instead of listing nothing.
+
+<Callout type="warn" title="Sync writes to billing tables, not to your business logic">
+It brings `billing_payments` back in line with the gateway. It does **not** run your webhook
+handlers, so credits are not granted and subscriptions are not activated by it. After a large
+reconcile, check what your own tables are missing — or replay the events from the gateway dashboard
+so the handlers run through the normal path.
+</Callout>
+
+## `make:billable`
+
+Scaffolds a Lucid model composed with the billing mixins:
+
+```sh
+node ace make:billable user
+```
+
+```ts title="app/models/user.ts"
+import { BaseModel, compose, column } from '@adonisjs/lucid/orm'
+import { withBillable } from '@adonis-agora/payments'
+
+export default class User extends compose(BaseModel, withBillable()) {
+  @column({ isPrimary: true }) declare id: string
+}
+```
+
+See [Billing](/docs/payments/billing) for what the mixins add and how to stack the narrower ones.
+
+## `make:webhook-handler`
+
+Scaffolds a handler under `app/payment_handlers/` — the convention folder the provider
+auto-discovers:
+
+```sh
+node ace make:webhook-handler payment.succeeded
+```
+
+```ts title="app/payment_handlers/payment_succeeded.ts"
+import { inject } from '@adonisjs/core'
+import type { WebhookEvent } from '@adonis-agora/payments'
+
+@inject()
+export default class PaymentSucceededHandler {
+  static readonly eventType = 'payment.succeeded'
+
+  async handle(event: WebhookEvent): Promise<void> {
+    // dispatch durable work — never grant inline
+  }
+}
+```
+
+Discovery needs the codegen hook registered once:
+
+```ts title="adonisrc.ts"
+hooks: { init: [() => import('@adonis-agora/payments/hooks/webhook_handlers')] }
+```
+
+The hook generates a barrel of the folder at build and dev time (the file watcher re-runs it), with
+a runtime scan as the fallback. See
+[Webhooks](/docs/payments/webhooks#running-your-business-logic--four-options).

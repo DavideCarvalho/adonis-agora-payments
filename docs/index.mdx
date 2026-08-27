@@ -138,6 +138,7 @@ your app ──charge()──▶ gateway (PENDING)
 
 <Cards>
   <Card title="Getting Started" href="/docs/payments/getting-started" description="Install, configure a gateway, run the migrations, register webhooks and make your first charge." />
+  <Card title="Concepts" href="/docs/payments/concepts" description="Money as an integer, one contract over four gateways, the pending-until-webhook rule, and the idempotency ledger." />
   <Card title="Configuration" href="/docs/payments/configuration" description="Providers, method routing, the invoice section, and the billing layer — durable + handlers." />
   <Card title="Providers" href="/docs/payments/providers" description="Stripe, AbacatePay, Asaas and Woovi specifics — methods, subscriptions, externalReference." />
   <Card title="Webhooks" href="/docs/payments/webhooks" description="Signature validation, the idempotency ledger, and the three ways to run your business logic." />
@@ -146,4 +147,9 @@ your app ──charge()──▶ gateway (PENDING)
   <Card title="Diagnostics" href="/docs/payments/diagnostics" description="Every milestone on the observability bus — gateway-action vs business events, Telescope." />
   <Card title="Custom providers" href="/docs/payments/custom-providers" description="Write a gateway or invoice provider as a config factory, or extend a bundled driver." />
   <Card title="Testing" href="/docs/payments/testing" description="The fake driver, in-memory store and mutable clock — exercise billing without a gateway or DB." />
+  <Card title="Patterns" href="/docs/payments/patterns" description="A cookbook: one-off Pix, card subscriptions, splits, metered billing, dunning, refunds, a dashboard." />
+  <Card title="Production" href="/docs/payments/production" description="The operational checklist — webhook secrets, choosing a dispatcher, reconciliation, what to watch." />
+  <Card title="Troubleshooting" href="/docs/payments/troubleshooting" description="The symptoms that actually happen, and how to tell the causes apart." />
+  <Card title="CLI" href="/docs/payments/cli" description="payments:webhook, payments:sync, make:billable and make:webhook-handler." />
+  <Card title="API reference" href="/docs/payments/api-reference" description="Every config option, driver method, exported helper, type, event and command — from source." />
 </Cards>

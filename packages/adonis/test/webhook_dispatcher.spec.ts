@@ -64,3 +64,66 @@ describe('WebhookDispatcher', () => {
     expect(payment?.status).toBe('paid');
   });
 });
+
+describe('retry after a failed attempt', () => {
+  /**
+   * The idempotency ledger is claimed BEFORE any work runs, so a retry has to be
+   * able to claim a failed event again. When it cannot, every retry — in-process
+   * or durable — short-circuits on the ledger and silently does nothing, which
+   * looks exactly like a webhook that was never delivered.
+   */
+  it('re-runs the handler instead of short-circuiting on the ledger', async () => {
+    const store = new InMemoryBillingStore();
+    let attempts = 0;
+    const processor = new WebhookProcessor({
+      store,
+      handlers: {
+        'payment.succeeded': () => {
+          attempts += 1;
+          if (attempts === 1) throw new Error('transient gateway timeout');
+        },
+      },
+    });
+
+    const event = {
+      id: 'evt_retry_1',
+      provider: 'stripe',
+      type: 'payment.succeeded',
+      data: { gatewayId: 'pi_retry_1', amount: 1990, currency: 'brl' },
+      raw: {},
+    };
+
+    await expect(processor.process(event)).rejects.toThrow('transient gateway timeout');
+    expect(store.webhookEvents.get('evt_retry_1')?.status).toBe('failed');
+
+    // The retry the dispatcher performs.
+    await expect(processor.process(event)).resolves.toBe(true);
+    expect(attempts).toBe(2);
+    expect(store.webhookEvents.get('evt_retry_1')?.status).toBe('processed');
+  });
+
+  it('still treats a redelivery of a processed event as a no-op', async () => {
+    const store = new InMemoryBillingStore();
+    let calls = 0;
+    const processor = new WebhookProcessor({
+      store,
+      handlers: {
+        'payment.succeeded': () => {
+          calls += 1;
+        },
+      },
+    });
+
+    const event = {
+      id: 'evt_redelivery_1',
+      provider: 'stripe',
+      type: 'payment.succeeded',
+      data: { gatewayId: 'pi_redelivery_1', amount: 1990, currency: 'brl' },
+      raw: {},
+    };
+
+    expect(await processor.process(event)).toBe(true);
+    expect(await processor.process(event)).toBe(false);
+    expect(calls).toBe(1);
+  });
+});

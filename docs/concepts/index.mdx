@@ -1,0 +1,39 @@
+---
+title: Concepts
+description: The four ideas the library is built on — money is an integer, the gateway is behind one contract, a charge is a promise until the webhook, and the ledger is what makes trusting the webhook safe.
+icon: Lightbulb
+---
+
+Four ideas carry the whole library. Everything else in these docs is a consequence of one of them.
+
+## Money is an integer, in the smallest unit
+
+`1990` is R$ 19,90. Never `19.90`, never a float, never a string parsed at the boundary. The
+`PaymentsDriver` contract, the billing tables and every diagnostics payload speak cents, and the two
+conversions to the decimal reais the Brazilian gateway APIs want live in exactly one place. See
+[Money](/docs/payments/concepts/money).
+
+## One contract, many gateways
+
+Stripe, AbacatePay, Asaas and Woovi normalize onto the same `PaymentsDriver` — `charge`, `refund`,
+`createSubscription`, `parseWebhook` — and onto the same domain types. Your services never see a
+gateway SDK, which is what makes adding a gateway a config entry and swapping one a routing change.
+A driver also **declares what it supports**, so sending a card to a Pix-only gateway fails at the
+manager with a clear message rather than as an opaque error from someone else's API. See
+[Routing](/docs/payments/concepts/routing).
+
+## A charge is a promise; the webhook is the money
+
+`charge()` returns a `PENDING` payment. Nothing has been paid: the customer still has to scan the QR
+code or approve the card. The only thing that turns that promise into revenue is the gateway calling
+your endpoint. Granting access on the response from `charge()` is the single most expensive mistake
+in this domain, and the library's shape exists to make the correct path the easy one. See
+[The payment lifecycle](/docs/payments/concepts/lifecycle).
+
+## The ledger is what makes trusting the webhook safe
+
+"Trust only the webhook" is only workable if a webhook is safe to receive twice — and gateways
+redeliver constantly: on a timeout, on a non-2xx, from a dashboard replay, from an ops script. Every
+event is written to an idempotency ledger **before** any work runs, so a redelivery stops at the
+door instead of double-granting. That ordering, not the handler, is the guarantee. See
+[Idempotency](/docs/payments/concepts/idempotency).

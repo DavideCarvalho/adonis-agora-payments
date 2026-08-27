@@ -134,11 +134,7 @@ export default class PaymentSucceededHandler {
 }
 ```
 
-Register the codegen hook once so the folder is discovered:
-
-```ts title="adonisrc.ts"
-hooks: { init: [() => import('@adonis-agora/payments/hooks/webhook_handlers')] }
-```
+The provider picks the file up at boot — no registration step.
 
 <Callout type="info" title="Never trust a payment until the webhook">
 A `PENDING` charge is a *promise*, not revenue. Grant access only after the gateway

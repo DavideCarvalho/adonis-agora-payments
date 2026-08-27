@@ -91,6 +91,27 @@ process restart: a deploy in the middle of the backoff window drops the pending 
 and queue backends do. Choose accordingly for money paths.
 </Callout>
 
+### The worker the dispatcher depends on
+
+`'durable'` and `'queue'` move processing out of the web process, which means something has to be
+consuming it:
+
+```sh
+node ace durable:work   # dispatcher: 'durable'
+node ace queue:listen   # dispatcher: 'queue'
+```
+
+This is the deployment mistake that hides best: the webhook endpoint keeps answering `200`, the
+ledger keeps filling up, and no handler ever runs. Add the worker to your process manager alongside
+the web process, and alert on `billing_webhook_events` rows stuck in `received`:
+
+```sql
+SELECT count(*) FROM billing_webhook_events
+WHERE status = 'received' AND created_at < now() - interval '15 minutes';
+```
+
+A non-zero count there means events were claimed and nothing finished them.
+
 ## Respond fast
 
 A webhook endpoint that holds the connection while a grant runs is a webhook endpoint that times
@@ -182,6 +203,7 @@ replay window is longer.
 - [ ] `sandbox` is explicit, and keys differ per environment
 - [ ] Webhook endpoints registered in each dashboard (`node ace payments:webhook`)
 - [ ] `billing.dispatcher` names the backend you actually run — not `'auto'`
+- [ ] The matching worker is running (`durable:work` / `queue:listen`) if the dispatcher is not `in-process`
 - [ ] Migrations run; `billing_webhook_events` has a retention floor, not an aggressive prune
 - [ ] Handlers dispatch rather than grant inline
 - [ ] Every grant has an **inner** idempotency guard at the database

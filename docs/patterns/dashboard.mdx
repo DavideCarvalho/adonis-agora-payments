@@ -1,12 +1,17 @@
 ---
-title: Billing dashboard
-description: The headless overview — revenue, active subscriptions and usage per meter from store queries alone, what each metric counts, and how to render it without leaking cents into the arithmetic.
-icon: LayoutDashboard
+title: Building your own dashboard
+description: The headless data layer behind the console — billingOverview and the store's read API, what each metric counts, and how to render cents without leaking the division into the arithmetic.
+icon: PanelsTopLeft
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
 
-`billingOverview` is the data contract a billing dashboard renders. It is **pure store queries** — no
+The package ships a [console](/docs/payments/dashboard) already — mount it and you are done. This
+page is for when you want the numbers somewhere else: inside your own admin, in a Slack digest, on a
+status page.
+
+Everything that console renders is a plain function over the [billing store](/docs/payments/billing),
+and those functions are exported. `billingOverview` is the first one: **pure store queries** — no
 gateway calls — so it is fast, works headless, and needs no network in tests.
 
 ```ts title="app/controllers/billing_dashboard_controller.ts"
@@ -64,12 +69,8 @@ It is a current count, not a historical one — the same number regardless of `f
 subscription still in its trial is counted. Label it as "now" in the UI, and split trials out
 yourself if you bill on converted subscribers:
 
-```ts
-const paying = await db
-  .from('billing_subscriptions')
-  .where('status', 'active')
-  .count('* as total')
-```
+`countActiveSubscriptions()` deliberately includes both; for a converted-only count, keep your own
+`active`-only tally alongside the subscription rows your app already writes.
 </Callout>
 
 ## Rendering it
@@ -102,25 +103,32 @@ See [Money](/docs/payments/concepts/money) for why the division belongs there an
 
 ## Going beyond it
 
-`billingOverview` is deliberately small — the metrics almost every dashboard opens with. Anything
-richer is an ordinary query against tables you own:
+`billingOverview` is deliberately small — the metrics almost every dashboard opens with. The store
+answers the narrower questions directly, and going through it rather than the tables is what keeps
+your dashboard working when someone points `billing.store` somewhere else:
 
 ```ts
-// Revenue by provider, to see what each gateway is actually carrying
-const byProvider = await db
-  .from('billing_payments')
-  .where('status', 'paid')
-  .whereBetween('created_at', [from, to])
-  .select('provider')
-  .sum('amount as total')
-  .groupBy('provider')
+// Which charges failed, and when
+const failed = await store.listPayments({ status: 'failed', limit: 20 })
 
-// New versus churned subscriptions in the window
-const churn = await db
-  .from('billing_subscriptions')
-  .whereBetween('ends_at', [from, to])
-  .count('* as churned')
+// How many charges were created and never confirmed
+const stranded = await store.countPayments({ status: 'pending', createdBefore: twoHoursAgo })
+
+// Which gateway and which event type is failing
+const breakdown = await store.webhookEventBreakdown({ status: 'failed', createdAfter: yesterday })
+// [{ provider: 'stripe', type: 'payment.succeeded', count: 4 }]
 ```
+
+The full read API is listed under [Reading the billing tables](/docs/payments/billing#reading-the-billing-tables),
+and [`billingHealth(store)`](/docs/payments/production#health-checks) rolls the operational ones into
+a single report.
+
+<Callout type="warn" title="Do not query the billing tables directly">
+`billing.store` is a configured seam — an app can point it at its own implementation, and one day
+yours might. A dashboard built on `db.from('billing_payments')` silently reads the wrong database
+the day that happens, and reads nothing at all if the store is not Lucid. Everything the console
+shows is reachable through the store; if something you need is not, that is a gap worth reporting.
+</Callout>
 
 ## Testing it
 

@@ -1,0 +1,66 @@
+---
+title: Asaas
+description: The Brazilian workhorse: Pix, boleto, card and debit, native recurring billing and NFS-e, with externalReference propagated to every installment.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+The Brazilian workhorse: Pix, boleto, card and debit, native recurring billing, and
+native NFS-e.
+
+- **Methods**: pix, boleto, credit_card, debit_card, undefined.
+- **Setup**: `payments.asaas({ apiKey, sandbox, webhookToken })` — `ASAAS_API_KEY`;
+  sandbox defaults to `NODE_ENV !== 'production'` (the sandbox API host is used).
+- **Webhooks**: authenticated by a shared token you set in the dashboard
+  (`asaas-access-token` / `asaas-webhook-token` header), compared timing-safe against
+  `webhookToken`. Events `PAYMENT_CREATED`, `PAYMENT_RECEIVED`, `PAYMENT_OVERDUE`,
+  `PAYMENT_REFUNDED`, `SUBSCRIPTION_*`.
+- **`externalReference`**: sent as the Asaas `externalReference` field — and crucially
+  **propagated to every installment** of a subscription's charges, so a webhook for the
+  3rd monthly charge still routes back to your subscription record.
+- **Subscriptions**: native recurring billing. The gateway generates charges and sends a
+  webhook per charge (with the subscription id). Pass `card` for transparent checkout —
+  a tokenized card auto-charged each cycle.
+- **Invoices**: **native NFS-e** — configure `invoice.asaas({ apiKey })` as the invoice
+  provider so `invoice: true` emits through Asaas itself (or use automatic emission per
+  subscription in the dashboard; the `invoice` option also works through any provider).
+- **Splits**: marketplace-style — pass `split` on the charge to share it across wallets
+  (`walletId` + `percentualValue` and/or `fixedValue`).
+- **Requires** a customer for every charge and subscription.
+
+```ts title="app/services/checkout_service.ts"
+await payments.driver('credit_card').createSubscription({
+  customerId: 'cus_123',
+  planId: 'plan_pro',
+  amount: 4990,
+  startDate: '2026-09-01',
+  externalReference: 'sub:sub_local_1',
+  card: {
+    token: 'tok_123',
+    holder: {
+      name: 'A', email: 'a@b.com', cpfCnpj: '123',
+      postalCode: '000', addressNumber: '1', phone: '999',
+    },
+    remoteIp: '1.2.3.4',
+  },
+})
+```
+
+### Transparent checkout — `card`
+
+Asaas' card flow is "tokenize in the frontend, charge with the token" — the card number
+never touches your server. `card` carries the token plus the holder info the gateway
+requires for the charge (and for issuing the NFS-e):
+
+```ts
+await payments.driver('credit_card').charge({
+  customerId: 'cus_123',
+  amount: 1990,
+  card: {
+    token: cardTokenFromFrontend,
+    holder: { name, email, cpfCnpj, postalCode, addressNumber, phone },
+    remoteIp,
+  },
+})
+```

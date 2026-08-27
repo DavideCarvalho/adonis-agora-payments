@@ -1,0 +1,39 @@
+---
+title: Woovi (OpenPix)
+description: Pix Automático and Pix charges, RSA-SHA256 webhooks, correlationID routing — and the operations its API does not expose.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+- **Methods**: pix, undefined — **Pix only**.
+- **Setup**: `payments.woovi({ appId, webhookPublicKey })` — `WOOVI_APP_ID`.
+- **Webhooks**: two signing schemes. The recommended one is RSA-SHA256 in
+  `x-webhook-signature`, verified against `webhookPublicKey` (the account public key from
+  `GET /api/v1/webhook/public-keys`, PEM or base64-PEM). The deprecated per-webhook HMAC
+  (`X-OpenPix-Signature`, HMAC-SHA1 base64) is supported via `webhookSecret` and takes a
+  back seat when both are set.
+- **`externalReference`**: maps to Woovi's `correlationID` — the id you pass comes back on
+  the charge and its webhook, so it's your routing key.
+- **Subscriptions**: Pix Automático — recurring Pix via webhooks, **no card**. Pass
+  `startDate` to set the monthly charge day (`dayGenerateCharge`). They are **immutable**:
+  the API creates and reads them and nothing else, so `updateSubscription` throws instead
+  of pretending. To change an amount, cancel and create a new subscription.
+- **Invoices**: no invoice concept — a charge *is* the billing record; use an invoice
+  provider with `invoice: true` if you need an invoice.
+
+```ts title="app/services/checkout_service.ts"
+await payments.driver('pix').charge({
+  customerId: 'your-correlation-id',
+  amount: 1990,
+  externalReference: 'payment_local_1',
+  invoice: true,
+})
+```
+
+<Callout type="info" title="`externalReference` is how webhooks find your records">
+Every gateway can echo back a string you choose. Set it to your local payment id
+(`payment.id`, `sub:<subscriptionId>`), and the webhook's normalized
+`event.data.externalReference` routes the confirmation back to the right row — no parsing
+gateway-specific payloads. See [Webhooks → externalReference](/docs/payments/webhooks#routing-payments-back-to-your-records-externalreference).
+</Callout>

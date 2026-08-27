@@ -1,0 +1,54 @@
+---
+title: Providers
+description: The gateways with a built-in driver — what each one accepts, how its webhooks are authenticated, what externalReference maps to, and which operations it simply does not expose.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+Every built-in driver speaks the same `PaymentsDriver` contract — `charge`, `refund`,
+`createSubscription`, `parseWebhook`, … — so your services never learn a gateway's shape.
+What the drivers cannot do is make the gateways identical: one settles cards worldwide,
+another only moves Pix; one deduplicates on a header, another on a field in the body; one
+has no subscription-update endpoint at all.
+
+These pages are the per-gateway cheat sheet for exactly those differences.
+
+## Picking one
+
+Three questions decide it, in this order:
+
+1. **Which methods must you accept?** A driver declares `supportedMethods`, and routing a
+   method a gateway does not support fails at the manager rather than at the gateway. A
+   Pix-only provider will refuse a card before a request leaves your process.
+2. **Who is the merchant of record?** Paddle, Lemon Squeezy, Polar and Dodo Payments sell
+   on your behalf and handle sales tax; Stripe, Adyen and the Brazilian gateways leave that
+   to you. This is a business decision the library cannot make and does not model — it only
+   changes which driver you configure.
+3. **What does it not do?** The gap that hurts is never the feature list; it is the
+   operation the API does not expose. Those are named on each page, and the driver throws
+   rather than reporting a change the gateway never saw.
+
+<Callout title="Routing picks the provider; `method` picks the method">
+`payments.driver('pix')` resolves *which gateway* handles Pix in your config. It does not
+tell that gateway what to create — set `method: 'pix'` on the charge as well. A driver that
+supports several methods otherwise falls back to its own account defaults.
+</Callout>
+
+## Nothing here is region-locked
+
+The contract has no notion of a country: money is an integer in the currency's smallest
+unit, a payment method is a name a driver either supports or refuses, and a webhook is a
+signature to verify and an event to normalize. A euro-area card charge and a Brazilian Pix
+charge differ in which driver you route to — not in the code that calls it.
+
+Multi-currency gateways take a **required** `currency`; the single-currency ones take no
+such option, because there is nothing to choose. See [Money](/docs/payments/concepts/money).
+
+## Adding one that is not here
+
+A driver is a config factory, not a fork: implement `PaymentsDriver`, hand it to
+`defineConfig`, and every part of the library — routing, the billing layer, the webhook
+ledger, the dashboard — works with it unchanged. See
+[Custom providers](/docs/payments/custom-providers).

@@ -1,0 +1,30 @@
+---
+title: AbacatePay
+description: Pix and boleto, no card. HMAC-SHA256 webhooks and a BRL-only, decimal-reais API.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+- **Methods**: pix, boleto, undefined — **no credit card** (routing `credit_card` here
+  throws at the manager, not at the gateway).
+- **Setup**: `payments.abacate({ apiKey, webhookSecret })` — `ABACATE_API_KEY` /
+  `ABACATE_PUBLIC_KEY`.
+- **Webhooks**: HMAC-SHA256 (base64) over the raw body in `x-webhook-signature`, verified
+  timing-safe against `webhookSecret` (the dashboard's "public key"). Events
+  `checkout.completed`, `checkout.refunded`, `subscription.completed/renewed/cancelled`.
+- **Subscriptions**: recurring — no transparent checkout for the recurring charge yet.
+- **Transparent checkout**: `charge` uses `POST /v2/transparents/create` — PIX and Boleto
+  inline, no redirect. The response carries the QR (`brCodeBase64` → `pixQrCodeImage`,
+  `brCode` → `pixCode`) or the barcode (`url` → `hostedUrl`). Needs the payer's
+  `name` + `taxId` — pass them via the charge's `customer` block or create the gateway
+  customer with them.
+
+```ts title="app/services/checkout_service.ts"
+await payments.driver('pix').charge({
+  customerId: 'cus_123',
+  amount: 1990,
+  customer: { name: 'Jane Doe', taxId: '123.456.789-00' },
+  invoice: true,
+})
+```

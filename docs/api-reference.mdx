@@ -47,7 +47,7 @@ defineConfig({
 ### Driver factories
 
 ```ts
-payments.stripe({ apiKey?, currency?, webhookSecret? })
+payments.stripe({ apiKey?, currency, webhookSecret? })   // currency is required
 payments.abacate({ apiKey?, publicKey?, webhookSecret? })
 payments.asaas({ apiKey?, sandbox?, webhookToken? })
 payments.woovi({ appId?, baseUrl?, webhookSecret?, webhookPublicKey? })

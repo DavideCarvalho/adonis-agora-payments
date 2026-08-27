@@ -9,11 +9,16 @@ import { Steps, Step } from 'fumadocs-ui/components/steps';
 import { Cards, Card } from 'fumadocs-ui/components/card';
 
 **`@adonis-agora/payments`** brings multi-gateway payments and Cashier-style billing to
-AdonisJS, built for the Brazilian market. One contract — `charge`, `refund`,
-`createSubscription`, `parseWebhook` — normalized across **Stripe**, **AbacatePay**,
-**Asaas** and **Woovi** (Pix Automático), so your services talk to one interface instead of
-four SDKs. A charge can pay via Pix through Woovi and emit the invoice
-through a completely different provider, in a single call.
+AdonisJS. One contract — `charge`, `refund`, `createSubscription`, `parseWebhook` —
+normalized across every supported gateway, so your services talk to one interface instead
+of one SDK per provider.
+
+Nothing in the contract is region-specific: money is an integer in the currency's smallest
+unit, a payment method is a name the driver either supports or refuses, and a webhook is a
+signature to verify and an event to normalize. What differs between a card charge in the
+euro area and a Pix charge in Brazil is which driver you route to — not the code that calls
+it. A charge can go out through one gateway and emit its invoice through a completely
+different provider, in a single call.
 
 <Callout type="info" title="The one rule">
 A payment is **confirmed only by the webhook**. A `charge()` returns a `PENDING` record —
@@ -29,7 +34,7 @@ Payment integrations are usually a mess of gateway SDKs, hand-rolled status mirr
 webhook controllers that duplicate each other. `@adonis-agora/payments` collapses that into
 four guarantees:
 
-- **One driver contract, four gateways.** Every gateway normalizes onto the same
+- **One driver contract, every gateway.** Every gateway normalizes onto the same
   `PaymentsDriver`. Adding a gateway is a config entry, not a code change — and a driver
   declares which methods it supports, so routing a card to a Pix-only gateway fails at the
   manager, not at the gateway.

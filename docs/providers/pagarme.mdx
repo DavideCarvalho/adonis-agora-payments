@@ -1,0 +1,180 @@
+---
+title: Pagar.me
+description: Stone's Brazilian gateway on the v5 Core API — orders and charges over Pix, boleto and card, native subscriptions, and integer centavos end to end.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Stone's Brazilian gateway, on the **Core API v5** (`https://api.pagar.me/core/v5`). Pix,
+boleto, credit and debit card, native subscriptions, payment links, marketplace splits.
+
+<Callout type="warn" title="Not yet run against a live account">
+This driver was written against Pagar.me's published v5 API reference and is covered by unit
+tests that stub the HTTP layer. Nothing here has been exercised against a real Pagar.me
+account. Run your flow in test mode (an `sk_test_…` key) before you take real money with it.
+</Callout>
+
+- **Methods**: pix, boleto, credit_card, debit_card. **No `undefined`** — an order must name
+  its `payment_method`, so "let the customer choose" exists only on a payment link
+  (`createCheckout`), never on a charge.
+- **Setup**: `payments.pagarme({ secretKey, webhookUser, webhookPassword, pixExpiresIn })` —
+  `PAGARME_SECRET_KEY`. There is no sandbox host: the same URL serves both, and a
+  `sk_test_…` key puts the account in test mode.
+- **Auth**: HTTP Basic with the secret key as the **username and an empty password**.
+- **Webhooks**: authenticated by the **optional HTTP Basic credentials** you set on the
+  webhook endpoint in the dashboard — Pagar.me signs nothing, and there is no HMAC to
+  verify. Set `webhookUser`/`webhookPassword` (or `PAGARME_WEBHOOK_USER` /
+  `PAGARME_WEBHOOK_PASSWORD`) and the driver rejects any request that does not carry them.
+- **`externalReference`**: on a **charge**, sent as the order's `code` **and** as
+  `metadata.external_reference` — order metadata is repeated on every charge the order
+  generates, which is what makes the reference survive into the `charge.*` webhooks. On a
+  **checkout**, sent as the payment link's `order_code`, which Pagar.me stamps as the `code`
+  of every order the link produces. Either way it comes back out on
+  `event.data.externalReference`.
+- **Subscriptions**: native. `createSubscription` picks the API shape from `planId` — see
+  below.
+- **Invoices**: `listInvoices` reads the gateway's own subscription invoices
+  (`GET /invoices`). For an **NFS-e**, configure a separate `invoice.providers` entry and
+  pass `invoice: true`; Pagar.me does not emit fiscal notes.
+- **Splits**: pass `split` on the charge. Each rule maps to a Pagar.me `recipient_id`.
+
+<Callout title="Money is already centavos here">
+Asaas, AbacatePay and Woovi speak decimal reais, so their drivers divide by 100. Pagar.me's
+`amount` fields are integer centavos — the same unit as this library's `Money` — and the
+driver does **no conversion at all**. R$ 19,90 is `1990` on both sides. The same is true of a
+`fixedValue` split share.
+</Callout>
+
+```ts title="config/payments.ts"
+import { defineConfig, payments } from '@adonis-agora/payments'
+import env from '#start/env'
+
+export default defineConfig({
+  default: 'pagarme',
+  providers: {
+    pagarme: payments.pagarme({
+      secretKey: env.get('PAGARME_SECRET_KEY'),
+      webhookUser: env.get('PAGARME_WEBHOOK_USER'),
+      webhookPassword: env.get('PAGARME_WEBHOOK_PASSWORD'),
+    }),
+  },
+})
+```
+
+## Charging
+
+A charge is an **order carrying one payment**: the driver posts `POST /orders` with a single
+`items[]` line and one `payments[]` entry, and returns the first charge the gateway created.
+That charge id (`ch_…`) is what `findPayment` reads (`GET /charges/{id}`) and what the
+`charge.*` webhooks talk about.
+
+```ts
+// Pix — the driver always sends the mandatory `expires_in`.
+const payment = await payments.driver('pagarme').charge({
+  customerId: 'cus_123',
+  amount: 1990,
+  method: 'pix',
+  description: 'Plano Pro',
+  externalReference: 'order:42',
+})
+payment.pixCode        // the BR Code the payer copies
+payment.pixQrCodeImage // URL of the QR image
+```
+
+```ts
+// Card — tokenize in the frontend, charge with the token.
+await payments.driver('pagarme').charge({
+  customerId: 'cus_123',
+  amount: 4990,
+  method: 'credit_card',
+  card: { token: cardTokenFromFrontend },
+  metadata: { installments: 3, statementDescriptor: 'MINHALOJA' },
+})
+```
+
+A charge with no `method` is refused rather than left to the account's defaults — the one
+exception is a call that hands over a card, which can only mean `credit_card`. `metadata`
+carries the fields the contract has no home for: `installments`, `statementDescriptor`,
+`expiresIn` (Pix, seconds) and `dueDate` (boleto).
+
+Without a `customerId`, the order needs an inline payer: pass at least `customer.name` on the
+charge (`customer.taxId` and `card.holder` are used when present).
+
+## Subscriptions
+
+`createSubscription` reads `planId` and picks the API shape it names:
+
+- **`plan_…`** — a subscription from that Pagar.me plan. The plan owns the interval and the
+  price, so `amount` and `cycle` are ignored.
+- **anything else** — a plan-less ("avulsa") subscription built from `amount` and `cycle`,
+  with your `planId` kept as the subscription's `code`. `amount` is required here: there is
+  no plan to read a price from, and the driver refuses rather than guessing one.
+
+`cycle` maps onto Pagar.me's `interval` + `interval_count` pair — `QUARTERLY` is
+`month`/`3`, `BIWEEKLY` is `week`/`2`, and so on.
+
+```ts
+await payments.driver('pagarme').createSubscription({
+  customerId: 'cus_123',
+  planId: 'pro',            // not a plan_… id → plan-less subscription
+  amount: 4990,
+  cycle: 'MONTHLY',
+  method: 'credit_card',
+  card: { token: cardTokenFromFrontend },
+  externalReference: 'sub:7',
+})
+```
+
+### What it will not do
+
+**`updateSubscription` throws.** A Pagar.me subscription has no amount or description of its
+own — the price lives on its *items*, each with a `pricing_scheme`, changed through the
+subscription-item sub-resource rather than through the subscription. No single request means
+what the contract's `{ amount, description }` means, so the driver refuses instead of
+returning a subscription the gateway never changed. Cancel and recreate, or edit the item in
+the dashboard.
+
+**`cancelSubscription` cancels immediately.** There is no period-end flag in the API, so
+`atPeriodEnd` cannot keep a subscription running. What it does control is the invoices already
+issued for the current cycle: `atPeriodEnd: true` sends `cancel_pending_invoices: false`,
+leaving them payable; the default cancels them too.
+
+## Checkout
+
+`createCheckout` creates a **payment link** (`POST /paymentlinks`) and returns its hosted
+URL. `flow_settings.success_url` is the one redirect the API has — **`cancelUrl` is ignored**,
+because there is no cancel destination to map it onto.
+
+Pass `planId` and the link becomes a subscription link, which Pagar.me only accepts with
+`credit_card`; `trialDays` becomes the recurrence's `start_in`. `metadata.methods` narrows
+which methods the page offers (default: card, Pix and boleto).
+
+Set `externalReference` on the session: it becomes the link's `order_code`, and every order
+the link generates carries it as its `code` — the value your `order.paid` handler reads off
+`event.data.externalReference`. Without it, a purchase that started at a hosted page arrives
+as a confirmation with nothing to route it to.
+
+## Webhooks
+
+Events arrive in the envelope `{ id, account, type, created_at, data }` and normalize like
+this:
+
+| Pagar.me | Normalized |
+| --- | --- |
+| `charge.paid`, `order.paid`, `invoice.paid` | `payment.succeeded` |
+| `charge.payment_failed`, `order.payment_failed`, `invoice.payment_failed` | `payment.failed` |
+| `charge.refunded`, `charge.partial_canceled` | `payment.refunded` |
+| `charge.created/pending/processing/updated/underpaid/overpaid`, `order.created/updated/closed` | `payment.updated` |
+| `charge.chargedback`, `order.canceled`, `invoice.canceled` | `payment.updated` |
+| `subscription.created` / `.updated` / `.canceled` | `subscription.created` / `.updated` / `.canceled` |
+
+`order.*` events deliver the order with its `charges[]`; `charge.*` deliver the charge
+itself. Both normalize onto the charge, which is what a payment row tracks.
+
+<Callout type="warn" title="Chargebacks arrive as payment.updated">
+The contract has no dispute event, and minting one would route straight to the processor's
+no-op branch under a name nothing reads. `charge.chargedback` is normalized to
+`payment.updated`; `event.raw.type` still says `charge.chargedback`, so a handler that cares
+can switch on it.
+</Callout>

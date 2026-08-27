@@ -59,6 +59,8 @@ providers: {
 | AbacatePay | `apiKey`, `webhookSecret`/`publicKey` | `ABACATE_API_KEY`, `ABACATE_PUBLIC_KEY` |
 | Asaas | `apiKey`, `sandbox`, `webhookToken` | `ASAAS_API_KEY`, `ASAAS_WEBHOOK_ACCESS_TOKEN` |
 | Woovi | `appId`, `webhookSecret`, `webhookPublicKey` | `WOOVI_APP_ID`, `WOOVI_WEBHOOK_SECRET`, `WOOVI_WEBHOOK_PUBLIC_KEY` |
+| PagBank | `token`, `sandbox`, `webhookToken` | `PAGBANK_TOKEN`, `PAGBANK_WEBHOOK_TOKEN` |
+| Efí | `clientId`, `clientSecret`, `pixKey`, `certificate` | `EFI_CLIENT_ID`, `EFI_CLIENT_SECRET`, `EFI_PIX_KEY`, `EFI_CERTIFICATE` |
 
 Every credential is a **config value first** — name your `.env` variables however you want
 and reference them with `env.get('YOUR_NAME')`. The "env fallback" column is only what a

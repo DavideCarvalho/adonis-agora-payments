@@ -1,0 +1,181 @@
+---
+title: Polar
+description: Merchant-of-record billing for software — Polar is the seller of record and handles sales tax, so there is no direct charge endpoint and every purchase starts at a hosted checkout.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Polar sells your software on your behalf. It is the **merchant of record**: the legal
+seller on the customer's statement, and the party that registers for, calculates and
+remits sales tax and VAT worldwide. You get paid net. That is a business arrangement, not
+a library feature — this package does not model it, and choosing Polar over Stripe is a
+decision about who carries the tax liability, not about which API is nicer.
+
+It shapes the driver, though. A merchant of record has to control the purchase surface,
+so **Polar has no "charge this card for this amount" endpoint**. Prices live on products
+you create in Polar, and money moves through Polar's own checkout.
+
+- **Methods**: credit_card, undefined. Polar's checkout takes cards plus the wallets and
+  local methods it enables per country (Apple Pay, Google Pay, iDEAL, Bancontact, BLIK,
+  EPS, Przelewy24, Bizum, UPI). **There is no API field to request one** — the create
+  payload has no payment-method parameter at all, and Polar picks what to show from the
+  customer's location. So `method` on a charge changes nothing here, and the driver only
+  claims what it can honestly route. **No Pix and no boleto**: `brl` is a valid
+  presentment currency, but nothing in the API reference produces either instrument.
+- **Setup**: `payments.polar({ accessToken, currency, sandbox, webhookSecret })` —
+  `POLAR_ACCESS_TOKEN` (an Organization Access Token, `polar_oat_...`). `currency` is
+  **required** (lowercase ISO 4217): Polar bills in whatever you hand it, so a default
+  would be a guess at the app's country and a wrong guess charges instead of failing.
+  `sandbox` defaults to `NODE_ENV !== 'production'` and switches the host to
+  `https://sandbox-api.polar.sh` — sandbox tokens are not interchangeable with production
+  ones, because the two environments hold separate organizations.
+- **API version**: pinned to `2026-04` via the `Polar-Version` header on every request.
+  Polar defaults to that version when the header is absent, so pinning only protects you
+  from the day it promotes a new default.
+- **Webhooks**: [Standard Webhooks](https://www.standardwebhooks.com/) —
+  `webhook-id` / `webhook-timestamp` / `webhook-signature`, base64 HMAC-SHA256 over
+  `{id}.{timestamp}.{body}`, with a ±5 minute replay window and support for the
+  space-separated rotation list. Needs `webhookSecret` (`POLAR_WEBHOOK_SECRET`).
+- **`externalReference`**: written to `metadata.external_reference` on the checkout and on
+  a subscription, and read back out of the same key. Polar copies checkout metadata onto
+  the order **and** the subscription it produces, which is what makes it survive to the
+  webhook. It is the only thing tying an `order.paid` back to your own row.
+- **Subscriptions**: created by a checkout. `createSubscription()` calls
+  `POST /v1/subscriptions/`, which Polar allows **only for free products** — a paid plan
+  has to go through checkout so Polar can collect and validate the payment method.
+- **Invoices**: Polar issues one per paid order and puts `invoice_number` on the order
+  itself. `listInvoices(customerId)` maps a customer's orders; `hostedPdfUrl` is left
+  unset because the PDF sits behind a separate per-order call.
+
+<Callout type="warn" title="Not yet verified against a live account">
+This driver is written against Polar's published API reference (spec version `2026-04`)
+and covered by unit tests. It has not been exercised against a live Polar account — run it
+in the sandbox and confirm a real checkout, webhook and refund before you take real money
+with it.
+</Callout>
+
+## What it refuses
+
+Every one of these throws a `[payments]` error rather than reporting a change Polar never
+made.
+
+- **`charge()`** — there is no direct charge endpoint. Polar does have a two-step
+  off-session route (`POST /v1/orders/` for a draft, then `POST /v1/orders/{id}/finalize`),
+  but it is gated behind the `off_session_charges_enabled` preview flag, is paid-plan only,
+  and needs a saved payment method on the customer. The driver does not pretend that is
+  the general case. Use `createCheckout()`.
+- **`createSubscription({ amount })`** and **`{ cycle }`** — the price and the interval
+  belong to the Polar product. Silently dropping an `amount` would bill a figure nobody
+  chose.
+- **`createSubscription({ trialDays })`** — Polar sets trials on the checkout
+  (`trial_interval`), not on the subscriptions endpoint. Pass `trialDays` to
+  `createCheckout()`.
+- **`createSubscription({ card })`** — there is no tokenized-card input. A merchant of
+  record collects the card itself.
+- **`updateSubscription({ amount })`** and **`{ description }`** — a Polar subscription has
+  neither field. See the plan switch below.
+
+## Checkout is the way in
+
+```ts title="app/services/checkout_service.ts"
+const session = await payments.driver('polar').createCheckout({
+  planId: 'prod_01HX...',              // a Polar product id
+  amount: 1990,                        // cents; ignored unless the price is pay-what-you-want
+  successUrl: 'https://app.test/thanks?checkout_id={CHECKOUT_ID}',
+  cancelUrl: 'https://app.test/pricing',
+  customerId: 'cus_01HX...',
+  externalReference: 'order:1234',
+})
+
+return response.redirect(session.url)
+```
+
+`amount` is sent as Polar's `amount`, whose reference says: *"Amount in cents, before
+discounts and taxes. Only useful for custom prices, it'll be ignored for fixed and free
+prices."* So it sets the figure on a pay-what-you-want product and is discarded on a fixed
+one — it never overrides a product price.
+
+`cancelUrl` maps to Polar's `return_url`. Polar has **no** `cancel_url`; `return_url` puts
+a back button on the checkout page pointing at that URL, which is the closest equivalent
+the API offers.
+
+## Orders are the payments
+
+Polar has no "payment" resource in the sense this library means. An **order** is the record
+of a single paid transaction, so that is what the driver maps onto `Payment` —
+`findPayment(orderId)`, and `refund()` takes an order id.
+
+`Payment.amount` is the order's `total_amount`: after discounts, **including** tax. All
+Polar amounts are already integers in the currency's smallest unit, so nothing is converted
+on the way in or out.
+
+## Refunds
+
+`refund(orderId)` with no amount reads the order's `refundable_amount` and refunds exactly
+that, rather than assuming the total. The distinction matters: Polar's refund `amount` is
+the **net** figure excluding tax, and Polar refunds the tax alongside it — in full for a
+full refund, prorated for a partial one. Passing `total_amount` would over-refund.
+
+Partial refunds work: `refund(orderId, 500)`. The reason is sent as `other`, because the
+driver is not told why and Polar's enum has no merchant-initiated member.
+
+## Switching plans
+
+Polar changes what a customer pays by moving them to a different product. The shared
+`UpdateSubscriptionInput` has no field for that, so it rides in metadata:
+
+```ts
+await payments.driver('polar').updateSubscription('sub_01HX...', {
+  metadata: {
+    productId: 'prod_enterprise',
+    prorationBehavior: 'prorate', // invoice | prorate | next_period | reset
+  },
+})
+```
+
+## Cancelling
+
+`cancelSubscription(id)` sets `cancel_at_period_end` — the subscription stays `active` and
+keeps its benefits until the paid period runs out. `cancelSubscription(id, { atPeriodEnd:
+false })` issues `DELETE /v1/subscriptions/{id}`, Polar's *revoke*: access ends now, there
+is no refund, and it cannot be undone.
+
+## Webhook events
+
+Mapped onto the canonical types:
+
+| Polar event | Normalized |
+| --- | --- |
+| `order.paid` | `payment.succeeded` |
+| `order.refunded`, `refund.created` | `payment.refunded` |
+| `order.created`, `order.updated`, `refund.updated` | `payment.updated` |
+| `subscription.created` | `subscription.created` |
+| `subscription.active`, `.updated`, `.uncanceled`, `.past_due`, `.cycled`, `.paused`, `.resumed` | `subscription.updated` |
+| `subscription.canceled`, `subscription.revoked` | `subscription.canceled` |
+
+Everything else (`checkout.*`, `customer.*`, `benefit_grant.*`, `product.*`, `discount.*`,
+`organization.*`) passes through under its Polar name, so an app handler can subscribe to
+it directly.
+
+Two behaviours worth knowing, because they are not obvious:
+
+- **The event id lives in the `webhook-id` header, not the body.** Polar's payload is
+  `{ type, timestamp, data }` with no id in it. The driver uses the header, which is what
+  the idempotency ledger deduplicates on.
+- **`subscription.canceled` does not mean it ended.** Polar fires it when a cancellation is
+  *scheduled*; the subscription is still `active` with `cancel_at_period_end: true`.
+  `subscription.revoked` is the one that fires when access actually stops. Both normalize
+  to `subscription.canceled`, so read `event.raw` if you need to tell them apart.
+
+A refund event is keyed by its **order** id, not the refund id — the order is the row your
+handler is holding.
+
+<Callout title="The webhook secret is used verbatim">
+Polar's secret derivation is not the Standard Webhooks default. `@polar-sh/sdk`
+base64-*encodes* the secret before handing it to the reference library, which base64-decodes
+it right back — so the HMAC key is the raw UTF-8 bytes of the secret string, `whsec_`
+prefix and all. It is **not** stripped and **not** base64-decoded. (Dodo Payments, on the
+same spec, does the opposite.) If you verify Polar webhooks yourself somewhere else, this
+is the detail that will cost you an afternoon.
+</Callout>

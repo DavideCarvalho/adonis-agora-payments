@@ -1,0 +1,154 @@
+---
+title: PagBank
+description: PagSeguro's Orders API v4 — Pix, card and boleto in integer centavos, one order id to reconcile on, and a webhook check that is not an HMAC.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+PagBank (PagSeguro) through the **Orders API v4** (`api.pagseguro.com/orders`): Pix, credit
+and debit card, and boleto, authenticated with a Bearer token.
+
+- **Methods**: pix, credit_card, debit_card, boleto. No `undefined` — the Orders API makes
+  you choose up front, so there is no "let the payer decide" order to create.
+- **Setup**: `payments.pagbank({ token, sandbox, notificationUrls })` — `PAGBANK_TOKEN`;
+  sandbox defaults to `NODE_ENV !== 'production'` (`sandbox.api.pagseguro.com`).
+- **Money**: integer **centavos**, end to end. PagBank's `amount.value` is the same unit
+  this library uses, so nothing is divided or multiplied anywhere in the driver —
+  R$ 19,90 is `1990` in your code and `1990` on the wire.
+- **`externalReference`**: sent as the order's `reference_id` and echoed on every webhook.
+- **Idempotency**: `idempotencyKey` becomes the `x-idempotency-key` header, which PagBank
+  honours for 48 hours — a retried charge returns the original order instead of a second one.
+- **Refunds**: `POST /charges/{id}/cancel`. Partial refunds leave the charge `PAID` with a
+  non-zero `refunded` summary; a full one flips it to `CANCELED`.
+- **No subscriptions, no customers, no invoice list** — see below.
+
+## One order, two ids — and which one this driver uses
+
+PagBank gives the same money two identifiers: the order (`ORDE_…`) and the charge inside it
+(`CHAR_…`). Every payment is a `charges[]` entry — Pix too, since PagBank moved it into the
+charge (`payment_method.type: 'PIX'`, BR Code on `charges[].qr_code.text`); the driver still
+reads the older order-level `qr_codes` shape when one turns up.
+
+**This driver uses the order id as `gatewayId`, always.** The webhook delivers the order, so
+keying on the charge id would file the charge you created and the webhook that confirms it
+under two different ids, and nothing would reconcile. `refund()` accepts either id and
+resolves the charge itself; `findPayment()` does too.
+
+```ts
+const payment = await payments.driver('pix').charge({
+  amount: 1990,                       // centavos, straight through
+  method: 'pix',
+  description: 'Plano Pro',
+  externalReference: 'pay:local_1',
+  customer: { name: 'Ana', email: 'ana@example.com', taxId: '123.456.789-09' },
+})
+
+payment.gatewayId   // 'ORDE_…' — the id the webhook will carry
+payment.pixCode     // the BR Code ("copia e cola")
+```
+
+<Callout type="warn" title="The QR image is a link, not base64">
+PagBank returns `links` pointing at the rendered PNG (`QRCODE.PNG`, `QRCODE.BASE64`), not
+the image bytes. `pixQrCodeImage` is documented as base64 content, so the driver leaves it
+unset rather than filling it with a URL — read `payment.payload.charges[0].links` if you
+want PagBank to render it for you, or generate the image yourself from `pixCode`.
+</Callout>
+
+## Webhook authenticity — read this before you rely on it
+
+PagBank sends an `x-authenticity-token` header with each Orders API notification. It is:
+
+```
+sha256( "<your API token>" + "-" + "<the exact raw body>" )     // hex
+```
+
+The driver verifies it, timing-safe, on every webhook, and rejects the request when it is
+missing or wrong. Three things about that mechanism deserve to be said plainly rather than
+implied:
+
+1. **It is not an HMAC.** It is a secret *prefix* hashed with SHA-256, which is the textbook
+   setup for a length-extension forgery: someone who has seen one valid `(body, token)` pair
+   can compute a valid token for that body plus a suffix without knowing the secret. What
+   saves it here is that the forged body is the original followed by binary padding and
+   `JSON.parse` rejects that — the forgery has to get past the parser, not just the hash. It
+   is a weaker construction than the HMAC every other gateway on these pages uses.
+2. **The secret is your API token.** There is no separate webhook signing secret to
+   configure or rotate. Anything that leaks your webhook secret has leaked your API
+   credential, and rotating one rotates the other.
+3. **The body must be byte-identical.** Re-serializing the JSON before verifying breaks the
+   hash. The lib-mounted route passes the raw body, so this only bites you if you verify it
+   yourself somewhere else.
+
+Set `webhookToken` when the account's webhook is configured with a token other than the API
+one. `verifyWebhooks: false` exists for one reason — PagBank's **sandbox** does not always
+send the header — and turning it off leaves the endpoint accepting anything that reaches
+it. Never do that in production.
+
+```ts
+providers: {
+  pagbank: payments.pagbank({
+    token: env.get('PAGBANK_TOKEN'),
+    notificationUrls: [`${env.get('APP_URL')}/payments/webhook/pagbank`],
+  }),
+}
+```
+
+<Callout title="Post-transaction events are a different API">
+Balance-released and chargeback notifications still arrive in PagBank's legacy
+form-encoded shape (`notificationCode=…&notificationType=transaction`), with **no
+authenticity token at all** and a separate lookup to resolve them. This driver rejects
+those with a clear error instead of half-parsing them; if you need them, route them to your
+own controller.
+</Callout>
+
+<Callout type="warn" title="Not yet run against a live account">
+This driver is written against PagBank's published API reference (Orders API v4, read
+August 2026) and covered by unit tests; it has never talked to a real PagBank account. Run
+it in the sandbox against your own credentials before it touches real money.
+</Callout>
+
+## What it does not do
+
+- **Subscriptions.** PagBank's recurring billing is the *Assinaturas* API — a different
+  product with a different base URL. `createSubscription`, `findSubscription` and friends
+  throw and name it, rather than returning something the gateway never created.
+- **Customers.** The Orders API has no customer resource; the payer travels inline on every
+  order, and **`customer: { name, email, taxId }` is required on every charge** (PagBank
+  refuses an order without a CPF/CNPJ). `createCustomer` throws — keep the mapping between
+  your users and their fiscal data in your own table.
+- **Hosted checkout.** `createCheckout` creates a Pix charge and gives you a BR Code with an
+  empty `url`; PagBank's redirect-style checkout is the separate Checkout API.
+- **Invoice listing.** `listInvoices` returns `[]` — orders are indexed by their own id, not
+  by customer. Fiscal notes come from an [invoice provider](/docs/payments/invoices).
+
+## Card and boleto
+
+Card charges take the blob from PagBank's card-encryption SDK (the number never touches
+your server), or a stored `CARD_…` id:
+
+```ts
+await payments.driver('credit_card').charge({
+  amount: 1990,
+  method: 'credit_card',
+  card: { token: encryptedCardFromFrontend, holder: { name: 'Ana', /* … */ } },
+  metadata: { installments: 3, capture: true },
+})
+```
+
+Boleto needs the payer's address, because PagBank prints it:
+
+```ts
+await payments.driver('boleto').charge({
+  amount: 1990,
+  method: 'boleto',
+  customer: { name: 'Ana', email: 'ana@example.com', taxId: '12345678909' },
+  metadata: {
+    dueDate: '2026-09-10',
+    address: {
+      street: 'Av. Brigadeiro Faria Lima', number: '1384', locality: 'Pinheiros',
+      city: 'São Paulo', region_code: 'SP', country: 'BRA', postal_code: '01452002',
+    },
+  },
+})
+```

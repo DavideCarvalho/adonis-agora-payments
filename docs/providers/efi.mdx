@@ -1,0 +1,173 @@
+---
+title: Efí
+description: Efí's Pix API — the gateway that needs a client certificate before it will even issue you a token, and what that means for how you configure it.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Efí (formerly Gerencianet), through its **Pix API** (`pix.api.efipay.com.br`): immediate
+Pix charges (`cob`), the Pix that settle them, and their refunds (`devolução`).
+
+- **Methods**: pix. Only pix.
+- **Setup**: `payments.efi({ clientId, clientSecret, pixKey, certificate })` —
+  `EFI_CLIENT_ID`, `EFI_CLIENT_SECRET`, `EFI_PIX_KEY`, `EFI_CERTIFICATE`; sandbox
+  (`pix-h.api.efipay.com.br`) defaults to `NODE_ENV !== 'production'`.
+- **Auth**: OAuth2 client credentials (`POST /oauth/token`, Basic) **over mutual TLS** —
+  see below, it is the whole story with this gateway.
+- **Money**: the Pix API wants a decimal string (`"19.90"`). The driver builds it by
+  shifting the digits of your integer, never by dividing, so `1990` cannot leave as
+  `"19.89"`.
+- **`externalReference`**: becomes the **txid** when it fits Efí's charset — see
+  [Routing a webhook back](#routing-a-webhook-back-to-your-record).
+- **Refunds**: yes, `PUT /v2/pix/{e2eid}/devolucao/{id}`.
+- **No subscriptions, no customers, no invoice list.**
+
+<Callout type="warn" title="Efí is several APIs, and this driver speaks one of them">
+The **Pix API** (this driver) and the **Cobranças API** (`cobrancas.api.efipay.com.br`) are
+different products with different authentication. Cobranças does boleto, card, carnê and
+native subscriptions, over OAuth **without** a certificate; Pix does Pix, with one. Nothing
+in the Cobranças API is reachable from this driver, and no config flag switches it over —
+that would be a second driver. Asking this one for a boleto throws and says so.
+</Callout>
+
+## The certificate
+
+Efí requires a client certificate on **every** request to the Pix API, including the token
+request itself. This is not an API key with an unusual name: it is mutual TLS, so the
+credential belongs to the TLS handshake, not to a header — which is why it cannot be
+configured the way every other gateway's key is.
+
+Get the `.p12` from the Efí dashboard (*API → Meus Certificados*), keep it out of your
+repository, and point the driver at it:
+
+```ts title="config/payments.ts"
+providers: {
+  efi: payments.efi({
+    clientId: env.get('EFI_CLIENT_ID'),
+    clientSecret: env.get('EFI_CLIENT_SECRET'),
+    pixKey: env.get('EFI_PIX_KEY'),
+    certificate: env.get('EFI_CERTIFICATE'),   // a path, or a Buffer
+  }),
+}
+```
+
+The driver builds a certificate-bearing `fetch` over Node's own `node:https` (which has
+accepted `pfx` forever) and hands it to the package's shared HTTP helper — so Efí gets the
+same error handling as every other driver, with **no extra dependency to install**. A `.pem`
+carrying both halves works too; `certificatePassphrase` is there for a `.p12` you protected
+(Efí's default export has no passphrase).
+
+Miss it and the driver refuses to boot, at boot, with the instructions in the message —
+never at the first charge:
+
+```
+[payments] Efí's Pix API requires mutual TLS and no certificate was configured.
+Generate the .p12 in the Efí dashboard (API → Meus Certificados), then set
+`EFI_CERTIFICATE` to its path or pass `certificate` (a path or a Buffer) to
+`payments.efi()`. If you terminate TLS somewhere else, pass your own `fetch` instead.
+```
+
+An unreadable path fails the same way, naming the path and the OS error. If your deployment
+terminates TLS elsewhere — a proxy holding the certificate, a pooled undici dispatcher —
+pass your own `fetch` and the driver uses it verbatim.
+
+## The token expires
+
+`/oauth/token` returns an access token with an `expires_in` (an hour today). The driver
+caches it against **that** number minus a minute of skew, so the cache can never outlive
+the token; concurrent charges share one token request instead of racing to mint several;
+and a `401` on any call drops the cache and retries once, for the token that was revoked
+before it expired. A cache with a lifetime of its own is how you get a driver that works
+all afternoon and starts failing an hour into the deploy that stayed up.
+
+## Routing a webhook back to your record
+
+Efí's Pix notification contains `endToEndId`, `txid`, `chave`, `valor`, `horario` and
+`infoPagador`. That is the whole list — **the txid is the only reference of yours it can
+carry**.
+
+So the driver uses it: an `externalReference` that fits the txid charset (26–35
+alphanumerics, no punctuation) is sent as the txid, and comes back on the webhook as
+`event.data.externalReference`. One that does not fit is not silently mangled — Efí
+generates the txid instead, and you must persist the returned `gatewayId`:
+
+```ts
+const payment = await payments.driver('pix').charge({
+  amount: 1990,
+  method: 'pix',
+  // fits: 26-35 alphanumerics -> becomes the txid, and routes itself back
+  externalReference: 'order01H8XGJWBWBAQ4TAV0PQGQ01',
+  customer: { name: 'Ana', taxId: '123.456.789-09' },   // Efí's `devedor`, optional
+})
+
+payment.gatewayId   // the txid — persist it either way
+payment.pixCode     // BR Code ("copia e cola")
+payment.pixQrCodeImage  // base64 PNG (the data-URI prefix is stripped for you)
+```
+
+`payment.gatewayId` is the txid everywhere: on the charge, on the webhook, and in the
+billing tables. Refunds take it too — the driver resolves the settled Pix behind it and
+refunds against that `endToEndId`, because a Pix refund is made against the payment, not
+against the charge.
+
+## Webhooks are not authenticated by this driver
+
+Say it plainly: **`parseWebhook` verifies nothing for Efí, and there is nothing for it to
+verify.** The notification carries no signature header. Efí offers two other mechanisms,
+and both live outside what a driver can see:
+
+- **Mutual TLS in reverse** — Efí presents *its* certificate to your endpoint and expects
+  your server to validate it. That is a decision your TLS terminator makes, before the
+  request ever reaches AdonisJS. Efí publishes an nginx setup for it.
+- **An `hmac` query parameter** you bake into the registered URL. It is in the **URL**, and
+  the driver is handed the body and the headers only — so this must be enforced in front
+  of the lib-mounted route, e.g. by a middleware on `/payments/webhook/efi` comparing
+  `request.qs().hmac` against your secret.
+
+Efí also documents that notifications currently originate from a single IP
+(`34.193.116.226`), which is worth an allow-list at the edge but is not authentication on
+its own. Treat the notification as a hint if you want belt and braces: `findPayment(txid)`
+re-reads the charge from Efí over mutual TLS, and that answer cannot be forged.
+
+Registering the URL is a call, not a dashboard toggle, so the driver exposes it:
+
+```ts
+const efi = payments.driver('efi') as EfiDriver
+await efi.registerPixWebhook(
+  'https://app.example.com/payments/webhook/efi?hmac=<secret>&ignorar=',
+  { skipMtls: true },   // sets x-skip-mtls-checking; drop it if you validate mTLS yourself
+)
+```
+
+Efí appends `/pix` to whatever you register unless the URL ends with `?ignorar=` — that
+trailing parameter is why the URL above looks the way it does. Registration also probes the
+URL with a body that has no `pix` array; the driver answers it with an inert event so the
+registration succeeds instead of erroring.
+
+<Callout type="warn" title="A batched notification is refused, loudly">
+The payload is a `pix` **array**. Efí sends one entry in practice, but a `WebhookEvent`
+carries one payment, so a notification with several would mean quietly dropping money that
+has already arrived. The driver throws instead, naming every txid in the batch, and nothing
+is processed — reconcile them with `GET /v2/pix` before retrying.
+</Callout>
+
+<Callout type="warn" title="Not yet run against a live account">
+This driver is written against Efí's published Pix API reference (read August 2026) and
+covered by unit tests; it has never presented a real certificate to a real Efí account. Run
+it against homologation (`pix-h`) with your own `.p12` before it touches real money — the
+mutual-TLS handshake in particular is something only a live call can prove.
+</Callout>
+
+## What it does not do
+
+- **Subscriptions.** Recurring billing at Efí is either the Cobranças API
+  (`/v1/subscription`) or Pix Automático (`/v2/rec`) — different products, different
+  scopes. All four subscription methods throw and name them.
+- **Customers.** The Pix API has no customer resource; the payer (`devedor`) travels on the
+  charge. Pass `customer: { name, taxId }` and the driver sends it — but only when both are
+  present, because Efí rejects a half-filled `devedor`.
+- **Invoices.** `listInvoices` returns `[]`: charges are indexed by txid and by date range,
+  never by payer. Fiscal notes come from an [invoice provider](/docs/payments/invoices).
+- **Hosted checkout.** `createCheckout` creates a Pix charge and returns the BR Code with an
+  empty `url`. There is no page for Efí to host.

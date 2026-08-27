@@ -1,0 +1,142 @@
+---
+title: Mercado Pago
+description: Pix, boleto and card across seven Latin American countries — multi-currency, decimal amounts, and notifications that carry an id and nothing else.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+The largest gateway in Latin America. One API, seven country sites (BR, AR, MX, CL, CO,
+PE, UY), so unlike the BRL-only Brazilian drivers this one is multi-currency and takes a
+required `currency`.
+
+- **Methods**: pix, boleto, credit_card, debit_card. `undefined` is deliberately **not**
+  supported: Mercado Pago requires a `payment_method_id` on every payment, so "let the
+  payer choose" is Checkout Pro (`createCheckout`), not a charge. Reach it by naming the
+  provider — `payments.driver('mercadopago').createCheckout(…)`.
+- **Setup**: `payments.mercadopago({ accessToken, currency, webhookSecret })` —
+  `MERCADOPAGO_ACCESS_TOKEN`, `MERCADOPAGO_WEBHOOK_SECRET`. `currency` is **required**
+  (lowercase ISO 4217) and the driver refuses to boot without one; a gateway that bills in
+  seven currencies has no safe default. There is no sandbox host — you switch environments
+  by switching credentials.
+- **Money**: Mercado Pago takes `transaction_amount` as a **decimal**, so the driver
+  converts at the boundary. The currency travels with the conversion: `clp` has no cents,
+  and dividing a Chilean amount by 100 bills 1% of it — which Mercado Pago accepts without
+  complaint. `cop` is treated as a two-decimal currency because ISO 4217 says so, even
+  though Colombian prices are quoted in whole pesos; verify a COP charge in sandbox before
+  trusting it.
+- **`idempotencyKey`**: sent as the `X-Idempotency-Key` **header**, which Mercado Pago
+  requires on `POST /v1/payments` and on refunds. It is a header, not a body field — a key
+  written into the payload deduplicates nothing. When you don't pass one the driver
+  generates a UUID to satisfy the API, and your retry is then a second charge; pass your
+  own key if you want the protection.
+- **Webhooks**: `x-signature` (`ts=…,v1=…`), an HMAC-SHA256 over
+  `id:<data.id>;request-id:<x-request-id>;ts:<ts>;` keyed by the *secret signature* from
+  Your integrations → Webhooks. Absent parts are dropped from the manifest, and the docs
+  ask you to lowercase an alphanumeric `data.id`, so the driver accepts either spelling.
+  Enforced strictly whenever `webhookSecret` is set, skipped when it isn't so local
+  development works without a dashboard webhook.
+- **`externalReference`**: sent as Mercado Pago's `external_reference` — on the payment,
+  on the Checkout Pro preference (from where the gateway copies it onto the resulting
+  payment) and on the preapproval. Mercado Pago restricts it to **64 characters of letters,
+  numbers, hyphens and underscores**; the driver refuses anything else up front rather than
+  letting the gateway return an opaque 400.
+- **Subscriptions**: preapprovals. Pass `amount` (plus `metadata.backUrl`) for a
+  subscription with an inline recurrence, or omit `amount` and pass an existing
+  `preapproval_plan_id` as `planId` and let the plan set the price. `updateSubscription`
+  really updates the gateway (`PUT /preapproval/{id}` with `auto_recurring`), and
+  `description` maps to the payer-visible `reason`.
+- **Invoices**: none for a customer. `listInvoices` throws — see below.
+
+```ts title="app/services/checkout_service.ts"
+const payment = await payments.driver('pix').charge({
+  amount: 1990,
+  method: 'pix',
+  externalReference: 'payment_local_1',
+  idempotencyKey: crypto.randomUUID(),
+  customer: { name: 'Jane Doe', email: 'jane@example.com', taxId: '123.456.789-00' },
+})
+
+payment.pixCode // the BR Code the payer copies
+payment.pixQrCodeImage // base64 PNG
+payment.hostedUrl // Mercado Pago's own payment page
+```
+
+## The notification carries an id and nothing else
+
+This is the single most important thing to know about Mercado Pago webhooks. A
+notification looks like this, in full:
+
+```json
+{ "id": 12345, "type": "payment", "action": "payment.updated", "data": { "id": "999999999" } }
+```
+
+No amount. No status. No `external_reference`. Mercado Pago's own docs tell you to fetch
+the resource afterwards, and there is no webhook variant that carries the payment.
+
+So `parseWebhook` verifies the `x-signature` HMAC and then **fetches the resource**:
+`GET /v1/payments/{id}` for the `payment` topic, `GET /preapproval/{id}` for
+`subscription_preapproval`. What you get back is a fully populated event — status, amount,
+currency and your `externalReference`:
+
+```ts
+// event.type === 'payment.succeeded'
+// event.data.externalReference === 'payment_local_1'
+```
+
+One extra API call per notification is Mercado Pago's design, not an inefficiency of the
+driver; the mounted `/payments/webhook/mercadopago` route pays it for you. **A failed fetch
+throws**, so the route answers 400 and Mercado Pago retries — reporting a status the
+gateway did not confirm would be worse than a retry.
+
+The one exception is `subscription_authorized_payment`, a subscription's recurring charge.
+It is read from `/authorized_payments/{id}`, whose response shape this driver has not
+verified against the reference, so it is left as `payment.updated` carrying the id rather
+than mapped from guessed field names. Fetch it yourself if you need the charge's status.
+
+<Callout type="warn" title="The signature is computed over the query string">
+Mercado Pago builds the manifest from the `data.id` **query parameter**, and the driver
+contract passes only the body and the headers. The driver reads the same id from the body,
+where Mercado Pago also puts it. Should the two ever disagree for a notification type, the
+signature check will reject a genuine webhook.
+</Callout>
+
+## What it refuses
+
+- **`listInvoices`** throws. `GET /authorized_payments/search` lists the charges of a
+  *subscription* and filters by `payer_id`, which is a Mercado Pago user id — a different
+  identifier space from the `/v1/customers` id. Returning an empty array would say "this
+  customer has no invoices", which is not something the API told us.
+- **`cancelSubscription({ atPeriodEnd: true })`** throws. A preapproval cancel is immediate
+  and, in Mercado Pago's own words, irreversible. Pause it (`status: "paused"`) and cancel
+  at the end of the period, or keep the grace period on your own record.
+- **A subscription `startDate` without an end date** throws. Mercado Pago documents that
+  `start_date` "only works together with the `end_date` parameter" — sent alone it is
+  silently ignored, and a subscription starting on a date nobody chose is worse than an
+  error. Pass `metadata.endDate` alongside it.
+- **A card charge without the brand** throws. Mercado Pago identifies a card payment by its
+  brand (`visa`, `master`, `debvisa`), which the frontend tokenizer returns next to the
+  token; pass it as `metadata.paymentMethodId`.
+- **A charge with no method** throws, pointing you at `createCheckout`.
+
+## Gaps and things the docs would not settle
+
+- The reference marks `transaction_amount`, `payment_method_id` and `token` as *optional*
+  while its own error table says each "can't be null". Requiredness here follows the errors
+  and the integration guides, not the schema flags.
+- `payment_method_id` for Pix is `Pix` in the API reference's enum and `pix` in every
+  working guide. The driver sends the lowercase form.
+- The payer address sits at `additional_info.payer.address` in the reference and directly
+  under `payer` in the Pix and boleto guides. The driver follows the guides
+  (`metadata.address` → `payer.address`), because those are the examples with a working
+  end-to-end flow.
+- `identification.type` is inferred as CPF/CNPJ from the digit count, which only holds for
+  Brazil. For AR/MX/CL/CO/PE/UY pass the document type yourself.
+- The set of `action` values is not documented — only `payment.created` appears anywhere —
+  so the driver keys off the notification's `type`, which is.
+
+<Callout type="warn" title="Not yet exercised against a live account">
+This driver was written against Mercado Pago's published API reference and is covered by
+unit tests, but it has never run against a real Mercado Pago account. Put it through
+sandbox with your own credentials before it takes real money.
+</Callout>

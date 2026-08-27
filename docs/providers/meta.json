@@ -17,6 +17,8 @@
     "adyen",
     "paypal",
     "mollie",
+    "razorpay",
+    "square",
     "---SaaS & merchant of record---",
     "paddle",
     "lemonsqueezy",

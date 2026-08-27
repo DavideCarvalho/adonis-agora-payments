@@ -37,6 +37,19 @@ export default defineConfig({
     //   // Recommended RSA signature (x-webhook-signature):
     //   webhookPublicKey: env.get('WOOVI_PUBLIC_KEY'),
     // }),
+    // pagbank: payments.pagbank({
+    //   token: env.get('PAGBANK_TOKEN'),
+    //   // Webhooks are verified with the SAME token (x-authenticity-token); there is no
+    //   // separate secret. Only turn verification off for the sandbox, never in production.
+    //   notificationUrls: [`${env.get('APP_URL')}/payments/webhook/pagbank`],
+    // }),
+    // efi: payments.efi({
+    //   clientId: env.get('EFI_CLIENT_ID'),
+    //   clientSecret: env.get('EFI_CLIENT_SECRET'),
+    //   pixKey: env.get('EFI_PIX_KEY'),
+    //   // Efí's Pix API needs mutual TLS: the .p12 from the dashboard, as a path or Buffer.
+    //   certificate: env.get('EFI_CERTIFICATE'),
+    // }),
   },
 
   /**

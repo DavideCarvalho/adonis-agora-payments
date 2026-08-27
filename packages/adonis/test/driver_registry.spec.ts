@@ -64,6 +64,30 @@ describe('driver registry', () => {
     ).toEqual([]);
   });
 
+  it('keeps the providers comparison table in step with the drivers', async () => {
+    // The table is the page a reader compares gateways on, and every cell in it is a fact
+    // that lives in code — so it is generated from the drivers and checked here rather than
+    // maintained by hand. A hand-kept matrix over eighteen gateways is a promise about
+    // capabilities that quietly stops being true.
+    const index = await readFile(`${docsDir}index.mdx`, 'utf-8');
+    const table = index.split('providers:table:start')[1]?.split('providers:table:end')[0] ?? '';
+
+    for (const slug of await slugs()) {
+      const source = await readFile(`${driversDir}${slug}.ts`, 'utf-8');
+      const row = table.split('\n').find((line) => line.includes(`/providers/${slug})`));
+      expect(row, `no row for ${slug} in the providers table`).toBeDefined();
+
+      const caps = source.match(/capabilities = \{([^}]*)\}/)?.[1] ?? '';
+      const supports = (name: string) =>
+        new RegExp(`${name}\\s*:\\s*true`).test(caps) ? '✅' : '—';
+      const cells = (row ?? '').split('|').map((cell) => cell.trim());
+      // | link | methods | refunds | subscriptions | invoices |
+      expect(cells[3], `${slug}: refunds cell disagrees with the driver`).toBe(supports('refunds'));
+      expect(cells[4], `${slug}: subscriptions cell disagrees`).toBe(supports('subscriptions'));
+      expect(cells[5], `${slug}: invoices cell disagrees`).toBe(supports('invoices'));
+    }
+  });
+
   it('lists every docs page in the sidebar', async () => {
     const meta = JSON.parse(await readFile(`${docsDir}meta.json`, 'utf-8')) as { pages: string[] };
     const listed = new Set(meta.pages);

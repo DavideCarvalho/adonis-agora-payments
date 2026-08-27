@@ -102,3 +102,82 @@ describe('driver → processor contract', () => {
     expect(ledger.status).toBe('failed');
   });
 });
+
+/**
+ * The same contract for the two gateways whose ids are the least obvious: PagBank hands
+ * out an order id and a charge id for the same money, and Efí hands out a txid and an
+ * endToEndId. Both drivers pick one and stick to it — these tests are what says so.
+ */
+describe('driver → processor contract (PagBank, Efí)', () => {
+  it('PagBank PAID order syncs a paid payment row under the ORDER id', async () => {
+    const { PagBankDriver } = await import('../src/drivers/pagbank.js');
+    const { createHash } = await import('node:crypto');
+    const driver = new PagBankDriver(
+      { config: () => ({}) },
+      { token: 'test-token', sandbox: true },
+    );
+    const raw = JSON.stringify({
+      id: 'ORDE_1',
+      reference_id: 'payment_abc',
+      charges: [
+        {
+          id: 'CHAR_1',
+          status: 'PAID',
+          amount: { value: 1990, currency: 'BRL', summary: { paid: 1990, refunded: 0 } },
+          payment_method: { type: 'CREDIT_CARD' },
+        },
+      ],
+    });
+    const event = driver.parseWebhook(raw, {
+      'x-authenticity-token': createHash('sha256')
+        .update(`test-token-${raw}`, 'utf8')
+        .digest('hex'),
+    });
+
+    const store = new InMemoryBillingStore();
+    await new WebhookProcessor({ store, driver }).process(event);
+
+    const row = await store.findPaymentByGatewayId('ORDE_1');
+    expect(row?.status).toBe('paid');
+    // Centavos, unconverted — the same integer the charge was created with.
+    expect(row?.amount).toBe(1990);
+    expect(row?.currency).toBe('brl');
+    // And nothing was written under the charge id.
+    expect(await store.findPaymentByGatewayId('CHAR_1')).toBeNull();
+  });
+
+  it('Efí pix notification syncs a paid payment row under the txid', async () => {
+    const { EfiDriver } = await import('../src/drivers/efi.js');
+    const driver = new EfiDriver(
+      { config: () => ({}) },
+      {
+        clientId: 'id',
+        clientSecret: 'secret',
+        pixKey: 'key',
+        sandbox: true,
+        fetch: (async () => {
+          throw new Error('no network in this test');
+        }) as unknown as typeof globalThis.fetch,
+      },
+    );
+    const raw = JSON.stringify({
+      pix: [
+        {
+          endToEndId: 'E00038166201907261559y6j6mt1u0f6',
+          txid: 'abc123def456ghi789jkl012mn',
+          valor: '19.90',
+          horario: '2026-08-01T10:05:00.000Z',
+        },
+      ],
+    });
+    const event = driver.parseWebhook(raw, {});
+
+    const store = new InMemoryBillingStore();
+    await new WebhookProcessor({ store, driver }).process(event);
+
+    const row = await store.findPaymentByGatewayId('abc123def456ghi789jkl012mn');
+    expect(row?.status).toBe('paid');
+    expect(row?.amount).toBe(1990);
+    expect(row?.currency).toBe('brl');
+  });
+});

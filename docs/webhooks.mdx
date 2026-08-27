@@ -51,6 +51,8 @@ returns `400` and is never processed.
 | Asaas | Shared token | `asaas-access-token` | `webhookToken` / `ASAAS_WEBHOOK_ACCESS_TOKEN` |
 | Woovi | RSA-SHA256 (recommended) | `x-webhook-signature` | `webhookPublicKey` / `WOOVI_WEBHOOK_PUBLIC_KEY` |
 | Woovi | Per-webhook HMAC-SHA1 (deprecated) | `X-OpenPix-Signature` | `webhookSecret` / `WOOVI_WEBHOOK_SECRET` |
+| PagBank | SHA-256 of `<token>-<body>` — **not an HMAC**, [read why](/docs/payments/providers/pagbank#webhook-authenticity--read-this-before-you-rely-on-it) | `x-authenticity-token` | `webhookToken` / `PAGBANK_WEBHOOK_TOKEN` (defaults to the API token) |
+| Efí | **None** — mTLS or an `hmac` query param, both [enforced outside the driver](/docs/payments/providers/efi#webhooks-are-not-authenticated-by-this-driver) | — | — |
 
 ```ts title="config/payments.ts"
 export default defineConfig({
@@ -264,6 +266,11 @@ How each gateway stores it:
   `externalReference` is absent).
 - **Woovi** → `correlationID`.
 - **Stripe** → `metadata.external_reference`.
+- **PagBank** → the order's `reference_id`, echoed on every notification about that order.
+- **Efí** → the **txid**, and only when your reference fits its charset (26–35
+  alphanumerics); Efí's Pix notification carries no other field of yours. A reference that
+  does not fit is not mangled — Efí generates the txid and you route on the returned
+  `gatewayId`.
 
 ## Webhook events
 

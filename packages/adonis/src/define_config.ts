@@ -10,6 +10,8 @@ import type { MollieDriverConfig } from './drivers/mollie.js';
 import type { PaddleDriverConfig } from './drivers/paddle.js';
 import type { PayPalDriverConfig } from './drivers/paypal.js';
 import type { PolarDriverConfig } from './drivers/polar.js';
+import type { RazorpayDriverConfig } from './drivers/razorpay.js';
+import type { SquareDriverConfig } from './drivers/square.js';
 import type { InvoiceProvider } from './invoice/invoice_provider.js';
 import type { InvoiceOptions, PaymentMethodName } from './types.js';
 import type { WebhookHandlerService } from './webhook_handlers.js';
@@ -499,6 +501,18 @@ export const payments = {
       return new PolarDriver(ctx, config);
     };
   },
+  razorpay(config: RazorpayDriverConfig): PaymentsDriverFactory {
+    return async (ctx) => {
+      const { RazorpayDriver } = await import('./drivers/razorpay.js');
+      return new RazorpayDriver(ctx, config);
+    };
+  },
+  square(config: SquareDriverConfig): PaymentsDriverFactory {
+    return async (ctx) => {
+      const { SquareDriver } = await import('./drivers/square.js');
+      return new SquareDriver(ctx, config);
+    };
+  },
 };
 
 /**
@@ -517,6 +531,8 @@ export type {
   PaddleDriverConfig,
   PayPalDriverConfig,
   PolarDriverConfig,
+  RazorpayDriverConfig,
+  SquareDriverConfig,
 };
 
 /**

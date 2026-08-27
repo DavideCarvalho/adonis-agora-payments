@@ -96,3 +96,41 @@ describe('PaymentsManager', () => {
     expect(map.get('fake')!.provider).toBe('fake');
   });
 });
+
+describe('assertCapability', () => {
+  const driverWith = (capabilities: Record<string, boolean>) =>
+    ({ provider: 'testing', capabilities }) as unknown as PaymentsDriver;
+
+  it('names only the capabilities that are actually supported', () => {
+    const manager = new PaymentsManager({
+      drivers: new Map([['testing', driverWith({ refunds: true, invoices: false })]]),
+    });
+    const driver = manager.driver('testing');
+
+    let message = '';
+    try {
+      manager.assertCapability(driver, 'invoices');
+    } catch (error) {
+      message = (error as Error).message;
+    }
+
+    expect(message).toContain('does not support invoices');
+    // The bug this pins: listing every KEY told a driver that spells out
+    // `{ invoices: false }` that invoices were among its supported capabilities.
+    expect(message).toContain('Supported capabilities: refunds.');
+    expect(message).not.toContain('refunds, invoices');
+  });
+
+  it('says "(none)" when a driver supports nothing beyond the core contract', () => {
+    const manager = new PaymentsManager({
+      drivers: new Map([['testing', driverWith({ refunds: false, subscriptions: false })]]),
+    });
+    let message = '';
+    try {
+      manager.assertCapability(manager.driver('testing'), 'refunds');
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('Supported capabilities: (none).');
+  });
+});

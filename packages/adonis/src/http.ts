@@ -5,14 +5,30 @@ export interface HttpRequestOptions {
   bearerToken?: string;
   /** Auth header sent as a raw header name/value (e.g. Asaas `access_token`). */
   authHeader?: { name: string; value: string };
+  /**
+   * Extra request headers (e.g. PagBank's `x-idempotency-key`). Merged last, so a driver
+   * can also override `Content-Type` when a gateway wants something else.
+   */
+  headers?: Record<string, string>;
+  /**
+   * The `fetch` implementation to call. Defaults to the global one.
+   *
+   * This is the seam a gateway that requires **mutual TLS** needs: a client certificate
+   * cannot be expressed as a header, only as the connection's TLS identity, which in Node
+   * means a custom undici dispatcher. Rather than teach this helper about undici (a
+   * dependency it does not have), the driver that needs mTLS — Efí's Pix API — builds its
+   * own certificate-bearing `fetch` and passes it here, so it still gets the shared error
+   * normalization every other driver relies on.
+   */
+  fetch?: typeof globalThis.fetch;
   /** Base URL the path is resolved against. */
   baseUrl: string;
 }
 
 /**
- * Thin `fetch` wrapper shared by the fetch-based drivers (Asaas, AbacatePay, Woovi).
- * Normalizes errors into an `Error` with a `status` property so `isNotFound` can check
- * it uniformly.
+ * Thin `fetch` wrapper shared by the fetch-based drivers (Asaas, AbacatePay, Woovi,
+ * PagBank, Efí). Normalizes errors into an `Error` with a `status` property so
+ * `isNotFound` can check it uniformly.
  */
 export async function httpRequest<T>(path: string, options: HttpRequestOptions): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -21,6 +37,9 @@ export async function httpRequest<T>(path: string, options: HttpRequestOptions):
   }
   if (options.authHeader !== undefined) {
     headers[options.authHeader.name] = options.authHeader.value;
+  }
+  if (options.headers !== undefined) {
+    Object.assign(headers, options.headers);
   }
 
   const requestInit: RequestInit = {
@@ -31,7 +50,8 @@ export async function httpRequest<T>(path: string, options: HttpRequestOptions):
     requestInit.body = JSON.stringify(options.body);
   }
 
-  const response = await fetch(`${options.baseUrl}${path}`, requestInit);
+  const doFetch = options.fetch ?? globalThis.fetch;
+  const response = await doFetch(`${options.baseUrl}${path}`, requestInit);
 
   if (!response.ok) {
     const text = await response.text();

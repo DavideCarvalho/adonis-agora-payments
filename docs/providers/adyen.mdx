@@ -1,0 +1,154 @@
+---
+title: Adyen
+description: Checkout API v71 — stored-token card charges, Pay by Link, HMAC-signed webhooks, and no customer, subscription or read-back endpoint to pretend about.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+<Callout type="warn">
+  Written against Adyen's published Checkout API v71 reference and covered by unit tests —
+  including Adyen's own published HMAC test vector — but never pointed at a live Adyen
+  account. Run it against `checkout-test.adyen.com` before it takes real money.
+</Callout>
+
+Adyen is a processor, not a billing system. Most of what makes this driver worth reading
+is where the two disagree, and what it does there: it refuses.
+
+- **Methods**: `credit_card`, `undefined`. `charge()` sends a stored card token
+  (`paymentMethod.type: 'scheme'`); `createCheckout()` opens a Pay by Link page where the
+  shopper picks. Adyen's ~100 local methods reach a shopper through Drop-in/Components,
+  which this driver does not front.
+- **Setup**: `payments.adyen({ apiKey, merchantAccount, currency, hmacKey, liveUrlPrefix })`
+  — `ADYEN_API_KEY`, `ADYEN_MERCHANT_ACCOUNT`, `ADYEN_HMAC_KEY`,
+  `ADYEN_LIVE_URL_PREFIX`. The API key travels as `X-API-Key`. `currency` is **required**
+  and the driver refuses to boot without it.
+- **Environment**: test is `https://checkout-test.adyen.com/v71`. Live is per-customer —
+  `https://{prefix}-checkout-live.adyenpayments.com/checkout/v71`, where `{prefix}` comes
+  from Customer Area → Developers → API URLs. Booting live without it fails at boot, not
+  as a DNS error on the first charge. Defaults to test unless `NODE_ENV=production`.
+- **Money**: `{ "value": 1990, "currency": "EUR" }` — an integer in the currency's minor
+  units, the same unit this package uses. Nothing is converted in either direction. (The
+  Mollie driver next door converts to a decimal string; that is Mollie's shape, not an
+  inconsistency here.)
+- **`externalReference`**: **required** on `charge` and `createCheckout`. It becomes
+  Adyen's `reference`, which every webhook echoes back as `merchantReference` — and since
+  `merchantReference` is one of the eight HMAC-signed fields, it is both the routing key
+  and part of what the signature protects. `parseWebhook` reads it onto
+  `event.data.externalReference`.
+- **`idempotencyKey`**: sent as Adyen's `Idempotency-Key` request header on `charge` and
+  `createCheckout` — the only thing Adyen deduplicates on, and it never echoes the key back
+  on the response, so there is nothing to store alongside it. Adyen's reference recommends a
+  UUID and caps it at 64 characters.
+
+```ts title="app/services/checkout_service.ts"
+const session = await payments.driver('adyen').createCheckout({
+  amount: 1990,
+  successUrl: 'https://example.org/thanks',
+  externalReference: 'order:order_local_1',
+})
+// session.url is the Pay by Link page.
+```
+
+## Webhooks
+
+Adyen signs each notification item with HMAC-SHA256 and puts the result in
+`additionalData.hmacSignature`. The signed payload is eight fields of the item, joined
+with `:`, empty string for the absent ones:
+
+```
+pspReference:originalReference:merchantAccountCode:merchantReference:amount.value:amount.currency:eventCode:success
+```
+
+Two details are where implementations go wrong, and both are pinned by tests here:
+
+1. **The key is hex.** It must be decoded to bytes before signing — HMAC-ing with the
+   key's *characters* produces a signature that never matches.
+2. **Nothing is escaped.** The `\` → `\\`, `:` → `\:` rule that circulates in Adyen
+   examples belongs to the classic HPP/dictionary signature, not to standard webhooks.
+   Adyen's own Node, PHP, Java and Python libraries all join the eight fields unescaped,
+   and so does this driver — so a `merchantReference` containing a colon verifies
+   correctly instead of being rejected as a forgery. The unit tests include Adyen's
+   published vector and a colon-bearing reference.
+
+Set `hmacKey` and verification is mandatory: an unsigned or wrongly-signed notification
+throws. Leave it unset and verification is skipped, so local development works without
+Customer Area setup.
+
+Event mapping: `AUTHORISATION`/`CAPTURE` → `payment.succeeded` (or `payment.failed` when
+`success` is `"false"`), `REFUND` → `payment.refunded`, and `CANCELLATION`,
+`CHARGEBACK`, `REFUND_FAILED`, `REFUNDED_REVERSED` and friends → `payment.updated`, since
+this package has no canonical event for them; `event.raw` still carries the `eventCode`
+for an app handler. A modification carries its own `pspReference` and names the payment in
+`originalReference`, so `event.data.gatewayId` is the **original** payment — that is the
+row the ledger should move.
+
+### Two things to know about the mounted route
+
+- **Batches.** Adyen's notification envelope is a `notificationItems` array, and
+  `parseWebhook` returns a single `WebhookEvent`. JSON/HTTP POST webhooks send one item
+  per request in practice, so this normally never comes up — but if more than one arrives,
+  the driver **throws** rather than processing the first and silently dropping a capture
+  or a refund.
+- **`[accepted]`.** Adyen's webhook docs ask for a `200` whose body is `[accepted]`; the
+  package's mounted `/payments/webhook/:provider` route answers `200 {"received": true}`.
+  Current Adyen documentation says a `2xx` is what it needs, so this should be fine — but
+  if your account is configured to require the literal body, mount your own route for
+  Adyen.
+
+## What it refuses
+
+Adyen genuinely has no endpoint behind these. Each one throws with a message naming the
+alternative, because a driver that returns a plausible object for a call the gateway never
+saw is worse than one that has no such call.
+
+- **`createCustomer` / `findCustomer` / `updateCustomer`** — Adyen has no customer
+  resource. `shopperReference` is a string you invent (your own user id) and it exists only
+  on the payments carrying it. Pass yours as `customerId`.
+- **`findPayment`** — Checkout v71 has no `GET /payments/{pspReference}`. Payment state
+  reaches you through webhooks; read your own `billing_payments` row, which they keep in
+  sync.
+- **`refund` with no amount** — Adyen requires the amount and, per the point above, the
+  driver cannot read the payment back to infer a full refund. Pass it explicitly.
+- **All four subscription methods** — Adyen has no subscription resource. Recurring
+  billing is you charging a stored token on your own schedule: tokenize with
+  `storePaymentMethod: true`, then call `charge({ paymentMethodId })` each cycle.
+  `capabilities.subscriptions` is `false`, so the manager stops the call before it reaches
+  the driver.
+- **`listInvoices`** — no invoice resource in Checkout.
+- **A charge with no payment method** — there is no server-side way to charge without one.
+- **`split`** — Adyen splits with absolute amounts against balance accounts
+  (`splits[].account`); the percent-based `split` input cannot express that.
+
+## `Authorised` is read as paid — with a caveat
+
+`charge()` maps `resultCode: 'Authorised'` onto `status: 'paid'`, because Adyen captures
+automatically by default. On an account configured for **manual capture** it means only
+that the funds are held, and nothing is settled until the `CAPTURE` webhook. The API
+reference does not expose which mode an account is in, so the driver cannot tell the
+difference — if you use manual capture, treat `paid` from `charge()` as "authorised" and
+let the `CAPTURE` webhook be your settlement signal.
+
+## Passing Adyen-specific fields
+
+A stored-token charge usually needs `shopperInteraction` and `recurringProcessingModel`;
+which values are right is a business question (is the shopper present? is this a
+subscription?), so the driver forwards yours and invents neither:
+
+```ts
+await payments.driver('adyen').charge({
+  customerId: 'shopper_42',
+  amount: 1990,
+  paymentMethodId: 'stored_pm_id',
+  externalReference: 'order:order_local_1',
+  metadata: {
+    shopperInteraction: 'ContAuth',
+    recurringProcessingModel: 'Subscription',
+    returnUrl: 'https://example.org/return',
+  },
+})
+```
+
+`paymentMethodType`, `shopperInteraction`, `recurringProcessingModel` and `returnUrl` are
+lifted out of `metadata` onto the request; everything else in `metadata` is sent as
+Adyen's `metadata`.

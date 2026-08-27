@@ -23,6 +23,8 @@ export type {
   LemonSqueezyDriverConfig,
   PolarDriverConfig,
   DodoDriverConfig,
+  RazorpayDriverConfig,
+  SquareDriverConfig,
   FocusInvoiceConfig,
   ENotasInvoiceConfig,
   PlugNotasInvoiceConfig,

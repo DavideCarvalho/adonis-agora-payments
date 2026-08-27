@@ -85,9 +85,15 @@ export class PaymentsManager {
       driver.capabilities?.[capability] === false ||
       driver.capabilities?.[capability] === undefined
     ) {
+      // Only the capabilities actually set to `true`. Listing every KEY meant a driver that
+      // spells out `{ invoices: false }` — as the newer ones do — had the capability it was
+      // just refused named back to it as supported.
+      const supported = Object.entries(driver.capabilities ?? {})
+        .filter(([, enabled]) => enabled === true)
+        .map(([name]) => name);
       throw new Error(
         `[payments] Driver "${driver.provider}" does not support ${capability}. ` +
-          `Supported capabilities: ${Object.keys(driver.capabilities ?? {}).join(', ') || '(none)'}.`,
+          `Supported capabilities: ${supported.join(', ') || '(none)'}.`,
       );
     }
   }

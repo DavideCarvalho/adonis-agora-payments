@@ -41,6 +41,29 @@ describe('driver registry', () => {
     expect(missing, `drivers with no docs/providers page: ${missing.join(', ')}`).toEqual([]);
   });
 
+  it('re-exports every driver config type from the package root', async () => {
+    // A config type that stops at `define_config.ts` cannot be imported from the package
+    // root the way the original four can, so an app annotating its own config has to reach
+    // into an internal path. The asymmetry is invisible until someone tries.
+    const index = await readFile(
+      fileURLToPath(new URL('../src/index.ts', import.meta.url)),
+      'utf-8',
+    );
+    const declared = await Promise.all(
+      (await slugs()).map(async (slug) => {
+        const source = await readFile(`${driversDir}${slug}.ts`, 'utf-8');
+        return source.match(/export interface (\w+DriverConfig)/)?.[1];
+      }),
+    );
+    const missing = declared
+      .filter((name): name is string => name !== undefined)
+      .filter((name) => !index.includes(name));
+    expect(
+      missing,
+      `driver config types not re-exported from src/index.ts: ${missing.join(', ')}`,
+    ).toEqual([]);
+  });
+
   it('lists every docs page in the sidebar', async () => {
     const meta = JSON.parse(await readFile(`${docsDir}meta.json`, 'utf-8')) as { pages: string[] };
     const listed = new Set(meta.pages);

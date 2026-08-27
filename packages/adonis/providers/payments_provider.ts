@@ -186,7 +186,13 @@ export default class PaymentsProvider {
         try {
           const driver = manager.driver(provider);
           const rawBody = ctx.request.raw() ?? '';
-          const event = driver.parseWebhook(rawBody, ctx.request.headers());
+          // Awaited: `parseWebhook` may be async. A gateway whose callback carries only an
+          // id (Mollie) has to fetch the payment to know what happened, and that fetch is
+          // also the only thing authenticating the call.
+          //
+          // Dropping this `await` is a compile error, not a silent bug — the contract
+          // returns `WebhookEvent | Promise<WebhookEvent>` and `dispatch` takes the former.
+          const event = await driver.parseWebhook(rawBody, ctx.request.headers());
           if (this.#webhook) {
             await this.#webhook.dispatch(event);
           }

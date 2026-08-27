@@ -94,11 +94,18 @@ export interface PaymentsDriver {
   /**
    * Verify the webhook signature and normalize the raw payload into a {@link WebhookEvent}.
    * Throws when the signature is invalid.
+   *
+   * May return a promise. Most gateways sign a self-describing payload, so this is a pure
+   * function of the body and headers — but not all: Mollie's webhook is a bare payment id
+   * with no status and no signature, and the ONLY way to learn what happened, or that the
+   * call is genuine, is an authenticated fetch of that payment. A synchronous signature
+   * forced such a driver to report `payment.updated` and nothing else, so the mounted route
+   * ledgered the event and never marked the payment paid. The mounted route awaits this.
    */
   parseWebhook(
     rawBody: string,
     headers: Record<string, string | string[] | undefined>,
-  ): WebhookEvent;
+  ): WebhookEvent | Promise<WebhookEvent>;
 }
 
 // ── Input types ─────────────────────────────────────────────────────────────────────────
@@ -220,6 +227,20 @@ export interface CheckoutInput {
    * back to an order, and the failure is a silent `return`.
    */
   externalReference?: string;
+  /**
+   * The payer's identity, for gateways that demand it up front rather than collecting it
+   * on the hosted page.
+   *
+   * Most checkouts ask the payer who they are, so this is usually unnecessary. PagBank's
+   * Orders API is the counter-example: every order carries the payer inline and is refused
+   * without a CPF/CNPJ, so a checkout there cannot be opened at all without it. Same shape
+   * as {@link ChargeInput.customer}, so a flow that already has the data passes it either way.
+   */
+  customer?: {
+    name?: string;
+    taxId?: string;
+    email?: string;
+  };
   /** Emit an invoice for this checkout: `true`/name/options. */
   invoice?: boolean | string | InvoiceOptions;
   /** Extra provider-specific fields. */

@@ -6,19 +6,7 @@ icon: GitBranch
 
 import { Callout } from 'fumadocs-ui/components/callout';
 
-```text
-your app ──charge()──▶ gateway            payment.status = 'pending'
-                          │                ↑ nothing has been paid
-                          │
-              the customer scans / approves
-                          │
-your app ◀──webhook───────┘
-   ├─ validate the signature      forged callbacks rejected
-   ├─ ledger the event            redeliveries stop here
-   ├─ sync the billing tables     billing_payments / billing_subscriptions
-   ├─ run your handler            grant credits, activate the subscription
-   └─ publish diagnostics         agora:payments:payment.succeeded
-```
+<PaymentFlow />
 
 ## `charge()` does not move money
 

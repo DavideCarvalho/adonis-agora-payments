@@ -11,6 +11,10 @@ export type {
   AbacateDriverConfig,
   AsaasDriverConfig,
   WooviDriverConfig,
+  PagBankDriverConfig,
+  EfiDriverConfig,
+  PagarmeDriverConfig,
+  InfinitePayDriverConfig,
   FocusInvoiceConfig,
   ENotasInvoiceConfig,
   PlugNotasInvoiceConfig,
@@ -19,6 +23,12 @@ export type {
 } from './define_config.js';
 export { PaymentsManager, resolveDrivers } from './payments_manager.js';
 export type { WooviSubAccount } from './drivers/woovi.js';
+export type {
+  InfinitePayItem,
+  InfinitePayCheckInput,
+  InfinitePayCustomerInput,
+  InfinitePayAddressInput,
+} from './drivers/infinitepay.js';
 export type {
   PaymentsDriver,
   CreateCustomerInput,
@@ -34,7 +44,7 @@ export { emitInvoice, emitInvoiceIfRequested } from './invoice/emit_invoice.js';
 export type { EmitInvoiceContext, EmitInvoiceData } from './invoice/emit_invoice.js';
 export { httpRequest, headerValue, isNotFound } from './http.js';
 export type { HttpRequestOptions } from './http.js';
-export { toDecimal, fromDecimal } from './money.js';
+export { toDecimal, fromDecimal, formatDecimal, currencyExponent } from './money.js';
 export { ensureCustomer } from './ensure_customer.js';
 export type { EnsureCustomerOptions } from './ensure_customer.js';
 export {

@@ -210,6 +210,16 @@ export interface CheckoutInput {
   trialDays?: number;
   /** Idempotency key — reusing it must not create a duplicate session. */
   idempotencyKey?: string;
+  /**
+   * Your own id for this purchase, echoed back on the gateway's webhooks.
+   *
+   * The same contract as {@link ChargeInput.externalReference}, and it matters MORE here:
+   * several gateways (Paddle, Lemon Squeezy, PayPal, and any merchant-of-record) have no
+   * server-side charge at all, so a hosted session is the only way a purchase starts. A
+   * session opened without a reference produces a confirmation the handler cannot route
+   * back to an order, and the failure is a silent `return`.
+   */
+  externalReference?: string;
   /** Emit an invoice for this checkout: `true`/name/options. */
   invoice?: boolean | string | InvoiceOptions;
   /** Extra provider-specific fields. */

@@ -72,7 +72,7 @@ node ace payments:sync --all --provider=stripe
 | Flag | Meaning |
 | --- | --- |
 | `--customer` | one gateway customer id |
-| `--all` | every gateway customer id recorded in `billing_customers` |
+| `--all` | every gateway customer recorded in `billing_customers` (paged) |
 | `--provider` | which configured provider to sync (default: the configured default) |
 
 It pulls the customer's invoices from the gateway and upserts the **paid** ones into
@@ -88,11 +88,12 @@ Two guards fail fast rather than doing nothing quietly: neither `--customer` nor
 rather than a silent no-op, and a gateway with no invoice concept (Woovi/OpenPix) is refused up
 front by the capability check instead of listing nothing.
 
-<Callout type="warn" title="`--all` reads a table the library does not populate">
-`billing_customers` is created by the migration, but nothing in the library writes to it — the
-[billable mixin](/docs/payments/billing) stores the gateway customer id on **your** model. Unless
-your app fills that table itself, `--all` finds nothing to sync. Use `--customer` with the ids you
-hold, and iterate your own billable rows.
+<Callout title="`--all` iterates what you recorded">
+It pages `billing_customers` through the store, and that table is opt-in: it is written by
+[`ensureCustomer({ store, owner })`](/docs/payments/billing#reusing-a-gateway-customer) (or
+`store.saveCustomer()` directly). An app that never records mappings has nothing for `--all` to
+reconcile over — use `--customer` with the ids you hold until it does. `--provider` narrows the
+iteration to one gateway's customers.
 </Callout>
 
 <Callout type="warn" title="Sync writes to billing tables, not to your business logic">

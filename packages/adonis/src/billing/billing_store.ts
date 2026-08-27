@@ -1,4 +1,5 @@
 import type {
+  BillingCustomer,
   BillingPayment,
   BillingSubscription,
   BillingUsageEvent,
@@ -27,6 +28,19 @@ export interface PaymentListItem {
   customerId: string | null;
   subscriptionId: string | null;
   paidAt: Date | null;
+  createdAt: Date | null;
+}
+
+/** One `billing_customers` row, normalized for reading. See {@link PaymentListItem}. */
+export interface CustomerListItem {
+  id: string;
+  gatewayId: string;
+  provider: string;
+  ownerType: string | null;
+  ownerId: string | null;
+  email: string | null;
+  name: string | null;
+  taxId: string | null;
   createdAt: Date | null;
 }
 
@@ -91,7 +105,53 @@ export interface BillingStore<
   PaymentRow = BillingPayment,
   WebhookEventRow = BillingWebhookEvent,
   UsageEventRow = BillingUsageEvent,
+  CustomerRow = BillingCustomer,
 > {
+  // ── Customers ────────────────────────────────────────────────────────────────────
+
+  /**
+   * Upsert the mapping between an app-side owner and its gateway customer, keyed by
+   * gateway id.
+   *
+   * Nothing records this for you — the library learns a gateway customer id inside
+   * `ensureCustomer`, which takes a store precisely so the mapping is written where it is
+   * created. Without it `billing_customers` stays empty and `payments:sync --all` has
+   * nothing to reconcile over.
+   */
+  saveCustomer(customer: {
+    gatewayId: string;
+    provider: string;
+    ownerType?: string | null;
+    ownerId?: string | null;
+    email?: string | null;
+    name?: string | null;
+    taxId?: string | null;
+    metadata?: Record<string, unknown>;
+  }): Promise<CustomerRow>;
+
+  findCustomerByGatewayId(gatewayId: string): Promise<CustomerRow | null>;
+
+  /**
+   * The customer an app-side row holds at one gateway.
+   *
+   * `provider` is part of the question, not an optional filter: one owner may legitimately
+   * have a customer at every configured gateway, and answering without it would return an
+   * arbitrary one of them.
+   */
+  findCustomerByOwner(
+    ownerType: string,
+    ownerId: string,
+    provider: string,
+  ): Promise<CustomerRow | null>;
+
+  /**
+   * Page through recorded customers, newest first, optionally narrowed to one provider.
+   *
+   * This is what `payments:sync --all` iterates. Returns the normalized
+   * {@link CustomerListItem} so a reader never depends on Lucid.
+   */
+  listCustomers(query: BillingListQuery & { provider?: string }): Promise<CustomerListItem[]>;
+
   // ── Subscriptions ────────────────────────────────────────────────────────────────
 
   /** Upsert a subscription keyed by gateway id. Returns the stored row. */

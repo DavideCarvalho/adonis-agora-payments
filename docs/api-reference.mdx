@@ -288,21 +288,31 @@ Normalized event types: `payment.succeeded`, `payment.failed`, `payment.refunded
 
 ```ts
 interface BillingStore {
+  saveCustomer(customer): Promise<CustomerRow>
+  findCustomerByGatewayId(gatewayId): Promise<CustomerRow | null>
+  findCustomerByOwner(ownerType, ownerId, provider): Promise<CustomerRow | null>
+  listCustomers(query): Promise<CustomerListItem[]>
+
   saveSubscription(sub): Promise<SubscriptionRow>
   findSubscriptionByGatewayId(gatewayId): Promise<SubscriptionRow | null>
+  countActiveSubscriptions(): Promise<number>
 
   savePayment(payment): Promise<PaymentRow>
   findPaymentByGatewayId(gatewayId): Promise<PaymentRow | null>
+  listPayments(query): Promise<PaymentListItem[]>
+  countPayments(query): Promise<number>
+  revenue(query: { from?: Date; to?: Date }): Promise<number>
 
   recordWebhookEvent(event): Promise<WebhookEventRow | null>   // null ⇒ redelivery
   markWebhookProcessed(id): Promise<void>
   markWebhookFailed(id, error): Promise<void>
+  findWebhookEventByGatewayEventId(gatewayEventId): Promise<WebhookEventListItem | null>
+  listWebhookEvents(query): Promise<WebhookEventListItem[]>
+  countWebhookEvents(query): Promise<number>
+  webhookEventBreakdown(query): Promise<WebhookEventBreakdownLine[]>
 
   recordUsage(event): Promise<UsageEventRow>
   usageReport(query): Promise<Array<{ meter: string; quantity: number }>>
-
-  revenue(query: { from?: Date; to?: Date }): Promise<number>
-  countActiveSubscriptions(): Promise<number>
 }
 ```
 
@@ -311,6 +321,11 @@ interface BillingStore {
 **failed** is claimed again and returned, which is what lets a retry actually re-run it. See
 [Idempotency](/docs/payments/concepts/idempotency).
 </Callout>
+
+The list/count reads take `{ status?, limit?, offset? }` and `{ status?, createdBefore?, createdAfter? }`
+respectively; `listCustomers` takes `{ provider?, limit?, offset? }`. Paging is clamped (50 default,
+200 maximum). The list reads return normalized plain shapes — `CustomerListItem`, `PaymentListItem`,
+`WebhookEventListItem` — never the implementation's row type, so a reader never depends on Lucid.
 
 Implementations: `LucidBillingStore` / `lucidBillingStore()`, and `InMemoryBillingStore` from
 `@adonis-agora/payments/testing`.
@@ -345,7 +360,8 @@ isNotFound(error): boolean
 toDecimal(cents: Money): number
 fromDecimal(value: number): Money
 
-ensureCustomer(driver, existingId, input): Promise<Customer>
+ensureCustomer(driver, existingId, input, options?): Promise<Customer>
+//   options: { store?: BillingStore; owner?: { type: string; id: string | number } }
 emitInvoice(ctx, options): Promise<Invoice>
 emitInvoiceIfRequested(ctx, input, payment, driver): Promise<void>
 ```

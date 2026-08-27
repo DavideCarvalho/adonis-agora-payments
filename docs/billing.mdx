@@ -20,7 +20,7 @@ The configure command publishes a migration creating four tables:
 
 | Table | Purpose |
 | --- | --- |
-| `billing_customers` | a polymorphic link table for your users' gateway customers — **not written by the library** (see below) |
+| `billing_customers` | the polymorphic mapping between your rows and their gateway customers — **opt-in** (see below) |
 | `billing_subscriptions` | subscriptions — `status`, `plan_id`, `trial_ends_at`, `ends_at` |
 | `billing_payments` | every payment, keyed by **gateway id** |
 | `billing_webhook_events` | the **idempotency ledger**, keyed by gateway event id |
@@ -28,11 +28,14 @@ The configure command publishes a migration creating four tables:
 `billing_webhook_events` is the heart: it's what makes every redelivery a no-op instead of a
 double-grant.
 
-`billing_customers` is the exception — the migration creates it, but nothing in the library writes
-to it. The [Billable mixin](#the-billable-model) keeps the gateway customer id on **your** model,
-which is where the library reads it from. The table is there for apps that want a separate
-polymorphic mapping (one user, several gateways); if you do not fill it yourself, it stays empty and
-`payments:sync --all` finds nothing.
+`billing_customers` is the one you have to opt into. The [Billable mixin](#the-billable-model) keeps
+the gateway customer id on **your** model, and that is what a charge reads — so the mapping table is
+not on the critical path and the library will not guess which of your rows owns a gateway customer.
+Pass a store to [`ensureCustomer`](#reusing-a-gateway-customer) and it is written where the id is
+created. Leave it out and the table stays empty, which is fine until you want the two things only it
+can answer: enumerating every gateway customer (what `payments:sync --all` reconciles over), and
+mapping one owner to customers at **several** gateways, which a single column on the user row has
+nowhere to put.
 
 ## Reading the billing tables
 
@@ -41,6 +44,10 @@ at its own implementation — so code that reaches around it into `billing_payme
 someone does. Everything the library records is readable through it:
 
 ```ts
+await store.findCustomerByGatewayId(gatewayId)         // one customer mapping
+await store.findCustomerByOwner('User', userId, 'stripe')
+await store.listCustomers({ provider: 'stripe' })
+
 await store.findPaymentByGatewayId(gatewayId)          // one payment
 await store.listPayments({ status: 'failed', limit: 20 })
 await store.countPayments({ status: 'pending', createdBefore: cutoff })
@@ -89,6 +96,8 @@ user.billingProvider = 'woovi'
 await user.save()
 ```
 
+### Reusing a gateway customer
+
 Getting a gateway customer is so common that the library ships `ensureCustomer` — reuse
 the stored id or create at the gateway, whichever applies:
 
@@ -101,6 +110,41 @@ const customer = await ensureCustomer(driver, user.billingCustomerId, {
 user.billingCustomerId = customer.id
 await user.save()
 ```
+
+Pass the store and the owner, and it also records the mapping in `billing_customers`:
+
+```ts title="app/services/subscribe_service.ts"
+@inject()
+export default class SubscribeService {
+  constructor(private store: LucidBillingStore) {}
+
+  async run(user: User) {
+    const customer = await ensureCustomer(
+      payments.driver('pix'),
+      user.billingCustomerId,
+      { name: user.name, email: user.email, taxId: user.taxId },
+      { store: this.store, owner: { type: 'User', id: user.id } },
+    )
+    user.billingCustomerId = customer.id
+    await user.save()
+  }
+}
+```
+
+It records on the **reuse** branch too, so an id your app has held since before it recorded anything
+gets backfilled the next time the flow runs — no gateway call involved. And a later call that knows
+less (a reconcile holding only the gateway id) does not blank what an earlier one wrote.
+
+Reading it back:
+
+```ts
+await store.findCustomerByOwner('User', String(user.id), 'stripe')
+await store.findCustomerByGatewayId('cus_123')
+await store.listCustomers({ provider: 'stripe', limit: 50 })
+```
+
+`provider` is part of the owner lookup rather than an optional filter: one user may legitimately have
+a customer at every configured gateway, and answering without it would return an arbitrary one.
 
 ## Subscriptions
 

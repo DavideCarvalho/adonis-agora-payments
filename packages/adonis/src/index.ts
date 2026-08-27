@@ -36,6 +36,7 @@ export { httpRequest, headerValue, isNotFound } from './http.js';
 export type { HttpRequestOptions } from './http.js';
 export { toDecimal, fromDecimal } from './money.js';
 export { ensureCustomer } from './ensure_customer.js';
+export type { EnsureCustomerOptions } from './ensure_customer.js';
 export {
   isWebhookHandlerService,
   resolveWebhookHandler,
@@ -74,6 +75,7 @@ export type {
   BillingStore,
   BillingCountQuery,
   BillingListQuery,
+  CustomerListItem,
   PaymentListItem,
   WebhookEventListItem,
   WebhookEventBreakdownLine,
@@ -83,6 +85,7 @@ export {
   BILLING_LIST_MAX_LIMIT,
 } from './billing/list_query.js';
 export { BillingUsageEvent } from './billing/mixins/with_usage_event.js';
+export { BillingCustomer } from './billing/mixins/with_customer.js';
 export { billingOverview } from './billing/billing_overview.js';
 export type { BillingOverview, BillingOverviewMetric } from './billing/billing_overview.js';
 export { billingHealth } from './billing/billing_health.js';

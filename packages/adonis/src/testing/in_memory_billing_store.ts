@@ -2,11 +2,27 @@ import type {
   BillingCountQuery,
   BillingListQuery,
   BillingStore,
+  CustomerListItem,
   PaymentListItem,
   WebhookEventBreakdownLine,
   WebhookEventListItem,
 } from '../billing/billing_store.js';
 import { clampLimit, clampOffset } from '../billing/list_query.js';
+
+/** A plain in-memory customer-mapping row (mirrors the Lucid model's columns). */
+export interface InMemoryCustomerRow {
+  id: string;
+  gatewayId: string;
+  provider: string;
+  ownerType: string | null;
+  ownerId: string | null;
+  email: string | null;
+  name: string | null;
+  taxId: string | null;
+  metadata: Record<string, unknown> | null;
+  /** Insertion timestamp — the Lucid rows have one, and the list query orders by it. */
+  createdAt: Date;
+}
 
 /** A minimal in-memory row shape (mirrors the Lucid models' columns). */
 export interface InMemorySubscriptionRow {
@@ -71,9 +87,11 @@ export class InMemoryBillingStore
       InMemorySubscriptionRow,
       InMemoryPaymentRow,
       InMemoryWebhookEventRow,
-      InMemoryUsageEventRow
+      InMemoryUsageEventRow,
+      InMemoryCustomerRow
     >
 {
+  customers: Map<string, InMemoryCustomerRow> = new Map();
   subscriptions: Map<string, InMemorySubscriptionRow> = new Map();
   payments: Map<string, InMemoryPaymentRow> = new Map();
   webhookEvents: Map<string, InMemoryWebhookEventRow> = new Map();
@@ -116,6 +134,78 @@ export class InMemoryBillingStore
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     const offset = clampOffset(query.offset);
     return sorted.slice(offset, offset + clampLimit(query.limit));
+  }
+
+  async saveCustomer(customer: {
+    gatewayId: string;
+    provider: string;
+    ownerType?: string | null;
+    ownerId?: string | null;
+    email?: string | null;
+    name?: string | null;
+    taxId?: string | null;
+    metadata?: Record<string, unknown>;
+  }): Promise<InMemoryCustomerRow> {
+    const existing = this.customers.get(customer.gatewayId);
+    const row: InMemoryCustomerRow = existing ?? {
+      id: String(this.#nextId++),
+      gatewayId: customer.gatewayId,
+      provider: customer.provider,
+      ownerType: null,
+      ownerId: null,
+      email: null,
+      name: null,
+      taxId: null,
+      metadata: null,
+      createdAt: this.#now(),
+    };
+    row.provider = customer.provider;
+    // Absent fields do NOT erase what is already recorded — mirrors the Lucid store, where
+    // a later, less-informed call must not blank the owner mapping an earlier one wrote.
+    if (customer.ownerType !== undefined) row.ownerType = customer.ownerType;
+    if (customer.ownerId !== undefined) row.ownerId = customer.ownerId;
+    if (customer.email !== undefined) row.email = customer.email;
+    if (customer.name !== undefined) row.name = customer.name;
+    if (customer.taxId !== undefined) row.taxId = customer.taxId;
+    if (customer.metadata !== undefined) row.metadata = customer.metadata;
+    this.customers.set(customer.gatewayId, row);
+    return row;
+  }
+
+  async findCustomerByGatewayId(gatewayId: string): Promise<InMemoryCustomerRow | null> {
+    return this.customers.get(gatewayId) ?? null;
+  }
+
+  async findCustomerByOwner(
+    ownerType: string,
+    ownerId: string,
+    provider: string,
+  ): Promise<InMemoryCustomerRow | null> {
+    for (const row of this.customers.values()) {
+      if (row.ownerType === ownerType && row.ownerId === ownerId && row.provider === provider) {
+        return row;
+      }
+    }
+    return null;
+  }
+
+  async listCustomers(
+    query: BillingListQuery & { provider?: string },
+  ): Promise<CustomerListItem[]> {
+    const matching = [...this.customers.values()].filter(
+      (row) => query.provider === undefined || row.provider === query.provider,
+    );
+    return this.#page(matching, query).map((row) => ({
+      id: row.id,
+      gatewayId: row.gatewayId,
+      provider: row.provider,
+      ownerType: row.ownerType,
+      ownerId: row.ownerId,
+      email: row.email,
+      name: row.name,
+      taxId: row.taxId,
+      createdAt: row.createdAt,
+    }));
   }
 
   async saveSubscription(sub: {

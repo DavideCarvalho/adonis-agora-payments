@@ -1,14 +1,18 @@
 import { BaseCommand, flags } from '@adonisjs/core/ace';
 import type { CommandOptions } from '@adonisjs/core/types/ace';
+import type { BillingStore } from '../src/billing/billing_store.js';
 import { resolveBillingStore } from '../src/billing/resolve_store.js';
 import type { PaymentsConfig } from '../src/define_config.js';
 import { PaymentsManager } from '../src/payments_manager.js';
+
+/** Customers pulled per page while iterating `--all`. */
+const PAGE = 100;
 
 /**
  * `node ace payments:sync [--provider=stripe] [--customer=cus_123 | --all]` — reconcile
  * local billing records with the gateway. Useful after missed webhooks or manual
  * dashboard changes: pulls recent invoices for a customer (or every customer in
- * `billing_customers` with `--all`) and upserts the paid ones into the local store, so
+ * recorded customer with `--all`) and upserts the paid ones into the local store, so
  * the billing tables converge with the gateway.
  */
 export default class PaymentsSync extends BaseCommand {
@@ -23,7 +27,7 @@ export default class PaymentsSync extends BaseCommand {
   declare customer?: string;
 
   @flags.boolean({
-    description: 'Sync invoices for every customer in the billing_customers table',
+    description: 'Sync invoices for every recorded gateway customer',
   })
   declare all?: boolean;
 
@@ -37,7 +41,7 @@ export default class PaymentsSync extends BaseCommand {
     }
     if (!this.customer && !this.all) {
       this.logger.error(
-        'Pass --customer=<gateway customer id> to sync one customer, or --all to sync every customer in billing_customers.',
+        'Pass --customer=<gateway customer id> to sync one customer, or --all to sync every recorded gateway customer.',
       );
       return;
     }
@@ -52,9 +56,13 @@ export default class PaymentsSync extends BaseCommand {
     // the billing layer never reads.
     const store = await resolveBillingStore(config);
 
-    const customers = this.customer ? [this.customer] : await this.#listCustomers();
+    const customers = this.customer
+      ? [this.customer]
+      : await this.#listCustomers(store, this.provider);
     if (customers.length === 0) {
-      this.logger.info('No customers to sync (billing_customers is empty).');
+      this.logger.info(
+        'No customers recorded to sync. `--all` iterates the mappings written by ensureCustomer({ store }) / store.saveCustomer() — see the billing docs.',
+      );
       return;
     }
 
@@ -91,19 +99,25 @@ export default class PaymentsSync extends BaseCommand {
   }
 
   /**
-   * Gateway customer ids from the `billing_customers` table.
+   * Gateway customer ids from the recorded customer mappings.
    *
-   * A failure here is NOT swallowed: an unreadable table used to be reported as
-   * "billing_customers is empty", which reads as "nothing to do" and hides a broken
-   * reconcile behind a success message.
+   * Read through the STORE rather than the table: `billing.store` is a configured seam, and
+   * a reconcile that queried `billing_customers` directly would iterate a table the rest of
+   * the billing layer no longer uses the moment an app points that seam elsewhere.
+   *
+   * Paged, because `--all` on a large install would otherwise select the whole table into
+   * memory before the first invoice is fetched.
    */
-  async #listCustomers(): Promise<string[]> {
-    // Imported here, not at module scope: `@adonisjs/lucid/services/db` resolves the
-    // container the moment it is imported, so a top-level import makes merely LOADING this
-    // command file depend on a booted app — which is a boot-order hazard, and made the
-    // commands barrel impossible to import from a test.
-    const { default: db } = await import('@adonisjs/lucid/services/db');
-    const rows = await db.from('billing_customers').select('gateway_id');
-    return (rows as Array<{ gateway_id: string }>).map((row) => row.gateway_id);
+  async #listCustomers(store: BillingStore, provider?: string): Promise<string[]> {
+    const ids: string[] = [];
+    for (let offset = 0; ; offset += PAGE) {
+      const page = await store.listCustomers({
+        limit: PAGE,
+        offset,
+        ...(provider !== undefined ? { provider } : {}),
+      });
+      for (const row of page) ids.push(row.gatewayId);
+      if (page.length < PAGE) return ids;
+    }
   }
 }

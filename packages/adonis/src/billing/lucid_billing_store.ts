@@ -4,12 +4,14 @@ import type {
   BillingCountQuery,
   BillingListQuery,
   BillingStore,
+  CustomerListItem,
   PaymentListItem,
   WebhookEventBreakdownLine,
   WebhookEventListItem,
 } from './billing_store.js';
 import { clampLimit, clampOffset } from './list_query.js';
 import {
+  BillingCustomer as DefaultCustomer,
   BillingPayment as DefaultPayment,
   BillingSubscription as DefaultSubscription,
   BillingUsageEvent as DefaultUsageEvent,
@@ -21,6 +23,7 @@ import {
  * model composed from the corresponding mixin (authkit `lucidStores` pattern).
  */
 export interface BillingModels {
+  customerModel?: NormalizeConstructor<typeof DefaultCustomer>;
   subscriptionModel?: NormalizeConstructor<typeof DefaultSubscription>;
   paymentModel?: NormalizeConstructor<typeof DefaultPayment>;
   webhookEventModel?: NormalizeConstructor<typeof DefaultWebhookEvent>;
@@ -48,6 +51,7 @@ function toCount(rows: unknown): number {
   return Number(first?.total ?? 0);
 }
 
+type CustomerInstance = InstanceType<typeof DefaultCustomer>;
 type SubscriptionInstance = InstanceType<typeof DefaultSubscription>;
 type PaymentInstance = InstanceType<typeof DefaultPayment>;
 type WebhookEventInstance = InstanceType<typeof DefaultWebhookEvent>;
@@ -60,14 +64,22 @@ type UsageEventInstance = InstanceType<typeof DefaultUsageEvent>;
  */
 export class LucidBillingStore
   implements
-    BillingStore<SubscriptionInstance, PaymentInstance, WebhookEventInstance, UsageEventInstance>
+    BillingStore<
+      SubscriptionInstance,
+      PaymentInstance,
+      WebhookEventInstance,
+      UsageEventInstance,
+      CustomerInstance
+    >
 {
+  #customerModel: typeof DefaultCustomer;
   #subscriptionModel: typeof DefaultSubscription;
   #paymentModel: typeof DefaultPayment;
   #webhookEventModel: typeof DefaultWebhookEvent;
   #usageEventModel: typeof DefaultUsageEvent;
 
   constructor(models: BillingModels = {}) {
+    this.#customerModel = (models.customerModel ?? DefaultCustomer) as typeof DefaultCustomer;
     this.#subscriptionModel = (models.subscriptionModel ??
       DefaultSubscription) as typeof DefaultSubscription;
     this.#paymentModel = (models.paymentModel ?? DefaultPayment) as typeof DefaultPayment;
@@ -75,6 +87,74 @@ export class LucidBillingStore
       DefaultWebhookEvent) as typeof DefaultWebhookEvent;
     this.#usageEventModel = (models.usageEventModel ??
       DefaultUsageEvent) as typeof DefaultUsageEvent;
+  }
+
+  async saveCustomer(customer: {
+    gatewayId: string;
+    provider: string;
+    ownerType?: string | null;
+    ownerId?: string | null;
+    email?: string | null;
+    name?: string | null;
+    taxId?: string | null;
+    metadata?: Record<string, unknown>;
+  }): Promise<CustomerInstance> {
+    const existing = await this.findCustomerByGatewayId(customer.gatewayId);
+    const row = (existing ?? new this.#customerModel()) as CustomerInstance;
+    row.gatewayId = customer.gatewayId;
+    row.provider = customer.provider;
+    // Absent fields do NOT erase what is already recorded: a later call that only knows the
+    // gateway id — a reconcile, a webhook — would otherwise blank the owner mapping that an
+    // earlier, better-informed call wrote, which is the whole reason the row exists.
+    if (customer.ownerType !== undefined) row.ownerType = customer.ownerType;
+    if (customer.ownerId !== undefined) row.ownerId = customer.ownerId;
+    if (customer.email !== undefined) row.email = customer.email;
+    if (customer.name !== undefined) row.name = customer.name;
+    if (customer.taxId !== undefined) row.taxId = customer.taxId;
+    if (customer.metadata !== undefined) row.metadata = customer.metadata;
+    await row.save();
+    return row;
+  }
+
+  async findCustomerByGatewayId(gatewayId: string): Promise<CustomerInstance | null> {
+    return (await this.#customerModel.findBy(
+      'gateway_id',
+      gatewayId,
+    )) as CustomerInstance | null;
+  }
+
+  async findCustomerByOwner(
+    ownerType: string,
+    ownerId: string,
+    provider: string,
+  ): Promise<CustomerInstance | null> {
+    return (await this.#customerModel
+      .query()
+      .where('owner_type', ownerType)
+      .where('owner_id', ownerId)
+      .where('provider', provider)
+      .first()) as CustomerInstance | null;
+  }
+
+  async listCustomers(
+    query: BillingListQuery & { provider?: string },
+  ): Promise<CustomerListItem[]> {
+    const builder = this.#customerModel.query().orderBy('created_at', 'desc');
+    if (query.provider !== undefined) builder.where('provider', query.provider);
+    const rows = (await builder
+      .limit(clampLimit(query.limit))
+      .offset(clampOffset(query.offset))) as CustomerInstance[];
+    return rows.map((row) => ({
+      id: String(row.id),
+      gatewayId: row.gatewayId,
+      provider: row.provider,
+      ownerType: row.ownerType ?? null,
+      ownerId: row.ownerId ?? null,
+      email: row.email ?? null,
+      name: row.name ?? null,
+      taxId: row.taxId ?? null,
+      createdAt: toDate(row.createdAt),
+    }));
   }
 
   async saveSubscription(sub: {

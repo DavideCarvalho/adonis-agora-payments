@@ -3,3 +3,6 @@ dist/
 .turbo/
 coverage/
 *.tsbuildinfo
+
+# Materialized from the published migration stubs by the integration harness.
+packages/adonis/test/integration/__generated__/

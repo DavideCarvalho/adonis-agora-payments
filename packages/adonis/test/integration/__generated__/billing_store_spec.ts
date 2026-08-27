@@ -1,0 +1,87 @@
+import { BaseSchema } from '@adonisjs/lucid/schema'
+
+export default class extends BaseSchema {
+  protected tableName = 'billing_customers'
+
+  async up() {
+    this.schema.createTable('billing_customers', (table) => {
+      table.uuid('id').primary()
+      table.string('owner_type')
+      table.string('owner_id')
+      table.string('gateway_id').unique()
+      table.string('provider')
+      table.string('email').nullable()
+      table.string('name').nullable()
+      table.string('tax_id').nullable()
+      table.jsonb('metadata').nullable()
+      table.timestamp('created_at', { useTz: true }).notNullable()
+      table.timestamp('updated_at', { useTz: true }).notNullable()
+      table.index(['owner_type', 'owner_id'], 'billing_customers_owner_idx')
+    })
+
+    this.schema.createTable('billing_subscriptions', (table) => {
+      table.uuid('id').primary()
+      table.string('gateway_id').unique()
+      table.string('provider')
+      table.string('status')
+      table.string('plan_id')
+      table.string('customer_id').nullable()
+      table.timestamp('trial_ends_at', { useTz: true }).nullable()
+      table.timestamp('ends_at', { useTz: true }).nullable()
+      table.jsonb('payload').nullable()
+      table.timestamp('created_at', { useTz: true }).notNullable()
+      table.timestamp('updated_at', { useTz: true }).notNullable()
+      table.index(['customer_id'], 'billing_subscriptions_customer_idx')
+    })
+
+    this.schema.createTable('billing_payments', (table) => {
+      table.uuid('id').primary()
+      table.string('gateway_id').unique()
+      table.string('provider')
+      table.string('status')
+      table.bigInteger('amount')
+      table.string('currency', 3)
+      table.string('customer_id').nullable()
+      table.string('subscription_id').nullable()
+      table.jsonb('payload').nullable()
+      table.timestamp('paid_at', { useTz: true }).nullable()
+      table.timestamp('created_at', { useTz: true }).notNullable()
+      table.timestamp('updated_at', { useTz: true }).notNullable()
+      table.index(['customer_id'], 'billing_payments_customer_idx')
+      table.index(['subscription_id'], 'billing_payments_subscription_idx')
+    })
+
+    this.schema.createTable('billing_webhook_events', (table) => {
+      table.uuid('id').primary()
+      table.string('gateway_event_id').unique()
+      table.string('provider')
+      table.string('type')
+      table.string('status')
+      table.jsonb('payload').nullable()
+      table.text('error').nullable()
+      table.timestamp('created_at', { useTz: true }).notNullable()
+      table.timestamp('updated_at', { useTz: true }).notNullable()
+    })
+
+    this.schema.createTable('billing_usage_events', (table) => {
+      table.uuid('id').primary()
+      table.string('subscription_id').nullable()
+      table.string('customer_id').nullable()
+      table.string('meter')
+      table.integer('quantity').defaultTo(1)
+      table.jsonb('metadata').nullable()
+      table.timestamp('recorded_at', { useTz: true }).notNullable()
+      table.timestamp('updated_at', { useTz: true }).notNullable()
+      table.index(['subscription_id', 'meter'], 'billing_usage_subscription_meter_idx')
+      table.index(['customer_id', 'meter'], 'billing_usage_customer_meter_idx')
+    })
+  }
+
+  async down() {
+    this.schema.dropTable('billing_customers')
+    this.schema.dropTable('billing_subscriptions')
+    this.schema.dropTable('billing_payments')
+    this.schema.dropTable('billing_webhook_events')
+    this.schema.dropTable('billing_usage_events')
+  }
+}

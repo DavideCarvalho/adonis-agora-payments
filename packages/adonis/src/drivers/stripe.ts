@@ -508,7 +508,17 @@ export class StripeDriver implements PaymentsDriver {
       id: event.id,
       provider: this.provider,
       type: normalized.type,
-      createdAt: new Date(event.created * 1000).toISOString(),
+      // Guarded: `new Date(undefined * 1000).toISOString()` throws a bare RangeError, which
+      // surfaces as a crash rather than as this package's own rejection. A real Stripe event
+      // always carries `created`, so this only fires on a malformed body — but a malformed
+      // body should be REFUSED, not turned into a stack trace.
+      //
+      // Deliberately untested: this spec's mocked Stripe SDK fills `created`, so a test here
+      // passes with and without the guard, which measures nothing. Reaching it needs the real
+      // SDK's `constructEvent` over a hand-signed body.
+      createdAt: Number.isFinite(event.created)
+        ? new Date(event.created * 1000).toISOString()
+        : new Date().toISOString(),
       data: normalized.data,
       raw: event as unknown as Record<string, unknown>,
     };

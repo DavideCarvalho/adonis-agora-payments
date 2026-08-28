@@ -918,6 +918,7 @@ export class RazorpayDriver implements PaymentsDriver {
       // would have the billing layer settle an order the merchant has not been paid for,
       // and there is deliberately no `payment.authorized` event for it to become.
       case 'payment.authorized':
+      case 'payment.dispute.won':
       case 'payment.dispute.lost':
       case 'payment.dispute.closed':
       case 'payment.dispute.under_review':

@@ -79,11 +79,13 @@ export function formatCents(cents: number, currency: string, locale = 'pt-BR'): 
  * Parse what an operator typed into a partial-refund box (`19,90`, `19.90`, `1990` for JPY) into
  * integer minor units. `null` for anything unusable.
  *
- * Digit-shifting, never `Math.round(value * 100)`: a partial refund typed as `8.35` goes through a
- * binary float on that path and comes out as `834`, and the customer is short a cent for a reason
- * nobody can find later. The fraction is padded/rejected against the currency's own exponent, so
- * `1.5` is 150 in BRL, 1500 in KWD, and refused outright in JPY — which has no fractional part to
- * refund.
+ * Digit-shifting rather than multiplying a float: shifting the digits of an integer cannot round
+ * anywhere, which is the same reason `src/money.ts`'s `formatDecimal` builds its string that way
+ * instead of going through `toDecimal(x).toFixed(2)`.
+ *
+ * The fraction is padded/rejected against the currency's OWN exponent, which is the part that
+ * silently bites: `19.9` is 1990, not 199, and `1.5` is 150 in BRL, 1500 in KWD, and refused
+ * outright in JPY — which has no fractional part to refund at all.
  */
 export function parseMajorToMinor(input: string, currency: string): number | null {
   const trimmed = input.trim().replace(',', '.');

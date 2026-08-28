@@ -46,11 +46,12 @@ describe('formatCents', () => {
 });
 
 describe('parseMajorToMinor', () => {
-  it('shifts the digits rather than multiplying through a float', () => {
-    // `Math.round(8.35 * 100)` is 834 on this machine. A refund short by a cent, forever.
-    expect(parseMajorToMinor('8.35', 'BRL')).toBe(835);
-    expect(parseMajorToMinor('19,90', 'BRL')).toBe(1990);
+  it('shifts the digits, padding the fraction to the currency’s own exponent', () => {
+    // `19.9` is nineteen reais ninety, not one real ninety-nine. A short fraction that is read
+    // literally refunds a hundredth of what the operator typed.
     expect(parseMajorToMinor('19.9', 'BRL')).toBe(1990);
+    expect(parseMajorToMinor('19,90', 'BRL')).toBe(1990);
+    expect(parseMajorToMinor('8.35', 'BRL')).toBe(835);
     expect(parseMajorToMinor('7', 'BRL')).toBe(700);
   });
 

@@ -56,17 +56,29 @@ Step 3 happening before step 5 is the guarantee: a redelivery never reaches your
 
 ## The normalized event types
 
-Every gateway maps onto seven:
+Every gateway maps onto these:
 
 | Type | Means |
 | --- | --- |
 | `payment.succeeded` | the money moved |
 | `payment.failed` | the attempt failed |
 | `payment.refunded` | a refund completed |
+| `payment.disputed` | a chargeback was opened — the money is going back |
 | `payment.updated` | a payment changed in some other way |
 | `subscription.created` | a recurring subscription now exists |
 | `subscription.updated` | its status or period changed |
 | `subscription.canceled` | it ended |
+
+`payment.disputed` is the one that takes revenue **away**, and it is why the list is not six. A
+chargeback used to arrive as an unknown type and pass through unprocessed, leaving the payment row
+saying `paid` while the money was already being pulled back — the app found out from its bank
+statement. The processor now moves the row to `disputed`. Which gateway event maps onto it is on
+each [provider page](/docs/payments/providers); a gateway with no dispute notification says so.
+
+Two more are declared and being wired driver by driver: `payment.dispute_warning`, which arrives
+**before** a chargeback exists (Stripe's early fraud warning, Adyen's fraud notification) while
+refunding is still cheaper than losing, and `payment.dispute_closed`, which carries the outcome. See
+[Roadmap](/docs/payments/roadmap).
 
 An event type the processor does not recognize passes through: it is ledgered, no built-in sync runs,
 and a handler runs if one is registered. Unknown does not mean dropped.
@@ -94,14 +106,25 @@ async handle(event: WebhookEvent) {
 }
 ```
 
-Each gateway stores it in its own field, and the driver normalizes both directions:
+Each gateway stores it in its own field, and the driver normalizes both directions. A few, to show
+how far apart the fields are:
 
 | Gateway | Field |
 | --- | --- |
 | Asaas | `externalReference` — **propagated to every installment** of a subscription's charges |
 | Woovi | `correlationID` |
 | Stripe | `metadata.external_reference` |
-| AbacatePay | carried in metadata |
+| Mercado Pago | `external_reference` |
+| PagBank | the order's `reference_id` |
+| Efí | the Pix **txid** itself, when your reference fits its charset |
+| Adyen | `merchantReference` — **required**, not optional |
+
+Every [provider page](/docs/payments/providers) names its own field, and the differences matter more
+than they look: Adyen refuses a charge without one, Efí squeezes it into a txid with a restricted
+charset, and Razorpay hides it in `notes`. You never touch any of that — you set
+`externalReference` and read `event.data.externalReference` — but when you are staring at a raw
+payload in the gateway's console, knowing which field to look at is the difference between a minute
+and an afternoon.
 
 The Asaas propagation is the one that saves real work: the webhook for the third monthly charge of a
 subscription still carries the reference you set when you created it, so it routes back to your

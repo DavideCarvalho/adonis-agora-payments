@@ -99,6 +99,26 @@ describe('driver registry', () => {
     }
   });
 
+  /**
+   * `externalReference` is the only thing tying a gateway's webhook back to the app's own
+   * row, and each gateway hides it in a different field — `correlationID`, `reference_id`,
+   * `notes`, a txid. A page that omits it documents everything except the one thing a
+   * reader cannot work out from the gateway's own site.
+   */
+  it('names externalReference on every provider page', async () => {
+    const pages = await Promise.all(
+      (await slugs()).map(async (slug) => ({
+        slug,
+        body: await readFile(`${docsDir}${slug}.mdx`, 'utf-8'),
+      })),
+    );
+    const silent = pages.filter((page) => !page.body.includes('externalReference'));
+    expect(
+      silent.map((page) => page.slug),
+      `provider pages that never mention externalReference: ${silent.map((p) => p.slug).join(', ')}`,
+    ).toEqual([]);
+  });
+
   it('lists every docs page in the sidebar', async () => {
     const meta = JSON.parse(await readFile(`${docsDir}meta.json`, 'utf-8')) as { pages: string[] };
     const listed = new Set(meta.pages);

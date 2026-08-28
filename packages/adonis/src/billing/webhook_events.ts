@@ -11,6 +11,14 @@ export const WEBHOOK_EVENT_TYPES = [
   'payment.failed',
   'payment.refunded',
   'payment.disputed',
+  // A dispute has two more moments than the one `payment.disputed` names. The warning
+  // arrives BEFORE a chargeback exists — Stripe's early fraud warning, Adyen's fraud
+  // notification, an Ethoca/Verifi alert — while refunding is still cheaper than losing.
+  // The close carries the outcome. Both are canonical because the deadline they carry is
+  // the only thing that makes a dispute actionable, and a deadline nothing normalizes is a
+  // deadline every app re-derives from a different gateway's payload.
+  'payment.dispute_warning',
+  'payment.dispute_closed',
   'payment.updated',
   'subscription.created',
   'subscription.updated',

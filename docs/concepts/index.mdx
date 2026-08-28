@@ -15,7 +15,8 @@ conversions to the decimal reais the Brazilian gateway APIs want live in exactly
 
 ## One contract, many gateways
 
-Stripe, AbacatePay, Asaas and Woovi normalize onto the same `PaymentsDriver` — `charge`, `refund`,
+Eighteen gateways — Stripe, Adyen and PayPal, Mercado Pago and Pagar.me, Pix-native Woovi and
+AbacatePay, Razorpay, Mollie and the rest — normalize onto the same `PaymentsDriver` — `charge`, `refund`,
 `createSubscription`, `parseWebhook` — and onto the same domain types. Your services never see a
 gateway SDK, which is what makes adding a gateway a config entry and swapping one a routing change.
 A driver also **declares what it supports**, so sending a card to a Pix-only gateway fails at the

@@ -200,10 +200,23 @@ type Money = number         // integer, smallest currency unit
 type Currency = string      // lowercase ISO 4217
 interface MoneyAmount { amount: Money; currency: Currency }
 
-type BillingStatus = 'pending' | 'paid' | 'failed' | 'refunded' | 'canceled' | 'disputed'
-type SubscriptionStatus = 'trialing' | 'active' | 'past_due' | 'incomplete' | 'canceled' | 'ended'
-type PaymentMethodType = 'card' | 'pix' | 'boleto' | 'debit_card' | 'unknown'
-type PaymentMethodName = 'pix' | 'credit_card' | 'debit_card' | 'boleto' | 'undefined'
+// 'authorized' = funds held, nothing captured. Money has NOT moved.
+type BillingStatus =
+  | 'pending' | 'authorized' | 'paid' | 'failed' | 'refunded' | 'canceled' | 'disputed'
+
+// 'paused' is not a flavour of 'active': it exists, it will bill again, it must not entitle.
+type SubscriptionStatus =
+  | 'trialing' | 'active' | 'paused' | 'past_due' | 'incomplete' | 'canceled' | 'ended'
+
+// Categories, not brands. 'wallet' covers PayPal/Apple Pay/Google Pay, 'bank_transfer' the
+// push-from-your-bank methods (iDEAL, Bancontact, Multibanco), 'bank_debit' the pull ones
+// (SEPA Direct Debit, ACH). The brand goes in the gateway's own field, via metadata.
+type PaymentMethodType =
+  | 'card' | 'pix' | 'boleto' | 'debit_card' | 'wallet' | 'bank_transfer'
+  | 'bank_debit' | 'upi' | 'bnpl' | 'voucher' | 'unknown'
+type PaymentMethodName =
+  | 'pix' | 'credit_card' | 'debit_card' | 'boleto' | 'wallet' | 'bank_transfer'
+  | 'bank_debit' | 'upi' | 'bnpl' | 'voucher' | 'undefined'
 
 interface Payment {
   id: string
@@ -362,8 +375,12 @@ httpRequest<T>(path, options: HttpRequestOptions): Promise<T>
 headerValue(headers, name): string | undefined
 isNotFound(error): boolean
 
-toDecimal(cents: Money): number
-fromDecimal(value: number): Money
+// All three take the currency, because the exponent is not always 2: JPY and KRW have none,
+// KWD and BHD have three. Omitting it assumes 2.
+currencyExponent(currency?: Currency): number
+toDecimal(amount: Money, currency?: Currency): number
+fromDecimal(value: number, currency?: Currency): Money
+formatDecimal(amount: Money, currency?: Currency): string
 
 ensureCustomer(driver, existingId, input, options?): Promise<Customer>
 //   options: { store?: BillingStore; owner?: { type: string; id: string | number } }

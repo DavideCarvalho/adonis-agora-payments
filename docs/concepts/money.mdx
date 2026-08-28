@@ -43,15 +43,24 @@ whole mapping is two functions, used only inside driver implementations:
 ```ts
 import { toDecimal, fromDecimal } from '@adonis-agora/payments'
 
-toDecimal(1990)    // 19.9   — cents → the gateway's decimal
-fromDecimal(19.9)  // 1990   — the gateway's decimal → cents
+toDecimal(1990, 'brl')    // 19.9   — minor units → the gateway's decimal
+fromDecimal(19.9, 'brl')  // 1990   — the gateway's decimal → minor units
 ```
 
 `fromDecimal` rounds, which is what makes a round trip stable: a gateway that answers `19.900000001`
 still becomes `1990`.
 
-Application code should never call either. If you find yourself converting in a service, the amount
-crossed a boundary it should not have.
+<Callout type="warn" title="The exponent is not always two">
+Both take the currency because dividing by 100 is only right for most of them. The yen and the won
+have **no** minor unit — `1990` JPY is ¥1,990, not ¥19.90 — and the Kuwaiti dinar, the Bahraini
+dinar and the Tunisian dinar have **three** digits. Omit the currency and both assume two, which is
+the old behaviour and correct for BRL, USD and EUR. `currencyExponent('jpy')` answers `0` if you
+need the number yourself.
+</Callout>
+
+Application code should never call either **in business logic**. If you find yourself converting in
+a service, the amount crossed a boundary it should not have. The presentation edge is the one place
+it belongs — see [Formatting](#formatting-for-humans).
 
 ## Currency
 
@@ -91,16 +100,20 @@ payment.amount.amount      // 1990
 Formatting is a presentation concern and the library does none of it. Convert once, at the edge:
 
 ```ts
+import { toDecimal } from '@adonis-agora/payments'
+
 const format = (money: MoneyAmount) =>
   new Intl.NumberFormat('pt-BR', {
     style: 'currency',
     currency: money.currency.toUpperCase(),
-  }).format(money.amount / 100)
+  }).format(toDecimal(money.amount, money.currency))
 
 format({ amount: 1990, currency: 'brl' })   // 'R$ 19,90'
 ```
 
-Divide by 100 in the formatter and nowhere else. A `19.9` floating around a service layer is an
+Convert in the formatter and nowhere else — and convert with `toDecimal`, not `/ 100`, so the
+formatter stays right the day the app takes a yen. `formatDecimal(amount, currency)` is there too:
+it shifts the digits into a string instead of dividing, so nothing ever becomes a float. A `19.9` floating around a service layer is an
 amount waiting to be added to something.
 
 ## Splitting an amount

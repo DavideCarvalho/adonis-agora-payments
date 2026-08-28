@@ -238,8 +238,8 @@ export default defineConfig({
 getPayments().driver('credit_card')   // → whichever provider methods.credit_card names
 ```
 
-**Two of the four gateways have no cards at all.** Woovi/OpenPix is Pix-only, and AbacatePay does
-Pix and boleto. Pointing `credit_card` at either is a config error, and the manager catches it when
+**Several gateways have no cards at all.** Woovi/OpenPix is Pix-only, and AbacatePay does Pix and
+boleto. Pointing `credit_card` at either is a config error, and the manager catches it when
 you ask for the driver — before a single byte reaches the gateway:
 
 ```ts

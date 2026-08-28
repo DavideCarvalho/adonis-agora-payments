@@ -56,18 +56,30 @@ Or pass values from anywhere — the driver configs are plain objects, so an API
 from a vault, another config file, or a literal (not recommended for secrets).
 </Step>
 
-<Step title="Run the migrations">
-The billing layer persists subscriptions, payments and the webhook idempotency ledger:
+<Step title="Skip the migration">
+There isn't one to run. The billing layer persists subscriptions, payments, disputes and the
+webhook idempotency ledger, and **it creates its own tables on first use** — the same convention
+`@adonis-agora/durable` and `@adonis-agora/authz` follow. Nothing to publish, nothing to run,
+nothing to remember when you upgrade.
+
+The DDL is idempotent, so it costs one round trip on the first query of a process and nothing
+afterwards. Columns added to the library in later versions are carried to a database that already
+has the tables, which is what makes this an upgrade path rather than a first-install convenience.
+
+If you would rather own the DDL — a shared database, a team that reviews every schema change, a
+deploy that runs migrations as their own step — turn it off and run the published migration
+instead:
+
+```ts title="config/payments.ts"
+billing: { autoCreateSchema: false }
+```
 
 ```sh
 node ace migration:run
 ```
 
-Two files are published: `create_billing_tables` and `add_billing_external_reference`, which
-carries the two columns added after the first shipped (`billing_payments.external_reference` and
-`billing_webhook_events.normalized`). A fresh install runs both and the second finds nothing to
-do; an existing install needs it, or references are not stored and failed webhooks cannot be
-retried from the dashboard.
+`configure` publishes that file for exactly this case. It calls the same `createBillingTables` the
+library does, so the two cannot drift.
 
 If you only want payments without the subscription layer, delete both published migrations —
 the drivers work standalone.

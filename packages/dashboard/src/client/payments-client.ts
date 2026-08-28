@@ -79,9 +79,42 @@ export interface WebhookEventRow {
   retryable: boolean;
 }
 
+/**
+ * One `billing_disputes` row — a chargeback or a pre-chargeback alert.
+ *
+ * Three fields here are nullable for reasons that are NOT "missing data", and the screen has to
+ * render each one as the thing it means:
+ *
+ * - `amount`: a Stripe early fraud warning names no money at all. Not zero — absent.
+ * - `currency`: same row, same reason.
+ * - `evidenceDueBy`: the gateway sent no deadline. Never "no hurry" — several gateways send none,
+ *   and Woovi's three-day rule is policy rather than a field.
+ */
+export interface DisputeRow {
+  id: string;
+  /** The DISPUTE's own gateway id — what you search for in the gateway's dashboard. */
+  gatewayId: string;
+  /** The disputed payment's gateway id — the join back to the payments screen. */
+  paymentGatewayId: string;
+  provider: string;
+  /** A `DisputeStatus`: warning | open | under_review | won | lost | canceled | expired. */
+  status: string;
+  /** The gateway's own reason code, verbatim — the vocabulary is per-network. */
+  reason: string | null;
+  /** INTEGER MINOR UNITS, or `null` when the gateway named no money. NEVER divide here. */
+  amount: number | null;
+  currency: string | null;
+  /** When evidence must be submitted by, or `null` when the gateway sent none. */
+  evidenceDueBy: string | null;
+  outcome: string | null;
+  openedAt: string | null;
+  closedAt: string | null;
+  createdAt: string | null;
+}
+
 /** One `billingHealth()` check. Every one is a "should be zero" check, so `count > 0` IS the alarm. */
 export interface HealthCheck {
-  key: 'stuck_webhooks' | 'failed_webhooks' | 'unconfirmed_payments';
+  key: 'stuck_webhooks' | 'failed_webhooks' | 'unconfirmed_payments' | 'disputes_due';
   label: string;
   count: number;
   healthy: boolean;
@@ -101,6 +134,9 @@ export interface Health {
   checkedAt: string;
   checks: HealthCheck[];
   failures: HealthFailure[];
+  /** WHICH windows are closing, soonest first — a count names no gateway dashboard to open.
+   *  Capped by the server; `disputes_due.count` is the real number. */
+  deadlines: DisputeRow[];
 }
 
 /** Echoed paging. `count === limit` is the ONLY "there might be more" signal: the server never
@@ -136,6 +172,24 @@ export interface SubscriptionsPage {
   statuses: readonly string[];
   /** Whole-table counts, not page counts — `past_due` is the figure that decides the morning. */
   counts: { past_due: number };
+}
+
+/**
+ * A page of disputes.
+ *
+ * `page` is NARROWER than {@link Page} on purpose: the store filters disputes by provider on a
+ * column, so there is no bounded scan behind this list and therefore no `scanned`/`truncated` to
+ * report. Claiming those here would be claiming a caveat that does not apply.
+ *
+ * `dueWithin` is present only in work-list mode (`?dueWithin=<hours>`). Its `total` is a SEPARATE,
+ * unbounded count: a full page says nothing about how many more windows are closing, and that is
+ * the number an operator plans the day around.
+ */
+export interface DisputesPage {
+  disputes: DisputeRow[];
+  page: { limit: number; offset: number; count: number };
+  statuses: readonly string[];
+  dueWithin?: { hours: number; total: number };
 }
 
 /** The gateways this install actually has data for — the provider filter is built from this, never
@@ -280,6 +334,16 @@ export interface ListOptions {
   offset?: number | undefined;
 }
 
+/** {@link ListOptions} plus the one filter only disputes have: a deadline horizon in HOURS. */
+export interface DisputeListOptions extends ListOptions {
+  /**
+   * Ask for the WORK LIST instead of the log: only open disputes carrying a deadline inside this
+   * many hours, soonest first. A row already past its deadline is still in it — it is still open
+   * and still unanswered.
+   */
+  dueWithin?: number | undefined;
+}
+
 /** The query every list endpoint takes, built once so the three screens cannot drift apart. */
 function listQuery(opts: ListOptions): string {
   return buildQuery({
@@ -308,6 +372,26 @@ export const paymentsClient = {
   },
   webhookEvents(opts: ListOptions = {}): Promise<WebhookEventsPage> {
     return http<WebhookEventsPage>(`/webhook-events${listQuery(opts)}`);
+  },
+  /**
+   * A page of disputes — the LOG by default, the work list when `dueWithin` (in hours) is given.
+   *
+   * `status` is dropped in work-list mode rather than passed along. The server's work list is
+   * already scoped to the open statuses that carry a deadline, so a status sent alongside
+   * `dueWithin` is silently ignored — and a filter that appears to apply and does not is worse
+   * than no filter at all.
+   */
+  disputes(opts: DisputeListOptions = {}): Promise<DisputesPage> {
+    const workList = opts.dueWithin !== undefined;
+    return http<DisputesPage>(
+      `/disputes${buildQuery({
+        status: workList ? undefined : opts.status,
+        provider: opts.provider,
+        dueWithin: opts.dueWithin,
+        limit: opts.limit,
+        offset: opts.offset,
+      })}`,
+    );
   },
 
   // ── Actions. `POST` only — see the note on `post()`. ──────────────────────────────────────────

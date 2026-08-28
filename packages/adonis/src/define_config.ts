@@ -324,6 +324,21 @@ export interface PaymentsConfig {
      */
     enabled?: boolean;
     /**
+     * Whether the library creates its own tables on first use. Defaults to **true**, the
+     * ecosystem convention — `@adonis-agora/durable` and `@adonis-agora/authz` both own
+     * their schema, and an app that installs a lib should not have to publish and run a
+     * migration before it can take a payment.
+     *
+     * The DDL is idempotent (`CREATE TABLE IF NOT EXISTS`), so an install that already ran
+     * the published migration gets no-ops.
+     *
+     * Set it to `false` when your schema is managed elsewhere — a shared database you do not
+     * own, a team that reviews every DDL, a deploy that runs migrations as a separate step.
+     * Then publish the migration (`node ace configure @adonis-agora/payments`) and run it;
+     * it calls the SAME `createBillingTables` function, so the two paths cannot drift.
+     */
+    autoCreateSchema?: boolean;
+    /**
      * Legacy alias for {@link dispatcher}: `'auto'` (default) or a boolean (`true` =
      * `'durable'`, `false` = `'in-process'`). Prefer `dispatcher` for the full set of
      * backends.

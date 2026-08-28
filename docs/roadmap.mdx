@@ -77,13 +77,17 @@ What exists today and what does not:
   separate the pre-dispute alert (where no money has moved and a refund still prevents the
   chargeback) from the chargeback itself, and both carry the response deadline through as
   `actionableUntil`.
-- **Not landed.** Nothing persists a dispute yet — there is no `billing_disputes` table, so the
-  deadline arrives on an event and then lives only in the gateway's dashboard. The remaining sixteen
-  drivers have not been through the same pass: their dispute events are still either
-  `payment.disputed` or `payment.updated`, which is safe but coarse, and each one needs its own read
-  of the gateway's reference before it is widened. No driver implements `findDispute` or
-  `submitDisputeEvidence` yet, so `capabilities.disputes` is false everywhere. The dashboard has no
-  dispute panel and `payments:health` does not check a window about to expire.
+  Disputes are persisted (`billing_disputes`, keyed on the dispute's own gateway id and indexed on
+  `(status, evidence_due_by)`), `payments:health` flags a window closing within 72 hours and names
+  which ones, and the dashboard has a read-only Disputes screen leading with the work list. All
+  eighteen drivers have been through the vocabulary pass; the ones with no pre-dispute event say so
+  on their page rather than implying otherwise. `submitDisputeEvidence` is real on Stripe.
+- **Not landed.** Adyen's Defend Disputes v30 has no endpoint that reads a dispute back, so
+  `findDispute` there would have to invent the object it returns — the driver refuses instead, and
+  closing that needs either an Adyen API that can read a dispute or a narrower contract than
+  `Dispute`. `capabilities.disputes` is false on the other seventeen gateways: PayPal, Square,
+  Razorpay and Mollie all have real dispute APIs and none is wired yet. Nothing decides whether to
+  fight or refund, and nothing will — see below.
 - **Not planned.** Deciding **for** you. The library will carry evidence to the gateway and tell you
   the window is closing; whether a given dispute is worth fighting or cheaper to refund is a business
   rule that depends on margin, customer value and fraud history, and a library that guesses it is a

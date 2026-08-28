@@ -33,7 +33,16 @@ export class BillingPayment extends BaseModel {
   @column()
   declare status: string;
 
-  @column()
+  /**
+   * Minor units, as an integer — and `consume` is what makes that true on Postgres.
+   *
+   * The column is `BIGINT`, and node-postgres returns bigints as STRINGS: reading beyond
+   * 2^53 would lose precision silently, so it refuses to guess. The type here said `number`
+   * and the value was `'1990'`, which means `payment.amount + fee` concatenated instead of
+   * adding. `Number()` is safe for this column specifically: these are minor units, and 2^53
+   * of them is ninety trillion reais.
+   */
+  @column({ consume: (value: unknown) => (value === null ? null : Number(value)) })
   declare amount: number;
 
   @column()
@@ -106,7 +115,8 @@ export function withPayment() {
       @column()
       declare status: string;
 
-      @column()
+      // See the note on `BillingPayment.amount`: BIGINT arrives as a string on Postgres.
+      @column({ consume: (value: unknown) => (value === null ? null : Number(value)) })
       declare amount: number;
 
       @column()

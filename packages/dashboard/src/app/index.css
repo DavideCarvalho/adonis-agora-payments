@@ -122,6 +122,32 @@ body {
   color: #71717a;
 }
 
+/* Dispute statuses. `warning` is the load-bearing one: a pre-chargeback alert where NOTHING has
+   been pulled back yet and a refund still prevents the debit. It takes amber — the same hue as
+   `authorized`, and for the same reason: this is not money that moved. */
+.s-warning {
+  color: var(--warn);
+}
+.s-open {
+  /* Filed, funds withdrawn, evidence clock running. */
+  color: var(--bad);
+}
+.s-under_review {
+  /* Answered; waiting on the network. In flight, like a claimed webhook event. */
+  color: var(--live);
+}
+.s-won {
+  color: var(--good);
+}
+.s-lost {
+  color: #fb7185;
+}
+/* `expired` shares the `lost` hue deliberately: the window shut, so the money is gone by default
+   rather than on the merits. The two differ in HOW, not in what is left to do — nothing. */
+.s-expired {
+  color: #fb7185;
+}
+
 /* Webhook-ledger statuses. */
 .s-received {
   /* Claimed, handler not finished — in flight. */

@@ -9,19 +9,12 @@ import { BaseModel } from '@adonisjs/lucid/orm';
 import type { BaseSchema } from '@adonisjs/lucid/schema';
 
 /**
- * Every published migration, in the order `configure.ts` publishes them.
- *
- * All of them, not just the first: `add_billing_external_reference` is what existing installs get,
- * and running only the create stub here would leave the suite testing a schema no upgraded
- * app has. It is also the only place the later migrations' `hasColumn`/`hasTable` guards are
- * ever executed — on a fresh database the create stub already declares those columns, so this run
- * proves the guarded migration is a no-op instead of a failure.
+ * The published migration. One file now: the library creates its own schema
+ * (`billing.autoCreateSchema`) and the stub is for apps that would rather run the DDL
+ * explicitly — both call the same `createBillingTables`, which is what this suite exercises
+ * end to end against a real Postgres.
  */
-const STUBS = [
-  'create_billing_tables',
-  'add_billing_external_reference',
-  'add_billing_disputes',
-].map((name) => ({
+const STUBS = ['create_billing_tables'].map((name) => ({
   name,
   path: fileURLToPath(new URL(`../../stubs/database/migrations/${name}.stub`, import.meta.url)),
 }));
@@ -48,7 +41,15 @@ async function loadMigration(schemaName: string, stub: string): Promise<typeof B
   // and a single shared filename means one process can be importing the file while another
   // rewrites it.
   const generated = `${GENERATED_DIR}${schemaName}__${basename(stub, '.stub')}.ts`;
-  await writeFile(generated, raw.slice(header + 3).trimStart(), 'utf-8');
+  // One transformation, and only one: the stub imports `@adonis-agora/payments` by name,
+  // which is what a consumer app writes and what cannot resolve from inside this package.
+  // Everything else — the DDL call, the `defer`, the `down()` — is the published file
+  // verbatim, so a change to the stub still fails this suite rather than sliding past it.
+  const source = raw
+    .slice(header + 3)
+    .trimStart()
+    .replace(/from '@adonis-agora\/payments'/g, "from '../../../src/index.js'");
+  await writeFile(generated, source, 'utf-8');
   const mod = (await import(generated)) as { default: typeof BaseSchema };
   return mod.default;
 }
@@ -66,7 +67,10 @@ export interface IntegrationDatabase {
  * parallel forks cannot see each other's rows — counting "every failed event in the last
  * hour" is only meaningful when the table holds nothing but this test's rows.
  */
-export async function createIntegrationDatabase(schemaName: string): Promise<IntegrationDatabase> {
+export async function createIntegrationDatabase(
+  schemaName: string,
+  options: { migrate?: boolean } = {},
+): Promise<IntegrationDatabase> {
   const url = process.env.PAYMENTS_TEST_PG_URL;
   if (!url) {
     throw new Error(
@@ -98,10 +102,15 @@ export async function createIntegrationDatabase(schemaName: string): Promise<Int
 
   await db.rawQuery(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`);
 
-  for (const stub of STUBS) {
-    const Migration = await loadMigration(schemaName, stub.path);
-    const migration = new Migration(db.connection(), stub.path, false);
-    await migration.execUp();
+  // `migrate: false` hands back a schema with NOTHING in it. That is what the schema spec
+  // needs: `createBillingTables` is the thing under test there, and running the migration
+  // first — which calls it — would make every assertion pass before the test began.
+  if (options.migrate !== false) {
+    for (const stub of STUBS) {
+      const Migration = await loadMigration(schemaName, stub.path);
+      const migration = new Migration(db.connection(), stub.path, false);
+      await migration.execUp();
+    }
   }
 
   return {

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  disputeIsChargeback,
+  disputeIsOpen,
+  disputeStatusClass,
   isActionable,
   paymentStatusClass,
   subscriptionIsBilling,
@@ -93,5 +96,61 @@ describe('subscriptionIsBilling', () => {
     expect(subscriptionIsBilling('paused')).toBe(false);
     expect(subscriptionIsBilling('past_due')).toBe(false);
     expect(subscriptionIsBilling('canceled')).toBe(false);
+  });
+});
+
+describe('disputeStatusClass', () => {
+  it('gives every modelled dispute status its own hue', () => {
+    expect(disputeStatusClass('warning')).toBe('s-warning');
+    expect(disputeStatusClass('open')).toBe('s-open');
+    expect(disputeStatusClass('under_review')).toBe('s-under_review');
+    expect(disputeStatusClass('won')).toBe('s-won');
+    expect(disputeStatusClass('lost')).toBe('s-lost');
+    expect(disputeStatusClass('expired')).toBe('s-expired');
+    expect(disputeStatusClass('canceled')).toBe('s-canceled');
+  });
+
+  it('never renders a warning with the same class as an open chargeback', () => {
+    // A warning is an alert: nothing has been pulled back and a refund still prevents the debit.
+    expect(disputeStatusClass('warning')).not.toBe(disputeStatusClass('open'));
+  });
+
+  it('falls back for a status nobody modelled', () => {
+    expect(disputeStatusClass('NEEDS_RESPONSE')).toBe('s-unknown');
+  });
+});
+
+describe('disputeIsOpen', () => {
+  it('is true for the three statuses that still need an answer', () => {
+    // Mirrors the store's OPEN_DISPUTE_STATUSES — the exact set `?dueWithin=` returns.
+    expect(disputeIsOpen('warning')).toBe(true);
+    expect(disputeIsOpen('open')).toBe(true);
+    expect(disputeIsOpen('under_review')).toBe(true);
+  });
+
+  it('is false once the money is decided, expired included', () => {
+    // `expired` is the outcome this screen exists to prevent, not a state to keep chasing.
+    for (const status of ['won', 'lost', 'canceled', 'expired']) {
+      expect([status, disputeIsOpen(status)]).toEqual([status, false]);
+    }
+  });
+});
+
+describe('disputeIsChargeback', () => {
+  it('is false for a warning — the distinction the whole screen turns on', () => {
+    // No money has moved. Reading it as a chargeback writes off revenue that is still there, and
+    // stops someone refunding while a refund still prevents the debit.
+    expect(disputeIsChargeback('warning')).toBe(false);
+  });
+
+  it('is true for every status where the network actually took the money', () => {
+    for (const status of ['open', 'under_review', 'won', 'lost', 'expired']) {
+      expect([status, disputeIsChargeback(status)]).toEqual([status, true]);
+    }
+  });
+
+  it('does not let a withdrawn or unmodelled dispute claim money moved', () => {
+    expect(disputeIsChargeback('canceled')).toBe(false);
+    expect(disputeIsChargeback('RETRIEVAL_REQUEST')).toBe(false);
   });
 });

@@ -108,6 +108,34 @@ describe('paymentsClient request shapes', () => {
     ]);
   });
 
+  it('asks for the dispute LOG when no horizon is given', async () => {
+    const { calls } = stubFetch({ json: async () => ({ disputes: [] }) });
+    await paymentsClient.disputes({ status: 'lost', provider: 'stripe', limit: 50, offset: 0 });
+    expect(calls).toEqual(['/pd/api/disputes?status=lost&provider=stripe&limit=50&offset=0']);
+  });
+
+  it('asks for the WORK LIST with an explicit horizon in hours', async () => {
+    const { calls } = stubFetch({ json: async () => ({ disputes: [] }) });
+    await paymentsClient.disputes({ dueWithin: 72, limit: 50, offset: 0 });
+    expect(calls).toEqual(['/pd/api/disputes?dueWithin=72&limit=50&offset=0']);
+  });
+
+  it('drops a status sent alongside a horizon instead of passing one the server ignores', async () => {
+    // The work list is already scoped to the open statuses that carry a deadline. A filter that
+    // appears to apply and silently does not is worse than no filter at all.
+    const { calls } = stubFetch({ json: async () => ({ disputes: [] }) });
+    await paymentsClient.disputes({ dueWithin: 24, status: 'lost', provider: 'asaas' });
+    expect(calls).toEqual(['/pd/api/disputes?provider=asaas&dueWithin=24']);
+  });
+
+  it('sends a zero-hour horizon rather than dropping it as empty', async () => {
+    // `dueWithin=0` is "everything already past due", a real question. Dropping it would answer
+    // the log's question instead, and the caller could not tell.
+    const { calls } = stubFetch({ json: async () => ({ disputes: [] }) });
+    await paymentsClient.disputes({ dueWithin: 0 });
+    expect(calls).toEqual(['/pd/api/disputes?dueWithin=0']);
+  });
+
   it('requests health and providers with no query at all', async () => {
     const { calls } = stubFetch({ json: async () => ({}) });
     await paymentsClient.health();
@@ -192,5 +220,24 @@ describe('error handling', () => {
   it('throws status + statusText for any other failure', async () => {
     stubFetch({ ok: false, status: 500, statusText: 'Internal Server Error' });
     await expect(paymentsClient.overview()).rejects.toThrow('500 Internal Server Error');
+  });
+});
+
+/**
+ * The disputes screen is READ-ONLY, and this is the test that keeps it that way.
+ *
+ * Whether a chargeback is worth contesting turns on margin, customer value and fraud history —
+ * a business rule that lives in the app's code. The JSON API has no action route for disputes, so
+ * the client must not grow a method that implies one.
+ */
+describe('disputes have no actions', () => {
+  it('exposes exactly one dispute call, and it is a read', async () => {
+    const disputeCalls = Object.keys(paymentsClient).filter((key) => /dispute/i.test(key));
+    expect(disputeCalls).toEqual(['disputes']);
+
+    window.__PAYMENTS_API__ = '/pd/api';
+    const { inits } = stubFetch({ json: async () => ({ disputes: [] }) });
+    await paymentsClient.disputes({ dueWithin: 72 });
+    expect(inits[0]?.method).toBeUndefined();
   });
 });

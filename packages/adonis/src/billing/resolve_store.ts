@@ -11,7 +11,15 @@ import { LucidBillingStore } from './lucid_billing_store.js';
  */
 export async function resolveBillingStore(config: PaymentsConfig): Promise<BillingStore> {
   const factory = config.billing?.store;
-  if (!factory) return new LucidBillingStore();
+  if (!factory) {
+    // `autoCreateSchema` reaches the store here and nowhere else. A custom store is the
+    // app's own — the library has no schema to create for it, and passing the flag through
+    // would imply it does.
+    return new LucidBillingStore(
+      {},
+      { autoCreateSchema: config.billing?.autoCreateSchema !== false },
+    );
+  }
   return factory({ config: () => config });
 }
 

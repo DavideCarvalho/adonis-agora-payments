@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { paymentsClient } from '../client/payments-client';
+import { deadlineTone, formatCountdown } from './disputes';
 import { failingChecks, healthTarget, healthyLine } from './health';
 import { formatCount, formatWhen } from './money';
 import { Badge } from './ui/badge';
@@ -19,7 +20,7 @@ import { Badge } from './ui/badge';
 export function HealthPanel({
   onNavigate,
 }: {
-  onNavigate: (screen: 'payments' | 'webhooks', status: string) => void;
+  onNavigate: (screen: 'payments' | 'webhooks' | 'disputes', status?: string) => void;
 }) {
   const query = useQuery({
     queryKey: ['health'],
@@ -103,6 +104,36 @@ export function HealthPanel({
           );
         })}
       </ul>
+
+      {report.deadlines.length > 0 && (
+        <div className="border-t border-bad/25 px-4 py-3">
+          <p className="text-[10px] uppercase tracking-wider text-zinc-500">
+            Which windows are closing
+          </p>
+          {/* WHICH ones, not just how many: a count names no dispute to open at the gateway. The
+              server caps this list — `disputes_due.count` above is the real number. */}
+          <ul className="mt-2 flex flex-wrap gap-2">
+            {report.deadlines.map((dispute) => (
+              <li
+                key={dispute.id}
+                className="flex items-center gap-1.5 rounded border border-line bg-panel px-2 py-1"
+              >
+                <Badge variant="provider">{dispute.provider}</Badge>
+                <span className="mono text-[11px] text-zinc-400">{dispute.gatewayId}</span>
+                <span
+                  className={
+                    deadlineTone(dispute.evidenceDueBy) === 'past'
+                      ? 'mono text-[11px] text-rose-300'
+                      : 'mono text-[11px] text-amber-300'
+                  }
+                >
+                  {formatCountdown(dispute.evidenceDueBy)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {report.failures.length > 0 && (
         <div className="border-t border-bad/25 px-4 py-3">

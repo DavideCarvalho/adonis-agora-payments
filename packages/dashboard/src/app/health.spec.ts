@@ -12,6 +12,7 @@ function report(checks: HealthCheck[]): Health {
     checkedAt: '2026-08-27T12:00:00.000Z',
     checks,
     failures: [],
+    deadlines: [],
   };
 }
 
@@ -43,8 +44,20 @@ describe('healthTarget', () => {
     });
   });
 
+  it('sends closing dispute windows to the DISPUTES screen with no status seeded', () => {
+    // The disputes screen opens on the work list, which is already this check's exact rows. A
+    // seeded status would filter the log underneath it instead — the wrong list entirely.
+    expect(healthTarget('disputes_due')).toMatchObject({ screen: 'disputes' });
+    expect(healthTarget('disputes_due').status).toBeUndefined();
+  });
+
   it('labels every target so the button says what it will show', () => {
-    for (const key of ['stuck_webhooks', 'failed_webhooks', 'unconfirmed_payments'] as const) {
+    for (const key of [
+      'stuck_webhooks',
+      'failed_webhooks',
+      'unconfirmed_payments',
+      'disputes_due',
+    ] as const) {
       expect(healthTarget(key).label.length).toBeGreaterThan(0);
     }
   });

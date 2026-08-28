@@ -55,7 +55,7 @@ The first thing on the Overview, above the revenue tiles, is [`billingHealth`](/
 - **Events claimed and never finished.** Nothing is consuming the dispatcher; the worker is not running.
 - **Events the dispatcher gave up on.** Handlers threw and retries ran out, so those events never took effect.
 - **Charges created that never confirmed.** What a webhook endpoint that stopped being reachable looks like from the inside.
-- **Dispute windows closing.** An open chargeback whose evidence deadline is inside the next three days. The check names each one, so the panel links to the dispute rather than to a number.
+- **Dispute windows closing.** An open chargeback whose evidence deadline is inside the next three days. The panel names each one — gateway, dispute id, how long is left — and its button opens the Disputes screen on exactly those rows.
 
 Every one of these is a silent failure: the endpoints keep answering `200` while revenue quietly
 stops landing. A healthy install shows one green line. An unhealthy one leads with the count, says
@@ -84,25 +84,45 @@ Amounts are integer **minor units** everywhere — on the wire too — and the d
 
 ### Disputes
 
-A chargeback has a clock, and it is the only clock in this package that runs against you. The
-Disputes screen has two modes over the same table:
+A chargeback has a clock, and it is the only clock in this package that runs against you: every
+network gives a fixed window to respond, and missing it loses the money **by default rather than on
+the merits**. So the screen is two panels over the same table, in this order:
 
-- **the log** — every dispute newest first, filterable by status (`warning`, `open`,
-  `under_review`, then the resolutions) and by gateway;
-- **the work list** — only the OPEN disputes that carry a deadline, ordered by the window that
-  closes soonest.
+1. **Evidence windows closing** — the work list. Only the OPEN disputes that carry a deadline,
+   soonest first, with the deadline as the leading column and a countdown in hours beside it
+   (`in 5 hours`, not "today" — the difference is a morning). The horizon picker offers 24h, 3
+   days, 7 days and 30 days, and opens on **3 days**, the same horizon `payments:health` alerts
+   on. The count above the table is the server's `dueWithin.total`, unbounded by the page.
+2. **All disputes** — the log. Every dispute newest first, filterable by status (`warning`,
+   `open`, `under_review`, then the resolutions) and by gateway.
 
-A dispute whose deadline has already passed **stays in the work list**. It is still open and still
-unanswered, and dropping it the moment it expires would empty the screen at exactly the moment it
-became urgent. A dispute whose gateway sent no deadline at all shows the deadline as unknown rather
-than as distant — the two are not the same, and only one of them is safe to ignore.
+The work list is deliberately **not** filterable by gateway. It is the one list whose whole job is
+that nothing gets missed, and narrowing it to Stripe while an Asaas window shuts tonight is exactly
+the failure it exists to prevent. Filter the log underneath; it is the same table.
+
+Three things the rows are careful about:
+
+- **A window that already shut still appears**, marked `past due` with how long ago. It is still
+  open and still unanswered, and going quiet the moment it expires reads as resolved.
+- **A dispute with no deadline is not in the work list at all**, and in the log its deadline cell
+  says *the gateway sends no deadline* rather than showing a dash. `evidence_due_by` is null when
+  the gateway told us nothing — several send no date, and Woovi's three-day rule is policy rather
+  than a field — and "we were told nothing" is not "there is time".
+- **A dispute can name no money.** Stripe's early fraud warning carries no amount, so the cell says
+  so instead of rendering `R$ 0,00`, which would be a claim about an amount that does not exist.
+
+`warning` is not a chargeback and does not look like one: nothing has been pulled back, a refund
+now stops the debit from ever being filed, and the row says *no money moved* in words rather than
+leaving that to a hue.
 
 <Callout title="There is no Fight button, on purpose">
-Whether to submit evidence or simply refund is a business rule: it turns on the dispute fee, the
-evidence your app actually holds, and the chargeback ratio that puts a merchant into a card
-network's monitoring programme — which is why refunding a dispute you would have won is sometimes
-right. That decision belongs in your code, against your data, not behind a console button. This
-screen exists so nobody misses the window; submitting evidence is
+The Disputes screen is **read-only**: no "fight this", no "accept", no "refund". Not an unfinished
+screen — a decision. Whether to submit evidence or simply refund turns on your margin, the
+customer's value, the dispute fee, the evidence your app actually holds, and the chargeback ratio
+that puts a merchant into a card network's monitoring programme — which is why refunding a dispute
+you would have won is sometimes right. That decision belongs in your code, against your data, not
+behind a console button someone can press without any of it. The JSON API has no action route for
+disputes either. This screen exists so nobody misses the window; submitting evidence is
 [`submitDisputeEvidence`](/docs/payments/api-reference) on the driver.
 </Callout>
 

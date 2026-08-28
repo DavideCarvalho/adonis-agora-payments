@@ -3,14 +3,22 @@
 The billing console for [`@adonis-agora/payments`](https://www.npmjs.com/package/@adonis-agora/payments) — a
 React SPA served by a thin AdonisJS provider that ships inside the main package.
 
-Three read-only screens, all driven by the `BillingStore` the app already resolved. **No gateway calls
-are made from this console**, and it has no control actions:
+Five screens, all driven by the `BillingStore` the app already resolved. Only two things in the whole
+console leave your app — refunding a payment and retrying a failed webhook event:
 
-- **Overview** — `billingOverview()` for a selectable window: revenue, active subscriptions
-  (which includes `trialing`), and metered usage per meter.
-- **Payments** — a page of `billing_payments`, newest first, filterable by status.
+- **Overview** — `billingHealth()` first, then `billingOverview()` for a selectable window: revenue,
+  active subscriptions (which includes `trialing`), and metered usage per meter.
+- **Payments** — a page of `billing_payments`, newest first, filterable by status and gateway.
+  Refund from here.
+- **Subscriptions** — opens on `past_due`: whose payment is failing and whose access is about to
+  lapse. `paused` is rendered as its own state, never as a shade of `active`.
+- **Disputes** — the evidence windows closing soonest first, then the full chargeback log. **Read
+  only, deliberately**: whether a dispute is worth contesting or cheaper to refund is a business
+  rule that belongs in your app's code, so there is no button for it here (and no API route behind
+  one). The screen exists so nobody misses a window.
 - **Webhook events** — the idempotency ledger. A `failed` row means a handler threw and the
   dispatcher gave up, so the event's effect never happened; the handler's error is shown in full.
+  Retry from here.
 
 ## Install
 

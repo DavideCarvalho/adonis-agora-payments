@@ -507,17 +507,19 @@ describe('LucidBillingStore (integration)', () => {
     });
   });
 
-  describe('an install that has not run the add_billing_disputes migration', () => {
-    // `billing_disputes` arrives in a THIRD migration, so an app that upgrades the package
-    // before running it has a processor that wants to write disputes and no table to write
-    // them to. The dispute row is ADDITIONAL — the payment still moves, the diagnostics still
-    // publish — so the write is skipped and the reads answer empty, rather than failing every
-    // gateway delivery with `relation "billing_disputes" does not exist`.
+  describe('an install with no billing_disputes table, with autoCreateSchema off', () => {
+    // A processor that wants to write disputes and no table to write them to. The dispute row
+    // is ADDITIONAL — the payment still moves, the diagnostics still publish — so the write is
+    // skipped and the reads answer empty, rather than failing every gateway delivery with
+    // `relation "billing_disputes" does not exist`.
+    //
+    // Reachable only with `autoCreateSchema: false`: on the default the store would create the
+    // table on first use and there would be nothing missing. Which is the point of the default.
     let legacy: LucidBillingStore;
 
     beforeAll(async () => {
       await database.db.rawQuery('ALTER TABLE billing_disputes RENAME TO billing_disputes_kept');
-      legacy = new LucidBillingStore();
+      legacy = new LucidBillingStore({}, { autoCreateSchema: false });
     });
 
     afterAll(async () => {
@@ -561,18 +563,22 @@ describe('LucidBillingStore (integration)', () => {
     });
   });
 
-  describe('an install that has not run the add_billing_external_reference migration', () => {
-    // Both columns are nullable and both writes are guarded, so an app that upgrades the package
-    // before running the migration keeps taking webhooks: it records a payment WITHOUT a stored
-    // reference, and a ledger row the dashboard's retry declines to replay. This block is the
-    // only place that claim is actually executed — the columns are dropped underneath a fresh
-    // store (a new one, so it re-asks the schema) and put back afterwards.
+  describe('an install whose schema predates two columns, with autoCreateSchema off', () => {
+    // Both columns are nullable and both writes are guarded, so an app on an older schema keeps
+    // taking webhooks: it records a payment WITHOUT a stored reference, and a ledger row the
+    // dashboard's retry declines to replay. This block is the only place that claim is actually
+    // executed — the columns are dropped underneath a fresh store and put back afterwards.
+    //
+    // **`autoCreateSchema: false` is the whole premise.** With it on — the default — the store
+    // calls `createBillingTables` on first use and the missing columns are simply added back,
+    // so there is no degradation left to test. The graceful path still matters, and only here:
+    // for the app that took the schema into its own hands and has not run its migration yet.
     let legacy: LucidBillingStore;
 
     beforeAll(async () => {
       await database.db.rawQuery('ALTER TABLE billing_payments DROP COLUMN external_reference');
       await database.db.rawQuery('ALTER TABLE billing_webhook_events DROP COLUMN normalized');
-      legacy = new LucidBillingStore();
+      legacy = new LucidBillingStore({}, { autoCreateSchema: false });
     });
 
     afterAll(async () => {

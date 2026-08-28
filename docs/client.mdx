@@ -97,9 +97,8 @@ echoes it back on the webhook and the processor stores it on
 If nothing carries that reference, it falls back to reading it as the **gateway payment id**
 (`payment.id` from `charge()`, stored as `gateway_id`). Two callers need that fallback: the Pix
 gateways where the two are literally the same value (Woovi's `correlationID`, Efí's `txid`), and an
-install that has not yet run the `add_billing_external_reference` migration, whose
-`external_reference` is `null` on every row — the endpoint keeps working there exactly as it did
-before, by gateway id.
+install whose rows predate the `external_reference` column, where it is `null` — the endpoint keeps
+working there exactly as it did before, by gateway id.
 
 Polling with something that is neither — a checkout session id, a hashed token — is what
 `resolveReference` is for. It **replaces** both lookups; see below.

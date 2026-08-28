@@ -110,6 +110,12 @@ export type {
 export { WebhookProcessor } from './billing/webhook_processor.js';
 export type { WebhookHandler } from './billing/webhook_processor.js';
 export { LucidBillingStore, lucidBillingStore } from './billing/lucid_billing_store.js';
+export { createBillingTables, dropBillingTables, BILLING_TABLES } from './billing/schema.js';
+export type {
+  LucidDatabase,
+  LucidQueryClient,
+  LucidQueryBindings,
+} from './billing/schema.js';
 export { resolveBillingStore } from './billing/resolve_store.js';
 export type { BillingModels } from './billing/lucid_billing_store.js';
 export type {

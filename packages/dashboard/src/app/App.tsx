@@ -1,24 +1,26 @@
 import { useState } from 'react';
 import { uiBase } from '../client/payments-client';
+import { Disputes } from './Disputes';
 import { Overview } from './Overview';
 import { PaymentsList } from './PaymentsList';
 import { Subscriptions } from './Subscriptions';
 import { WebhookEvents } from './WebhookEvents';
 import { Segmented } from './ui/segmented';
 
-type Screen = 'overview' | 'payments' | 'subscriptions' | 'webhooks';
+type Screen = 'overview' | 'payments' | 'subscriptions' | 'disputes' | 'webhooks';
 
 const SCREENS: ReadonlyArray<{ value: Screen; label: string }> = [
   { value: 'overview', label: 'Overview' },
   { value: 'payments', label: 'Payments' },
   { value: 'subscriptions', label: 'Subscriptions' },
+  { value: 'disputes', label: 'Disputes' },
   { value: 'webhooks', label: 'Webhook events' },
 ];
 
 /**
- * The console shell: a header and one of four screens.
+ * The console shell: a header and one of five screens.
  *
- * Deliberately no router. The whole console is four panels, and a router would add a dependency
+ * Deliberately no router. The whole console is five panels, and a router would add a dependency
  * plus a base-path problem (the SPA can be mounted at ANY prefix — see `spa.ts`'s
  * `BASE_PLACEHOLDER`) to buy back-button support for a switch between four tabs.
  *
@@ -40,8 +42,13 @@ export function App() {
     setVisit((n) => n + 1);
   };
 
-  /** Following a health check: seed the filter that isolates exactly the rows it counted. */
-  const focusRows = (next: 'payments' | 'webhooks', status: string) => {
+  /**
+   * Following a health check: seed the filter that isolates exactly the rows it counted.
+   *
+   * `status` is optional because one check has no filter to seed: the disputes screen already
+   * opens on the closing windows the check counted, so there is nothing to narrow.
+   */
+  const focusRows = (next: 'payments' | 'webhooks' | 'disputes', status?: string) => {
     setScreen(next);
     setFocus(status);
     setVisit((n) => n + 1);
@@ -82,6 +89,7 @@ export function App() {
         {screen === 'subscriptions' && (
           <Subscriptions key={`subscriptions-${visit}`} initialStatus={focus} />
         )}
+        {screen === 'disputes' && <Disputes key={`disputes-${visit}`} initialStatus={focus} />}
         {screen === 'webhooks' && <WebhookEvents key={`webhooks-${visit}`} initialStatus={focus} />}
       </div>
     </div>

@@ -61,9 +61,14 @@ export class BillingDispute extends BaseModel {
   @column()
   declare reason: string | null;
 
-  /** Integer minor units, like every other amount in this package. Nullable: a pre-dispute
-   *  alert (Stripe's early fraud warning) names a charge and a fraud type, and no money. */
-  @column()
+  /**
+   * Integer minor units, like every other amount in this package. Nullable: a pre-dispute
+   * alert (Stripe's early fraud warning) names a charge and a fraud type, and no money.
+   *
+   * `consume` for the same reason as `BillingPayment.amount` — BIGINT arrives from Postgres
+   * as a string, and a type that says `number` while holding `'1990'` adds by concatenation.
+   */
+  @column({ consume: (value: unknown) => (value === null ? null : Number(value)) })
   declare amount: number | null;
 
   @column()

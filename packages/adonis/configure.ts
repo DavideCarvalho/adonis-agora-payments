@@ -11,11 +11,10 @@ import { stubsRoot } from './stubs/main.js';
  *    but the barrel removes that scan from boot);
  * 3. publishes `config/payments.ts`, `config/payments_dashboard.ts` and
  *    `config/payments_client.ts` (the browser status endpoint — off unless enabled);
- * 4. publishes the Lucid migrations for the billing tables — the `create_billing_tables` one,
- *    the `add_billing_external_reference` one that carries the two columns added after it, and
- *    the `add_billing_disputes` one that carries the `billing_disputes` table (run
- *    `node ace migration:run`; delete all three files if you only use payments without the
- *    billing layer);
+ * 4. publishes ONE Lucid migration for the billing tables, which most apps can delete: the
+ *    library creates its own schema on first use (`billing.autoCreateSchema`, on by
+ *    default), so the file is there for apps that would rather run the DDL explicitly. Both
+ *    paths call the same `createBillingTables`;
  * 5. registers the env validations for the payment providers.
  */
 export async function configure(command: Configure) {
@@ -35,19 +34,9 @@ export async function configure(command: Configure) {
   await codemods.makeUsingStub(stubs, 'config/payments_dashboard.stub', {});
   await codemods.makeUsingStub(stubs, 'config/payments_client.stub', {});
   await codemods.makeUsingStub(stubs, 'database/migrations/create_billing_tables.stub', {});
-  // Published alongside the first, not instead of it: `create_billing_tables` has already run
-  // in every existing install, so the two columns it now declares reach those installs only as
-  // a separate migration. A fresh install gets both files and the second finds nothing to do —
-  // every step in it is guarded by `hasColumn`.
-  await codemods.makeUsingStub(
-    stubs,
-    'database/migrations/add_billing_external_reference.stub',
-    {},
-  );
   // The third, same reasoning again: `billing_disputes` is a whole TABLE added after
   // `create_billing_tables` shipped, so it reaches existing installs only as its own file.
   // Guarded by `hasTable`, so on a fresh install (which gets all three) it does nothing.
-  await codemods.makeUsingStub(stubs, 'database/migrations/add_billing_disputes.stub', {});
 
   await codemods.defineEnvValidations({
     leadingComment: 'PAYMENTS_',

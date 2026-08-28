@@ -22,6 +22,7 @@ import {
   BillingUsageEvent as DefaultUsageEvent,
   BillingWebhookEvent as DefaultWebhookEvent,
 } from './mixins/index.js';
+import { type LucidDatabase, createBillingTables } from './schema.js';
 
 /**
  * Models the billing layer persists through. Apps may override any of them with their own
@@ -156,6 +157,22 @@ export class LucidBillingStore
    */
   #columnCache: Map<string, Promise<boolean>> = new Map();
 
+  /**
+   * Whether to create the billing tables on first use. On by default — the ecosystem
+   * convention is that a lib owns its own schema, the same way `@adonis-agora/durable` and
+   * `@adonis-agora/authz` do. An app that wants explicit control sets
+   * `billing.autoCreateSchema: false` and calls {@link createBillingTables} from a migration
+   * instead; both paths run the SAME DDL, so they cannot drift.
+   */
+  #autoCreateSchema: boolean;
+
+  /**
+   * The one-shot schema promise. Cached so the DDL runs once per store, not once per query,
+   * and so concurrent first calls await the same round trip rather than racing six
+   * `CREATE TABLE IF NOT EXISTS` statements against each other.
+   */
+  #schemaReady: Promise<void> | undefined;
+
   #customerModel: typeof DefaultCustomer;
   #subscriptionModel: typeof DefaultSubscription;
   #paymentModel: typeof DefaultPayment;
@@ -163,7 +180,8 @@ export class LucidBillingStore
   #usageEventModel: typeof DefaultUsageEvent;
   #disputeModel: typeof DefaultDispute;
 
-  constructor(models: BillingModels = {}) {
+  constructor(models: BillingModels = {}, options: { autoCreateSchema?: boolean } = {}) {
+    this.#autoCreateSchema = options.autoCreateSchema !== false;
     this.#customerModel = (models.customerModel ?? DefaultCustomer) as typeof DefaultCustomer;
     this.#subscriptionModel = (models.subscriptionModel ??
       DefaultSubscription) as typeof DefaultSubscription;
@@ -173,6 +191,34 @@ export class LucidBillingStore
     this.#usageEventModel = (models.usageEventModel ??
       DefaultUsageEvent) as typeof DefaultUsageEvent;
     this.#disputeModel = (models.disputeModel ?? DefaultDispute) as typeof DefaultDispute;
+  }
+
+  /**
+   * Create the billing tables if they are not there. Idempotent, and safe to call from an
+   * app that already ran the published migration — every statement is `IF NOT EXISTS`.
+   *
+   * Public because an app that turns `autoCreateSchema` off may still want it in a seeder or
+   * a test bootstrap without reaching for the standalone function.
+   */
+  async ensureSchema(): Promise<void> {
+    // NOT gated by `#ready()`: that is what calls this, and awaiting it here would have the
+    // promise await itself. A deadlock, not a crash — every query would hang forever.
+    await createBillingTables(this.#paymentModel.query().client as unknown as LucidDatabase);
+  }
+
+  /**
+   * Awaited at the top of every public method.
+   *
+   * Every one, not just the writes: a read against a table that does not exist is the same
+   * error, and it is the first thing an app hits — a dashboard opened before the first
+   * charge. `test/lucid_store_schema.spec.ts` enumerates this class's public methods and
+   * fails when one of them skips this, because "I added a method and forgot" is exactly how
+   * a lazily-created schema becomes a schema that exists most of the time.
+   */
+  async #ready(): Promise<void> {
+    if (!this.#autoCreateSchema) return;
+    if (!this.#schemaReady) this.#schemaReady = this.ensureSchema();
+    return this.#schemaReady;
   }
 
   async #hasColumn(
@@ -231,6 +277,7 @@ export class LucidBillingStore
     taxId?: string | null;
     metadata?: Record<string, unknown>;
   }): Promise<CustomerInstance> {
+    await this.#ready();
     const existing = await this.findCustomerByGatewayId(customer.gatewayId);
     const row = (existing ?? new this.#customerModel()) as CustomerInstance;
     row.gatewayId = customer.gatewayId;
@@ -249,6 +296,7 @@ export class LucidBillingStore
   }
 
   async findCustomerByGatewayId(gatewayId: string): Promise<CustomerInstance | null> {
+    await this.#ready();
     return (await this.#customerModel.findBy('gateway_id', gatewayId)) as CustomerInstance | null;
   }
 
@@ -257,6 +305,7 @@ export class LucidBillingStore
     ownerId: string,
     provider: string,
   ): Promise<CustomerInstance | null> {
+    await this.#ready();
     return (await this.#customerModel
       .query()
       .where('owner_type', ownerType)
@@ -268,6 +317,7 @@ export class LucidBillingStore
   async listCustomers(
     query: BillingListQuery & { provider?: string },
   ): Promise<CustomerListItem[]> {
+    await this.#ready();
     const builder = this.#customerModel.query().orderBy('created_at', 'desc');
     if (query.provider !== undefined) builder.where('provider', query.provider);
     const rows = (await builder
@@ -296,6 +346,7 @@ export class LucidBillingStore
     endsAt?: Date | null;
     payload?: Record<string, unknown>;
   }): Promise<SubscriptionInstance> {
+    await this.#ready();
     const existing = await this.findSubscriptionByGatewayId(sub.gatewayId);
     const row = (existing ?? new this.#subscriptionModel()) as SubscriptionInstance;
     row.gatewayId = sub.gatewayId;
@@ -311,6 +362,7 @@ export class LucidBillingStore
   }
 
   async listSubscriptions(query: BillingListQuery): Promise<SubscriptionListItem[]> {
+    await this.#ready();
     const builder = this.#subscriptionModel.query().orderBy('created_at', 'desc');
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.provider !== undefined) builder.where('provider', query.provider);
@@ -331,6 +383,7 @@ export class LucidBillingStore
   }
 
   async countSubscriptions(query: BillingCountQuery): Promise<number> {
+    await this.#ready();
     const builder = this.#subscriptionModel.query().count('* as total').pojo();
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
@@ -339,6 +392,7 @@ export class LucidBillingStore
   }
 
   async findSubscriptionByGatewayId(gatewayId: string): Promise<SubscriptionInstance | null> {
+    await this.#ready();
     const row = await this.#subscriptionModel.findBy('gateway_id', gatewayId);
     return row as SubscriptionInstance | null;
   }
@@ -355,6 +409,7 @@ export class LucidBillingStore
     paidAt?: Date | null;
     payload?: Record<string, unknown>;
   }): Promise<PaymentInstance> {
+    await this.#ready();
     const existing = await this.findPaymentByGatewayId(payment.gatewayId);
     const row = (existing ?? new this.#paymentModel()) as PaymentInstance;
     row.gatewayId = payment.gatewayId;
@@ -381,11 +436,13 @@ export class LucidBillingStore
   }
 
   async findPaymentByGatewayId(gatewayId: string): Promise<PaymentInstance | null> {
+    await this.#ready();
     const row = await this.#paymentModel.findBy('gateway_id', gatewayId);
     return row as PaymentInstance | null;
   }
 
   async findPaymentByExternalReference(reference: string): Promise<PaymentInstance | null> {
+    await this.#ready();
     // An install that has not run `add_billing_external_reference` has no column to match on,
     // and every row it holds would answer `null` anyway — so say `null` instead of raising
     // `column "external_reference" does not exist` at a browser that is merely polling.
@@ -401,6 +458,7 @@ export class LucidBillingStore
   }
 
   async listPayments(query: BillingListQuery): Promise<PaymentListItem[]> {
+    await this.#ready();
     const builder = this.#paymentModel.query().orderBy('created_at', 'desc');
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.provider !== undefined) builder.where('provider', query.provider);
@@ -423,6 +481,7 @@ export class LucidBillingStore
   }
 
   async countPayments(query: BillingCountQuery): Promise<number> {
+    await this.#ready();
     const builder = this.#paymentModel.query().count('* as total').pojo();
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
@@ -444,6 +503,7 @@ export class LucidBillingStore
     closedAt?: Date | null;
     payload?: Record<string, unknown>;
   }): Promise<DisputeInstance | null> {
+    await this.#ready();
     if (!(await this.#hasDisputesTable())) return null;
     const existing = await this.findDisputeByGatewayId(dispute.gatewayId);
     const row = (existing ?? new this.#disputeModel()) as DisputeInstance;
@@ -487,11 +547,13 @@ export class LucidBillingStore
   }
 
   async findDisputeByGatewayId(gatewayId: string): Promise<DisputeInstance | null> {
+    await this.#ready();
     if (!(await this.#hasDisputesTable())) return null;
     return (await this.#disputeModel.findBy('gateway_id', gatewayId)) as DisputeInstance | null;
   }
 
   async findOpenDisputeByPayment(paymentGatewayId: string): Promise<DisputeInstance | null> {
+    await this.#ready();
     if (!(await this.#hasDisputesTable())) return null;
     const row = await this.#disputeModel
       .query()
@@ -503,6 +565,7 @@ export class LucidBillingStore
   }
 
   async listDisputes(query: BillingListQuery): Promise<DisputeListItem[]> {
+    await this.#ready();
     if (!(await this.#hasDisputesTable())) return [];
     const builder = this.#disputeModel.query().orderBy('created_at', 'desc');
     if (query.status !== undefined) builder.where('status', query.status);
@@ -514,6 +577,7 @@ export class LucidBillingStore
   }
 
   async countDisputes(query: BillingCountQuery): Promise<number> {
+    await this.#ready();
     if (!(await this.#hasDisputesTable())) return 0;
     const builder = this.#disputeModel.query().count('* as total').pojo();
     if (query.status !== undefined) builder.where('status', query.status);
@@ -523,6 +587,7 @@ export class LucidBillingStore
   }
 
   async listDisputesDueWithin(query: DisputeDeadlineQuery): Promise<DisputeListItem[]> {
+    await this.#ready();
     if (!(await this.#hasDisputesTable())) return [];
     const builder = this.#disputeModel
       .query()
@@ -545,6 +610,7 @@ export class LucidBillingStore
   async countDisputesDueWithin(
     query: Omit<DisputeDeadlineQuery, 'limit' | 'offset'>,
   ): Promise<number> {
+    await this.#ready();
     if (!(await this.#hasDisputesTable())) return 0;
     const builder = this.#disputeModel
       .query()
@@ -564,6 +630,7 @@ export class LucidBillingStore
     payload: Record<string, unknown>;
     normalized?: unknown;
   }): Promise<WebhookEventInstance | null> {
+    await this.#ready();
     const existing = await this.#webhookEventModel.findBy('gateway_event_id', event.gatewayEventId);
     if (existing) {
       // A previous attempt failed: claim it again so the retry re-runs. Anything
@@ -592,6 +659,7 @@ export class LucidBillingStore
   }
 
   async markWebhookProcessed(id: string): Promise<void> {
+    await this.#ready();
     const row = await this.#webhookEventModel.find(id);
     if (row) {
       row.status = 'processed';
@@ -600,6 +668,7 @@ export class LucidBillingStore
   }
 
   async markWebhookFailed(id: string, error: string): Promise<void> {
+    await this.#ready();
     const row = await this.#webhookEventModel.find(id);
     if (row) {
       row.status = 'failed';
@@ -609,6 +678,7 @@ export class LucidBillingStore
   }
 
   async listWebhookEvents(query: BillingListQuery): Promise<WebhookEventListItem[]> {
+    await this.#ready();
     const builder = this.#webhookEventModel.query().orderBy('created_at', 'desc');
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.provider !== undefined) builder.where('provider', query.provider);
@@ -630,6 +700,7 @@ export class LucidBillingStore
   async findWebhookEventByGatewayEventId(
     gatewayEventId: string,
   ): Promise<WebhookEventListItem | null> {
+    await this.#ready();
     const row = (await this.#webhookEventModel.findBy(
       'gateway_event_id',
       gatewayEventId,
@@ -648,6 +719,7 @@ export class LucidBillingStore
   }
 
   async countWebhookEvents(query: BillingCountQuery): Promise<number> {
+    await this.#ready();
     const builder = this.#webhookEventModel.query().count('* as total').pojo();
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
@@ -656,6 +728,7 @@ export class LucidBillingStore
   }
 
   async webhookEventBreakdown(query: BillingCountQuery): Promise<WebhookEventBreakdownLine[]> {
+    await this.#ready();
     const builder = this.#webhookEventModel
       .query()
       .select('provider', 'type')
@@ -688,6 +761,7 @@ export class LucidBillingStore
     metadata?: Record<string, unknown>;
     recordedAt?: Date;
   }): Promise<UsageEventInstance> {
+    await this.#ready();
     const row = new this.#usageEventModel() as UsageEventInstance;
     row.subscriptionId = event.subscriptionId ?? null;
     row.customerId = event.customerId ?? null;
@@ -706,6 +780,7 @@ export class LucidBillingStore
     from?: Date;
     to?: Date;
   }): Promise<Array<{ meter: string; quantity: number }>> {
+    await this.#ready();
     const builder = this.#usageEventModel
       .query()
       .select('meter')
@@ -725,6 +800,7 @@ export class LucidBillingStore
   }
 
   async revenue(query: { from?: Date; to?: Date }): Promise<number> {
+    await this.#ready();
     const builder = this.#paymentModel
       .query()
       .where('status', 'paid')
@@ -736,6 +812,7 @@ export class LucidBillingStore
   }
 
   async countActiveSubscriptions(): Promise<number> {
+    await this.#ready();
     return toCount(
       await this.#subscriptionModel
         .query()

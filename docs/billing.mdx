@@ -16,11 +16,15 @@ how many webhooks arrive, in which order, or how many times a gateway redelivers
 
 ## The billing tables
 
-The configure command publishes **three** migrations — `create_billing_tables` and, for installs
-that already ran it, `add_billing_external_reference` (the two columns added afterwards) and
-`add_billing_disputes` (the table added afterwards). Run all of them (`node ace migration:run`);
-on a fresh install the later two find their work already done and say so by doing nothing. Together
-they create five tables:
+**You do not create these tables.** The library does, on first use — the ecosystem convention that
+`@adonis-agora/durable` and `@adonis-agora/authz` follow, and the reason there is no migration to
+publish, run or remember on upgrade. `createBillingTables` is idempotent (`CREATE TABLE IF NOT
+EXISTS`), runs once per process, and carries columns added in later versions to a database that
+already has the tables.
+
+To own the DDL yourself, set `billing: { autoCreateSchema: false }` and run the migration
+`configure` publishes for that case — it calls the same function, so the two paths cannot drift.
+Six tables:
 
 | Table | Purpose |
 | --- | --- |
@@ -77,9 +81,8 @@ await store.usageReport({ subscriptionId, from, to })
 polls for `order-1042`, not for `pi_3Qx...`. It reads the `external_reference` column — the
 `externalReference` you set on the charge, as the gateway echoed it back — through
 `billing_payments_external_reference_idx`, and `listPayments` carries the same value on every item.
-It answers `null` for a payment whose gateway sent no reference, and for **every** row an install
-wrote before it ran `add_billing_external_reference`: nothing backfills a reference that was never
-stored.
+It answers `null` for a payment whose gateway sent no reference, and for **every** row written
+before the column existed: nothing backfills a reference that was never stored.
 
 Two aggregates sit on top of those: `billingOverview(store, { from, to })` for the KPI row a
 dashboard renders, and [`billingHealth(store)`](/docs/payments/production#health-checks) for the

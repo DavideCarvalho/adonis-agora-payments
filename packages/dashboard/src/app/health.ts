@@ -9,9 +9,13 @@ import type { Health, HealthCheck } from '../client/payments-client';
  * sends someone to a screen full of healthy rows and teaches them to distrust the number.
  */
 export interface HealthTarget {
-  screen: 'payments' | 'webhooks';
-  /** The status filter that isolates exactly the rows the check counted. */
-  status: string;
+  screen: 'payments' | 'webhooks' | 'disputes';
+  /**
+   * The status filter that isolates exactly the rows the check counted, or `undefined` when the
+   * target screen already opens on them — the disputes screen leads with the closing windows, so
+   * seeding its LOG with a status would filter the wrong list.
+   */
+  status?: string;
   /** The button's label. */
   label: string;
 }
@@ -25,6 +29,10 @@ export function healthTarget(key: HealthCheck['key']): HealthTarget {
       return { screen: 'webhooks', status: 'failed', label: 'Show the failed events' };
     case 'unconfirmed_payments':
       return { screen: 'payments', status: 'pending', label: 'Show the pending charges' };
+    case 'disputes_due':
+      // No status: the disputes screen opens on the work list, which IS this check's rows —
+      // the same open-with-a-deadline set, on the same 72 h horizon the cron alerts on.
+      return { screen: 'disputes', label: 'Show the closing windows' };
   }
 }
 

@@ -64,6 +64,7 @@ export const BILLING_TABLES = [
   'billing_webhook_events',
   'billing_disputes',
   'billing_usage_events',
+  'billing_audit_events',
 ] as const;
 
 /** Best-effort dialect name; `undefined` when it cannot be read. */
@@ -270,6 +271,27 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   // The deadline read — open disputes ordered by the window closing soonest — scans exactly
   // these two columns, in this order.
 
+  // Added in 0.4.0. A NEW table, not a new column, which is why it needs nothing from the ALTER
+  // block below: `CREATE TABLE IF NOT EXISTS` carries a table to an existing install exactly as
+  // well as to a fresh one. Only columns added to a table that already shipped have the upgrade
+  // problem, and only they belong down there.
+  await run(
+    `CREATE TABLE IF NOT EXISTS billing_audit_events (
+      id VARCHAR(36) PRIMARY KEY,
+      action VARCHAR(255),
+      actor VARCHAR(255),
+      provider VARCHAR(255),
+      subject_type VARCHAR(255),
+      subject_id VARCHAR(255),
+      amount BIGINT,
+      currency VARCHAR(3),
+      message TEXT,
+      metadata ${t.json},
+      created_at ${t.timestamp} NOT NULL,
+      updated_at ${t.timestamp} NOT NULL
+    )`,
+  );
+
   await run(
     `CREATE TABLE IF NOT EXISTS billing_usage_events (
       id VARCHAR(36) PRIMARY KEY,
@@ -366,6 +388,22 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
     'billing_disputes',
     'status, evidence_due_by',
   );
+  // The two ways the audit trail is read: "what did the endpoint reject in the last day"
+  // (the health check) and "what has anyone done to THIS payment" (the timeline).
+  await createIndex(
+    db,
+    dialect,
+    'billing_audit_events_action_idx',
+    'billing_audit_events',
+    'action, created_at',
+  );
+  await createIndex(
+    db,
+    dialect,
+    'billing_audit_events_subject_idx',
+    'billing_audit_events',
+    'subject_type, subject_id',
+  );
   await createIndex(
     db,
     dialect,
@@ -383,13 +421,75 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
 }
 
 /**
+ * Callbacks that forget a store's memoized "the schema exists" answer.
+ *
+ * A `LucidBillingStore` creates the tables once and caches the promise, so after
+ * {@link dropBillingTables} the store still believes the tables are there and every
+ * subsequent query fails with `relation ... does not exist`. The store registers here so the
+ * drop can tell it otherwise — a Set of callbacks rather than an import, because the store
+ * already imports this module and the reverse would be a cycle.
+ */
+const schemaCacheResets = new Set<() => void>();
+
+/**
+ * Register a "forget the cached schema" callback. Returns the unregister function.
+ * Internal — {@link LucidBillingStore} is the only caller.
+ */
+export function registerBillingSchemaCache(reset: () => void): () => void {
+  schemaCacheResets.add(reset);
+  return () => {
+    schemaCacheResets.delete(reset);
+  };
+}
+
+/**
  * Drop every billing table, newest-dependency-first.
  *
  * Only for a migration's `down()` and for tests. There is no auto-drop and there will not be
  * one: a library that can delete a payments table on a config typo is a library that will.
+ *
+ * Every live store is told to forget its cached schema afterwards, so a store built before
+ * the drop re-creates the tables on its next query instead of querying tables that are gone.
  */
 export async function dropBillingTables(db: LucidDatabase): Promise<void> {
   for (const table of [...BILLING_TABLES].reverse()) {
     await db.rawQuery(`DROP TABLE IF EXISTS ${table}`);
   }
+  for (const reset of schemaCacheResets) reset();
+}
+
+/**
+ * Empty every billing table, keeping the schema.
+ *
+ * What a test suite actually needs between groups, and the reason it is here rather than in
+ * every app: dropping the tables invalidates the store (see above), while leaving the ROWS
+ * in place means one test's webhook ledger deduplicates the next test's event — the
+ * library's own idempotency working perfectly, against the suite. The app that found this
+ * hand-wrote it with a `to_regclass` guard; this is that, dialect-agnostically.
+ *
+ * Order is the reverse of creation, so a foreign key never blocks a delete. `DELETE FROM`
+ * rather than `TRUNCATE`: it is the one statement every dialect here spells the same way,
+ * and these tables are test-sized.
+ */
+export async function truncateBillingTables(db: LucidDatabase): Promise<void> {
+  for (const table of [...BILLING_TABLES].reverse()) {
+    // A table that was never created is not an error to a suite that only wants it empty —
+    // and asking `information_schema` per table per group costs more than the delete does.
+    try {
+      await db.rawQuery(`DELETE FROM ${table}`);
+    } catch (error) {
+      if (!isMissingTableError(error)) throw error;
+    }
+  }
+}
+
+/** Whether a driver error is "that table does not exist" rather than a real failure. */
+function isMissingTableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    /does not exist|no such table|doesn't exist|Unknown table|Invalid object name/i.test(message) ||
+    // Postgres `undefined_table`, MySQL `ER_NO_SUCH_TABLE`.
+    (error as { code?: string })?.code === '42P01' ||
+    (error as { errno?: number })?.errno === 1146
+  );
 }

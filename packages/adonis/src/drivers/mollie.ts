@@ -12,6 +12,7 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { headerValue, httpRequest, isNotFound } from '../http.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
@@ -575,6 +576,24 @@ export class MollieDriver implements PaymentsDriver {
    * Those still get fetched: a signature proves who sent the event, not what the payment
    * is worth, and the built-in billing sync needs the amount.
    */
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * Next-gen webhooks are signed, so a configured secret is `'configured'`. Without one the
+   * driver is on the CLASSIC flow, and that flow is `'unsupported'` rather than
+   * `'unconfigured'` — the distinction matters, because `'unconfigured'` refuses to boot.
+   *
+   * There is no credential to configure on the classic flow and nothing insecure about not
+   * having one: the request carries only `id=tr_xxx`, and the driver authenticates by
+   * reading that payment back with your API key (see `parseWebhook` below). Reporting it as
+   * a missing credential would make the supported, safe configuration fail at boot and push
+   * apps into `allowUnverifiedWebhooks`, which would then also silence a genuinely missing
+   * next-gen secret.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#webhookSecret !== undefined ? 'configured' : 'unsupported';
+  }
+
   async parseWebhook(
     rawBody: string,
     headers: Record<string, string | string[] | undefined>,

@@ -8,6 +8,7 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { headerValue, httpRequest, isNotFound } from '../http.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
@@ -326,6 +327,16 @@ export class PagBankDriver implements PaymentsDriver {
   }
 
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * `verifyWebhooks: false` is a deliberate opt-out, and it is reported as what it is so the
+   * boot check can refuse it unless the app also opted out there.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#verifyWebhooks ? 'configured' : 'unconfigured';
+  }
 
   parseWebhook(
     rawBody: string,

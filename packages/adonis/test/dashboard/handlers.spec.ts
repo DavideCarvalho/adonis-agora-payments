@@ -324,7 +324,7 @@ describe('health', () => {
       failures: unknown[];
     };
     expect(body.healthy).toBe(true);
-    expect(body.checks).toHaveLength(4);
+    expect(body.checks).toHaveLength(6);
     expect(body.checks.map((c) => c.key)).toContain('disputes_due');
     expect(body.checks.every((c) => c.count === 0 && c.healthy)).toBe(true);
     expect(body.failures).toEqual([]);

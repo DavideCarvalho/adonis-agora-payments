@@ -10,3 +10,9 @@ export type {
   InMemoryDisputeRow,
 } from './in_memory_billing_store.js';
 export { MutableClock } from './mutable_clock.js';
+export {
+  fakePayments,
+  swapPayments,
+  swapBillingStore,
+  flushWebhooks,
+} from './fake_payments.js';

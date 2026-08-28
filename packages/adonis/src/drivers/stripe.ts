@@ -13,6 +13,7 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
 import type { EmitInvoiceContext } from '../invoice/emit_invoice.js';
@@ -502,6 +503,15 @@ export class StripeDriver implements PaymentsDriver {
   }
 
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * `parseWebhook` already refuses without the secret — declaring it moves the refusal to boot.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#webhookSecret !== undefined ? 'configured' : 'unconfigured';
+  }
 
   parseWebhook(
     rawBody: string,

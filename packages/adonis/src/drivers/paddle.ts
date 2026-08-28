@@ -8,6 +8,7 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { headerValue, httpRequest, isNotFound } from '../http.js';
 import type { EmitInvoiceContext } from '../invoice/emit_invoice.js';
@@ -519,6 +520,15 @@ export class PaddleDriver implements PaymentsDriver {
   }
 
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * `parseWebhook` already refuses without the secret — declaring it moves the refusal to boot.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#webhookSecret !== undefined ? 'configured' : 'unconfigured';
+  }
 
   parseWebhook(
     rawBody: string,

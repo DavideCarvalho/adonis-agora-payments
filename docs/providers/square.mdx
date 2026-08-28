@@ -32,6 +32,18 @@ that stub the HTTP layer; nothing in it has touched a real Square account. Verif
 in the Sandbox (`sandbox: true`, `connect.squareupsandbox.com`) before taking real money.
 </Callout>
 
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — unless
+**both** `webhookSignatureKey` and `notificationUrl` are configured (env fallbacks
+`SQUARE_WEBHOOK_SIGNATURE_KEY` / `SQUARE_WEBHOOK_NOTIFICATION_URL`). Square's signature is computed
+over the notification URL as well as the body, so one without the other cannot verify anything.
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/square` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
 ## `locationId` is required, and that is deliberate
 
 Payments, payment links, subscriptions and the invoice search are all scoped to a seller
@@ -137,8 +149,8 @@ public address. It cannot be derived from the request. So:
 - Setting the key **without** the URL throws at boot. The alternatives were a driver that
   rejects every genuine webhook, or one that quietly skips verification because it is
   missing a piece of its own input; neither is something to discover in production.
-- With neither configured, verification is skipped so local development works. Configure
-  both in production.
+- With neither configured the driver reports `'unconfigured'` and the app refuses to boot. For
+  local development without dashboard setup, name the provider in `allowUnverifiedWebhooks`.
 
 `event.id` is Square's `event_id`, which is what makes a redelivery dedupe in the ledger.
 

@@ -37,6 +37,16 @@ unit tests. Nobody has yet pointed it at a live Paddle account. Run it through t
   it. Paddle bills in whatever currency the transaction names, so a default here would be
   a guess at which country you sell in — and a wrong guess charges instead of failing.
 
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`webhookSecret` is not configured (env fallback `PADDLE_WEBHOOK_SECRET`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/paddle` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
 ### There is no server-side charge
 
 `charge()` **throws**. Paddle has no endpoint that takes money: every payment is collected

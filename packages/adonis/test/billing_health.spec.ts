@@ -34,9 +34,10 @@ describe('billingHealth', () => {
 
     const report = await billingHealth(store, { now: NOW });
     expect(report.healthy).toBe(true);
-    expect(report.checks.map((check) => check.count)).toEqual([0, 0, 0, 0]);
+    expect(report.checks.map((check) => check.count)).toEqual([0, 0, 0, 0, 0, 0]);
     expect(report.failures).toEqual([]);
     expect(report.deadlines).toEqual([]);
+    expect(report.openDisputes).toEqual([]);
   });
 
   it('counts an event claimed and never finished as stuck — but only past the threshold', async () => {
@@ -155,7 +156,12 @@ describe('billingHealth', () => {
 
       const report = await billingHealth(store, { now: NOW });
       expect(report.checks.find((check) => check.key === 'disputes_due')?.count).toBe(0);
-      expect(report.healthy).toBe(true);
+      // The DEADLINE check ignores it, which is correct — there is no window to be late for.
+      // The install is NOT healthy, though: the chargeback is open and the money is out. That
+      // used to read `healthy: true` here, and it was the whole bug — on a gateway that
+      // publishes no deadline, `disputes_due` is the only dispute check and it can never fire.
+      expect(report.healthy).toBe(false);
+      expect(report.checks.find((check) => check.key === 'open_disputes')?.count).toBe(1);
     });
 
     it('honors a custom horizon', async () => {

@@ -47,6 +47,16 @@ await payments.driver('credit_card').charge({
 })
 ```
 
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`webhookSecret` is not configured (env fallback `STRIPE_WEBHOOK_SECRET`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/stripe` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
 ## Webhooks
 
 Every Stripe event is verified, then renamed onto the canonical type the library syncs on.

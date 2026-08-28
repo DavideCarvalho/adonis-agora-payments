@@ -1,15 +1,22 @@
 import {
+  type AuditEventCountQuery,
+  type AuditEventListItem,
+  type AuditEventQuery,
   type BillingCountQuery,
   type BillingListQuery,
   type BillingStore,
   type CustomerListItem,
+  type CustomerListQuery,
   type DisputeDeadlineQuery,
   type DisputeListItem,
   OPEN_DISPUTE_STATUSES,
+  type OpenDisputeQuery,
   type PaymentListItem,
+  type PaymentListQuery,
   type SubscriptionListItem,
   type WebhookEventBreakdownLine,
   type WebhookEventListItem,
+  type WebhookEventListQuery,
 } from '../billing/billing_store.js';
 import { clampLimit, clampOffset } from '../billing/list_query.js';
 
@@ -33,6 +40,52 @@ function disputeItem(row: InMemoryDisputeRow): DisputeListItem {
     outcome: row.outcome,
     openedAt: row.openedAt,
     closedAt: row.closedAt,
+    createdAt: row.createdAt,
+  };
+}
+
+/** One audit row, normalized for reading — the same shape the Lucid store returns. */
+function auditItem(row: InMemoryAuditEventRow): AuditEventListItem {
+  return {
+    id: row.id,
+    action: row.action,
+    actor: row.actor,
+    provider: row.provider,
+    subjectType: row.subjectType,
+    subjectId: row.subjectId,
+    amount: row.amount,
+    currency: row.currency,
+    message: row.message,
+    metadata: row.metadata,
+    createdAt: row.createdAt,
+  };
+}
+
+/** One ledger row, normalized for reading. The stored payload is NEVER part of it. */
+function webhookEventItem(row: InMemoryWebhookEventRow): WebhookEventListItem {
+  return {
+    id: row.id,
+    gatewayEventId: row.gatewayEventId,
+    provider: row.provider,
+    type: row.type,
+    status: row.status,
+    error: row.error,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+/** One customer-mapping row, normalized for reading — the same shape the Lucid store returns. */
+function customerItem(row: InMemoryCustomerRow): CustomerListItem {
+  return {
+    id: row.id,
+    gatewayId: row.gatewayId,
+    provider: row.provider,
+    ownerType: row.ownerType,
+    ownerId: row.ownerId,
+    email: row.email,
+    name: row.name,
+    taxId: row.taxId,
     createdAt: row.createdAt,
   };
 }
@@ -123,6 +176,21 @@ export interface InMemoryDisputeRow {
   createdAt: Date;
 }
 
+/** A plain in-memory audit row (mirrors `billing_audit_events`). */
+export interface InMemoryAuditEventRow {
+  id: string;
+  action: string;
+  actor: string | null;
+  provider: string | null;
+  subjectType: string | null;
+  subjectId: string | null;
+  amount: number | null;
+  currency: string | null;
+  message: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: Date;
+}
+
 /** A plain in-memory metered-usage row (mirrors the Lucid model's columns). */
 export interface InMemoryUsageEventRow {
   id: string;
@@ -156,6 +224,8 @@ export class InMemoryBillingStore
   usageEvents: Map<string, InMemoryUsageEventRow> = new Map();
   /** Keyed by the DISPUTE's gateway id, mirroring the table's unique column. */
   disputes: Map<string, InMemoryDisputeRow> = new Map();
+  /** Append-only, like the table — keyed by the row's own id, because nothing looks one up. */
+  auditEvents: Map<string, InMemoryAuditEventRow> = new Map();
 
   #nextId = 1;
 
@@ -249,23 +319,23 @@ export class InMemoryBillingStore
     return null;
   }
 
-  async listCustomers(
-    query: BillingListQuery & { provider?: string },
-  ): Promise<CustomerListItem[]> {
+  async listCustomers(query: CustomerListQuery): Promise<CustomerListItem[]> {
     const matching = [...this.customers.values()].filter(
-      (row) => query.provider === undefined || row.provider === query.provider,
+      (row) =>
+        (query.provider === undefined || row.provider === query.provider) &&
+        (query.ownerType === undefined || row.ownerType === query.ownerType) &&
+        (query.ownerId === undefined || row.ownerId === query.ownerId) &&
+        (query.gatewayId === undefined || row.gatewayId === query.gatewayId),
     );
-    return this.#page(matching, query).map((row) => ({
-      id: row.id,
-      gatewayId: row.gatewayId,
-      provider: row.provider,
-      ownerType: row.ownerType,
-      ownerId: row.ownerId,
-      email: row.email,
-      name: row.name,
-      taxId: row.taxId,
-      createdAt: row.createdAt,
-    }));
+    return this.#page(matching, query).map(customerItem);
+  }
+
+  async listCustomersByGatewayIds(gatewayIds: readonly string[]): Promise<CustomerListItem[]> {
+    if (gatewayIds.length === 0) return [];
+    const wanted = new Set(gatewayIds);
+    return [...this.customers.values()]
+      .filter((row) => wanted.has(row.gatewayId))
+      .map(customerItem);
   }
 
   async saveSubscription(sub: {
@@ -391,11 +461,17 @@ export class InMemoryBillingStore
     return found;
   }
 
-  async listPayments(query: BillingListQuery): Promise<PaymentListItem[]> {
+  async listPayments(query: PaymentListQuery): Promise<PaymentListItem[]> {
     const matching = [...this.payments.values()].filter(
       (row) =>
         (query.status === undefined || row.status === query.status) &&
-        (query.provider === undefined || row.provider === query.provider),
+        (query.provider === undefined || row.provider === query.provider) &&
+        (query.gatewayId === undefined || row.gatewayId === query.gatewayId) &&
+        (query.customerId === undefined || row.customerId === query.customerId) &&
+        // EXACT, like the Lucid store's `where('external_reference', ?)`. A substring match
+        // here would make `order-4` return `order-42` in tests and not in production.
+        (query.externalReference === undefined ||
+          row.externalReference === query.externalReference),
     );
     return this.#page(matching, query).map((row) => ({
       id: row.id,
@@ -540,6 +616,86 @@ export class InMemoryBillingStore
     );
   }
 
+  async listOpenDisputes(query: OpenDisputeQuery): Promise<DisputeListItem[]> {
+    const matching = [...this.disputes.values()]
+      .filter(
+        (row) =>
+          isOpenDispute(row.status) &&
+          (query.provider === undefined || row.provider === query.provider),
+      )
+      // Oldest FIRST — mirrors the Lucid store's `order by created_at asc`. With no deadline
+      // to rank on, how long a dispute has gone unanswered is the only priority left.
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    const offset = clampOffset(query.offset);
+    return matching.slice(offset, offset + clampLimit(query.limit)).map(disputeItem);
+  }
+
+  async countOpenDisputes(query: { provider?: string }): Promise<number> {
+    let count = 0;
+    for (const row of this.disputes.values()) {
+      if (!isOpenDispute(row.status)) continue;
+      if (query.provider !== undefined && row.provider !== query.provider) continue;
+      count += 1;
+    }
+    return count;
+  }
+
+  async recordAuditEvent(event: {
+    action: string;
+    actor?: string | null;
+    provider?: string | null;
+    subjectType?: string | null;
+    subjectId?: string | null;
+    amount?: number | null;
+    currency?: string | null;
+    message?: string | null;
+    metadata?: Record<string, unknown> | null;
+    createdAt?: Date;
+  }): Promise<AuditEventListItem> {
+    const row: InMemoryAuditEventRow = {
+      id: `audit_${this.#nextId++}`,
+      action: event.action,
+      actor: event.actor ?? null,
+      provider: event.provider ?? null,
+      subjectType: event.subjectType ?? null,
+      subjectId: event.subjectId ?? null,
+      amount: event.amount ?? null,
+      currency: event.currency ?? null,
+      message: event.message ?? null,
+      metadata: event.metadata ?? null,
+      createdAt: event.createdAt ?? this.#now(),
+    };
+    this.auditEvents.set(row.id, row);
+    return auditItem(row);
+  }
+
+  async listAuditEvents(query: AuditEventQuery): Promise<AuditEventListItem[]> {
+    const matching = [...this.auditEvents.values()].filter((row) => this.#matchesAudit(row, query));
+    return this.#page(matching, query).map(auditItem);
+  }
+
+  async countAuditEvents(query: AuditEventCountQuery): Promise<number> {
+    let count = 0;
+    for (const row of this.auditEvents.values()) {
+      if (this.#matchesAudit(row, query)) count += 1;
+    }
+    return count;
+  }
+
+  /** One filter for the list and the count — see `#matchesCount`: a bound only one of them
+   *  applied is how an alert learns to report a healthy zero. */
+  #matchesAudit(row: InMemoryAuditEventRow, query: AuditEventCountQuery): boolean {
+    if (query.action !== undefined && row.action !== query.action) return false;
+    if (query.actions !== undefined && !query.actions.includes(row.action)) return false;
+    if (query.actor !== undefined && row.actor !== query.actor) return false;
+    if (query.provider !== undefined && row.provider !== query.provider) return false;
+    if (query.subjectType !== undefined && row.subjectType !== query.subjectType) return false;
+    if (query.subjectId !== undefined && row.subjectId !== query.subjectId) return false;
+    if (query.createdBefore !== undefined && row.createdAt >= query.createdBefore) return false;
+    if (query.createdAfter !== undefined && row.createdAt < query.createdAfter) return false;
+    return true;
+  }
+
   async recordWebhookEvent(event: {
     gatewayEventId: string;
     provider: string;
@@ -604,22 +760,30 @@ export class InMemoryBillingStore
     }
   }
 
-  async listWebhookEvents(query: BillingListQuery): Promise<WebhookEventListItem[]> {
+  async listWebhookEvents(query: WebhookEventListQuery): Promise<WebhookEventListItem[]> {
     const matching = [...this.webhookEvents.values()].filter(
       (row) =>
         (query.status === undefined || row.status === query.status) &&
-        (query.provider === undefined || row.provider === query.provider),
+        (query.provider === undefined || row.provider === query.provider) &&
+        (query.type === undefined || row.type === query.type),
     );
-    return this.#page(matching, query).map((row) => ({
-      id: row.id,
-      gatewayEventId: row.gatewayEventId,
-      provider: row.provider,
-      type: row.type,
-      status: row.status,
-      error: row.error,
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
-    }));
+    return this.#page(matching, query).map(webhookEventItem);
+  }
+
+  async listWebhookEventsForPayment(
+    paymentGatewayId: string,
+    query: { limit?: number } = {},
+  ): Promise<WebhookEventListItem[]> {
+    if (paymentGatewayId === '') return [];
+    // Mirrors the Lucid store's `CAST(payload AS TEXT) LIKE '%id%'`, substring semantics and
+    // all — including the false positives. A test that matched more precisely here than the
+    // database can would be testing a store nobody ships.
+    const matching = [...this.webhookEvents.values()].filter((row) =>
+      JSON.stringify(row.payload).includes(paymentGatewayId),
+    );
+    return this.#page(matching, query.limit === undefined ? {} : { limit: query.limit }).map(
+      webhookEventItem,
+    );
   }
 
   async findWebhookEventByGatewayEventId(
@@ -627,16 +791,7 @@ export class InMemoryBillingStore
   ): Promise<WebhookEventListItem | null> {
     const row = this.webhookEvents.get(gatewayEventId);
     if (!row) return null;
-    return {
-      id: row.id,
-      gatewayEventId: row.gatewayEventId,
-      provider: row.provider,
-      type: row.type,
-      status: row.status,
-      error: row.error,
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
-    };
+    return webhookEventItem(row);
   }
 
   async countWebhookEvents(query: BillingCountQuery): Promise<number> {

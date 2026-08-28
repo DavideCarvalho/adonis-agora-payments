@@ -83,7 +83,7 @@ losing.
 
 ```ts title="app/payment_handlers/payment_dispute_warning.ts"
 import { inject } from '@adonisjs/core'
-import type { WebhookEvent } from '@adonis-agora/payments'
+import type { WebhookEventFor } from '@adonis-agora/payments'
 import { LucidBillingStore } from '@adonis-agora/payments'
 
 @inject()
@@ -95,13 +95,12 @@ export default class DisputeWarningHandler {
     private mail: MailService,
   ) {}
 
-  async handle(event: WebhookEvent): Promise<void> {
-    const data = event.data as {
-      gatewayId: string
-      disputeId?: string
-      reason?: string
-      actionableUntil?: string
-    }
+  async handle(event: WebhookEventFor<'payment.dispute_warning'>): Promise<void> {
+    // `DisputeWebhookData` — typed by the event type, so no cast. It is deliberately looser
+    // than a payment payload: `amount` and `currency` are optional, because Stripe's early
+    // fraud warning carries neither. The copy-pasted `as PaymentWebhookData` this replaces
+    // was simply wrong here.
+    const data = event.data
 
     // The payment row still says `paid`, and that is correct — nothing has been withdrawn.
     // What you are deciding is whether to refund BEFORE it is.
@@ -261,12 +260,59 @@ Two behaviours worth knowing before you wire an alert on it:
 - **A window already past stays in the list**, because the dispute is still open and still
   unanswered. Going quiet the moment it expires reads as resolved.
 - **A dispute with no deadline is never in it.** `listDisputesDueWithin` filters on a date, and a
-  gateway that sends none produces no row here. It is in `listDisputes`, and nowhere else.
+  gateway that sends none produces no row here. That is what the second check is for.
 
 The default horizon is 72 hours — late enough that the check is not permanently red, early enough
 that someone can still gather a receipt, a delivery confirmation and an IP log. Run it on a cron.
-The bundled console shows the same data on a **read-only** Disputes screen, leading with the windows
-closing rather than the log; see [Dashboard](/docs/payments/dashboard).
+
+### The check that does not need a deadline
+
+`disputes_due` is **structurally blind** on most installs, and that is worth stating plainly:
+`evidence_due_by` can only ever be filled by a gateway that publishes a deadline. On Asaas it comes
+from `chargeback.deadlineToSendDisputeDocuments`, which no published webhook example even contains.
+So on such an install the deadline check answers zero forever while a chargeback sits open with the
+money already pulled back, and `payments:health` reports healthy.
+
+```text
+3  Disputes still open and unanswered
+     A chargeback is open and the money is already out of the account. This check does NOT need
+     a deadline, which is the point: most gateways publish none, and on those installs the
+     deadline check reports zero forever.
+```
+
+`open_disputes` counts every dispute in `warning`, `open` or `under_review`, with **no threshold and
+no flag** — an open chargeback is money already out of the account, so there is no horizon at which
+it stops mattering. `billingHealth()` returns `openDisputes` alongside it, oldest first: with no
+deadline to sort on, age is the only priority signal left.
+
+The bundled console shows the same data on its Disputes screen, leading with the windows closing
+rather than the log; see [Dashboard](/docs/payments/dashboard).
+
+### Closing one the gateway never will
+
+Asaas publishes no lost-dispute event at all, and its driver hardcodes `outcome: 'won'` on close —
+so a dispute that was **lost** stays `open` in `billing_disputes` indefinitely. `listDisputesDueWithin`
+counts past-deadline rows on purpose, so the check stays red, and a fifteen-minute cron logs the same
+failure until nobody reads it, burying every other finding with it.
+
+Record the ending. From the console it is
+[`POST <path>/api/disputes/:gatewayId/resolve`](/docs/payments/dashboard#recording-how-a-dispute-ended),
+which additionally records **who** said so; from code it is `saveDispute` with a finished status:
+
+```ts
+await store.saveDispute({
+  gatewayId: dispute.gatewayId,
+  paymentGatewayId: dispute.paymentGatewayId,
+  provider: dispute.provider,
+  status: 'lost',
+  outcome: 'lost',
+  closedAt: new Date(),
+})
+```
+
+Nothing is sent to the gateway by this. The decision was made at the bank; this writes down which
+way it went — and the absent-fields-are-left-alone rule keeps the deadline and the reason the opening
+event carried.
 
 ## What this library will not do: decide
 

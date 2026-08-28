@@ -59,13 +59,24 @@ export default defineConfig({
 
 Or pass values from anywhere — the driver configs are plain objects, so an API key can come
 from a vault, another config file, or a literal (not recommended for secrets).
+
+<Callout type="warn" title="The webhook credential is not optional">
+`webhookToken` above is what lets the driver authenticate a delivery, and a driver that *can*
+verify with nothing configured **refuses to boot** — because the empty slot used to mean "accept
+anything anyone posts to `/payments/webhook/asaas`", including a body that marks a payment paid.
+
+Set the credential, or, only if verification really happens upstream, say so:
+`allowUnverifiedWebhooks: ['asaas']`. Efí and InfinitePay are exempt: their gateways sign nothing,
+so there is no credential to forget. See
+[Configuration → allowUnverifiedWebhooks](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
 </Step>
 
 <Step title="Skip the migration">
-There isn't one to run. The billing layer owns six tables — customers, subscriptions, payments,
-disputes, usage events and the webhook idempotency ledger — and **it creates them itself on first
-use**, the same convention `@adonis-agora/durable` and `@adonis-agora/authz` follow. Nothing to
-publish, nothing to run, nothing to remember when you upgrade.
+There isn't one to run. The billing layer owns seven tables — customers, subscriptions, payments,
+disputes, usage events, the audit trail and the webhook idempotency ledger — and **it creates them
+itself on first use**, the same convention `@adonis-agora/durable` and `@adonis-agora/authz`
+follow. Nothing to publish, nothing to run, nothing to remember when you upgrade.
 
 The DDL is idempotent, so it costs one round trip on the first query of a process and nothing
 afterwards. Columns added to the library in later versions are carried to a database that already
@@ -162,13 +173,15 @@ node ace make:webhook-handler payment.succeeded
 @inject()
 export default class PaymentSucceededHandler {
   static readonly eventType = 'payment.succeeded'
-  async handle(event: WebhookEvent): Promise<void> {
+  async handle(event: WebhookEventFor<'payment.succeeded'>): Promise<void> {
     // dispatch a durable workflow — durable owns retry + exactly-once
   }
 }
 ```
 
-The provider picks the file up at boot — no registration step.
+The provider picks the file up at boot — no registration step. `WebhookEventFor<T>` types
+`event.data` from the event type, so there is no cast to write; and `eventType` is checked at boot,
+so a misspelling throws instead of registering a handler nothing ever calls.
 
 <Callout type="info" title="Never trust a payment until the webhook">
 A `PENDING` charge is a *promise*, not revenue. Grant access only after the gateway

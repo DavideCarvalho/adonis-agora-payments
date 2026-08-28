@@ -137,6 +137,31 @@ shifting the integer's digits rather than dividing, so the value never passes th
 the way. `toDecimal(x).toFixed(2)` does pass through one, which is the classic way to send
 `"19.89"`. Drivers should use `formatDecimal` on the wire; screens should use `Intl`.
 
+## A partial refund is a subtraction, never a division
+
+`billing_payments` carries `amount` **and** `refunded_amount`, both integer minor units, both
+`BIGINT`. Net revenue for a row is one subtraction:
+
+```ts
+const net = payment.amount - (payment.refundedAmount ?? 0)
+```
+
+The alternative before that column existed was overwriting `status` with `refunded` and `amount`
+with the refunded figure — which writes off the whole charge, so a R$10 refund on a R$100 charge
+erased R$90 of revenue. A partial refund therefore keeps the row `paid`, keeps its full `amount`,
+keeps its `paid_at`, and records what went back separately.
+
+`null` and `0` are different answers here. `null` means nothing has been *said* about refunds on
+this row — a gateway that sent no refunds array, or a row written before the column existed. `0`
+asserts that nothing has gone back. The store's leave-alone rule keeps them distinct: an absent
+`refundedAmount` on a write does not clear a stored one.
+
+<Callout type="warn" title="`revenue()` and `billingOverview` are gross">
+Both sum `amount` on `paid` rows and neither subtracts `refunded_amount`. If a partially refunded
+charge should not count at full value on your screen, do the subtraction where you render — at the
+same edge as the one division, and after you have finished adding.
+</Callout>
+
 ## Splitting an amount
 
 Percentage splits are where integers earn their keep. Compute the parts, then give the remainder to

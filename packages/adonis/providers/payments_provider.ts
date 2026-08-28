@@ -1,6 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import type { HttpContext } from '@adonisjs/core/http';
 import type { ApplicationService, HttpRouterService } from '@adonisjs/core/types';
+import { AUDIT_ACTIONS } from '../src/billing/billing_store.js';
 import type { BillingStore } from '../src/billing/billing_store.js';
 import { LucidBillingStore } from '../src/billing/lucid_billing_store.js';
 import {
@@ -24,14 +25,17 @@ import {
 } from '../src/diagnostics.js';
 import { InvoiceManager, resolveInvoiceProviders } from '../src/invoice/invoice_manager.js';
 import { PaymentsManager, resolveDrivers } from '../src/payments_manager.js';
-import { setBillingStore, setPayments } from '../src/services/main.js';
+import { setBillingStore, setPayments, setWebhookDispatcher } from '../src/services/main.js';
 import {
   type DiscoveredWebhookHandler,
+  type WebhookHandlerRegistration,
   type WebhookHandlersBarrel,
+  assertWebhookHandlerTypes,
   discoverWebhookHandlers,
   loadWebhookHandlersFromBarrel,
   resolveWebhookHandler,
 } from '../src/webhook_handlers.js';
+import { assertWebhookVerification } from '../src/webhook_security.js';
 
 /**
  * Wires `@adonis-agora/payments` into the AdonisJS application: binds a singleton
@@ -41,6 +45,8 @@ import {
  */
 export default class PaymentsProvider {
   #webhook: WebhookDispatcher | undefined;
+  /** Held for the webhook route: a REFUSED delivery is filed here, having no ledger row. */
+  #store: BillingStore | undefined;
 
   constructor(protected app: ApplicationService) {}
 
@@ -81,7 +87,16 @@ export default class PaymentsProvider {
       }
       // Resolve the manager here so `setPayments` runs and `getPayments()` works for
       // services that read it during boot — after every provider has registered.
-      await this.app.container.make(PaymentsManager);
+      const manager = await this.app.container.make(PaymentsManager);
+      // Before the route goes up, not after: a driver with an empty webhook-credential slot
+      // verifies nothing, and the route it would be mounted behind is reachable from the
+      // public internet. Fail closed at boot, the way the dashboard does on a missing session
+      // secret.
+      assertWebhookVerification(manager.drivers, {
+        ...(config.allowUnverifiedWebhooks !== undefined
+          ? { allowUnverifiedWebhooks: config.allowUnverifiedWebhooks }
+          : {}),
+      });
       // A 'worker' process consumes what the api half enqueued; it must not also
       // advertise an endpoint gateways could deliver to.
       if (resolveRole(config) !== 'worker') {
@@ -122,15 +137,35 @@ export default class PaymentsProvider {
     assertRoleIsDispatchable(role, mode);
 
     const store = await this.#resolveBillingStore(config);
-    // On an 'api' process the handlers run on the worker, so resolving them here
-    // would scan the folder and build services this process never calls.
-    const handlers =
-      role === 'api' ? undefined : await this.#resolveAllHandlers(config.billing?.handlers);
+    this.#store = store;
+    let handlers: Record<string, WebhookHandler> | undefined;
+    if (role === 'api') {
+      // The handlers run on the worker, so resolving them here would scan the folder and
+      // build services this process never calls. The TYPES are still checked, from config
+      // alone: a misspelled key is a config error on both halves of the deployment, and the
+      // api process is usually the one a developer boots first.
+      assertWebhookHandlerTypes(
+        Object.keys(config.billing?.handlers ?? {}).map((type) => ({
+          type,
+          source: 'billing.handlers',
+        })),
+        {
+          ...(config.billing?.passthroughEvents !== undefined
+            ? { passthroughEvents: config.billing.passthroughEvents }
+            : {}),
+        },
+      );
+    } else {
+      handlers = await this.#resolveAllHandlers(
+        config.billing?.handlers,
+        config.billing?.passthroughEvents,
+      );
+    }
     const processor = new WebhookProcessor({
       store,
       ...(handlers !== undefined ? { handlers } : {}),
     });
-    this.#webhook = new WebhookDispatcher({
+    const dispatcher = new WebhookDispatcher({
       processor,
       mode,
       // In 'auto', durable is used only when its engine is resolvable in the app
@@ -140,6 +175,13 @@ export default class PaymentsProvider {
       // webhook workflow on the app's engine before it can start a run on it.
       durableEngine: () => this.#resolveDurableEngine(),
     });
+    this.#webhook = dispatcher;
+    // Published so tests can reach it: `flushWebhooks()` from
+    // `@adonis-agora/payments/testing` awaits the in-flight processing that durable mode
+    // deliberately does not await. Bound in the container too, for an app that prefers
+    // `@inject()` over the service accessor.
+    setWebhookDispatcher(dispatcher);
+    this.app.container.singleton(WebhookDispatcher, () => dispatcher);
   }
 
   /**
@@ -168,15 +210,35 @@ export default class PaymentsProvider {
    */
   async #resolveAllHandlers(
     configHandlers: BillingHandlers | undefined,
+    passthroughEvents: readonly string[] | undefined,
   ): Promise<Record<string, WebhookHandler> | undefined> {
+    const discovered = await this.#discoverFolderHandlers();
+    // Validated BEFORE anything is wired, so the app never boots half-registered. A handler
+    // for an event type that will never be delivered is a silent no-op — the ledger records
+    // the delivery as processed and the grant simply never happens — and two handlers for
+    // one type mean the second overwrote the first in the map below.
+    const registrations: WebhookHandlerRegistration[] = [
+      ...Object.keys(configHandlers ?? {}).map((type) => ({
+        type,
+        source: 'billing.handlers',
+      })),
+      ...discovered.map((entry) => ({
+        type: entry.type,
+        source: entry.source ?? 'app/payment_handlers',
+      })),
+    ];
+    assertWebhookHandlerTypes(registrations, {
+      ...(passthroughEvents !== undefined ? { passthroughEvents } : {}),
+    });
+
     const handlers: Record<string, WebhookHandler> = {};
     if (configHandlers) {
       for (const [type, entry] of Object.entries(configHandlers)) {
         handlers[type] = await resolveWebhookHandler(entry, this.app.container);
       }
     }
-    for (const discovered of await this.#discoverFolderHandlers()) {
-      handlers[discovered.type] = await resolveWebhookHandler(discovered.entry, this.app.container);
+    for (const entry of discovered) {
+      handlers[entry.type] = await resolveWebhookHandler(entry.entry, this.app.container);
     }
     return Object.keys(handlers).length > 0 ? handlers : undefined;
   }
@@ -232,7 +294,11 @@ export default class PaymentsProvider {
     router
       .post('/payments/webhook/:provider', async (ctx: HttpContext) => {
         const manager = await this.app.container.make(PaymentsManager);
-        return handleWebhookDelivery(ctx, { manager, dispatcher: this.#webhook });
+        return handleWebhookDelivery(ctx, {
+          manager,
+          dispatcher: this.#webhook,
+          ...(this.#store !== undefined ? { store: this.#store } : {}),
+        });
       })
       .as('payments.webhook');
   }
@@ -248,7 +314,12 @@ export default class PaymentsProvider {
  */
 export async function handleWebhookDelivery(
   ctx: HttpContext,
-  deps: { manager: PaymentsManager; dispatcher?: WebhookDispatcher | undefined },
+  deps: {
+    manager: PaymentsManager;
+    dispatcher?: WebhookDispatcher | undefined;
+    /** Where a REFUSED delivery is recorded. Absent when the billing layer is off. */
+    store?: Pick<BillingStore, 'recordAuditEvent'> | undefined;
+  },
 ): Promise<unknown> {
   const provider = String(ctx.params.provider);
   // ONE trace per delivery ATTEMPT, shared by every event the delivery carries — not one
@@ -332,6 +403,21 @@ export async function handleWebhookDelivery(
           durationMs: Date.now() - startedAt,
         });
       }
+      // A rejected delivery is the ONLY webhook outcome that leaves no ledger row — it is
+      // refused before an event exists to record. That is why a rotated webhook token looks
+      // exactly like a quiet gateway from the inside: zero events, zero failures, every
+      // health check green. The audit row is what the `rejected_deliveries` check counts.
+      //
+      // Best-effort on purpose: the delivery is already being refused, and failing to file
+      // the note must not change the status the gateway sees. The store itself returns
+      // `null` when the install predates the table.
+      await deps.store
+        ?.recordAuditEvent({
+          action: AUDIT_ACTIONS.webhookRejected,
+          provider,
+          message,
+        })
+        .catch(() => {});
       return ctx.response.status(400).json({ error: message });
     }
   });

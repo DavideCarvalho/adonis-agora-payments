@@ -13,6 +13,7 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { headerValue, httpRequest, isNotFound } from '../http.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
@@ -386,6 +387,16 @@ export class AbacateDriver implements PaymentsDriver {
   }
 
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * AbacatePay signs the body with the dashboard public key. Without it `parseWebhook` skips
+   * the HMAC check entirely and every POST to the route is accepted.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#publicKey !== undefined ? 'configured' : 'unconfigured';
+  }
 
   parseWebhook(
     rawBody: string,

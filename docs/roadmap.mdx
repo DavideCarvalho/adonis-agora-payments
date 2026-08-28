@@ -1,6 +1,6 @@
 ---
 title: Roadmap
-description: What is still missing — a queue dispatcher, subscription amounts on Stripe, partial refunds in the tables, splits beyond Asaas, dispute submission beyond Stripe, and fiscal invoice reconciliation.
+description: What is still missing — a queue dispatcher, subscription amounts on Stripe, net revenue in the aggregates, a per-payment history, splits beyond Asaas, dispute submission beyond Stripe, and fiscal invoice reconciliation.
 icon: Map
 ---
 
@@ -54,11 +54,14 @@ per-gateway matrix.
 - **Idempotency where the gateway has none.** `idempotencyKey` now rides on `charge`,
   `createCheckout`, `refund`, `createCustomer`, `createSubscription` and `updateSubscription`, and
   every driver either wires it to the gateway's own deduplication or **throws** rather than
-  accepting a key it cannot honour. InfinitePay is the clearest case: it documents no idempotency
-  at all, so the key is used only for routing and a repeated `createCheckout` makes a second link.
-  Nothing in the library can fix that — it is a property of the gateway — but which operations are
-  genuinely deduplicated is on each provider page rather than in one table, which it should be. See
-  [Idempotency](/docs/payments/concepts/idempotency).
+  accepting a key it cannot honour. Asaas' `charge()` is the one place the library does the
+  deduplication itself — an `externalReference` lookup before the POST, which is exactly what the
+  refusal message tells callers to do by hand — and it is a retry guard, not a lock: two concurrent
+  calls can still both create. InfinitePay is the clearest remaining case: it documents no
+  idempotency at all, so the key is used only for routing and a repeated `createCheckout` makes a
+  second link. Nothing in the library can fix that — it is a property of the gateway — but which
+  operations are genuinely deduplicated is on each provider page rather than in one table, which it
+  should be. See [Idempotency](/docs/payments/concepts/idempotency).
 - **A method on checkout and on subscriptions.** `CheckoutInput` has no `method`, so a Stripe
   checkout session is always created with the account's default methods.
   `CreateSubscriptionInput.method` exists and Stripe ignores it — a Stripe subscription bills
@@ -87,9 +90,14 @@ What exists today and what does not:
   `actionableUntil`.
   Disputes are persisted (`billing_disputes`, keyed on the dispute's own gateway id and indexed on
   `(status, evidence_due_by)`), `payments:health` flags a window closing within 72 hours and names
-  which ones, and the dashboard has a read-only Disputes screen leading with the work list. All
+  which ones, and the dashboard's Disputes screen leads with the work list. All
   eighteen drivers have been through the vocabulary pass; the ones with no pre-dispute event say so
   on their page rather than implying otherwise. `submitDisputeEvidence` is real on Stripe.
+  Two later additions close the gap the deadline left: an `open_disputes` health check that needs
+  **no** deadline (most gateways publish none, so the deadline check answers zero forever on them)
+  and no threshold, and a console action that records how a dispute **ended** — status, outcome,
+  note and who said so — for the several gateways that never send a lost-dispute event at all. It
+  sends nothing to a gateway.
 - **Not landed.** Adyen's Defend Disputes v30 has no endpoint that reads a dispute back, so
   `findDispute` there would have to invent the object it returns — the driver refuses instead, and
   closing that needs either an Adyen API that can read a dispute or a narrower contract than
@@ -103,10 +111,26 @@ What exists today and what does not:
 
 ## What the billing tables do not record
 
-- **Partial refunds skew revenue.** A `payment.refunded` webhook overwrites the payment row's status
-  with `refunded` and its amount with the refunded amount. `revenue()` sums rows with status `paid`,
-  so a partially refunded charge leaves revenue entirely and its original amount is lost. The tables
-  need a refunded amount and a partial state so the arithmetic can subtract instead of drop.
+- **Landed: partial refunds are recorded.** `billing_payments` carries `refunded_amount` (integer
+  minor units, `BIGINT`, on `BillingPayment`, `withPayment()` and `PaymentListItem`), and
+  `payment.updated` — which is what a partial refund arrives as — writes it. A partially refunded
+  charge keeps its `status`, its `amount` and its `paid_at`, and the net is
+  `amount - refunded_amount`: a subtraction, never a division. What is still open is that
+  `revenue()` and `billingOverview` are **gross** — they sum `amount` on `paid` rows and subtract
+  nothing — so a screen that wants net revenue does the subtraction itself. Wiring it into the
+  aggregate is a decision about what "revenue" means to a given business, and it has not been made
+  here.
+- **Landed: an audit trail.** `billing_audit_events` records what no other table did — who refunded
+  from the console, who closed a dispute a gateway will never close, and every delivery the endpoint
+  **refused**. A rejected delivery is answered `400` before an event exists, so it never becomes a
+  ledger row: that audit row is the only trace it leaves, and `payments:health`'s
+  `rejected_deliveries` check is the only thing that counts them.
+- **No per-payment history.** `billing_payments` is a single mutable row upserted in place, so what
+  it used to be is recorded nowhere. The console's per-payment view assembles what *is* knowable and
+  says so — its ledger strand is a `CAST(payload AS TEXT) LIKE` scan, reported as
+  `matchedBy: 'payload-substring'`, which is unindexed, can over-match and can miss. The honest fix
+  is a `payment_gateway_id` column the **processor** fills on the way in; no history table has been
+  invented in the meantime.
 - **Splits are not attributed.** A split charge stores the full amount on one row; who received what
   is only in the gateway payload. Per-recipient reporting is on the app today — the manual pattern
   is in [Marketplace splits](/docs/payments/patterns/marketplace-splits).
@@ -136,10 +160,12 @@ See [Invoices](/docs/payments/invoices).
   period's usage, and that is where it stops — nothing charges the overage or emits an invoice for
   it. The cron, the charge and the guard against billing a period twice are yours to write. See
   [Metered billing](/docs/payments/patterns/metered-billing).
-- **Dashboard beyond payments and webhooks.** A dashboard now ships — health, payments, webhook
-  events, refund and retry. Subscriptions and customers are listable from the store but have no
-  screen yet, and there is no export. See [Dashboard](/docs/payments/dashboard); the headless
-  `billingOverview` is still there for a UI of your own.
+- **Dashboard export.** The console now has seven screens — overview, payments (with a per-payment
+  detail view and lookup by your own reference), customers, subscriptions, disputes, webhook events
+  and activity — plus refund, retry and dispute-resolution actions. What is still missing is an
+  **export**: every list is paged JSON and nothing produces a CSV. See
+  [Dashboard](/docs/payments/dashboard); the headless `billingOverview` is still there for a UI of
+  your own.
 
 ## Coverage
 

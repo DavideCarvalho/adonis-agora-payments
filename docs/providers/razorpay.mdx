@@ -32,6 +32,16 @@ tests that stub the HTTP layer; nothing in it has touched a real Razorpay accoun
 your flow with `rzp_test_…` keys before taking real money.
 </Callout>
 
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`webhookSecret` is not configured (env fallback `RAZORPAY_WEBHOOK_SECRET`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/razorpay` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
 ## `charge()` creates an order, not a payment
 
 Razorpay has no "charge this customer" call for a normal integration. You create an
@@ -117,9 +127,9 @@ Razorpay rejects a partial capture, so the amount you pass has to be the authori
 
 `X-Razorpay-Signature` is a **hex** HMAC-SHA256 over the **raw** request body, keyed with
 the webhook secret from the dashboard. The driver verifies it timing-safe and rejects a
-missing or wrong signature. With no `webhookSecret` and no `RAZORPAY_WEBHOOK_SECRET`,
-verification is skipped so local development works without dashboard setup — configure the
-secret in production.
+missing or wrong signature. With no `webhookSecret` and no `RAZORPAY_WEBHOOK_SECRET` the driver
+reports `'unconfigured'` and the app refuses to boot — for local development without dashboard
+setup, name the provider in `allowUnverifiedWebhooks`.
 
 `event.id` is Razorpay's own `x-razorpay-event-id` header, which is what makes a redelivery
 dedupe in the ledger.

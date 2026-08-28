@@ -10,6 +10,7 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { headerValue } from '../http.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
@@ -327,6 +328,18 @@ export class WooviDriver implements PaymentsDriver {
   }
 
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * Woovi accepts either the RSA public key (recommended) or the shared secret; with neither,
+   * `parseWebhook` verifies nothing.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#webhookPublicKey !== undefined || this.#webhookSecret !== undefined
+      ? 'configured'
+      : 'unconfigured';
+  }
 
   parseWebhook(
     rawBody: string,

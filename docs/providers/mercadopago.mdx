@@ -36,8 +36,9 @@ required `currency`.
   `id:<data.id>;request-id:<x-request-id>;ts:<ts>;` keyed by the *secret signature* from
   Your integrations → Webhooks. Absent parts are dropped from the manifest, and the docs
   ask you to lowercase an alphanumeric `data.id`, so the driver accepts either spelling.
-  Enforced strictly whenever `webhookSecret` is set, skipped when it isn't so local
-  development works without a dashboard webhook.
+  Enforced strictly, and `webhookSecret` is required — without it the app refuses to boot rather
+  than accepting anything. For local development without a dashboard webhook, name the provider in
+  `allowUnverifiedWebhooks`.
 - **`externalReference`**: sent as Mercado Pago's `external_reference` — on the payment,
   on the Checkout Pro preference (from where the gateway copies it onto the resulting
   payment) and on the preapproval. Mercado Pago restricts it to **64 characters of letters,
@@ -63,6 +64,16 @@ payment.pixCode // the BR Code the payer copies
 payment.pixQrCodeImage // base64 PNG
 payment.hostedUrl // Mercado Pago's own payment page
 ```
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`webhookSecret` is not configured (env fallback `MERCADOPAGO_WEBHOOK_SECRET`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/mercadopago` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
 
 ## The notification carries an id and nothing else
 

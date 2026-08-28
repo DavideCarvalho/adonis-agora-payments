@@ -81,6 +81,36 @@ ecosystem's conventional names. It's a convenience default, not a contract: pass
 The webhook credentials are what make the mounted route **enforce** signatures — see
 [Webhooks → Validation](/docs/payments/webhooks#validation-per-provider).
 
+### `allowUnverifiedWebhooks` — the opt-out for a boot refusal
+
+A driver that *can* authenticate a webhook and was given no credential **refuses to boot**. The
+empty slot used to mean "skip verification", which made `POST /payments/webhook/:provider` accept
+any body anyone posted to it — including one that marks a payment paid.
+
+```ts title="config/payments.ts"
+export default defineConfig({
+  providers: { efi: payments.efi({ /* ... */ }) },
+  allowUnverifiedWebhooks: ['efi'],
+})
+```
+
+| Value | Meaning |
+| --- | --- |
+| omitted (default) | any driver reporting `'unconfigured'` throws at boot, naming the provider |
+| `['efi', 'asaas']` | those providers may take unverified deliveries |
+| `true` | every provider may. Almost never what you want |
+
+Set it only when verification genuinely happens upstream — mutual TLS at the edge, or an API
+gateway that checks the signature before forwarding. Efí and InfinitePay never trip the check:
+their gateways sign nothing, so they report `'unsupported'` rather than `'unconfigured'` and there
+is no credential to forget.
+
+<Callout type="warn" title="This is a breaking change for an existing app">
+An app that has been running with, say, `ASAAS_WEBHOOK_ACCESS_TOKEN` unset will not boot after
+upgrading. That is the point — it was accepting forged deliveries — but it is a deploy-time
+failure, so set the credentials before you ship, not after.
+</Callout>
+
 ## Methods — routing a payment method to a provider
 
 A charge doesn't always know which gateway will handle it — the *customer* picks the
@@ -96,7 +126,7 @@ methods: {
 },
 ```
 
-Then `getPayments().driver('pix')` resolves to the routed provider. Two rules keep a
+Then `getPayments().driver('pix')` resolves to the routed provider. Four rules keep a
 misconfiguration from failing *at the gateway*:
 
 1. **Unknown method/provider** → the manager throws with a helpful list of what's
@@ -105,6 +135,21 @@ misconfiguration from failing *at the gateway*:
    a Pix-only gateway (AbacatePay, Woovi) is a config error, and it's caught when you
    resolve the driver — not after a request to the gateway. The manager checks
    `driver.supportedMethods` before returning the driver.
+3. **`driver()` with no argument consults `methods` too.** It used to skip the map entirely, so an
+   app that configured routing and then called `driver()` got a driver bound to **nothing** and
+   every charge fell back to whatever the gateway dashboard defaults to. Now: exactly one method
+   routed to that provider is applied, the same binding `driver('pix')` would have produced.
+4. **Ambiguity is refused, not guessed.** When `methods` routes several methods to the provider
+   `driver()` resolved, there is no honest answer — so `charge()` and `createSubscription()` throw
+   unless the call names a `method:`, and the message names both ways to say what you meant. Every
+   other method on the driver is untouched. An app that already passes `method:` everywhere is
+   unaffected.
+
+Once a driver was resolved *through* the routing map, a `method:` on the call that the map routes
+**elsewhere** is refused rather than sent to the wrong gateway — `driver('pix').charge({ method:
+'credit_card' })` throws when `methods.credit_card` names another provider. Resolving by provider
+**name** is the deliberate escape hatch: `driver('stripe')` says which gateway you mean, so
+`methods` is not consulted at all and nothing is bound.
 
 ## Invoice — independent of the gateway
 
@@ -157,12 +202,13 @@ Every option, and what you get by omitting it:
 | `role` | `'all'` | `'api'` mounts the route and never processes; `'worker'` processes and never mounts. Both demand an explicit `'durable'` dispatcher — there is no channel between the halves otherwise, and it is refused at boot. See [Production → Splitting api and worker](/docs/payments/production#splitting-api-and-worker). |
 | `store` | the Lucid store over the billing tables | Where the layer persists. `billingStores.lucid({ models })` swaps the models; a factory of your own replaces the store entirely. See [Billing → The billing store](/docs/payments/billing#the-billing-store). |
 | `handlers` | none | Your business logic, keyed by normalized event type. See below. |
+| `passthroughEvents` | none | Gateway event types your drivers pass through unmapped that you register a handler for, when the type happens to fall in the library's own `payment.*`/`subscription.*` namespace. See below. |
 | `durable` | — | Legacy alias for `dispatcher`. See the callout below. |
 
 ### `autoCreateSchema` — who owns the DDL
 
 `true` by default, and there is **no migration to run**: on its first query the Lucid store
-creates the six billing tables itself, the same convention `@adonis-agora/durable` and
+creates the seven billing tables itself, the same convention `@adonis-agora/durable` and
 `@adonis-agora/authz` follow. The DDL is idempotent (`CREATE TABLE IF NOT EXISTS`, plus guarded
 `ALTER`s for columns added after a table shipped), so it costs one round trip per process and an
 install that already ran an older migration gets no-ops.
@@ -236,6 +282,28 @@ in [Webhooks](/docs/payments/webhooks#running-your-business-logic--four-options)
 
 A throwing handler marks the event `failed` in the ledger and the dispatcher retries — so
 handler failures surface instead of being silently swallowed.
+
+Keys are **validated at boot**. A type in the `payment.*`/`subscription.*` namespace that is not
+one of the ten `WEBHOOK_EVENT_TYPES` throws, and so do two handlers claiming the same type. On a
+`role: 'api'` process, where handlers are not resolved at all, the config keys are still checked —
+a misspelling is a config error on both halves of a split deployment.
+
+### `passthroughEvents` — the exception to that check
+
+A gateway event a driver could not map arrives lowercased as the gateway spells it: Asaas'
+`PAYMENT_ANTICIPATED` becomes `payment_anticipated`, which has no dot and needs no declaration.
+This option is for the rare gateway that spells one **with** a dot inside the library's own
+namespace, where the boot check would otherwise read it as a typo:
+
+```ts title="config/payments.ts"
+billing: {
+  passthroughEvents: ['payment.anticipated'],
+  handlers: { 'payment.anticipated': onAnticipated },
+}
+```
+
+The handler's `event.data` stays `unknown` for a passthrough type: nothing normalized it, and
+typing it would be a claim no driver is making.
 
 <Callout type="info" title="The money-flow pattern">
 Webhooks must respond fast. The recommended shape is: the handler only **dispatches a

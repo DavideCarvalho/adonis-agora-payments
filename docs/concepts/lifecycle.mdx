@@ -41,7 +41,9 @@ The provider mounts `POST /payments/webhook/:provider` and hands the request to 
 The order below is the whole design, and each step depends on the one before it:
 
 1. **Validate the signature.** The driver verifies the gateway's scheme — HMAC, RSA, or a shared
-   token, always timing-safe — and throws on failure. A forged callback never reaches your data.
+   token, always timing-safe — and throws on failure. A forged callback never reaches your data. A
+   driver that *can* verify and has no credential configured refuses to boot, so this step is never
+   silently skipped.
 2. **Normalize.** The gateway's own event (`PAYMENT_RECEIVED`, `checkout.session.completed`,
    `PIX_AUTOMATIC_COBR_COMPLETED`) becomes a canonical `payment.succeeded` with a stable `id`.
    One delivery can normalize into **several** events — Adyen's `notificationItems` and Efí's `pix`
@@ -59,8 +61,9 @@ The order below is the whole design, and each step depends on the one before it:
    to cover it dies with the process. A delivery rejected in step 1 stays `400`: redelivering a bad
    signature would fail identically.
 
-Step 3 happening before step 5 is the guarantee: a redelivery never reaches your handler at all.
-Step 6 is why that redelivery is cheap — the events that succeeded are already `processed` and skip
+Step 3 happening before step 5 is the guarantee: a redelivery never reaches your handler at all —
+provided the driver declares a real **event** id, since that is what the ledger keys on. Step 6 is
+why that redelivery is cheap — the events that succeeded are already `processed` and skip
 the claim, so only the failed one runs again.
 
 <Callout type="warn" title="A failed webhook now shows up in your 5xx rate">
@@ -79,11 +82,11 @@ built-in sync switches on nothing else:
 | --- | --- | --- |
 | `payment.succeeded` | the money moved | the payment row becomes `paid` |
 | `payment.failed` | the attempt failed | the payment row becomes `failed` |
-| `payment.refunded` | a refund completed | a known payment row becomes `refunded` |
+| `payment.refunded` | a **full** refund completed | a known payment row becomes `refunded`, with `refunded_amount` set to the whole amount |
 | `payment.disputed` | a chargeback — the money is already going back | a known payment row becomes `disputed`, and a dispute row is opened |
 | `payment.dispute_warning` | an alert *before* any chargeback exists | the payment row is left alone; a dispute row is written with status `warning` |
 | `payment.dispute_closed` | the dispute reached an outcome | `won` puts a `disputed` row back to `paid`; `lost` moves a row that never went to `disputed`; the dispute row records the outcome |
-| `payment.updated` | a payment changed in some other way | nothing |
+| `payment.updated` | a payment changed in some other way — a **partial refund** is this | a known payment row is kept current: `status`, `amount`, `refunded_amount` and `paid_at`, each only when the event states it |
 | `subscription.created` | a recurring subscription now exists | upserted |
 | `subscription.updated` | its status or period changed | upserted |
 | `subscription.canceled` | it ended | a known subscription becomes `canceled` |
@@ -136,8 +139,8 @@ await getPayments().driver('pix').charge({
 ```
 
 ```ts title="app/payment_handlers/payment_succeeded.ts"
-async handle(event: WebhookEvent) {
-  const orderId = (event.data as { externalReference?: string }).externalReference
+async handle(event: WebhookEventFor<'payment.succeeded'>) {
+  const orderId = event.data.externalReference     // typed — no cast
   if (!orderId) return
   await grantAccessFor(orderId)
 }

@@ -28,6 +28,17 @@ and debit card, and boleto, authenticated with a Bearer token.
   granted) and not `paid` (which would grant access against money that evaporates).
 - **No subscriptions, no customers, no invoice list, and no dispute event** — see below.
 
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`verifyWebhooks` is off, which is what an unset `webhookToken` (and unset `PAGBANK_WEBHOOK_TOKEN`,
+and no API token to fall back on) leaves you with.
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/pagbank` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
 ## One order, two ids — and which one this driver uses
 
 PagBank gives the same money two identifiers: the order (`ORDE_…`) and the charge inside it
@@ -87,8 +98,11 @@ implied:
 
 Set `webhookToken` when the account's webhook is configured with a token other than the API
 one. `verifyWebhooks: false` exists for one reason — PagBank's **sandbox** does not always
-send the header — and turning it off leaves the endpoint accepting anything that reaches
-it. Never do that in production.
+send the header — and turning it off leaves the endpoint accepting anything that reaches it.
+
+Turning it off is no longer silent: the driver then reports `webhookVerification: 'unconfigured'`
+and the app refuses to boot unless you also name `pagbank` in `allowUnverifiedWebhooks`. Two
+deliberate statements instead of one flag nobody re-reads.
 
 ```ts
 providers: {

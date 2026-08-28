@@ -73,7 +73,7 @@ node ace make:webhook-handler payment.succeeded
 
 ```ts title="app/payment_handlers/payment_succeeded.ts"
 import { inject } from '@adonisjs/core'
-import type { WebhookEvent } from '@adonis-agora/payments'
+import type { WebhookEventFor } from '@adonis-agora/payments'
 import { DateTime } from 'luxon'
 import Order from '#models/order'
 import GrantService from '#services/grant_service'
@@ -84,8 +84,9 @@ export default class PaymentSucceededHandler {
 
   constructor(private grants: GrantService) {}
 
-  async handle(event: WebhookEvent): Promise<void> {
-    const orderId = (event.data as { externalReference?: string }).externalReference
+  async handle(event: WebhookEventFor<'payment.succeeded'>): Promise<void> {
+    // Typed from the event type — a `PaymentWebhookData`, no cast.
+    const orderId = event.data.externalReference
     if (!orderId) return
 
     // The inner idempotency guard — see below.
@@ -105,6 +106,12 @@ That is the whole setup. The provider scans `app/payment_handlers/` at boot and 
 finds — no import, no config entry, no `adonisrc.ts` edit. The class form (`static eventType` +
 `handle`) is resolved through the container, so constructor injection just works.
 
+`eventType` is checked at boot. A type in the library's own `payment.*`/`subscription.*` namespace
+that is not one of the ten `WEBHOOK_EVENT_TYPES` throws, naming the file — because `'payment.suceeded'`
+used to register a handler nothing ever called while the ledger recorded the delivery as processed
+and the route answered `200`. Two files claiming the same type throw too, naming both: registration
+is a map keyed by type, so the second used to silently replace the first.
+
 <Callout title="How discovery actually runs">
 `node ace add` registers an Assembler `init` hook that generates a barrel of the folder at build and
 dev time, so boot imports a generated module instead of reading the directory. If that hook is not
@@ -122,7 +129,7 @@ redelivers.** See [What actually retries](#what-actually-retries-a-failed-handle
 The same handler, wired explicitly in the config instead of found by convention:
 
 ```ts title="config/payments.ts"
-import { defineConfig, payments } from '@adonis-agora/payments'
+import { defineConfig, defineWebhookHandler, payments } from '@adonis-agora/payments'
 import PaymentSucceededHandler from '#payment_handlers/payment_succeeded'
 
 export default defineConfig({
@@ -136,11 +143,11 @@ export default defineConfig({
       // A DI service class — the library resolves it and calls `.handle(event)`.
       'payment.succeeded': PaymentSucceededHandler,
 
-      // Or a plain function, for logic that needs no injection.
-      'payment.refunded': async (event) => {
-        const ref = (event.data as { externalReference?: string }).externalReference
-        if (ref) await revokeAccessFor(ref)
-      },
+      // Or a plain function, for logic that needs no injection. `defineWebhookHandler`
+      // types `event.data` from the type it is given.
+      'payment.refunded': defineWebhookHandler('payment.refunded', async (event) => {
+        if (event.data.externalReference) await revokeAccessFor(event.data.externalReference)
+      }),
     },
   },
 })

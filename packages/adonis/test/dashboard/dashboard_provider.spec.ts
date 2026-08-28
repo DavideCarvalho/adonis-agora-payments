@@ -72,22 +72,31 @@ describe('PaymentsDashboardProvider route registration', () => {
       'GET /payments/api/health',
       'GET /payments/api/overview',
       'GET /payments/api/payments',
+      'GET /payments/api/payments/:gatewayId',
+      'GET /payments/api/customers',
+      'GET /payments/api/audit',
       'GET /payments/api/disputes',
       'GET /payments/api/subscriptions',
       'GET /payments/api/webhook-events',
       'GET /payments/api/providers',
       'POST /payments/api/payments/:gatewayId/refund',
       'POST /payments/api/webhook-events/:gatewayEventId/retry',
+      'POST /payments/api/disputes/:gatewayId/resolve',
     ]);
   });
 
-  it('exposes disputes as a read and nothing else', async () => {
-    // No accept, no fight, no "submit evidence": whether to answer a chargeback or refund it
-    // is a business rule that stays in the app's code. A write route here would be a decision
-    // this console is not entitled to make.
+  it('exposes disputes as a read plus exactly one write, and that write is a POST', async () => {
+    // Still no accept, no fight, no "submit evidence": whether to ANSWER a chargeback or refund
+    // it is a business rule that stays in the app's code, and none of those routes exist. The
+    // one write is `resolve`, which sends nothing to a gateway — it records how a dispute ended,
+    // because several gateways publish no lost-dispute event and would otherwise leave the row
+    // open forever, holding the health check red until nobody reads it.
     const routes = await bootWith({});
     const dispute = routes.filter((r) => r.pattern.includes('/disputes'));
-    expect(dispute.map((r) => r.method)).toEqual(['get']);
+    expect(dispute.map((r) => `${r.method} ${r.pattern}`)).toEqual([
+      'get /payments/api/disputes',
+      'post /payments/api/disputes/:gatewayId/resolve',
+    ]);
   });
 
   it('registers the refund and the retry as POST ONLY — never reachable by URL', async () => {
@@ -128,12 +137,16 @@ describe('PaymentsDashboardProvider route registration', () => {
       '/ops/billing/api/health',
       '/ops/billing/api/overview',
       '/ops/billing/api/payments',
+      '/ops/billing/api/payments/:gatewayId',
+      '/ops/billing/api/customers',
+      '/ops/billing/api/audit',
       '/ops/billing/api/disputes',
       '/ops/billing/api/subscriptions',
       '/ops/billing/api/webhook-events',
       '/ops/billing/api/providers',
       '/ops/billing/api/payments/:gatewayId/refund',
       '/ops/billing/api/webhook-events/:gatewayEventId/retry',
+      '/ops/billing/api/disputes/:gatewayId/resolve',
     ]);
   });
 
@@ -145,12 +158,16 @@ describe('PaymentsDashboardProvider route registration', () => {
       '/api/health',
       '/api/overview',
       '/api/payments',
+      '/api/payments/:gatewayId',
+      '/api/customers',
+      '/api/audit',
       '/api/disputes',
       '/api/subscriptions',
       '/api/webhook-events',
       '/api/providers',
       '/api/payments/:gatewayId/refund',
       '/api/webhook-events/:gatewayEventId/retry',
+      '/api/disputes/:gatewayId/resolve',
     ]);
   });
 

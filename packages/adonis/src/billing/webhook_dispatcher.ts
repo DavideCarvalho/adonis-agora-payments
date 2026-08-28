@@ -114,6 +114,15 @@ export class WebhookDispatcher {
   #durableChecked = false;
   #durableAvailable: (() => Promise<boolean>) | undefined;
   #durableEngine: (() => Promise<DurableEngineLike>) | undefined;
+  /**
+   * Work that has been ACCEPTED but is not finished: durable runs the engine has taken but
+   * not yet executed, workflow bodies currently running, and in-process background retries.
+   *
+   * Kept so {@link WebhookDispatcher.flushWebhooks} can answer "is anything still in
+   * flight?" — see there for why a test cannot answer it any other way.
+   */
+  #accepted = 0;
+  #inFlight = new Set<Promise<unknown>>();
 
   constructor(options: WebhookDispatcherOptions) {
     this.#processor = options.processor;
@@ -187,7 +196,16 @@ export class WebhookDispatcher {
       // event is the ledger's job (the claim answers `null` and the run skips), and it
       // makes that decision from the row's state rather than from the id alone.
       const runId = randomUUID();
-      await engine.start(WEBHOOK_WORKFLOW_NAME, { event }, runId);
+      // Counted BEFORE the start and cleared when the workflow body begins, so the window
+      // between "the engine took it" and "the engine ran it" is not a window in which
+      // `flushWebhooks()` reports quiet. That window is the entire bug it exists for.
+      this.#accepted += 1;
+      try {
+        await engine.start(WEBHOOK_WORKFLOW_NAME, { event }, runId);
+      } catch (error) {
+        this.#accepted -= 1;
+        throw error;
+      }
       return { runId };
     }
 
@@ -254,7 +272,8 @@ export class WebhookDispatcher {
       WEBHOOK_WORKFLOW_NAME,
       WEBHOOK_WORKFLOW_VERSION,
       async (_ctx: unknown, input: never) => {
-        await processor.process((input as { event: WebhookEvent }).event);
+        this.#accepted = Math.max(0, this.#accepted - 1);
+        await this.#track(processor.process((input as { event: WebhookEvent }).event));
       },
     );
     this.#registered = true;
@@ -278,7 +297,7 @@ export class WebhookDispatcher {
     } catch (error) {
       // Retry in the background (don't block the webhook response). The processor itself
       // publishes `webhook.failed` on the diagnostics channel.
-      void this.#retry(event, 2);
+      void this.#track(this.#retry(event, 2));
       return { error: asError(error) };
     }
   }
@@ -291,6 +310,59 @@ export class WebhookDispatcher {
       await this.#processor.process(event);
     } catch {
       await this.#retry(event, attempt + 1);
+    }
+  }
+  /** Record a promise as in-flight until it settles, and hand it back unchanged. */
+  #track<T>(promise: Promise<T>): Promise<T> {
+    const tracked = promise.finally(() => {
+      this.#inFlight.delete(tracked);
+    });
+    // A rejection here is somebody else's to report (`dispatchAll` collects it, the retry
+    // loop swallows it); this handler only exists so tracking never adds an unhandled
+    // rejection of its own.
+    tracked.catch(() => {});
+    this.#inFlight.add(tracked);
+    return promise;
+  }
+
+  /**
+   * Resolve when nothing this dispatcher accepted is still being processed.
+   *
+   * **The asymmetry this fixes.** In `in-process` mode `dispatchAll` resolves when the event
+   * has been PROCESSED, so a test can assert straight after it. In `durable` mode it
+   * resolves when the event has been ACCEPTED — the run executes out of band — so the same
+   * assertion races the workflow. Every app that pairs `billing.dispatcher` with durable
+   * writes the same polling `waitFor(() => ...)` helper to paper over it, and then cannot
+   * write a NEGATIVE assertion at all: "nothing was granted" against a poll is a timed
+   * sleep, which is slow when it passes and lies when the machine is loaded.
+   *
+   * `await dispatcher.flushWebhooks()` is that assertion made possible: after it, an
+   * unchanged row means the webhook genuinely changed nothing.
+   *
+   * It waits for the background in-process RETRIES too, which have exactly the same problem
+   * — the first attempt is awaited and the retries are not.
+   *
+   * Only reaches work this process accepted. A worker-role deployment runs the events in
+   * another process, and no in-process await can see those; the timeout says so rather than
+   * hanging.
+   */
+  async flushWebhooks(options: { timeoutMs?: number } = {}): Promise<void> {
+    const timeoutMs = options.timeoutMs ?? 5_000;
+    const deadline = Date.now() + timeoutMs;
+    while (this.#accepted > 0 || this.#inFlight.size > 0) {
+      if (Date.now() > deadline) {
+        throw new Error(
+          [
+            `[payments] flushWebhooks timed out after ${timeoutMs}ms with`,
+            `${this.#accepted + this.#inFlight.size} webhook(s) still in flight.`,
+            'If the events are processed by a separate worker process, no in-process wait can',
+            'observe them — assert against the ledger instead.',
+          ].join(' '),
+        );
+      }
+      // Yield to whatever is running rather than polling on a timer: an in-process retry is
+      // on a real `setTimeout` and a durable run may be a microtask away.
+      await Promise.race([...this.#inFlight, sleep(1)]).catch(() => {});
     }
   }
 }

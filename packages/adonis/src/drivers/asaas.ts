@@ -13,6 +13,7 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { headerValue, httpRequest, isNotFound } from '../http.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
@@ -604,6 +605,16 @@ export class AsaasDriver implements PaymentsDriver {
   }
 
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * The shared access token is the only thing authenticating an Asaas delivery; with the slot
+   * empty the token comparison below never runs.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#webhookToken !== undefined ? 'configured' : 'unconfigured';
+  }
 
   parseWebhook(
     rawBody: string,

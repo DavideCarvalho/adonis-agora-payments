@@ -8,6 +8,7 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { httpRequest } from '../http.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
@@ -530,6 +531,15 @@ export class AdyenDriver implements PaymentsDriver {
    * returns one {@link WebhookEvent} per item. A single item still returns a single event,
    * not an array of one.
    */
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * Without the HMAC key every `notificationItem` is taken on trust.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#hmacKey !== undefined ? 'configured' : 'unconfigured';
+  }
+
   parseWebhook(
     rawBody: string,
     _headers: Record<string, string | string[] | undefined>,

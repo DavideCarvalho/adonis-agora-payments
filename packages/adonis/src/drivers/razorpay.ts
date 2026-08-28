@@ -11,6 +11,7 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { headerValue, httpRequest, isNotFound } from '../http.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
@@ -681,6 +682,15 @@ export class RazorpayDriver implements PaymentsDriver {
   }
 
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * Without the secret the `X-Razorpay-Signature` header is never checked.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#webhookSecret !== undefined ? 'configured' : 'unconfigured';
+  }
 
   parseWebhook(
     rawBody: string,

@@ -212,6 +212,53 @@ describe('an event failing in the middle of a batch', () => {
     expect(sent.body).toMatchObject({ error: '[payments] Invalid webhook HMAC signature.' });
     expect(store.webhookEvents.size).toBe(0);
   });
+
+  it('files the refusal in the audit trail, the only trace it can leave', async () => {
+    // A refused delivery is the ONE webhook outcome with no ledger row — it is rejected
+    // before an event exists to record. Without this row a rotated webhook token looks
+    // exactly like a quiet gateway from the inside: no events, no failures, every health
+    // check green, and revenue simply stops arriving.
+    const store = new InMemoryBillingStore();
+    const manager = new PaymentsManager({
+      drivers: new Map([
+        [
+          'batchy',
+          makeDriver(() => {
+            throw new Error('[payments] Invalid webhook HMAC signature.');
+          }),
+        ],
+      ]),
+    });
+
+    const { ctx, sent } = makeCtx('{"forged":true}');
+    await handleWebhookDelivery(ctx, { manager, dispatcher: makeDispatcher(store), store });
+
+    expect(sent.statusCode).toBe(400);
+    const audit = await store.listAuditEvents({ action: 'webhook.rejected' });
+    expect(audit, 'a refused delivery left no trace anywhere').toHaveLength(1);
+    expect(audit[0]?.provider).toBe('batchy');
+    expect(audit[0]?.message).toContain('HMAC');
+  });
+
+  it('still answers 400 when the billing layer is off and there is nowhere to file it', async () => {
+    // `store` is absent whenever `billing.enabled` is false. Refusing the delivery is the
+    // job; recording it is the extra — the extra must never change the status the gateway
+    // sees.
+    const manager = new PaymentsManager({
+      drivers: new Map([
+        [
+          'batchy',
+          makeDriver(() => {
+            throw new Error('[payments] Invalid webhook HMAC signature.');
+          }),
+        ],
+      ]),
+    });
+
+    const { ctx, sent } = makeCtx('{"forged":true}');
+    await handleWebhookDelivery(ctx, { manager });
+    expect(sent.statusCode).toBe(400);
+  });
 });
 
 describe('a driver that returns one event', () => {

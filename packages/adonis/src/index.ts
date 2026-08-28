@@ -41,6 +41,7 @@ export type {
 } from './drivers/infinitepay.js';
 export type {
   PaymentsDriver,
+  WebhookVerificationState,
   CreateCustomerInput,
   UpdateCustomerInput,
   ChargeInput,
@@ -64,12 +65,20 @@ export {
   discoverWebhookHandlers,
   loadWebhookHandlersFromBarrel,
   pickModuleExt,
+  defineWebhookHandler,
+  assertWebhookHandlerTypes,
 } from './webhook_handlers.js';
 export type {
   WebhookHandlerService,
   WebhookHandlerModule,
   DiscoveredWebhookHandler,
   WebhookHandlersBarrel,
+  WebhookHandlerDefinition,
+  WebhookHandlerRegistration,
+  WebhookEventDataMap,
+  WebhookEventDataFor,
+  WebhookEventFor,
+  TypedWebhookHandler,
 } from './webhook_handlers.js';
 export {
   PAYMENTS_DIAGNOSTIC_EVENTS,
@@ -124,14 +133,29 @@ export {
   isPaymentWebhookData,
   isDisputeWebhookData,
   isSubscriptionWebhookData,
+  isWebhookEventType,
 } from './billing/webhook_events.js';
+/**
+ * The canonical event types, as a value and as a type.
+ *
+ * They existed from the start and were not exported, so an app typed its handler keys as a
+ * bare `string` — and `'payment.suceeded'` compiled, registered a handler nothing ever
+ * called, and the ledger still recorded the delivery as processed.
+ */
+export { WEBHOOK_EVENT_TYPES } from './billing/webhook_events.js';
+export type { WebhookEventType } from './billing/webhook_events.js';
 export {
   withBillable,
   withSubscription,
   withPayment,
 } from './billing/index.js';
 export { LucidBillingStore, lucidBillingStore } from './billing/lucid_billing_store.js';
-export { createBillingTables, dropBillingTables, BILLING_TABLES } from './billing/schema.js';
+export {
+  createBillingTables,
+  dropBillingTables,
+  truncateBillingTables,
+  BILLING_TABLES,
+} from './billing/schema.js';
 export type {
   LucidDatabase,
   LucidQueryClient,
@@ -140,18 +164,25 @@ export type {
 export { resolveBillingStore } from './billing/resolve_store.js';
 export type { BillingModels } from './billing/lucid_billing_store.js';
 export type {
+  AuditEventCountQuery,
+  AuditEventListItem,
+  AuditEventQuery,
   BillingStore,
   BillingCountQuery,
   BillingListQuery,
   CustomerListItem,
+  CustomerListQuery,
   DisputeListItem,
   DisputeDeadlineQuery,
+  OpenDisputeQuery,
   PaymentListItem,
+  PaymentListQuery,
   SubscriptionListItem,
   WebhookEventListItem,
+  WebhookEventListQuery,
   WebhookEventBreakdownLine,
 } from './billing/billing_store.js';
-export { OPEN_DISPUTE_STATUSES } from './billing/billing_store.js';
+export { AUDIT_ACTIONS, OPEN_DISPUTE_STATUSES } from './billing/billing_store.js';
 export {
   BILLING_LIST_DEFAULT_LIMIT,
   BILLING_LIST_MAX_LIMIT,
@@ -159,6 +190,7 @@ export {
 export { BillingUsageEvent } from './billing/mixins/with_usage_event.js';
 export { BillingCustomer } from './billing/mixins/with_customer.js';
 export { BillingDispute } from './billing/mixins/with_dispute.js';
+export { BillingAuditEvent } from './billing/mixins/with_audit_event.js';
 export { billingOverview } from './billing/billing_overview.js';
 export type { BillingOverview, BillingOverviewMetric } from './billing/billing_overview.js';
 export { billingHealth } from './billing/billing_health.js';

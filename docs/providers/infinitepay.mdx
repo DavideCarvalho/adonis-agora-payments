@@ -99,7 +99,10 @@ There is no failure event and no refund event, so `parseWebhook` always normaliz
 
 **It verifies nothing, because there is nothing to verify.** InfinitePay documents no
 signature, no HMAC and no shared token for the checkout webhook — its own security advice is
-to re-check the payment instead. An event out of `parseWebhook` therefore means *somebody
+to re-check the payment instead. So this driver declares
+`webhookVerification: 'unsupported'`: the boot-time refusal that stops an app whose driver *can*
+verify and was given no credential does not apply, because there is nothing to configure — and
+`allowUnverifiedWebhooks` is not needed for InfinitePay either. An event out of `parseWebhook` therefore means *somebody
 claimed a payment happened*, not *a payment happened*.
 
 Two things to do about that:

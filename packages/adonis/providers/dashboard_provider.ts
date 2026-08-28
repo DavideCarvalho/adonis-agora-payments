@@ -24,12 +24,16 @@ import {
   type ApiResponse,
   type DashboardActions,
   type Deps,
+  auditEvents,
+  customers,
   disputes,
   health,
   overview,
+  paymentDetail,
   payments,
   providers,
   refundPayment,
+  resolveDispute,
   retryWebhookEvent,
   subscriptions,
   webhookEvents,
@@ -77,13 +81,21 @@ function spaDirectory(): string {
  * - `GET  /assets/:file`         -> the SPA's hashed JS/CSS bundle
  * - `GET  /api/health`           -> `billingHealth()` — what needs attention today
  * - `GET  /api/overview`         -> `billingOverview()` metrics for a period
- * - `GET  /api/payments`         -> a page of `billing_payments` (status/provider filters)
+ * - `GET  /api/payments`         -> a page of `billing_payments` (status/provider filters, plus
+ *                                   `?reference=` / `?gatewayId=` / `?customerId=` lookups)
+ * - `GET  /api/payments/:gatewayId` -> one payment: current state, owner, disputes, the ledger
+ *                                   rows naming it, and who refunded it
+ * - `GET  /api/customers`        -> a page of `billing_customers` — the owner mapping that ties
+ *                                   a `cus_…` back to an app user
+ * - `GET  /api/audit`            -> the trail: refunds issued here, disputes resolved here, and
+ *                                   the gateway deliveries this endpoint REFUSED
  * - `GET  /api/disputes`         -> a page of `billing_disputes`; `?dueWithin=<hours>` for the
- *                                   open windows closing soonest (READ-ONLY, no actions)
+ *                                   open windows closing soonest
  * - `GET  /api/subscriptions`    -> a page of `billing_subscriptions` (status/provider filters)
- * - `GET  /api/webhook-events`   -> a page of `billing_webhook_events` (status/provider filters)
- * - `GET  /api/providers`        -> the gateways this install actually has data for
+ * - `GET  /api/webhook-events`   -> a page of `billing_webhook_events` (status/provider/type)
+ * - `GET  /api/providers`        -> the gateways and event types this install has data for
  * - `POST /api/payments/:gatewayId/refund`           -> refund through the payment's own gateway
+ * - `POST /api/disputes/:gatewayId/resolve`          -> record how a dispute ended, and who said so
  * - `POST /api/webhook-events/:gatewayEventId/retry` -> re-run a failed event's handlers
  *
  * Plus, when `dashboardAuth` is configured, `GET|POST <path>/login`, `POST <path>/session` and
@@ -130,7 +142,8 @@ export default class PaymentsDashboardProvider {
       needsActions = false,
     ) => {
       return async (ctx: HttpContext) => {
-        if (!(await this.enforce(config, ctx, 'api'))) return;
+        const guard = await this.enforce(config, ctx, 'api');
+        if (!guard.allowed) return;
         let store: BillingStore;
         try {
           store = getBillingStore();
@@ -145,6 +158,11 @@ export default class PaymentsDashboardProvider {
           const deps: Deps = {
             store,
             currency: config.currency,
+            // WHO is asking. The guard has already verified a signed session carrying a user;
+            // passing it through is what lets a refund and a dispute resolution be recorded
+            // against a person instead of against nobody. Absent when this deployment
+            // configures no `dashboardAuth` — recorded as "unattributed", never invented.
+            ...(guard.actor !== undefined ? { actor: guard.actor } : {}),
             // Resolved lazily and only for the routes that need it: a console whose payments
             // manager is unreachable must still serve every read.
             ...(needsActions ? { actions: await this.actions(store) } : {}),
@@ -162,9 +180,17 @@ export default class PaymentsDashboardProvider {
     router.get(`${apiBase}/health`, json(health)).as('payments_dashboard.health');
     router.get(`${apiBase}/overview`, json(overview)).as('payments_dashboard.overview');
     router.get(`${apiBase}/payments`, json(payments)).as('payments_dashboard.payments');
-    // Read-only, and only a `GET`: there is no "fight" or "accept" route, on purpose. Whether
-    // to submit evidence or refund is a business rule that stays in the app's code; this exists
-    // so nobody misses the window.
+    // Registered AFTER the collection route and before the refund `POST`, and the ordering is
+    // only cosmetic here — `/payments` and `/payments/:gatewayId` cannot shadow each other — but
+    // it keeps the read routes reading top-down.
+    router
+      .get(`${apiBase}/payments/:gatewayId`, json(paymentDetail))
+      .as('payments_dashboard.payments.show');
+    router.get(`${apiBase}/customers`, json(customers)).as('payments_dashboard.customers');
+    router.get(`${apiBase}/audit`, json(auditEvents)).as('payments_dashboard.audit');
+    // There is still no "fight" or "accept" route, on purpose: whether to submit evidence or
+    // refund is a business rule that stays in the app's code. The `resolve` POST below is a
+    // different thing — it records an outcome that already happened at the gateway.
     router.get(`${apiBase}/disputes`, json(disputes)).as('payments_dashboard.disputes');
     router
       .get(`${apiBase}/subscriptions`, json(subscriptions))
@@ -182,6 +208,12 @@ export default class PaymentsDashboardProvider {
     router
       .post(`${apiBase}/webhook-events/:gatewayEventId/retry`, json(retryWebhookEvent, true))
       .as('payments_dashboard.webhook_events.retry');
+    // No `needsActions`: this one calls no gateway. It records how a dispute ENDED — the loop a
+    // gateway that publishes no lost-dispute event never closes on its own — so it stays
+    // available on a deployment whose payments manager is unreachable.
+    router
+      .post(`${apiBase}/disputes/:gatewayId/resolve`, json(resolveDispute))
+      .as('payments_dashboard.disputes.resolve');
   }
 
   /**
@@ -274,7 +306,7 @@ export default class PaymentsDashboardProvider {
 
     router
       .get(indexPath, async (ctx: HttpContext) => {
-        if (!(await this.enforce(config, ctx, 'page'))) return;
+        if (!(await this.enforce(config, ctx, 'page')).allowed) return;
         let html: string;
         try {
           html = await readFile(resolvePath(spaDirectory(), 'index.html'), 'utf8');
@@ -294,7 +326,7 @@ export default class PaymentsDashboardProvider {
 
     router
       .get(`${config.path}/assets/:file`, async (ctx: HttpContext) => {
-        if (!(await this.enforce(config, ctx, 'page'))) return;
+        if (!(await this.enforce(config, ctx, 'page')).allowed) return;
         const file = basename(String(ctx.params.file));
         const root = resolvePath(spaDirectory(), 'assets');
         const assetPath = resolvePath(root, file);
@@ -397,32 +429,43 @@ export default class PaymentsDashboardProvider {
    *    the login page (Mode B) carrying a sanitized `returnTo`, or a `401` notice (Mode A only);
    *    for an `api` request, `401 { error: 'unauthorized', auth: { modes } }`.
    *
-   * Returns `false` (and has already written the response) when the request must short-circuit.
+   * Returns `allowed: false` (and has already written the response) when the request must
+   * short-circuit. On success it also carries WHO passed the gate: the session's user, which
+   * the write handlers record against a refund or a dispute resolution. `undefined` when this
+   * deployment configures no `dashboardAuth` — there is genuinely nobody to name, and inventing
+   * one would be worse than an honest "unattributed".
    */
   private async enforce(
     config: ResolvedPaymentsDashboardConfig,
     ctx: HttpContext,
     mode: 'page' | 'api',
-  ): Promise<boolean> {
+  ): Promise<{ allowed: boolean; actor?: string }> {
     const allowed = await config.authorize(ctx);
     if (!allowed) {
       if (!ctx.response.getHeader('location')) {
         ctx.response.status(403).json({ error: 'forbidden' });
       }
-      return false;
+      return { allowed: false };
     }
 
     const auth = config.dashboardAuth;
-    if (!auth) return true;
+    if (!auth) return { allowed: true };
 
     const session = readSession(auth, this.readSessionCookie(ctx));
-    if (session) return true;
+    // The display name when the host supplied one, the stable id otherwise. `sub` alone is
+    // unambiguous but often unreadable; a name alone is readable and not unique.
+    if (session) {
+      return {
+        allowed: true,
+        actor: session.name !== undefined ? `${session.name} <${session.sub}>` : session.sub,
+      };
+    }
 
     if (mode === 'page') {
       if (auth.login) {
         const returnTo = ctx.request.url(true);
         ctx.response.redirect().withQs('returnTo', returnTo).toPath(`${config.path}/login`);
-        return false;
+        return { allowed: false };
       }
       // Mode A only: there's no login page to send the browser to — this deployment expects the
       // host app to mint a session via `POST <path>/session` before ever navigating here.
@@ -433,10 +476,10 @@ export default class PaymentsDashboardProvider {
         .send(
           '<!doctype html><html><body style="font-family:ui-monospace,monospace;background:#09090b;color:#e7e7ea;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><p>Open this console from your application.</p></body></html>',
         );
-      return false;
+      return { allowed: false };
     }
     ctx.response.status(401).json({ error: 'unauthorized', auth: { modes: auth.modes } });
-    return false;
+    return { allowed: false };
   }
 
   private readSessionCookie(ctx: HttpContext): string | undefined {

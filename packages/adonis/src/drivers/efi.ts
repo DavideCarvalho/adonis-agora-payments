@@ -11,6 +11,7 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { httpRequest, isNotFound } from '../http.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
@@ -404,6 +405,17 @@ export class EfiDriver implements PaymentsDriver {
    * a non-2xx up to 9 times on a progressive backoff, which is what makes the route's
    * "any failure means a non-2xx" answer actually redeliver a Pix that failed to process.
    */
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * Efí's Pix callback carries no signature at all: authenticity comes from the mutual-TLS
+   * handshake at your edge, or from an `hmac` QUERY parameter this method never sees. There is
+   * nothing to configure, so there is nothing for the boot check to demand.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return 'unsupported';
+  }
+
   parseWebhook(
     rawBody: string,
     _headers: Record<string, string | string[] | undefined>,

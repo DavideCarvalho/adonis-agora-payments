@@ -51,6 +51,16 @@ tests. It has not been exercised against a live Dodo Payments account — run it
 and confirm a real payment, webhook and refund before you take real money with it.
 </Callout>
 
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`webhookKey` is not configured (env fallback `DODO_PAYMENTS_WEBHOOK_KEY`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/dodo` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
 ## Every charge names a product
 
 ```ts title="app/services/checkout_service.ts"

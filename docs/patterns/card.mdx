@@ -290,7 +290,9 @@ Woovi driver with no method to validate, and the failure moves to the gateway's 
 filled in without you repeating it. That matters here, because every driver that varies by method
 reads it off the charge — Stripe's `payment_method_types`, Asaas' `billingType` — and without it the
 charge falls back to whatever the gateway's dashboard defaults are. A method you pass explicitly
-still wins; routing is a default, not an override. See [Routing](/docs/payments/concepts/routing).
+still wins — unless `config.methods` routes it somewhere else, in which case the call is refused
+rather than sent to the wrong gateway. Routing is a default, not an override, and never a
+contradiction. See [Routing](/docs/payments/concepts/routing).
 </Callout>
 
 Forgetting the routing entry altogether is its own error, and it lists what is available:
@@ -310,8 +312,8 @@ back as `payment.failed`, exactly like every other outcome in this library:
 export default class PaymentFailedHandler {
   static readonly eventType = 'payment.failed'
 
-  async handle(event: WebhookEvent): Promise<void> {
-    const data = event.data as { externalReference?: string; reason?: string }
+  async handle(event: WebhookEventFor<'payment.failed'>): Promise<void> {
+    const data = event.data          // PaymentWebhookData — no cast
     const order = await Order.findBy('id', data.externalReference)
     if (!order) return
 

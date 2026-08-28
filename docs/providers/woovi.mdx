@@ -36,6 +36,18 @@ await payments.driver('pix').charge({
 })
 ```
 
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+neither `webhookPublicKey` nor `webhookSecret` is configured (env fallbacks
+`WOOVI_WEBHOOK_PUBLIC_KEY` / `WOOVI_WEBHOOK_SECRET`). Prefer the public key: it is the recommended
+scheme and wins when both are set.
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/woovi` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
 ## Disputes are Pix MED, not chargebacks
 
 A Pix cannot be charged back. What Woovi calls a *disputa* is the Banco Central's

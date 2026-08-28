@@ -232,15 +232,18 @@ it:
 | `failed` | the driver rejected the delivery. `reason` carries its message — bad signature, missing header, stale timestamp, unparsable body. |
 | `unreported` | the delivery was accepted, but **nothing verified it through the shared helpers**. |
 
-That last row is the one to read carefully. `unreported` means one of two things, and the
-entry deliberately does not guess which:
+That last row is the one to read carefully. `unreported` means one of three things, and the entry
+deliberately does not guess which:
 
-1. the driver verified inside its own SDK (Stripe's `constructEvent` does), or
-2. **no webhook credential is configured**, so the driver skipped verification entirely
-   and your endpoint is accepting anything that posts to it.
+1. the driver verified inside its own SDK (Stripe's `constructEvent` does),
+2. the gateway signs nothing at all and there is nothing to verify — Efí and InfinitePay, which
+   declare `webhookVerification: 'unsupported'`, or
+3. **no webhook credential is configured**, which now requires the provider to be named in
+   `allowUnverifiedWebhooks` — an app that has not said that would have refused to boot.
 
-If you are asking "why is my endpoint unauthenticated", `unreported` plus a driver that
-is not SDK-based is your answer: set the webhook secret.
+The third case used to be the silent default, and this row was the only place it showed. It is a
+boot error now, which is why the drift here is worth less than it was: `unreported` plus a driver
+that is not SDK-based and not one of the two unsigned gateways means somebody wrote an opt-out.
 
 <Callout type="warn" title="A known gap">
 The outcome is derived from what the shared `webhook_security` helpers report, so a

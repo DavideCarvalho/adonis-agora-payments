@@ -50,6 +50,16 @@ const session = await payments.driver('adyen').createCheckout({
 // session.url is the Pay by Link page.
 ```
 
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`hmacKey` is not configured (env fallback `ADYEN_HMAC_KEY`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/adyen` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
 ## Webhooks
 
 Adyen signs each notification item with HMAC-SHA256 and puts the result in
@@ -71,9 +81,9 @@ Two details are where implementations go wrong, and both are pinned by tests her
    correctly instead of being rejected as a forgery. The unit tests include Adyen's
    published vector and a colon-bearing reference.
 
-Set `hmacKey` and verification is mandatory: an unsigned or wrongly-signed notification
-throws. Leave it unset and verification is skipped, so local development works without
-Customer Area setup.
+`hmacKey` is required: an unsigned or wrongly-signed notification throws, and leaving the key
+unset no longer means "skip verification" — the app refuses to boot instead. For local development
+without Customer Area setup, name the provider in `allowUnverifiedWebhooks`.
 
 Event mapping: `AUTHORISATION`/`CAPTURE` → `payment.succeeded` (or `payment.failed` when
 `success` is `"false"`), `REFUND` → `payment.refunded`, and `CANCELLATION`, `REFUND_FAILED`,

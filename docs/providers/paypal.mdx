@@ -58,6 +58,16 @@ const session = await payments.driver('paypal').createCheckout({
 return response.redirect(session.url) // paypal.com/checkoutnow?token=…
 ```
 
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`webhookId` is not configured (env fallback `PAYPAL_WEBHOOK_ID`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/paypal` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
 ## Every webhook costs a round trip
 
 `parseWebhook` verifies by calling PayPal, so each event it handles is one
@@ -71,9 +81,11 @@ thousand extra calls to PayPal. There is no offline HMAC to substitute for it.
 // event.data.externalReference === 'order_42'
 ```
 
-With no `webhookId` configured there is nothing to verify against at all, so the event is
-parsed unverified — the same "unconfigured means unenforced" rule the other drivers follow,
-and what lets local development work without a dashboard webhook.
+With no `webhookId` configured there is nothing to verify against at all — so the driver reports
+`webhookVerification: 'unconfigured'` and the app refuses to boot rather than parsing an unverified
+event. For local development without a dashboard webhook, name the provider in
+`allowUnverifiedWebhooks`; the parse path then behaves as it always did and returns the event
+unverified.
 
 Event types are mapped as PayPal spells them: `PAYMENT.CAPTURE.COMPLETED` and
 `PAYMENT.SALE.COMPLETED` → `payment.succeeded`; `PAYMENT.CAPTURE.DECLINED` (there is no

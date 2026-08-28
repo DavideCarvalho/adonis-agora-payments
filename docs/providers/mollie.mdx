@@ -62,6 +62,16 @@ const session = await payments.driver('mollie').createCheckout({
 // session.url is Mollie's hosted checkout page.
 ```
 
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`webhookSecret` is not configured (env fallback `MOLLIE_WEBHOOK_SECRET`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/mollie` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
 ## Webhooks — the fetch is the authentication
 
 Mollie's classic webhook is a form-encoded POST carrying one field:
@@ -108,8 +118,13 @@ and a chargeback both leave Mollie's own `status` at `paid`, so those two get a 
 Mollie's newer Webhooks API sends a JSON event and signs it with `X-Mollie-Signature:
 sha256=<hex>` — an HMAC-SHA256 over the raw body under a signing secret you choose. Set
 `webhookSecret` and the driver switches to fail-closed: a request with no signature, or a
-wrong one, is rejected before anything is fetched. Leave it unset for the classic flow,
-where there is nothing to verify. Note that Mollie's *payment* event types are still beta
+wrong one, is rejected before anything is fetched.
+
+Leaving it unset is the classic flow, where the callback is a bare payment id and the authenticated
+fetch of that payment is what proves the call is genuine. The driver cannot tell the two apart from
+its credential slot, so it reports `'unconfigured'` and the app refuses to boot. **On the classic
+flow that refusal is a false positive** — name `mollie` in `allowUnverifiedWebhooks` and say in a
+comment that the fetch is the authentication. Note that Mollie's *payment* event types are still beta
 and enabled on request; the classic `webhookUrl` remains the supported path.
 
 A signed event still gets fetched. The signature proves who sent the event; it does not

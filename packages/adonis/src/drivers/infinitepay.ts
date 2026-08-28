@@ -9,6 +9,7 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { httpRequest } from '../http.js';
 import type { EmitInvoiceContext } from '../invoice/emit_invoice.js';
@@ -246,6 +247,16 @@ export class InfinitePayDriver implements PaymentsDriver {
    * before you credit anything, and put an unguessable segment in the `webhookUrl` you
    * configure so the endpoint is at least not trivially discoverable.
    */
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * InfinitePay's checkout notification is unsigned — the reference documents no signature
+   * header and no shared secret — so there is nothing to verify with.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return 'unsupported';
+  }
+
   parseWebhook(
     rawBody: string,
     _headers: Record<string, string | string[] | undefined>,

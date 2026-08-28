@@ -14,11 +14,12 @@ native NFS-e.
   sandbox defaults to `NODE_ENV !== 'production'` (the sandbox API host is used).
 - **Webhooks**: authenticated by a shared token you set in the dashboard
   (`asaas-access-token` / `asaas-webhook-token` header), compared timing-safe against
-  `webhookToken`. Events `PAYMENT_CREATED`, `PAYMENT_RECEIVED`, `PAYMENT_OVERDUE`,
-  `PAYMENT_REFUNDED`, `PAYMENT_CHARGEBACK_*`, `SUBSCRIPTION_*` — see
-  [Chargebacks](#chargebacks) for the dispute mapping.
-- **Idempotency**: Asaas has none, and `charge()` is the only method that takes an
-  `idempotencyKey` at all — see [Idempotency](#idempotency-asaas-has-none).
+  `webhookToken`. **The token is required** — without it the driver reports
+  `webhookVerification: 'unconfigured'` and the app refuses to boot. Events `PAYMENT_CREATED`,
+  `PAYMENT_RECEIVED`, `PAYMENT_OVERDUE`, `PAYMENT_REFUNDED`, `PAYMENT_CHARGEBACK_*`,
+  `SUBSCRIPTION_*` — see [Chargebacks](#chargebacks) for the dispute mapping.
+- **Idempotency**: Asaas' API has none, so `charge()` **does the lookup itself** and every
+  other method refuses the key loudly — see [Idempotency](#idempotency-asaas-has-none-so-charge-does-it).
 - **`externalReference`**: sent as the Asaas `externalReference` field — and crucially
   **propagated to every installment** of a subscription's charges, so a webhook for the
   3rd monthly charge still routes back to your subscription record.
@@ -92,6 +93,11 @@ published example shows it on a notification. So the driver reads it defensively
 absent, the event is still a correct `payment.disputed`, just without a deadline. Fetch the
 payment if you need one and it did not arrive.
 
+Plan for it being absent. `evidence_due_by` is what `disputes_due` filters on, so on an Asaas install
+that check can report a healthy **zero** while a chargeback sits open with the money already pulled
+back. The `open_disputes` check needs no deadline and exists for exactly this — see
+[Health checks](/docs/payments/production#health-checks).
+
 <Callout type="warn" title="Asaas does not publish when the money leaves">
 Its developer reference documents `chargeback.status` and says **nothing** about the
 balance; its help centre says the balance is debited when the dispute is *lost*, while also
@@ -108,6 +114,13 @@ A dispute **lost** has no event at all — there is no `PAYMENT_CHARGEBACK_LOST`
 list, and it only shows up as `chargeback.status: "DISPUTE_LOST"` on the payment, which you
 have to fetch. Budget a reconciliation job for it rather than waiting for a webhook that
 never comes.
+
+The consequence is that the `billing_disputes` row stays `open` forever — and
+`listDisputesDueWithin` counts past-deadline rows on purpose, so the dispute check stays red until
+nobody reads it. Close the row by hand once you know: from the console,
+[`POST <dashboard>/api/disputes/:gatewayId/resolve`](/docs/payments/dashboard#recording-how-a-dispute-ended),
+which also records who said so; from code, `store.saveDispute({ status: 'lost', outcome: 'lost',
+closedAt })`. Neither sends anything to Asaas.
 </Callout>
 
 `PAYMENT_DUNNING_REQUESTED` and `PAYMENT_DUNNING_RECEIVED` are **not** disputes — that is
@@ -135,15 +148,58 @@ And the ones that look like money moving and are not:
 | `AWAITING_RISK_ANALYSIS` | `pending` | Held for Asaas' manual card review. Their own guidance is to wait before releasing the product. |
 
 `PAYMENT_PARTIALLY_REFUNDED` normalizes to **`payment.updated`**, deliberately not
-`payment.refunded`: the refund handler overwrites the row's status with `refunded` and its
-amount with the refunded amount, so a R$10 refund on a R$100 charge would drop R$90 of
-revenue rather than subtract R$10. Until the billing tables carry a refunded amount, an
-update is the arithmetic-safe half — the partial amount is in `payload`.
+`payment.refunded`: the refund handler writes the charge off whole — status `refunded` — so a
+R$10 refund on a R$100 charge would drop R$90 of revenue rather than subtract R$10.
+
+The update is now the handler that records it honestly. `payment.updated` carries
+`refundedAmount` in integer minor units, summed from the payment's own `refunds` array, so
+`billing_payments` keeps its `amount`, its `status` and its `paid_at`, and the net is
+`amount - refunded_amount`. Until that column existed the event reached a branch that did
+nothing at all and the refund was simply lost.
+
+**Only refunds Asaas reports as `DONE` are counted.** An Asaas refund can sit `PENDING`, wait
+on approval, or be `CANCELLED`, and `PAYMENT_REFUND_DENIED` is a real event — summing those
+would write off money still in the account. A notification carrying no `refunds` array at all
+sends **nothing** rather than `0`: absent leaves the stored figure alone, while `0` would
+assert that nothing has gone back.
 
 `PAYMENT_CREDIT_CARD_CAPTURE_REFUSED` and `PAYMENT_REPROVED_BY_RISK_ANALYSIS` both
 normalize to `payment.failed`. `PAYMENT_RECEIVED_IN_CASH_UNDONE` — a cash confirmation
 taken back — is a `payment.updated` rather than a refund: Asaas never held the money, so
 there is nothing to refund. The synced row follows the payload's own status.
+
+## The webhook event id
+
+Asaas sends its **own** `id` on the body of every notification — a value like
+`evt_05b708f9…&368604920`, stable across its retries of that notification — and the driver
+declares it. That id is what the [idempotency ledger](/docs/payments/concepts/idempotency) keys on.
+
+It used to be synthesized as `${event}-${paymentId}`, which is not an event identity: it is a
+(payment, event-type) identity, so the **second** `PAYMENT_UPDATED` about one payment was discarded
+as a replay of the first — and a partial refund arrives as exactly that type. When the payload named
+neither a payment nor a subscription it fell back to `Math.random()`, which turned deduplication off
+outright for those deliveries: every retry of a failing one looked new.
+
+The fallback is now a SHA-256 digest of the raw body, used only when Asaas genuinely sends no `id`.
+It is deterministic — a redelivery of the same notification hashes to the same key and is still
+deduplicated — while two genuinely different notifications differ, which is the property the old key
+lacked.
+
+## Listing invoices pages
+
+`GET /payments` is a paged endpoint (`limit`/`offset`, with an explicit `hasMore` in the envelope),
+and `listInvoices` reads **all** of it: 100 rows per page, `hasMore` as the loop's authority, a short
+page ending it when the envelope omits one. It used to ask with neither parameter and hand back
+whatever default page Asaas felt like returning — so `payments:sync` printed a confident total over
+the most recent page and left every older charge unreconciled, silently.
+
+A paging loop that does not terminate **throws** rather than truncating. Returning a partial list
+quietly is the exact bug the paging replaced.
+
+One mapping is lossy in a direction worth naming: `Invoice['status']` has no `refunded` and no
+`disputed` member, so a refunded or charged-back Asaas payment lands on `draft` — "the gateway said
+something this vocabulary cannot spell". Nothing should read a reversal out of a listing;
+`payments:sync` asks `findPayment` for the authoritative status, which speaks `BillingStatus`.
 
 ## Pre-authorized cards
 
@@ -155,7 +211,7 @@ already granted, and not `paid`, which would grant access against money that eva
 nobody captures it. The `PAYMENT_AUTHORIZED` webhook normalizes to `payment.updated`: the
 contract has no authorization event, and the payment's own status already says it.
 
-## Idempotency: Asaas has none
+## Idempotency: Asaas has none, so `charge()` does it
 
 Asaas documents no idempotency mechanism — no header, no body field, on any endpoint; its
 own guidance is that you deduplicate on your side before you retry. So `refund`,
@@ -163,10 +219,36 @@ own guidance is that you deduplicate on your side before you retry. So `refund`,
 `idempotencyKey`, rather than accepting it and dropping it: a silently ignored key turns
 your retry guarantee into a second refund.
 
-`charge()` still accepts one, and always has, but it does not mean deduplication there
-either — it is a legacy fallback for `externalReference`, the routing key echoed on the
-payment. Pass `externalReference` explicitly and look the payment up by it before you
-retry.
+**`charge()` is the exception, and it honours the key.** It used to accept one and quietly
+repurpose it as an `externalReference` fallback — so an app passing `idempotencyKey: order.id`
+on the one call that moves money, believing it was protected against a double charge on a
+retry, got no protection and no warning either.
+
+It now does the deduplication the refusal message describes, on your behalf: the key travels
+as the charge's `externalReference` — the only handle Asaas echoes back **and** accepts as a
+query filter — and a `GET /payments` scoped to that reference and that customer runs
+**before** the `POST`.
+
+```ts
+await payments.driver('pix').charge({
+  customerId: 'cus_123',
+  amount: 1990,
+  idempotencyKey: `order:${order.id}`,   // at most one Asaas charge for this key
+})
+```
+
+Four properties worth knowing:
+
+- **An explicit `externalReference` wins.** The key only stands in when there is none — they
+  must be the same string, or the second call looks for a key the first never wrote.
+- **A hit returns the charge that already exists**, enriched with its Pix code, so the caller
+  gets a usable payment rather than an error.
+- **Neither side effect re-runs.** No second fiscal invoice is emitted (an NFS-e is a legal
+  document, not a retryable write) and no `charge.created` diagnostic is published for a
+  charge that was not created.
+- **It is not a lock.** Two concurrent calls with the same key can both miss the lookup and
+  both create; Asaas offers nothing to prevent that. It closes the retry case, which is the
+  one that actually happens.
 
 ## Transparent checkout — `card`
 

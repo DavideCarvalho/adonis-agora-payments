@@ -13,6 +13,7 @@ function report(checks: HealthCheck[]): Health {
     checks,
     failures: [],
     deadlines: [],
+    openDisputes: [],
   };
 }
 
@@ -51,12 +52,30 @@ describe('healthTarget', () => {
     expect(healthTarget('disputes_due').status).toBeUndefined();
   });
 
+  it('sends open disputes to the DISPUTES screen with no status seeded', () => {
+    // This check counts `warning`, `open` AND `under_review`. Seeding any single one of them
+    // would hide part of what it just counted — the panel names the rows underneath instead.
+    expect(healthTarget('open_disputes')).toMatchObject({ screen: 'disputes' });
+    expect(healthTarget('open_disputes').status).toBeUndefined();
+  });
+
+  it('sends refused deliveries to ACTIVITY, never to the ledger they are not in', () => {
+    // The whole point of the check is that a rejected delivery never becomes a ledger row. The
+    // webhook-events screen would show none of them, which is the worst possible landing.
+    expect(healthTarget('rejected_deliveries')).toMatchObject({
+      screen: 'activity',
+      status: 'webhook.rejected',
+    });
+  });
+
   it('labels every target so the button says what it will show', () => {
     for (const key of [
       'stuck_webhooks',
       'failed_webhooks',
       'unconfirmed_payments',
       'disputes_due',
+      'open_disputes',
+      'rejected_deliveries',
     ] as const) {
       expect(healthTarget(key).label.length).toBeGreaterThan(0);
     }

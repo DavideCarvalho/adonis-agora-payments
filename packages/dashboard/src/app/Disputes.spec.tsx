@@ -206,9 +206,12 @@ describe('empty states', () => {
  *
  * Whether a dispute is worth contesting or cheaper to refund turns on margin, customer value and
  * fraud history — a business rule that stays in the app's code. A button here invites someone to
- * press it without any of that, so the ONLY controls this screen may grow are filters and paging.
+ * press it without any of that, so this screen may grow filters, paging, and exactly ONE action:
+ * recording how a dispute ENDED. That one sends nothing to a gateway; it writes down an outcome
+ * decided somewhere else, because most gateways publish no closing event and the row would
+ * otherwise sit `open` forever with the health check red behind it.
  */
-describe('read-only', () => {
+describe('no decisions, one record', () => {
   const CONTROLS = new Set([
     '24h',
     '3 days',
@@ -224,9 +227,10 @@ describe('read-only', () => {
     'Won',
     'Previous',
     'Next',
+    'Record outcome',
   ]);
 
-  it('offers filters and paging, and nothing that acts on a dispute', async () => {
+  it('offers filters, paging and the outcome record — and nothing that decides a dispute', async () => {
     stubApi({
       due: [dispute({ id: '1', evidenceDueBy: inHours(5) })],
       log: [dispute({ id: '2', status: 'warning' })],
@@ -244,12 +248,31 @@ describe('read-only', () => {
     expect(names.filter((name) => !CONTROLS.has(name))).toEqual([]);
   });
 
-  it('puts no control at all in a dispute row', async () => {
+  it('puts no control at all in a WORK LIST row', async () => {
+    // The closing-windows panel stays untouched: its whole job is "nothing gets missed", and a
+    // control on a row whose window is still open would be a decision, not a record.
     stubApi({ due: [dispute({ id: '1', evidenceDueBy: inHours(5) })] });
     renderScreen();
 
     const row = (await screen.findByText('dp_1')).closest('tr');
     expect(row).not.toBeNull();
     expect((row as HTMLElement).querySelectorAll('button, a, input, select').length).toBe(0);
+  });
+
+  it('offers the outcome record on an OPEN log row and withholds it from a closed one', async () => {
+    // The same set the health check counts. "Resolve" on a row already `lost` would be an edit
+    // box over a money table rather than a resolution.
+    stubApi({
+      log: [
+        dispute({ id: 'open_one', status: 'open' }),
+        dispute({ id: 'done_one', status: 'lost' }),
+      ],
+    });
+    renderScreen();
+
+    const openRow = (await screen.findByText('pi_open_one')).closest('tr') as HTMLElement;
+    const closedRow = (await screen.findByText('pi_done_one')).closest('tr') as HTMLElement;
+    expect(openRow.textContent).toContain('Record outcome');
+    expect(closedRow.textContent).not.toContain('Record outcome');
   });
 });

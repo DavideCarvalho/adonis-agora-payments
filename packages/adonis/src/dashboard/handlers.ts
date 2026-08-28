@@ -1,6 +1,14 @@
 import { billingHealth } from '../billing/billing_health.js';
 import { billingOverview } from '../billing/billing_overview.js';
-import type { BillingStore, DisputeListItem } from '../billing/billing_store.js';
+import {
+  AUDIT_ACTIONS,
+  type AuditEventListItem,
+  type BillingStore,
+  type CustomerListItem,
+  type DisputeListItem,
+  OPEN_DISPUTE_STATUSES,
+  type PaymentListItem,
+} from '../billing/billing_store.js';
 import {
   BILLING_LIST_DEFAULT_LIMIT,
   BILLING_LIST_MAX_LIMIT,
@@ -47,6 +55,16 @@ export interface Deps {
    * with a sentence saying so, rather than a button that silently does nothing.
    */
   actions?: Partial<DashboardActions>;
+  /**
+   * WHO is making this request, as the provider's `enforce()` guard already knew them.
+   *
+   * Per-request, unlike everything else on `Deps`. The guard has verified a signed session
+   * carrying a user before any handler runs, and until now it threw that away — so the only
+   * record of a refund issued from this console was a diagnostic naming a gateway id, an amount
+   * and no person at all. `undefined` on a console with no `dashboardAuth` configured, which is
+   * recorded honestly as "unattributed" rather than invented.
+   */
+  actor?: string;
 }
 
 /** The two things this console can CHANGE. See `actions.ts`. */
@@ -302,6 +320,9 @@ export async function health(deps: Deps): Promise<ApiResponse> {
     // WHICH windows are closing, not just how many — a count names no gateway dashboard to
     // open. Dates cross the wire as ISO strings, like everywhere else here.
     deadlines: report.deadlines.map(disputeJson),
+    // The deadline-free list. On a gateway that publishes no deadline this is the only one of
+    // the two that is ever non-empty, which is exactly why it is separate.
+    openDisputes: report.openDisputes.map(disputeJson),
   });
 }
 
@@ -336,10 +357,12 @@ function disputeJson(row: DisputeListItem) {
  *   unanswered, and dropping them the moment they expire would make the panel go quiet at
  *   exactly the moment it became urgent.
  *
- * READ-ONLY, deliberately. There is no "accept" and no "fight" button: whether to submit
- * evidence or refund is a business rule (it turns on the fee, the evidence you actually have,
- * and the chargeback ratio that puts a merchant into a card network's monitoring programme),
- * and it stays in the app's code. This panel exists so nobody misses the window.
+ * There is still no "accept" and no "fight" button: whether to submit evidence or refund is a
+ * business rule (it turns on the fee, the evidence you actually have, and the chargeback ratio
+ * that puts a merchant into a card network's monitoring programme), and it stays in the app's
+ * code. The one write this screen does have is {@link resolveDispute}, which records an outcome
+ * that has ALREADY happened at the gateway — see the note there for why that is not the same
+ * thing.
  */
 export async function disputes(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
   const status = filterQuery(req.query.status);
@@ -394,39 +417,187 @@ export async function disputes(deps: Deps, req: ApiRequest): Promise<ApiResponse
   });
 }
 
-/** `GET <api>/payments` — a page of `billing_payments`, newest first, `status`/`provider` filters. */
+/** The app-side owner of a payment, resolved through `billing_customers`. */
+interface OwnerJson {
+  type: string | null;
+  id: string | null;
+  name: string | null;
+  email: string | null;
+}
+
+/**
+ * One payment row as JSON.
+ *
+ * `externalReference` is here, and its absence was the bug: the store has returned it since the
+ * column existed and this serializer dropped it, so the console showed a gateway id where the
+ * operator was holding an order number. It is the ONLY field on this row the app itself chose,
+ * which makes it the only one that can answer "did THIS student's payment land?".
+ *
+ * `owner` is the other half of the same question. A payment carries the GATEWAY's customer id
+ * (`cus_…`), which names nobody; `billing_customers.owner_type`/`owner_id`, written by
+ * `ensureCustomer`, is the only thing tying it to an app user. `null` when the payment has no
+ * customer id, or when nothing mapped it.
+ */
+function paymentJson(row: PaymentListItem, owner: OwnerJson | null) {
+  return {
+    id: row.id,
+    gatewayId: row.gatewayId,
+    provider: row.provider,
+    status: row.status,
+    // Integer minor units, as stored. The SPA formats.
+    amount: row.amount,
+    currency: row.currency,
+    customerId: row.customerId,
+    subscriptionId: row.subscriptionId,
+    /** The APP's own id for this charge. `null` when the gateway echoed none. */
+    externalReference: row.externalReference,
+    /** Integer minor units already refunded; `null` on a row older than the column. */
+    refundedAmount: row.refundedAmount,
+    owner,
+    paidAt: iso(row.paidAt),
+    createdAt: iso(row.createdAt),
+    /** Whether the Refund button is offered for this row. The SPA must not have to re-derive
+     *  the server's rule, because the two disagreeing means a button that always errors. */
+    refundable: row.status === REFUNDABLE_STATUS,
+  };
+}
+
+/**
+ * Resolve the app-side owner for a page of payments, in ONE store read.
+ *
+ * A lookup per row would be a query per row of every page. `listCustomersByGatewayIds` takes the
+ * distinct ids instead; rows whose customer is unmapped simply get `null`, which is the honest
+ * answer — `ensureCustomer` is what writes the mapping, and an app that charges without it has
+ * no owner to report.
+ */
+async function ownersFor(
+  store: BillingStore,
+  rows: readonly PaymentListItem[],
+): Promise<Map<string, OwnerJson>> {
+  const ids = [...new Set(rows.map((row) => row.customerId).filter((id): id is string => !!id))];
+  const owners = new Map<string, OwnerJson>();
+  if (ids.length === 0) return owners;
+  for (const customer of await store.listCustomersByGatewayIds(ids)) {
+    owners.set(customer.gatewayId, {
+      type: customer.ownerType,
+      id: customer.ownerId,
+      name: customer.name,
+      email: customer.email,
+    });
+  }
+  return owners;
+}
+
+/**
+ * `GET <api>/payments` — a page of `billing_payments`, newest first.
+ *
+ * Filters: `status`, `provider`, and the three that answer "did this one land?" —
+ * `reference` (the app's own `externalReference`), `gatewayId`, and `customerId`. All three are
+ * EXACT: they are join keys, and a prefix match on `order-4` returning `order-42` is a wrong
+ * answer to a question about money.
+ */
 export async function payments(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
   const status = filterQuery(req.query.status);
   const provider = filterQuery(req.query.provider);
+  // `reference` in the query string, `externalReference` in the store — the short name is what
+  // an operator types, and both are accepted so a link built from either keeps working.
+  const reference = filterQuery(req.query.reference) ?? filterQuery(req.query.externalReference);
+  const gatewayId = filterQuery(req.query.gatewayId);
+  const customerId = filterQuery(req.query.customerId);
   const page = pageOf(req);
   const filtered = await pageBy(
     (limit, offset) =>
-      deps.store.listPayments({ ...(status !== undefined ? { status } : {}), limit, offset }),
+      deps.store.listPayments({
+        ...(status !== undefined ? { status } : {}),
+        ...(reference !== undefined ? { externalReference: reference } : {}),
+        ...(gatewayId !== undefined ? { gatewayId } : {}),
+        ...(customerId !== undefined ? { customerId } : {}),
+        limit,
+        offset,
+      }),
     page,
     provider,
   );
+  const owners = await ownersFor(deps.store, filtered.rows);
   return ok({
-    payments: filtered.rows.map((row) => ({
-      id: row.id,
-      gatewayId: row.gatewayId,
-      provider: row.provider,
-      status: row.status,
-      // Integer minor units, as stored. The SPA formats.
-      amount: row.amount,
-      currency: row.currency,
-      customerId: row.customerId,
-      subscriptionId: row.subscriptionId,
-      paidAt: iso(row.paidAt),
-      createdAt: iso(row.createdAt),
-      /** Whether the Refund button is offered for this row. The SPA must not have to re-derive
-       *  the server's rule, because the two disagreeing means a button that always errors. */
-      refundable: row.status === REFUNDABLE_STATUS,
-    })),
+    payments: filtered.rows.map((row) =>
+      paymentJson(row, (row.customerId && owners.get(row.customerId)) || null),
+    ),
     page: pageEnvelope(page, filtered),
     statuses: PAYMENT_STATUSES,
     currency: deps.currency,
+    /** Echoed so the SPA can render "no payment carries reference X" rather than "no payments". */
+    filters: {
+      reference: reference ?? null,
+      gatewayId: gatewayId ?? null,
+      customerId: customerId ?? null,
+    },
   });
 }
+
+/**
+ * `GET <api>/payments/:gatewayId` — everything this system knows about ONE payment.
+ *
+ * The screen that did not exist, and the honest name for it is "what IS knowable", not "history".
+ * `billing_payments` is a single mutable row upserted in place: it has a current state and no
+ * past, so "what changed on this payment, and when?" cannot be answered from it and this endpoint
+ * does not pretend otherwise. What it assembles instead:
+ *
+ * - the row's CURRENT state, including `refundedAmount` and the app's own reference;
+ * - the app-side OWNER, through `billing_customers`;
+ * - every DISPUTE filed against it — that table does carry a real link (`payment_gateway_id`);
+ * - the LEDGER rows whose stored delivery names it, newest first. That is a payload substring
+ *   scan, with everything that implies: it is unindexed, and it can match a delivery that merely
+ *   mentions the id. `events.matchedBy` says so on the wire rather than in a comment nobody sees.
+ * - the AUDIT rows naming it — who refunded it, from this console, and when.
+ *
+ * The stored payload is still never returned. The timeline says an event ARRIVED and what type it
+ * was; what was inside it is telescope's job.
+ */
+export async function paymentDetail(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
+  const gatewayId = req.params.gatewayId;
+  if (gatewayId === undefined || gatewayId === '') {
+    return badRequest('A payment gateway id is required.');
+  }
+
+  // The LIST read, not `findPaymentByGatewayId`: that one hands back the implementation's row
+  // (a Lucid model in one store, a plain object in the other) and this response needs the
+  // normalized shape every other endpoint here serializes.
+  const [row] = await deps.store.listPayments({ gatewayId, limit: 1 });
+  if (row === undefined) {
+    return notFound(`No payment "${gatewayId}" is recorded locally.`);
+  }
+
+  const [owners, disputeRows, eventRows, auditRows] = await Promise.all([
+    ownersFor(deps.store, [row]),
+    deps.store.listDisputes({ limit: PAYMENT_TIMELINE_LIMIT }),
+    deps.store.listWebhookEventsForPayment(gatewayId, { limit: PAYMENT_TIMELINE_LIMIT }),
+    deps.store.listAuditEvents({
+      subjectType: 'payment',
+      subjectId: gatewayId,
+      limit: PAYMENT_TIMELINE_LIMIT,
+    }),
+  ]);
+
+  return ok({
+    payment: paymentJson(row, (row.customerId && owners.get(row.customerId)) || null),
+    // Filtered here rather than in the store: `listDisputes` has no payment filter, and adding
+    // one for a page that is already bounded would be a second read to maintain. A dispute list
+    // this long on one install is itself the emergency.
+    disputes: disputeRows.filter((d) => d.paymentGatewayId === gatewayId).map(disputeJson),
+    events: {
+      rows: eventRows.map(webhookEventJson),
+      /** How the rows were found — see the note on `listWebhookEventsForPayment`. */
+      matchedBy: 'payload-substring',
+    },
+    audit: auditRows.map(auditJson),
+    currency: deps.currency,
+  });
+}
+
+/** How many rows each strand of the per-payment view returns. A payment with more than this many
+ *  ledger rows is not a timeline, it is an incident. */
+const PAYMENT_TIMELINE_LIMIT = 50;
 
 /**
  * `GET <api>/subscriptions` — a page of `billing_subscriptions`, newest first,
@@ -481,28 +652,166 @@ export async function subscriptions(deps: Deps, req: ApiRequest): Promise<ApiRes
 export async function webhookEvents(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
   const status = filterQuery(req.query.status);
   const provider = filterQuery(req.query.provider);
+  // The filter the ledger was missing. `status` + `provider` answers "what is failing on Asaas";
+  // it could not answer "did a refund event arrive at all", which is the question the ledger gets
+  // read for the moment one specific charge is in doubt.
+  const type = filterQuery(req.query.type);
   const page = pageOf(req);
   const filtered = await pageBy(
     (limit, offset) =>
-      deps.store.listWebhookEvents({ ...(status !== undefined ? { status } : {}), limit, offset }),
+      deps.store.listWebhookEvents({
+        ...(status !== undefined ? { status } : {}),
+        ...(type !== undefined ? { type } : {}),
+        limit,
+        offset,
+      }),
     page,
     provider,
   );
   return ok({
-    events: filtered.rows.map((row) => ({
-      id: row.id,
-      gatewayEventId: row.gatewayEventId,
-      provider: row.provider,
-      type: row.type,
-      status: row.status,
-      error: row.error,
-      createdAt: iso(row.createdAt),
-      updatedAt: iso(row.updatedAt),
-      /** Only a `failed` row can be retried — see `retryWebhookEvent`. */
-      retryable: row.status === 'failed',
-    })),
+    events: filtered.rows.map(webhookEventJson),
     page: pageEnvelope(page, filtered),
     statuses: WEBHOOK_EVENT_STATUSES,
+  });
+}
+
+/** One ledger row as JSON. The stored payload is never part of it — telescope's job. */
+function webhookEventJson(row: {
+  id: string;
+  gatewayEventId: string;
+  provider: string;
+  type: string;
+  status: string;
+  error: string | null;
+  createdAt: Date | null;
+  updatedAt: Date | null;
+}) {
+  return {
+    id: row.id,
+    gatewayEventId: row.gatewayEventId,
+    provider: row.provider,
+    type: row.type,
+    status: row.status,
+    error: row.error,
+    createdAt: iso(row.createdAt),
+    updatedAt: iso(row.updatedAt),
+    /** Only a `failed` row can be retried — see `retryWebhookEvent`. */
+    retryable: row.status === 'failed',
+  };
+}
+
+/** One audit row as JSON. `amount` stays integer minor units. */
+function auditJson(row: AuditEventListItem) {
+  return {
+    id: row.id,
+    action: row.action,
+    /** `null` is "unattributed" — a console with no `dashboardAuth` cannot name anybody. */
+    actor: row.actor,
+    provider: row.provider,
+    subjectType: row.subjectType,
+    subjectId: row.subjectId,
+    amount: row.amount,
+    currency: row.currency,
+    message: row.message,
+    metadata: row.metadata,
+    createdAt: iso(row.createdAt),
+  };
+}
+
+/** One `billing_customers` row as JSON — the mapping that ties a gateway customer to an app user. */
+function customerJson(row: CustomerListItem) {
+  return {
+    id: row.id,
+    gatewayId: row.gatewayId,
+    provider: row.provider,
+    ownerType: row.ownerType,
+    ownerId: row.ownerId,
+    email: row.email,
+    name: row.name,
+    taxId: row.taxId,
+    createdAt: iso(row.createdAt),
+  };
+}
+
+/**
+ * `GET <api>/customers` — a page of `billing_customers`, newest first.
+ *
+ * The endpoint that did not exist. `billing_customers` holds `owner_type`/`owner_id`, written by
+ * the app itself through `ensureCustomer`, and that mapping is the ONLY thing tying a payment to
+ * a person: a payment row carries `cus_…` and nothing else. Without this the console could show
+ * every charge in the system and never answer "which of these is user 4102's".
+ *
+ * Filters: `provider`, `ownerType`, `ownerId`, `gatewayId` — all exact. Pair `ownerType` with
+ * `ownerId`: one owner may legitimately hold a customer at every configured gateway, so an id
+ * alone is not a key.
+ */
+export async function customers(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
+  const provider = filterQuery(req.query.provider);
+  const ownerType = filterQuery(req.query.ownerType);
+  const ownerId = filterQuery(req.query.ownerId);
+  const gatewayId = filterQuery(req.query.gatewayId);
+  const page = pageOf(req);
+  const rows = await deps.store.listCustomers({
+    ...(provider !== undefined ? { provider } : {}),
+    ...(ownerType !== undefined ? { ownerType } : {}),
+    ...(ownerId !== undefined ? { ownerId } : {}),
+    ...(gatewayId !== undefined ? { gatewayId } : {}),
+    limit: page.limit,
+    offset: page.offset,
+  });
+  return ok({
+    customers: rows.map(customerJson),
+    // No `scanned`/`truncated`: every filter here is a column the store applies, so there is no
+    // bounded scan behind this list and claiming the caveat would be claiming one that does not
+    // apply. Same reason the disputes page reports a narrower envelope.
+    page: { limit: page.limit, offset: page.offset, count: rows.length },
+  });
+}
+
+/** The audit actions the filter offers. A free string in the column, so this is a UI convenience
+ *  list, not a validation whitelist — an app that records its own actions still sees them. */
+export const AUDIT_ACTION_FILTERS = [
+  AUDIT_ACTIONS.webhookRejected,
+  AUDIT_ACTIONS.refund,
+  AUDIT_ACTIONS.disputeResolved,
+] as const;
+
+/**
+ * `GET <api>/audit` — the trail of things that happened which no other table records.
+ *
+ * Three kinds of row, and each of them used to be a diagnostic and nothing else:
+ *
+ * - `webhook.rejected` — a delivery the endpoint REFUSED. This is the one that matters most,
+ *   because it is otherwise invisible: a rejected delivery never becomes a ledger row, so a
+ *   rotated webhook secret looks exactly like a quiet week — zero events, zero failures, every
+ *   check green — while every refund, chargeback and dispute closure is dropped on the floor.
+ * - `payment.refunded` — WHO refunded what, from this console. The payment row moves only when
+ *   the gateway's webhook lands, and that row names no person.
+ * - `dispute.resolved` — who closed a dispute the gateway will never close itself.
+ *
+ * Filters: `action`, `actor`, `provider`, `subjectType`, `subjectId` — all exact.
+ */
+export async function auditEvents(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
+  const action = filterQuery(req.query.action);
+  const actor = filterQuery(req.query.actor);
+  const provider = filterQuery(req.query.provider);
+  const subjectType = filterQuery(req.query.subjectType);
+  const subjectId = filterQuery(req.query.subjectId);
+  const page = pageOf(req);
+  const rows = await deps.store.listAuditEvents({
+    ...(action !== undefined ? { action } : {}),
+    ...(actor !== undefined ? { actor } : {}),
+    ...(provider !== undefined ? { provider } : {}),
+    ...(subjectType !== undefined ? { subjectType } : {}),
+    ...(subjectId !== undefined ? { subjectId } : {}),
+    limit: page.limit,
+    offset: page.offset,
+  });
+  return ok({
+    audit: rows.map(auditJson),
+    // Column filters throughout, so no bounded scan and no `truncated` caveat to claim.
+    page: { limit: page.limit, offset: page.offset, count: rows.length },
+    actions: AUDIT_ACTION_FILTERS,
   });
 }
 
@@ -522,10 +831,152 @@ export async function providers(deps: Deps): Promise<ApiResponse> {
     deps.store.webhookEventBreakdown({}),
   ]);
   const names = new Set<string>();
+  const types = new Set<string>();
   for (const row of paymentRows) names.add(row.provider);
   for (const row of subscriptionRows) names.add(row.provider);
-  for (const line of breakdown) names.add(line.provider);
-  return ok({ providers: [...names].sort() });
+  for (const line of breakdown) {
+    names.add(line.provider);
+    types.add(line.type);
+  }
+  // The event-type vocabulary, from the DATA for the same reason the provider list is: the types
+  // an install actually receives are a handful, the ones this package can emit are many, and a
+  // filter offering twenty that return nothing hides the three that do not.
+  return ok({ providers: [...names].sort(), eventTypes: [...types].sort() });
+}
+
+/** The dispute statuses that mean the matter is FINISHED — `DISPUTE_STATUSES` minus the open
+ *  ones. Only these can be recorded through {@link resolveDispute}: "resolve" that could put a
+ *  row back into `open` is not a resolution, it is an edit box over a money table. */
+export const DISPUTE_RESOLUTION_STATUSES = DISPUTE_STATUSES.filter(
+  (status) => !(OPEN_DISPUTE_STATUSES as readonly string[]).includes(status),
+);
+
+/**
+ * `POST <api>/disputes/:gatewayId/resolve` — record how a dispute ENDED.
+ *
+ * The one thing this console could not do, and the reason the dispute alarm was permanently red
+ * on a real install: Asaas publishes no lost-dispute event at all, and the driver hardcodes
+ * `outcome: 'won'` when it closes one — so a dispute that was LOST stays `open` in
+ * `billing_disputes` forever. `listDisputesDueWithin` counts past-deadline rows on purpose, so
+ * the check stays red, and a fifteen-minute cron logs the same failure until nobody reads it.
+ * A gateway that never closes the loop is the NORMAL case here, not the exception.
+ *
+ * This does not fight, accept or refund anything — nothing here talks to a gateway. It records
+ * an outcome that has already happened somewhere else, with the status, the outcome and WHO said
+ * so, which is the difference between a resolution and an edit box.
+ *
+ * Body: `{ status, outcome?, note? }`. `status` must be a finished one
+ * ({@link DISPUTE_RESOLUTION_STATUSES}); `outcome` defaults to it.
+ */
+export async function resolveDispute(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
+  const gatewayId = req.params.gatewayId;
+  if (gatewayId === undefined || gatewayId === '') {
+    return badRequest('A dispute gateway id is required.');
+  }
+
+  const body = (typeof req.body === 'object' && req.body !== null ? req.body : {}) as {
+    status?: unknown;
+    outcome?: unknown;
+    note?: unknown;
+  };
+  const status = typeof body.status === 'string' ? body.status : '';
+  if (!DISPUTE_RESOLUTION_STATUSES.includes(status as (typeof DISPUTE_STATUSES)[number])) {
+    return badRequest(
+      `\`status\` must be one of ${DISPUTE_RESOLUTION_STATUSES.map((s) => `"${s}"`).join(', ')} — a dispute is only resolved by ending.`,
+    );
+  }
+  if (body.outcome !== undefined && body.outcome !== null && typeof body.outcome !== 'string') {
+    return badRequest('`outcome` must be a string when given.');
+  }
+  if (body.note !== undefined && body.note !== null && typeof body.note !== 'string') {
+    return badRequest('`note` must be a string when given.');
+  }
+  const outcome = typeof body.outcome === 'string' && body.outcome !== '' ? body.outcome : status;
+  const note = typeof body.note === 'string' && body.note !== '' ? body.note : null;
+
+  const existing = await deps.store.findDisputeByGatewayId(gatewayId);
+  if (existing === null) {
+    return notFound(`No dispute "${gatewayId}" is recorded locally.`);
+  }
+  const dispute = readDisputeRow(existing);
+
+  const now = (deps.now ?? (() => new Date()))();
+  // `saveDispute` leaves absent fields alone, so the deadline and the reason the OPENING event
+  // carried survive this write — which is the whole point of that rule.
+  await deps.store.saveDispute({
+    gatewayId,
+    paymentGatewayId: dispute.paymentGatewayId,
+    provider: dispute.provider,
+    status,
+    outcome,
+    closedAt: now,
+  });
+
+  // WHO closed it. The row itself records the outcome; only this records the person, and on a
+  // gateway that publishes no closing event a human IS the entire provenance of that outcome.
+  const audit = await deps.store.recordAuditEvent({
+    action: AUDIT_ACTIONS.disputeResolved,
+    ...(deps.actor !== undefined ? { actor: deps.actor } : {}),
+    provider: dispute.provider,
+    subjectType: 'dispute',
+    subjectId: gatewayId,
+    ...(dispute.amount !== null ? { amount: dispute.amount } : {}),
+    ...(dispute.currency !== null ? { currency: dispute.currency } : {}),
+    message: note,
+    metadata: {
+      status,
+      outcome,
+      previousStatus: dispute.status,
+      paymentGatewayId: dispute.paymentGatewayId,
+    },
+    createdAt: now,
+  });
+
+  return ok({
+    dispute: {
+      gatewayId,
+      paymentGatewayId: dispute.paymentGatewayId,
+      provider: dispute.provider,
+      status,
+      outcome,
+      closedAt: now.toISOString(),
+    },
+    /** `null` on an install whose `billing_audit_events` table is not there yet — the dispute
+     *  still closed, and saying so beats pretending the note was filed. */
+    audit: audit === null ? null : auditJson(audit),
+    note: 'Recorded locally. Nothing was sent to the gateway — this closes the row a gateway that publishes no lost-dispute event would otherwise leave open forever.',
+  });
+}
+
+/**
+ * Read the fields a resolution needs off whatever row the store returned.
+ *
+ * `findDisputeByGatewayId` hands back the IMPLEMENTATION's row (a Lucid model in one store, a
+ * plain object in the other), not the normalized `DisputeListItem` the lists get — the same
+ * situation, and the same defensive read, as {@link readPaymentRow}. `amount` goes through
+ * `Number` because Postgres hands a `bigint` back as a string.
+ */
+function readDisputeRow(row: unknown): {
+  paymentGatewayId: string;
+  provider: string;
+  status: string;
+  amount: number | null;
+  currency: string | null;
+} {
+  const r = row as {
+    paymentGatewayId?: unknown;
+    provider?: unknown;
+    status?: unknown;
+    amount?: unknown;
+    currency?: unknown;
+  };
+  return {
+    paymentGatewayId: String(r.paymentGatewayId ?? ''),
+    provider: String(r.provider ?? ''),
+    status: String(r.status ?? ''),
+    amount: r.amount === null || r.amount === undefined ? null : Number(r.amount),
+    currency: typeof r.currency === 'string' ? r.currency : null,
+  };
 }
 
 /**
@@ -580,7 +1031,29 @@ export async function refundPayment(deps: Deps, req: ApiRequest): Promise<ApiRes
     ...(amount !== undefined ? { amount } : {}),
   });
   switch (outcome.kind) {
-    case 'ok':
+    case 'ok': {
+      // WHO refunded WHAT. The only record of a console refund used to be a diagnostic carrying
+      // a gateway id, a provider and an amount — and no actor at all, even though `enforce()`
+      // had already verified exactly who authorised the request. The payment row will not carry
+      // it either: the gateway's webhook moves that row and it names no person. Partial refunds
+      // make it sharper still, now that several of them can land on one payment.
+      const audit = await deps.store.recordAuditEvent({
+        action: AUDIT_ACTIONS.refund,
+        ...(deps.actor !== undefined ? { actor: deps.actor } : {}),
+        provider: payment.provider,
+        subjectType: 'payment',
+        subjectId: gatewayId,
+        // What was ASKED for, in the payment's own currency — `amount` absent means the whole
+        // charge, and recording the figure rather than a null is what makes a partial legible.
+        amount: amount ?? payment.amount,
+        currency: payment.currency,
+        metadata: {
+          partial: amount !== undefined,
+          paymentAmount: payment.amount,
+          refundGatewayId: outcome.refund.gatewayId,
+          refundStatus: outcome.refund.status,
+        },
+      });
       return ok({
         refund: outcome.refund,
         payment: {
@@ -589,10 +1062,14 @@ export async function refundPayment(deps: Deps, req: ApiRequest): Promise<ApiRes
           amount: payment.amount,
           currency: payment.currency,
         },
+        /** `null` when this install has no `billing_audit_events` table yet. The refund still
+         *  happened — failing it because the note could not be filed would be strictly worse. */
+        audit: audit === null ? null : auditJson(audit),
         // The row still says `paid` until the gateway's webhook lands. Say so, rather than
         // letting the operator read the unchanged list as a failed refund.
         note: 'The payment row updates when the gateway’s refund webhook arrives.',
       });
+    }
     case 'unavailable':
       return unavailable(outcome.message);
     case 'unsupported':

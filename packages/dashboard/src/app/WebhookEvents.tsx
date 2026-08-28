@@ -5,6 +5,7 @@ import { formatWhen } from './money';
 import { Pager, Panel, QueryState, ScanNotice } from './shell';
 import { isActionable, webhookStatusClass } from './status';
 import { Badge } from './ui/badge';
+import { EventTypeFilter } from './ui/event-type-filter';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';
 
@@ -35,12 +36,14 @@ const STATUS_OPTIONS: ReadonlyArray<{ value: string | undefined; label: string }
 export function WebhookEvents({ initialStatus }: { initialStatus?: string | undefined } = {}) {
   const [status, setStatus] = useState<string | undefined>(initialStatus ?? 'failed');
   const [provider, setProvider] = useState<string | undefined>(undefined);
+  const [type, setType] = useState<string | undefined>(undefined);
   const [offset, setOffset] = useState(0);
   const queryClient = useQueryClient();
 
   const query = useQuery({
-    queryKey: ['webhook-events', status, provider, offset],
-    queryFn: () => paymentsClient.webhookEvents({ status, provider, limit: PAGE_SIZE, offset }),
+    queryKey: ['webhook-events', status, provider, type, offset],
+    queryFn: () =>
+      paymentsClient.webhookEvents({ status, provider, type, limit: PAGE_SIZE, offset }),
   });
 
   const retry = useMutation({
@@ -63,6 +66,7 @@ export function WebhookEvents({ initialStatus }: { initialStatus?: string | unde
       subtitle="The idempotency ledger. A failed row means a handler threw and the dispatcher gave up — its effect never happened."
       actions={
         <div className="flex flex-wrap items-center gap-3">
+          <EventTypeFilter value={type} onChange={(v) => refilter(() => setType(v))} />
           <ProviderFilter value={provider} onChange={(v) => refilter(() => setProvider(v))} />
           <Segmented
             aria-label="Event status"
@@ -76,7 +80,7 @@ export function WebhookEvents({ initialStatus }: { initialStatus?: string | unde
       <QueryState
         query={query}
         empty={rows.length === 0}
-        emptyMessage={emptyMessage(status, provider)}
+        emptyMessage={emptyMessage(status, provider, type)}
       >
         <table className="w-full text-sm">
           <thead>
@@ -171,7 +175,17 @@ export function WebhookEvents({ initialStatus }: { initialStatus?: string | unde
   );
 }
 
-function emptyMessage(status: string | undefined, provider: string | undefined): string {
+function emptyMessage(
+  status: string | undefined,
+  provider: string | undefined,
+  type?: string | undefined,
+): string {
+  // The type answer first: "no webhook events" would read as a dead endpoint, when what was
+  // actually asked was whether ONE kind of event ever arrived.
+  if (type !== undefined) {
+    const scope = provider === undefined ? '' : ` from “${provider}”`;
+    return `No “${type}” event has ever arrived${scope}. If the gateway says it sent one, it was refused before it reached the ledger — check the Activity screen.`;
+  }
   if (provider !== undefined) {
     return status === undefined
       ? `No webhook events from “${provider}”.`

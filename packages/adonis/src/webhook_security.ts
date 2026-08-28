@@ -224,3 +224,46 @@ export function verifyStandardWebhookSignature(options: {
   reportWebhookVerification('standard-webhooks', ok);
   return ok;
 }
+
+/**
+ * Refuse to boot when a configured driver CAN authenticate webhook deliveries but was given
+ * nothing to authenticate them with.
+ *
+ * The hole: the library mounts `POST /payments/webhook/:provider` for every configured
+ * provider, and a driver whose credential slot is empty verifies nothing — so anyone who
+ * knows the URL can post `{"event":"PAYMENT_RECEIVED", ...}` and the built-in sync marks a
+ * payment paid. Nothing logged it, nothing warned, and the app's own webhook-security tests
+ * passed *because* they only asserted that a good signature is accepted.
+ *
+ * This package already fails closed in the two comparable places — the dashboard throws at
+ * boot on a missing session secret, the dispatcher throws on a mode it cannot serve — and
+ * this is the same decision for the one endpoint the public internet can reach.
+ *
+ * The opt-out is explicit and per-provider, because terminating verification upstream is a
+ * real deployment (mutual TLS at the edge, an API gateway that checks the signature) and it
+ * is exactly what Efí's driver does by design. What it must not be is the default.
+ */
+export function assertWebhookVerification(
+  drivers: Iterable<[string, { provider?: string; webhookVerification?: string }]>,
+  options: { allowUnverifiedWebhooks?: boolean | readonly string[] } = {},
+): void {
+  const allow = options.allowUnverifiedWebhooks;
+  if (allow === true) return;
+  const allowed = new Set<string>(Array.isArray(allow) ? allow : []);
+  for (const [name, driver] of drivers) {
+    if (driver.webhookVerification !== 'unconfigured') continue;
+    if (allowed.has(name) || (driver.provider !== undefined && allowed.has(driver.provider))) {
+      continue;
+    }
+    throw new Error(
+      [
+        `[payments] The "${name}" driver can verify webhook deliveries but has no credential`,
+        `configured, so \`POST /payments/webhook/${driver.provider ?? name}\` would accept any`,
+        'request that reaches it — including one that marks a payment paid.',
+        "Set the gateway's webhook secret/token (see the provider docs page for the env var),",
+        'or, if verification is genuinely terminated upstream, say so explicitly with',
+        `\`allowUnverifiedWebhooks: ['${name}']\` in config/payments.ts.`,
+      ].join(' '),
+    );
+  }
+}

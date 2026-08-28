@@ -56,6 +56,11 @@ usage in the window, keyed `meter:<name>`.
 | `active_subscriptions` | subscriptions currently `active` **or** `trialing` — not windowed |
 | `meter:<name>` | quantity consumed for that meter in the window |
 
+`revenue` is gross: it sums `amount` and does **not** subtract `refunded_amount`. A partially
+refunded charge stays `paid`, keeps its full amount, and records what went back on
+`billing_payments.refunded_amount`. Net revenue for a row is `amount - refundedAmount` — subtract at
+the edge, alongside the one division, and never before you have finished adding.
+
 Two details worth knowing before you put a number on a screen:
 
 <Callout type="warn" title="Revenue windows on paidAt, not on when the charge was created">
@@ -133,11 +138,24 @@ const closingTotal = await store.countDisputesDueWithin({ withinHours: 72 })
 // never appear above. `status` takes any DisputeStatus; OPEN_DISPUTE_STATUSES is the
 // unresolved set.
 const disputes = await store.listDisputes({ status: 'warning', limit: 50 })
+
+// Unanswered disputes, OLDEST first, deadline or no deadline. On a gateway that publishes
+// none, this is the only read that can see a chargeback at all.
+const unanswered = await store.listOpenDisputes({ limit: 20 })
+const unansweredTotal = await store.countOpenDisputes({})
+
+// One payment by YOUR id, and the owner behind a page of them in one read.
+const [payment] = await store.listPayments({ externalReference: 'order-1042' })
+const owners = await store.listCustomersByGatewayIds(rows.map((row) => row.customerId))
+
+// Deliveries the endpoint refused — invisible in the ledger, because they never became one.
+const rejected = await store.listAuditEvents({ action: 'webhook.rejected', limit: 20 })
 ```
 
 The full read API is listed under [Reading the billing tables](/docs/payments/billing#reading-the-billing-tables),
 and [`billingHealth(store)`](/docs/payments/production#health-checks) rolls the operational ones into
-a single report — its four checks plus, on `deadlines`, the closing dispute windows by name.
+a single report — its six checks plus, on `deadlines`, the closing dispute windows by name and, on
+`openDisputes`, the unanswered ones oldest first.
 
 <Callout type="warn" title="Two dispute fields are nullable and must not render as zero">
 `evidenceDueBy` is `null` when the gateway sent no deadline — eleven of the eighteen never do — and

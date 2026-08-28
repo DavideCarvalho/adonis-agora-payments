@@ -171,6 +171,141 @@ export interface BillingCountQuery {
   createdAfter?: Date;
 }
 
+/**
+ * Filter + page for {@link BillingStore.listPayments}.
+ *
+ * The three fields beyond `status`/`provider` all answer the SAME question, which the console
+ * could not ask before: "did THIS charge land?" An operator holds one of three ids — the app's
+ * own reference for the order, the gateway's id for the payment, or the gateway's id for the
+ * customer — and a list that filters only on status makes them page a growing table looking for
+ * a string.
+ *
+ * All three are EXACT matches, not prefixes or substrings. They are join keys, not search terms:
+ * a substring match on `externalReference` would let `order-4` return `order-42`, and the whole
+ * point of the lookup is that the row it returns is the row that was asked for.
+ */
+export interface PaymentListQuery extends BillingListQuery {
+  /**
+   * The app's own id for the charge (`ChargeInput.externalReference`), exactly as
+   * {@link BillingStore.findPaymentByExternalReference} matches it.
+   *
+   * Unlike that method this returns every row carrying the reference rather than the newest —
+   * an app may reuse a reference across retries, and when it did, "which one landed?" is
+   * precisely the question being asked.
+   */
+  externalReference?: string;
+  /** The gateway's own payment id (`pi_...`, `pay_...`) — what the gateway's dashboard shows. */
+  gatewayId?: string;
+  /** The gateway's customer id — every payment recorded for one customer. */
+  customerId?: string;
+}
+
+/** Filter + page for {@link BillingStore.listWebhookEvents}. */
+export interface WebhookEventListQuery extends BillingListQuery {
+  /**
+   * Exact event-type match (`payment.succeeded`, `payment.refunded`, ...). Omit for every type.
+   *
+   * `status` + `provider` answers "what is failing on Asaas"; without this there is no way to
+   * ask "did any refund event arrive at all", which is the question a ledger is read for once
+   * a specific charge is in doubt. The type vocabulary is discoverable —
+   * {@link BillingStore.webhookEventBreakdown} with no filter enumerates exactly the types this
+   * install has actually received.
+   */
+  type?: string;
+}
+
+/** Filter + page for {@link BillingStore.listCustomers}. */
+export interface CustomerListQuery extends BillingListQuery {
+  /** The app-side owner type (`'users'`) written by `ensureCustomer`. Exact match. */
+  ownerType?: string;
+  /** The app-side owner id. Exact match; pair it with `ownerType`. */
+  ownerId?: string;
+  /** The gateway's customer id — the join key a payment row carries. Exact match. */
+  gatewayId?: string;
+}
+
+/**
+ * "Which disputes are still unanswered?" — regardless of whether anyone told us a deadline.
+ *
+ * The deliberately deadline-FREE counterpart to {@link DisputeDeadlineQuery}, and it exists
+ * because the deadline one is structurally blind on most installs: `evidence_due_by` can only be
+ * filled by a gateway that publishes the field, and several of the eighteen drivers here never
+ * receive one. On those, `countDisputesDueWithin` returns zero while a chargeback sits open with
+ * the money already pulled — a healthy report about an install that is losing money by default.
+ */
+export interface OpenDisputeQuery {
+  /** Exact provider match. Omit for every provider. */
+  provider?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * One `billing_audit_events` row, normalized for reading. See {@link PaymentListItem}.
+ *
+ * The table records the things that HAPPENED to this install that no other table keeps: a human
+ * refunding from the console, a human resolving a dispute the gateway will never close, and a
+ * delivery the endpoint REJECTED before it ever became a ledger row. Every one of those was
+ * previously a diagnostic and nothing else — i.e. a line in a log that has usually rotated away
+ * by the time somebody asks.
+ */
+export interface AuditEventListItem {
+  id: string;
+  /** One of {@link AUDIT_ACTIONS}' values. A free string in the column: an app may add its own. */
+  action: string;
+  /**
+   * WHO did it — the dashboard session's user, as `enforce()` knew them.
+   *
+   * `null` when nothing authorised it in a human sense: a rejected delivery has no actor, and a
+   * console with no `dashboardAuth` configured cannot name one. `null` therefore means
+   * "unattributed", never "the system".
+   */
+  actor: string | null;
+  provider: string | null;
+  /** `'payment'` | `'dispute'` | `'webhook'`, or whatever an app records. */
+  subjectType: string | null;
+  /** The subject's gateway id — the join back to the table it names. */
+  subjectId: string | null;
+  /** Integer minor units, or `null`. NEVER divide here. */
+  amount: number | null;
+  currency: string | null;
+  /** A human sentence: the refusal reason, the operator's note. */
+  message: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: Date | null;
+}
+
+/** The actions this package records itself. A free string in the column; these are the built-ins. */
+export const AUDIT_ACTIONS = {
+  /** A refund issued FROM THE CONSOLE. The gateway's own webhook still moves the payment row. */
+  refund: 'payment.refunded',
+  /** A dispute an operator closed by hand, because the gateway publishes no lost-dispute event. */
+  disputeResolved: 'dispute.resolved',
+  /** A delivery the webhook endpoint refused: bad signature, unparsable body, unknown provider. */
+  webhookRejected: 'webhook.rejected',
+} as const;
+
+/** Filter + page for {@link BillingStore.listAuditEvents}. */
+export interface AuditEventQuery {
+  /** Exact action match. */
+  action?: string;
+  /** Any of these actions — the timeline reads several at once. Composed with `action` as AND. */
+  actions?: readonly string[];
+  actor?: string;
+  provider?: string;
+  subjectType?: string;
+  subjectId?: string;
+  /** Only rows created at or AFTER this instant — the window a health check counts over. */
+  createdAfter?: Date;
+  /** Only rows created strictly BEFORE this instant. */
+  createdBefore?: Date;
+  limit?: number;
+  offset?: number;
+}
+
+/** The same filter without a page — the count a health check alerts on. */
+export type AuditEventCountQuery = Omit<AuditEventQuery, 'limit' | 'offset'>;
+
 /** Filter + page for the two list queries. `limit`/`offset` are applied after the filter. */
 export interface BillingListQuery {
   /** Exact status match. Omit for every status. */
@@ -246,7 +381,20 @@ export interface BillingStore<
    * This is what `payments:sync --all` iterates. Returns the normalized
    * {@link CustomerListItem} so a reader never depends on Lucid.
    */
-  listCustomers(query: BillingListQuery & { provider?: string }): Promise<CustomerListItem[]>;
+  listCustomers(query: CustomerListQuery): Promise<CustomerListItem[]>;
+
+  /**
+   * The customer mappings behind a set of gateway customer ids, in one read.
+   *
+   * The join the payments screen needs and could not do: a payment row carries the GATEWAY's
+   * customer id (`cus_…`), and the only thing that ties it back to an app user is
+   * `billing_customers.owner_type`/`owner_id`, written by `ensureCustomer`. Resolving that one
+   * row at a time would be a query per row of every page.
+   *
+   * Ids not present simply do not appear — a short result is the answer, not an error. An empty
+   * input returns an empty array without touching the database.
+   */
+  listCustomersByGatewayIds(gatewayIds: readonly string[]): Promise<CustomerListItem[]>;
 
   // ── Subscriptions ────────────────────────────────────────────────────────────────
 
@@ -336,7 +484,7 @@ export interface BillingStore<
    * WHICH payment failed. Returns the normalized {@link PaymentListItem}, not the
    * implementation's row type, so a reader never depends on Lucid.
    */
-  listPayments(query: BillingListQuery): Promise<PaymentListItem[]>;
+  listPayments(query: PaymentListQuery): Promise<PaymentListItem[]>;
 
   /**
    * How many payments match a status and/or a creation window.
@@ -431,6 +579,23 @@ export interface BillingStore<
    */
   countDisputesDueWithin(query: Omit<DisputeDeadlineQuery, 'limit' | 'offset'>): Promise<number>;
 
+  /**
+   * Every dispute that still needs an answer, oldest FIRST — deadline or no deadline.
+   *
+   * The check {@link listDisputesDueWithin} cannot be. That one requires `evidence_due_by`, and
+   * the deadline only ever arrives from a gateway that publishes one; on Asaas it comes from
+   * `chargeback.deadlineToSendDisputeDocuments`, which no published webhook example even
+   * contains. On such an install every deadline read answers zero forever, so a chargeback can
+   * be open with the money already pulled back while the report says healthy.
+   *
+   * Oldest first because with no deadline to sort on, "how long has nobody answered this" is the
+   * only priority signal left.
+   */
+  listOpenDisputes(query: OpenDisputeQuery): Promise<DisputeListItem[]>;
+
+  /** The unbounded count behind {@link listOpenDisputes} — what a health check alerts on. */
+  countOpenDisputes(query: { provider?: string }): Promise<number>;
+
   // ── Webhook idempotency ledger ───────────────────────────────────────────────────
 
   /**
@@ -473,7 +638,29 @@ export interface BillingStore<
    * handler threw and the dispatcher gave up, so the event's effect never happened. It
    * carries the handler's `error`, which is the only place that message survives.
    */
-  listWebhookEvents(query: BillingListQuery): Promise<WebhookEventListItem[]>;
+  listWebhookEvents(query: WebhookEventListQuery): Promise<WebhookEventListItem[]>;
+
+  /**
+   * The ledger rows whose stored delivery NAMES one payment — that payment's timeline.
+   *
+   * `billing_payments` is a single mutable row upserted in place: it holds the current state and
+   * no history at all, so "what happened to this charge, and when?" has no answer from the
+   * payments table. The ledger does have one — every delivery that moved the row is in it — but
+   * nothing links a ledger row to a payment, because the link lives inside the stored payload.
+   *
+   * So this is a SUBSTRING match over the payload, and both of that decision's costs are real:
+   * it is an unindexed scan (bounded by `limit`, newest first, which is why the bound is not
+   * optional in spirit even though it has a default), and a gateway id that happens to be a
+   * substring of some other identifier in another delivery will match. It is offered anyway
+   * because the alternative on the table today is nothing at all. The honest fix is a
+   * `payment_gateway_id` column the PROCESSOR fills on the way in; see the changeset.
+   *
+   * Never returns the payload itself — the same rule the rest of this console follows.
+   */
+  listWebhookEventsForPayment(
+    paymentGatewayId: string,
+    query?: { limit?: number },
+  ): Promise<WebhookEventListItem[]>;
 
   /**
    * The ledger row for one **gateway** event id — the id the gateway's dashboard shows.
@@ -498,6 +685,40 @@ export interface BillingStore<
    * "how much". Ordered by count, descending.
    */
   webhookEventBreakdown(query: BillingCountQuery): Promise<WebhookEventBreakdownLine[]>;
+
+  // ── Audit trail ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Record something that happened which no other table keeps: a console refund, a dispute an
+   * operator resolved by hand, a delivery the endpoint rejected.
+   *
+   * Returns `null` — and writes nothing — when the install has no `billing_audit_events` table
+   * yet, i.e. it upgraded the package before running an earlier schema. Exactly the tolerance
+   * {@link BillingStore.saveDispute} has, and for the same reason: the audit row is ADDITIONAL,
+   * and failing a refund that the gateway already accepted because the note could not be filed
+   * would be the worse outcome by a distance.
+   */
+  recordAuditEvent(event: {
+    action: string;
+    /** WHO. `null`/absent means unattributed — see {@link AuditEventListItem.actor}. */
+    actor?: string | null;
+    provider?: string | null;
+    subjectType?: string | null;
+    subjectId?: string | null;
+    /** Integer minor units. */
+    amount?: number | null;
+    currency?: string | null;
+    message?: string | null;
+    metadata?: Record<string, unknown> | null;
+    /** Defaults to the insert instant. */
+    createdAt?: Date;
+  }): Promise<AuditEventListItem | null>;
+
+  /** Page through the audit trail, newest first. Empty on an install with no table yet. */
+  listAuditEvents(query: AuditEventQuery): Promise<AuditEventListItem[]>;
+
+  /** How many audit rows match — the count the rejected-delivery check alerts on. */
+  countAuditEvents(query: AuditEventCountQuery): Promise<number>;
 
   // ── Metered usage ────────────────────────────────────────────────────────────────
 

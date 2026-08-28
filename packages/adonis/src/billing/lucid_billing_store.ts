@@ -1,20 +1,28 @@
 import type { NormalizeConstructor } from '@adonisjs/core/types/helpers';
 import { DateTime } from 'luxon';
 import {
+  type AuditEventCountQuery,
+  type AuditEventListItem,
+  type AuditEventQuery,
   type BillingCountQuery,
   type BillingListQuery,
   type BillingStore,
   type CustomerListItem,
+  type CustomerListQuery,
   type DisputeDeadlineQuery,
   type DisputeListItem,
   OPEN_DISPUTE_STATUSES,
+  type OpenDisputeQuery,
   type PaymentListItem,
+  type PaymentListQuery,
   type SubscriptionListItem,
   type WebhookEventBreakdownLine,
   type WebhookEventListItem,
+  type WebhookEventListQuery,
 } from './billing_store.js';
 import { clampLimit, clampOffset } from './list_query.js';
 import {
+  BillingAuditEvent as DefaultAuditEvent,
   BillingCustomer as DefaultCustomer,
   BillingDispute as DefaultDispute,
   BillingPayment as DefaultPayment,
@@ -22,7 +30,12 @@ import {
   BillingUsageEvent as DefaultUsageEvent,
   BillingWebhookEvent as DefaultWebhookEvent,
 } from './mixins/index.js';
-import { type LucidDatabase, createBillingTables } from './schema.js';
+import {
+  type LucidDatabase,
+  createBillingTables,
+  detectDialect,
+  registerBillingSchemaCache,
+} from './schema.js';
 
 /**
  * Models the billing layer persists through. Apps may override any of them with their own
@@ -35,6 +48,7 @@ export interface BillingModels {
   webhookEventModel?: NormalizeConstructor<typeof DefaultWebhookEvent>;
   usageEventModel?: NormalizeConstructor<typeof DefaultUsageEvent>;
   disputeModel?: NormalizeConstructor<typeof DefaultDispute>;
+  auditEventModel?: NormalizeConstructor<typeof DefaultAuditEvent>;
 }
 
 /** Lucid hands back Luxon `DateTime`s; the read SPI speaks plain `Date`. */
@@ -124,6 +138,53 @@ type PaymentInstance = InstanceType<typeof DefaultPayment>;
 type WebhookEventInstance = InstanceType<typeof DefaultWebhookEvent>;
 type UsageEventInstance = InstanceType<typeof DefaultUsageEvent>;
 type DisputeInstance = InstanceType<typeof DefaultDispute>;
+type AuditEventInstance = InstanceType<typeof DefaultAuditEvent>;
+
+/** One ledger row, normalized for reading. The stored payload is NEVER part of it. */
+function webhookEventItem(row: WebhookEventInstance): WebhookEventListItem {
+  return {
+    id: String(row.id),
+    gatewayEventId: row.gatewayEventId,
+    provider: row.provider,
+    type: row.type,
+    status: row.status,
+    error: row.error ?? null,
+    createdAt: toDate(row.createdAt),
+    updatedAt: toDate(row.updatedAt),
+  };
+}
+
+/** One customer-mapping row, normalized for reading. Shared by both customer reads. */
+function customerItem(row: CustomerInstance): CustomerListItem {
+  return {
+    id: String(row.id),
+    gatewayId: row.gatewayId,
+    provider: row.provider,
+    ownerType: row.ownerType ?? null,
+    ownerId: row.ownerId ?? null,
+    email: row.email ?? null,
+    name: row.name ?? null,
+    taxId: row.taxId ?? null,
+    createdAt: toDate(row.createdAt),
+  };
+}
+
+/** One audit row, normalized for reading. `amount` is BIGINT — a STRING on Postgres. */
+function auditItem(row: AuditEventInstance): AuditEventListItem {
+  return {
+    id: String(row.id),
+    action: row.action,
+    actor: row.actor ?? null,
+    provider: row.provider ?? null,
+    subjectType: row.subjectType ?? null,
+    subjectId: row.subjectId ?? null,
+    amount: row.amount === null || row.amount === undefined ? null : Number(row.amount),
+    currency: row.currency ?? null,
+    message: row.message ?? null,
+    metadata: (row.metadata as Record<string, unknown> | null | undefined) ?? null,
+    createdAt: toDate(row.createdAt),
+  };
+}
 
 /**
  * Lucid implementation of {@link BillingStore}. Resolves the models passed in (defaulting
@@ -179,6 +240,7 @@ export class LucidBillingStore
   #webhookEventModel: typeof DefaultWebhookEvent;
   #usageEventModel: typeof DefaultUsageEvent;
   #disputeModel: typeof DefaultDispute;
+  #auditEventModel: typeof DefaultAuditEvent;
 
   constructor(models: BillingModels = {}, options: { autoCreateSchema?: boolean } = {}) {
     this.#autoCreateSchema = options.autoCreateSchema !== false;
@@ -191,6 +253,15 @@ export class LucidBillingStore
     this.#usageEventModel = (models.usageEventModel ??
       DefaultUsageEvent) as typeof DefaultUsageEvent;
     this.#disputeModel = (models.disputeModel ?? DefaultDispute) as typeof DefaultDispute;
+    this.#auditEventModel = (models.auditEventModel ??
+      DefaultAuditEvent) as typeof DefaultAuditEvent;
+    // So `dropBillingTables()` can invalidate the memo below. Without it a suite that drops
+    // the tables between groups leaves this store certain they still exist, and every
+    // following query fails on a table nothing will re-create.
+    registerBillingSchemaCache(() => {
+      this.#schemaReady = undefined;
+      this.#columnCache.clear();
+    });
   }
 
   /**
@@ -270,12 +341,36 @@ export class LucidBillingStore
    * query then says exactly what is wrong.
    */
   async #hasDisputesTable(): Promise<boolean> {
-    const key = `${this.#disputeModel.table}.*`;
+    return this.#hasTable(this.#disputeModel);
+  }
+
+  /**
+   * Does this install have `billing_audit_events`?
+   *
+   * Same question, same tolerance: the table arrives after the package shipped, and every write
+   * to it is ADDITIONAL to an action that already happened. Refusing a refund the gateway
+   * already accepted because the audit note could not be filed would be strictly worse than
+   * filing no note.
+   */
+  async #hasAuditTable(): Promise<boolean> {
+    return this.#hasTable(this.#auditEventModel);
+  }
+
+  /**
+   * "Does this table exist?", cached beside the column answers and resolved the same way:
+   * `columnsInfo` on a missing table yields no columns at all. A probe that itself fails
+   * answers "present", so the real query then says exactly what is wrong.
+   */
+  async #hasTable(model: {
+    table: string;
+    query(): { client: { columnsInfo(table: string): Promise<unknown> } };
+  }): Promise<boolean> {
+    const key = `${model.table}.*`;
     let answer = this.#columnCache.get(key);
     if (answer === undefined) {
-      answer = this.#disputeModel
+      answer = model
         .query()
-        .client.columnsInfo(this.#disputeModel.table)
+        .client.columnsInfo(model.table)
         .then((columns) => Object.keys(columns as Record<string, unknown>).length > 0)
         .catch(() => true);
       this.#columnCache.set(key, answer);
@@ -330,26 +425,28 @@ export class LucidBillingStore
       .first()) as CustomerInstance | null;
   }
 
-  async listCustomers(
-    query: BillingListQuery & { provider?: string },
-  ): Promise<CustomerListItem[]> {
+  async listCustomers(query: CustomerListQuery): Promise<CustomerListItem[]> {
     await this.#ready();
     const builder = this.#customerModel.query().orderBy('created_at', 'desc');
     if (query.provider !== undefined) builder.where('provider', query.provider);
+    if (query.ownerType !== undefined) builder.where('owner_type', query.ownerType);
+    if (query.ownerId !== undefined) builder.where('owner_id', query.ownerId);
+    if (query.gatewayId !== undefined) builder.where('gateway_id', query.gatewayId);
     const rows = (await builder
       .limit(clampLimit(query.limit))
       .offset(clampOffset(query.offset))) as CustomerInstance[];
-    return rows.map((row) => ({
-      id: String(row.id),
-      gatewayId: row.gatewayId,
-      provider: row.provider,
-      ownerType: row.ownerType ?? null,
-      ownerId: row.ownerId ?? null,
-      email: row.email ?? null,
-      name: row.name ?? null,
-      taxId: row.taxId ?? null,
-      createdAt: toDate(row.createdAt),
-    }));
+    return rows.map(customerItem);
+  }
+
+  async listCustomersByGatewayIds(gatewayIds: readonly string[]): Promise<CustomerListItem[]> {
+    await this.#ready();
+    // No ids means no query. `whereIn('gateway_id', [])` is a guaranteed-empty scan on some
+    // dialects and a syntax error on others; either way it is a round trip for a known answer.
+    if (gatewayIds.length === 0) return [];
+    const rows = (await this.#customerModel
+      .query()
+      .whereIn('gateway_id', [...new Set(gatewayIds)])) as CustomerInstance[];
+    return rows.map(customerItem);
   }
 
   async saveSubscription(sub: {
@@ -492,11 +589,20 @@ export class LucidBillingStore
     return row as PaymentInstance | null;
   }
 
-  async listPayments(query: BillingListQuery): Promise<PaymentListItem[]> {
+  async listPayments(query: PaymentListQuery): Promise<PaymentListItem[]> {
     await this.#ready();
     const builder = this.#paymentModel.query().orderBy('created_at', 'desc');
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.provider !== undefined) builder.where('provider', query.provider);
+    if (query.gatewayId !== undefined) builder.where('gateway_id', query.gatewayId);
+    if (query.customerId !== undefined) builder.where('customer_id', query.customerId);
+    // Guarded like `findPaymentByExternalReference`: an install that has not run the ALTER has
+    // no column to match on, and every row it holds would answer nothing anyway. Returning an
+    // empty page beats raising `column "external_reference" does not exist` at a filter box.
+    if (query.externalReference !== undefined) {
+      if (!(await this.#hasColumn(this.#paymentModel, 'external_reference'))) return [];
+      builder.where('external_reference', query.externalReference);
+    }
     const rows = (await builder
       .limit(clampLimit(query.limit))
       .offset(clampOffset(query.offset))) as PaymentInstance[];
@@ -664,6 +770,102 @@ export class LucidBillingStore
     return toCount(await builder);
   }
 
+  async listOpenDisputes(query: OpenDisputeQuery): Promise<DisputeListItem[]> {
+    await this.#ready();
+    if (!(await this.#hasDisputesTable())) return [];
+    // Oldest FIRST, and it is the opposite of every other list here. With no deadline to sort
+    // on, "nobody has answered this for eleven days" is the only priority signal there is.
+    const builder = this.#disputeModel
+      .query()
+      .whereIn('status', [...OPEN_DISPUTE_STATUSES])
+      .orderBy('created_at', 'asc');
+    if (query.provider !== undefined) builder.where('provider', query.provider);
+    const rows = (await builder
+      .limit(clampLimit(query.limit))
+      .offset(clampOffset(query.offset))) as DisputeInstance[];
+    return rows.map(disputeItem);
+  }
+
+  async countOpenDisputes(query: { provider?: string }): Promise<number> {
+    await this.#ready();
+    if (!(await this.#hasDisputesTable())) return 0;
+    const builder = this.#disputeModel
+      .query()
+      .whereIn('status', [...OPEN_DISPUTE_STATUSES])
+      .count('* as total')
+      .pojo();
+    if (query.provider !== undefined) builder.where('provider', query.provider);
+    return toCount(await builder);
+  }
+
+  async recordAuditEvent(event: {
+    action: string;
+    actor?: string | null;
+    provider?: string | null;
+    subjectType?: string | null;
+    subjectId?: string | null;
+    amount?: number | null;
+    currency?: string | null;
+    message?: string | null;
+    metadata?: Record<string, unknown> | null;
+    createdAt?: Date;
+  }): Promise<AuditEventListItem | null> {
+    await this.#ready();
+    if (!(await this.#hasAuditTable())) return null;
+    const row = new this.#auditEventModel() as AuditEventInstance;
+    row.action = event.action;
+    row.actor = event.actor ?? null;
+    row.provider = event.provider ?? null;
+    row.subjectType = event.subjectType ?? null;
+    row.subjectId = event.subjectId ?? null;
+    row.amount = event.amount ?? null;
+    row.currency = event.currency ?? null;
+    row.message = event.message ?? null;
+    row.metadata = event.metadata ?? null;
+    if (event.createdAt !== undefined) row.createdAt = DateTime.fromJSDate(event.createdAt);
+    await row.save();
+    return auditItem(row);
+  }
+
+  async listAuditEvents(query: AuditEventQuery): Promise<AuditEventListItem[]> {
+    await this.#ready();
+    if (!(await this.#hasAuditTable())) return [];
+    const builder = this.#auditEventModel.query().orderBy('created_at', 'desc');
+    this.#applyAuditFilters(builder, query);
+    const rows = (await builder
+      .limit(clampLimit(query.limit))
+      .offset(clampOffset(query.offset))) as AuditEventInstance[];
+    return rows.map(auditItem);
+  }
+
+  async countAuditEvents(query: AuditEventCountQuery): Promise<number> {
+    await this.#ready();
+    if (!(await this.#hasAuditTable())) return 0;
+    const builder = this.#auditEventModel.query().count('* as total').pojo();
+    this.#applyAuditFilters(builder, query);
+    return toCount(await builder);
+  }
+
+  /** The audit filter, applied identically by the list and the count — see `#matchesCount`'s
+   *  note in the in-memory store: a bound one of them ignored would report a healthy zero. */
+  #applyAuditFilters(
+    builder: {
+      where(column: string, value: unknown): unknown;
+      where(column: string, operator: string, value: unknown): unknown;
+      whereIn(column: string, values: unknown[]): unknown;
+    },
+    query: AuditEventCountQuery,
+  ): void {
+    if (query.action !== undefined) builder.where('action', query.action);
+    if (query.actions !== undefined) builder.whereIn('action', [...query.actions]);
+    if (query.actor !== undefined) builder.where('actor', query.actor);
+    if (query.provider !== undefined) builder.where('provider', query.provider);
+    if (query.subjectType !== undefined) builder.where('subject_type', query.subjectType);
+    if (query.subjectId !== undefined) builder.where('subject_id', query.subjectId);
+    if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
+    if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
+  }
+
   async recordWebhookEvent(event: {
     gatewayEventId: string;
     provider: string;
@@ -718,24 +920,38 @@ export class LucidBillingStore
     }
   }
 
-  async listWebhookEvents(query: BillingListQuery): Promise<WebhookEventListItem[]> {
+  async listWebhookEvents(query: WebhookEventListQuery): Promise<WebhookEventListItem[]> {
     await this.#ready();
     const builder = this.#webhookEventModel.query().orderBy('created_at', 'desc');
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.provider !== undefined) builder.where('provider', query.provider);
+    if (query.type !== undefined) builder.where('type', query.type);
     const rows = (await builder
       .limit(clampLimit(query.limit))
       .offset(clampOffset(query.offset))) as WebhookEventInstance[];
-    return rows.map((row) => ({
-      id: String(row.id),
-      gatewayEventId: row.gatewayEventId,
-      provider: row.provider,
-      type: row.type,
-      status: row.status,
-      error: row.error ?? null,
-      createdAt: toDate(row.createdAt),
-      updatedAt: toDate(row.updatedAt),
-    }));
+    return rows.map(webhookEventItem);
+  }
+
+  async listWebhookEventsForPayment(
+    paymentGatewayId: string,
+    query: { limit?: number } = {},
+  ): Promise<WebhookEventListItem[]> {
+    await this.#ready();
+    // An empty needle would match the whole table — the timeline of "no payment at all".
+    if (paymentGatewayId === '') return [];
+    // The payload column's type differs per dialect (JSONB / JSON / TEXT) and only one of the
+    // three can be compared to a string directly, so it is cast. MySQL spells the text type
+    // `CHAR`; Postgres and SQLite take `TEXT`.
+    const dialect = detectDialect(
+      this.#webhookEventModel.query().client as unknown as LucidDatabase,
+    );
+    const textType = /mysql|mariadb/i.test(dialect ?? '') ? 'CHAR' : 'TEXT';
+    const rows = (await this.#webhookEventModel
+      .query()
+      .whereRaw(`CAST(payload AS ${textType}) LIKE ?`, [`%${paymentGatewayId}%`])
+      .orderBy('created_at', 'desc')
+      .limit(clampLimit(query.limit))) as WebhookEventInstance[];
+    return rows.map(webhookEventItem);
   }
 
   async findWebhookEventByGatewayEventId(
@@ -747,16 +963,7 @@ export class LucidBillingStore
       gatewayEventId,
     )) as WebhookEventInstance | null;
     if (!row) return null;
-    return {
-      id: String(row.id),
-      gatewayEventId: row.gatewayEventId,
-      provider: row.provider,
-      type: row.type,
-      status: row.status,
-      error: row.error ?? null,
-      createdAt: toDate(row.createdAt),
-      updatedAt: toDate(row.updatedAt),
-    };
+    return webhookEventItem(row);
   }
 
   async countWebhookEvents(query: BillingCountQuery): Promise<number> {

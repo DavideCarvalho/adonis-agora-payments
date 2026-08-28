@@ -1,6 +1,6 @@
 ---
 title: Dashboard
-description: The embedded billing console — a React SPA plus the JSON API it runs on, mounted into your AdonisJS routes. Lead with what needs attention today, read revenue and subscriptions, find the customer who is stuck, and refund or retry from the same page.
+description: The embedded billing console — a React SPA plus the JSON API it runs on, mounted into your AdonisJS routes. Lead with what needs attention today, read revenue and subscriptions, find one payment by your own reference, and refund, retry or close a dispute from the same page.
 icon: LayoutDashboard
 ---
 
@@ -13,8 +13,9 @@ debugging a single gateway call. Raw payloads, signature traces and timings belo
 [`@adonis-agora/telescope`](/docs/payments/diagnostics); you will not find them here.
 
 Every screen reads through the [billing store](/docs/payments/billing), so it answers instantly and
-shows exactly what your database recorded. The only calls that leave your app are the two actions:
-a refund, and a webhook retry.
+shows exactly what your database recorded. Only one action leaves your app at all: a refund calls
+the gateway that took the payment. A webhook retry re-runs your own handlers, and resolving a
+dispute writes a local row and sends nothing anywhere.
 
 ```sh
 node ace configure @adonis-agora/payments
@@ -42,20 +43,24 @@ a wildcard, for that reason.
 | Screen | Reads | What it answers |
 | --- | --- | --- |
 | **Overview** | `billingHealth` + `billingOverview` | What needs attention today, then revenue and active subscriptions for a period, plus usage per meter. |
-| **Payments** | `listPayments` | A page of payments, filterable by status and gateway — which charge failed, and when. Refund from here. |
+| **Payments** | `listPayments` | A page of payments, filterable by status and gateway, searchable by **your** reference or the gateway id — which charge failed, and when. Refund from here, and open one row in full. |
+| **Customers** | `listCustomers` | The `billing_customers` mapping — which app user a `cus_…` belongs to, filterable by owner, gateway id and provider. |
 | **Subscriptions** | `listSubscriptions` | Who is `past_due` or `paused`, on which plan, with the trial and period end dates. |
-| **Webhook events** | `listWebhookEvents` | The ledger, defaulting to `failed`, with each handler's error rendered in full. Retry from here. |
-| **Disputes** | `listDisputes` / `listDisputesDueWithin` | Every chargeback and pre-chargeback alert, and — the reason the screen exists — which evidence windows close next. Read-only. |
+| **Disputes** | `listDisputes` / `listDisputesDueWithin` | Every chargeback and pre-chargeback alert, and — the reason the screen exists — which evidence windows close next. Record how one ended from here. |
+| **Webhook events** | `listWebhookEvents` | The ledger, defaulting to `failed`, filterable by event **type**, with each handler's error rendered in full. Retry from here. |
+| **Activity** | `listAuditEvents` | Who refunded what, who closed which dispute, and every delivery this endpoint **refused**. |
 
 ### The health panel
 
 The first thing on the Overview, above the revenue tiles, is [`billingHealth`](/docs/payments/production#health-checks)
-— the same four checks `node ace payments:health` runs, on the same thresholds:
+— the same six checks `node ace payments:health` runs, on the same thresholds:
 
 - **Events claimed and never finished.** Nothing is consuming the dispatcher; the worker is not running.
 - **Events the dispatcher gave up on.** Handlers threw and retries ran out, so those events never took effect.
 - **Charges created that never confirmed.** What a webhook endpoint that stopped being reachable looks like from the inside.
 - **Dispute windows closing.** An open chargeback whose evidence deadline is inside the next three days. The panel names each one — gateway, dispute id, how long is left — and its button opens the Disputes screen on exactly those rows.
+- **Disputes still open and unanswered.** No deadline required, which is the point: most gateways publish none, and on those installs the check above reports zero forever. The panel names these too, oldest first.
+- **Deliveries the endpoint refused, last 24 h.** A bad signature, an unparsable body, a provider nobody configured. Usually a rotated webhook secret that never reached the deployment — and invisible everywhere else, because a rejected delivery never becomes a ledger row.
 
 Every one of these is a silent failure: the endpoints keep answering `200` while revenue quietly
 stops landing. A healthy install shows one green line. An unhealthy one leads with the count, says
@@ -72,9 +77,57 @@ Every list filters by **provider** as well as status, and the list of providers 
 data — not from the eighteen drivers this package ships. With Stripe and Pix in production, the
 filter offers Stripe and Pix.
 
-The store's list queries filter on status only, so the provider narrowing is applied over pages read
-from the store, up to a bounded scan. When that scan stops short the console says so, because "no
-Asaas failures" and "no Asaas failures in the rows I looked at" are different answers.
+The store's list queries have no provider column filter, so the provider narrowing is applied over
+pages read from the store, up to a bounded scan. When that scan stops short the console says so,
+because "no Asaas failures" and "no Asaas failures in the rows I looked at" are different answers.
+The Customers and Activity lists report no such caveat, and that is deliberate: every filter they
+offer *is* a column the store applies, so there is no bounded scan behind them and claiming the
+caveat would be claiming one that does not apply.
+
+The webhook-event **type** filter is built the same way — `GET <path>/api/providers` reports the
+event types this install has actually received, rather than the twenty this package can emit. A
+filter offering twenty that return nothing hides the three that do not.
+
+### Finding one payment
+
+The question a console gets opened for is "did *this* person's payment land?", and the operator
+holds one of three ids: the app's own reference for the order, the gateway's id for the payment, or
+the gateway's id for the customer. The Payments screen has one search box that tries the app's
+reference first and the gateway id second — an operator pasting from a support ticket does not know
+which of the two they are holding.
+
+All three lookups are **exact**. They are join keys, and letting `order-4` return `order-42` is a
+wrong answer to a question about money.
+
+Every payment row now carries the app's `externalReference`, the `refundedAmount`, and an **owner**.
+A gateway customer nobody mapped reads as **unmapped**, not as a blank: it means charges are landing
+that this console can never attribute to a person. The mapping is written by
+[`ensureCustomer({ store, owner })`](/docs/payments/billing#reusing-a-gateway-customer) and by
+nothing else.
+
+### One payment in full
+
+Clicking a row opens `GET <path>/api/payments/:gatewayId` — the current state, the owner, the
+disputes filed against it, the ledger rows whose stored delivery names it, and who refunded it from
+this console.
+
+<Callout type="warn" title="It is not a history, and it does not claim to be">
+`billing_payments` is a single mutable row upserted in place. What it used to be is recorded
+nowhere, so "what changed on this payment, and when?" has no answer here.
+
+The ledger strand in particular is a `CAST(payload AS TEXT) LIKE` scan over the stored payloads,
+because nothing links a ledger row to a payment — the link lives *inside* the payload. The response
+says so on the wire (`events.matchedBy: 'payload-substring'`) and the panel says so on screen: it is
+**unindexed**, it can **over-match** a delivery that merely mentions the id, and it **cannot see** a
+delivery that never stored it. Reading "3 events" as "exactly the 3 events that touched this
+payment" is the mistake that caveat exists to stop.
+
+No history table was invented for this. The honest fix is a `payment_gateway_id` column the
+**processor** fills on the way in — a write path this does not touch.
+</Callout>
+
+The stored payload itself is still never returned. The timeline says an event arrived and what type
+it was; what was inside it is [telescope's](/docs/payments/diagnostics) job.
 
 ### Money
 
@@ -115,22 +168,31 @@ Three things the rows are careful about:
 now stops the debit from ever being filed, and the row says *no money moved* in words rather than
 leaving that to a hue.
 
-<Callout title="There is no Fight button, on purpose">
-The Disputes screen is **read-only**: no "fight this", no "accept", no "refund". Not an unfinished
-screen — a decision. Whether to submit evidence or simply refund turns on your margin, the
-customer's value, the dispute fee, the evidence your app actually holds, and the chargeback ratio
-that puts a merchant into a card network's monitoring programme — which is why refunding a dispute
-you would have won is sometimes right. That decision belongs in your code, against your data, not
-behind a console button someone can press without any of it. The JSON API has no action route for
-disputes either. This screen exists so nobody misses the window; submitting evidence is
+<Callout title="There is still no Fight button, on purpose">
+No "fight this", no "accept", no "refund from the dispute". Not an unfinished screen — a decision.
+Whether to submit evidence or simply refund turns on your margin, the customer's value, the dispute
+fee, the evidence your app actually holds, and the chargeback ratio that puts a merchant into a card
+network's monitoring programme — which is why refunding a dispute you would have won is sometimes
+right. That decision belongs in your code, against your data, not behind a console button someone
+can press without any of it. Submitting evidence is
 [`submitDisputeEvidence`](/docs/payments/api-reference) on the driver.
+
+The one action the screen *does* have — **Resolve** — is a different thing entirely: it records an
+outcome that already happened at the bank. See below.
 </Callout>
 
 ## Actions
 
-Two things can be changed from the console. Both are `POST` (a refund reachable by URL is a refund a
-crawler can trigger) and both run through the same [`authorize`](#authorization) guard — and the
+Three things can be changed from the console. All are `POST` (a refund reachable by URL is a refund
+a crawler can trigger) and all run through the same [`authorize`](#authorization) guard — and the
 `dashboardAuth` session, when configured — as every read.
+
+They also carry a CSRF token. `@adonisjs/shield` guards every state-changing route of the host app,
+and the SPA sent none — so both POSTs were refused before they ever reached the console's own guard,
+and the button did nothing with nothing on screen saying why. Shield publishes the token as an
+`XSRF-TOKEN` cookie precisely so a browser client can echo it in `x-xsrf-token`, and the SPA now
+does. No cookie means no header, which is the right answer for a host that does not run shield.
+Reads are untouched: CSRF only guards mutations.
 
 ### Refund a payment
 
@@ -148,6 +210,37 @@ from your `config/payments.ts`:
 The local row is not rewritten. The gateway confirms a refund with a `payment.refunded` webhook, and
 that is what moves the row to `refunded` — writing it optimistically would show a refund that may
 never have settled.
+
+A successful refund writes an **audit row** naming the person who authorised it, the amount asked
+for and whether it was partial. `enforce()` had already verified exactly who was asking; until now
+that was thrown away and the only record was a diagnostic carrying a gateway id and an amount. A
+console with no `dashboardAuth` records `actor: null` — "unattributed", never an invented "system".
+A refund the gateway **refused** writes nothing: an audit of refunds that never happened is an audit
+nobody can trust.
+
+### Recording how a dispute ended
+
+Several gateways publish no lost-dispute event at all. Asaas is one, and its driver hardcodes
+`outcome: 'won'` when it closes a dispute — so a dispute that was **lost** sat at `open` forever,
+the deadline check stayed red, and a fifteen-minute cron logged the same failure until nobody read
+it, burying every other finding with it.
+
+`POST <path>/api/disputes/:gatewayId/resolve` records the ending: a finished status, an outcome, a
+note, and **who** said so.
+
+```json
+{ "status": "lost", "outcome": "lost", "note": "acquirer sided with the cardholder" }
+```
+
+`status` must be one of the finished dispute statuses — the full `DISPUTE_STATUSES` list minus the
+open ones (`warning`, `open`, `under_review`). A "resolve" that could put a row back into `open` is
+not a resolution, it is an edit box over a money table. `outcome` defaults to the status.
+
+**Nothing is sent to a gateway.** The dialog says so twice: the decision was made at the bank, this
+writes down which way it went. The write goes through `saveDispute`, whose absent-fields-are-left-
+alone rule means the deadline and the reason the *opening* event carried survive it. It also writes
+a `dispute.resolved` audit row — on a gateway that publishes no closing event, a human is the entire
+provenance of that outcome.
 
 ### Retry a failed webhook event
 
@@ -272,17 +365,27 @@ The SPA is a client of a plain API, and so can you be — the same guard covers 
 | --- | --- | --- |
 | `GET <path>/api/health` | — | the `billingHealth` checks plus the failure breakdown |
 | `GET <path>/api/overview` | `period`, `from`, `to` | `billingOverview` metrics for the period |
-| `GET <path>/api/payments` | `status`, `provider`, `limit`, `offset` | a page of payments, newest first |
+| `GET <path>/api/payments` | `status`, `provider`, `reference`, `gatewayId`, `customerId`, `limit`, `offset` | a page of payments, newest first, each with `externalReference`, `refundedAmount` and an `owner` |
+| `GET <path>/api/payments/:gatewayId` | — | one payment: current state, owner, disputes, ledger rows naming it (with `events.matchedBy`), and its audit rows |
+| `GET <path>/api/customers` | `provider`, `ownerType`, `ownerId`, `gatewayId`, `limit`, `offset` | a page of the owner mapping, newest first |
 | `GET <path>/api/disputes` | `status`, `provider`, `limit`, `offset` | a page of disputes, newest first |
 | `GET <path>/api/disputes` | `dueWithin` (hours), `provider`, `limit`, `offset` | only the OPEN windows closing inside the horizon, soonest first, plus the full `dueWithin.total` |
 | `GET <path>/api/subscriptions` | `status`, `provider`, `limit`, `offset` | a page of subscriptions, plus the whole-table `past_due` count |
-| `GET <path>/api/webhook-events` | `status`, `provider`, `limit`, `offset` | a page of the ledger, newest first |
-| `GET <path>/api/providers` | — | the gateways present in your data |
+| `GET <path>/api/webhook-events` | `status`, `provider`, `type`, `limit`, `offset` | a page of the ledger, newest first |
+| `GET <path>/api/audit` | `action`, `actor`, `provider`, `subjectType`, `subjectId`, `limit`, `offset` | the audit trail, newest first, plus the action filter list |
+| `GET <path>/api/providers` | — | the gateways **and the event types** present in your data |
 | `POST <path>/api/payments/:gatewayId/refund` | `{ amount? }` | the gateway's refund; `amount` is integer minor units |
+| `POST <path>/api/disputes/:gatewayId/resolve` | `{ status, outcome?, note? }` | the closed dispute plus the audit row; sends nothing to a gateway |
 | `POST <path>/api/webhook-events/:gatewayEventId/retry` | — | `{ status: 'processed' }` |
 
+`?reference=` also accepts `?externalReference=`, so a link built from either keeps working. All
+three payment lookups are exact matches. The response echoes them back under `filters`, so the SPA
+can say "no payment carries reference X" rather than "no payments".
+
 Paging is clamped (50 by default, 200 maximum), so an unbounded `limit` from a query string cannot
-select the whole table. A provider-filtered page also reports `scanned` and `truncated`.
+select the whole table. A provider-filtered page also reports `scanned` and `truncated`. The
+customers and audit pages report neither, because every filter they offer is a column the store
+applies — there is no bounded scan behind them to warn about.
 
 `?dueWithin` with no value uses the same 72-hour horizon `payments:health` alerts on, so the console
 and the cron agree about "soon". A value that is present and unreadable answers `400` rather than
@@ -297,6 +400,31 @@ that refused, and `503` when the payments manager is not reachable at all.
 
 When the billing layer is disabled (`billing.enabled: false`) the API answers `503` rather than
 `500` — the store being absent is a deployment state, not a crash.
+
+## Activity — the trail nothing else keeps
+
+Three kinds of row, each of which used to be a diagnostic and nothing else:
+
+| Action | Written when |
+| --- | --- |
+| `webhook.rejected` | the endpoint answered `400`. **The one that matters most**: a rejected delivery never becomes a ledger row, so a rotated webhook secret looks exactly like a quiet week while every refund, chargeback and dispute closure is dropped on the floor |
+| `payment.refunded` | someone refunded from this console. The payment row moves only when the gateway's webhook lands, and that row names no person |
+| `dispute.resolved` | someone closed a dispute the gateway will never close itself |
+
+`actor` is `null` when nothing authorised it in a human sense — a rejected delivery has none, and a
+console with no `dashboardAuth` cannot name one. `null` means **unattributed**, never "the system".
+
+`action` is a free string in the column, so an app recording its own actions with
+`store.recordAuditEvent(...)` sees them here too; the filter list is a UI convenience, not a
+validation whitelist.
+
+<Callout title="An install that upgraded before running the schema">
+`billing_audit_events` is a new **table**, so `CREATE TABLE IF NOT EXISTS` carries it to an existing
+install exactly as well as to a fresh one — nothing from the post-ship `ALTER` phase is involved. An
+app that upgrades the package before the table exists keeps working: every audit write is additional
+to an action that already happened, so a missing table skips the note and answers `null` rather than
+failing a refund the gateway already accepted. The screen is then simply empty.
+</Callout>
 
 ## Without the console
 

@@ -41,7 +41,9 @@ four guarantees:
   manager, not at the gateway.
 - **Money moves only on confirmation.** The idempotent webhook processor (a gateway-event
   ledger written *before* any work runs) makes redeliveries no-ops. Your business logic —
-  grant credits, activate a subscription — runs at the right moment, exactly once.
+  grant credits, activate a subscription — runs at the right moment, exactly once. And the
+  endpoint that receives it will not boot unverified: a driver that can authenticate a delivery
+  and was given no credential refuses to start.
 - **Billing mirrors the gateway.** Subscriptions, payments, disputes and trials sync into
   Lucid tables automatically, Cashier-style, with billable mixins on your models — and the
   library creates those tables itself, so adopting it is a config file, not a migration.
@@ -143,10 +145,10 @@ export default class PaymentSucceededHandler {
   <Card title="Billing" href="/docs/payments/billing" description="Billable mixins, the billing tables, webhook sync, and durable-backed dispatch." />
   <Card title="Invoices" href="/docs/payments/invoices" description="Emit an invoice attached to a charge, through a provider independent of the gateway." />
   <Card title="Client" href="/docs/payments/client" description="The browser status endpoint and the usePaymentStatus polling hook — ownership first, off until you enable it." />
-  <Card title="Dashboard" href="/docs/payments/dashboard" description="The console at /payments — health first, then revenue, payments, subscriptions, disputes and the webhook ledger, with refund and retry." />
+  <Card title="Dashboard" href="/docs/payments/dashboard" description="The console at /payments — health first, then revenue, payments, customers, subscriptions, disputes, the webhook ledger and the audit trail, with refund, retry and dispute resolution." />
   <Card title="Diagnostics" href="/docs/payments/diagnostics" description="Every milestone on the observability bus — gateway-action vs business events, Telescope." />
   <Card title="Custom providers" href="/docs/payments/custom-providers" description="Write a gateway or invoice provider as a config factory, or extend a bundled driver." />
-  <Card title="Testing" href="/docs/payments/testing" description="The fake driver, in-memory store and mutable clock — exercise billing without a gateway or DB." />
+  <Card title="Testing" href="/docs/payments/testing" description="The fake driver, a real manager over it, the in-memory store, awaiting dispatched webhooks — exercise billing without a gateway or DB." />
   <Card title="Patterns" href="/docs/payments/patterns" description="A cookbook with the gateway differences side by side — Pix, subscriptions, where business logic lives, metered billing, splits, recovery." />
   <Card title="Production" href="/docs/payments/production" description="The operational checklist — webhook secrets, choosing a dispatcher, reconciliation, what to watch." />
   <Card title="Troubleshooting" href="/docs/payments/troubleshooting" description="The symptoms that actually happen, and how to tell the causes apart." />

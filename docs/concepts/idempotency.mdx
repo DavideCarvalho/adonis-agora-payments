@@ -68,6 +68,14 @@ It is the **outer** defence, and it is not the only one you need.
 - **It does not protect against two different event ids for the same fact.** A gateway that sends
   `PAYMENT_RECEIVED` and later `PAYMENT_CONFIRMED` for one payment sends two distinct ids, and both
   are legitimately new.
+- **It is only as good as the id the driver declares.** The key has to be an *event* identity. The
+  Asaas driver used to synthesize `${event}-${paymentId}`, which is a (payment, event-type) identity
+  — so the **second** `PAYMENT_UPDATED` about a payment was discarded as a replay of the first, and
+  a partial refund arrives as exactly that type. It reads Asaas' own top-level `id` now, and falls
+  back to a deterministic hash of the raw body (a redelivery of the same notification hashes to the
+  same key; two different notifications do not) rather than to the `Math.random()` that had been
+  disabling deduplication outright for any payload naming neither a payment nor a subscription.
+  Writing a driver? Give every event an id of its own, from the gateway where there is one.
 - **It does not protect a handler with side effects outside your database.** An email sent before a
   later step throws is sent again on the retry.
 - **It does not make your grant idempotent.** It makes the *event* processed once, which is not the
@@ -156,14 +164,34 @@ rejects is a key that does not deduplicate.
 Partial support is common and is refused per operation, not per driver. Mercado Pago documents the
 header for payments and refunds only; Pagar.me for order creation only; Razorpay for refunds only;
 Mollie for `POST` only, so `updateSubscription` — a `PATCH` — refuses; Square has no
-`idempotency_key` on a subscription update, so that one refuses too. Asaas, AbacatePay, Dodo, Lemon
-Squeezy and Paddle document no mechanism anywhere and refuse on every operation they implement —
-with one legacy exception on the first two, below.
+`idempotency_key` on a subscription update, so that one refuses too. AbacatePay, Dodo, Lemon Squeezy
+and Paddle document no mechanism anywhere and refuse on every operation they implement.
 
-<Callout type="warn" title="Two places the key is not deduplication">
-On Asaas, AbacatePay, Woovi and Efí, a `charge()` with no `externalReference` uses the
-`idempotencyKey` **as** the reference — legacy behaviour, kept because removing it would silently
-stop routing webhooks for anyone relying on it. It is routing, not deduplication.
+### Asaas `charge()` — the lookup, done for you
+
+Asaas documents no idempotency header and no idempotency body field on any endpoint; it tells you to
+deduplicate on your side. So `AsaasDriver.charge()` **does that lookup**, and it is the one place in
+this package where the third behaviour would have been the wrong call.
+
+The key travels as the charge's `externalReference` — the only handle Asaas echoes back *and*
+accepts as a query filter — and a `GET /payments` scoped to that reference and that customer runs
+**before** the `POST`. A hit returns the charge that already exists, enriched with its Pix code so
+the caller gets a usable payment, and re-runs neither side effect: no second fiscal invoice (an
+NFS-e is a legal document, not a retryable write) and no `charge.created` diagnostic for a charge
+that was not created.
+
+The guarantee is **at most one Asaas charge per key, scoped to the customer**. What it is not is a
+lock: two concurrent calls with the same key can both miss the lookup and both create, and Asaas
+offers nothing to prevent that. It closes the retry case, which is the one that actually happens.
+
+Every other method on the Asaas driver still refuses loudly — an accepted-and-dropped key on
+`refund()` is a second refund, and there is no equivalent lookup to invent.
+
+<Callout type="warn" title="Three places the key is still not deduplication">
+On AbacatePay, Woovi and Efí, a `charge()` with no `externalReference` uses the `idempotencyKey`
+**as** the reference — legacy behaviour, kept because removing it would silently stop routing
+webhooks for anyone relying on it. It is routing, not deduplication. (Efí's `refund()` is different
+and genuinely deduplicates: the key becomes the devolução id in the URL.)
 
 InfinitePay is the one gateway that neither honours nor refuses it. Its only creating operation is
 `createCheckout`, its API documents no idempotency at all, and the key is used there as the last

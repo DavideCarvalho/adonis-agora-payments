@@ -121,6 +121,12 @@ Say it plainly: **`parseWebhook` verifies nothing for Efí, and there is nothing
 verify.** The notification carries no signature header. Efí offers two other mechanisms,
 and both live outside what a driver can see:
 
+This driver therefore declares `webhookVerification: 'unsupported'`, not `'unconfigured'`. The
+boot-time refusal that stops an app whose driver *can* verify and was given no credential does not
+apply here: there is no credential to forget, so `allowUnverifiedWebhooks` is not needed for Efí
+either. What the boot check cannot do is tell you whether the two mechanisms below are actually in
+place — that part is still yours.
+
 - **Mutual TLS in reverse** — Efí presents *its* certificate to your endpoint and expects
   your server to validate it. That is a decision your TLS terminator makes, before the
   request ever reaches AdonisJS. Efí publishes an nginx setup for it.

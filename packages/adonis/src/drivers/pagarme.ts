@@ -12,6 +12,7 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { headerValue, httpRequest, isNotFound } from '../http.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
@@ -540,6 +541,18 @@ export class PagarmeDriver implements PaymentsDriver {
    * every request must carry the matching `Authorization: Basic …`; when they are not,
    * the payload is accepted as-is — so configure them in production.
    */
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * Pagar.me authenticates with HTTP Basic on the callback; with neither half configured the
+   * credentials are not checked.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#webhookUser !== undefined || this.#webhookPassword !== undefined
+      ? 'configured'
+      : 'unconfigured';
+  }
+
   parseWebhook(
     rawBody: string,
     headers: Record<string, string | string[] | undefined>,

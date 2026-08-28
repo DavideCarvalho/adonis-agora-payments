@@ -12,6 +12,7 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { headerValue, httpRequest, isNotFound } from '../http.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
@@ -721,6 +722,18 @@ export class SquareDriver implements PaymentsDriver {
   }
 
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * Square signs `notificationUrl + body`, so BOTH are needed — a signature key with no URL
+   * verifies nothing, which is why the check below tests for both.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#webhookSignatureKey !== undefined && this.#notificationUrl !== undefined
+      ? 'configured'
+      : 'unconfigured';
+  }
 
   parseWebhook(
     rawBody: string,

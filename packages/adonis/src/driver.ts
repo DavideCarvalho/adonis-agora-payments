@@ -20,6 +20,9 @@ import type {
  * normalizing its own API onto the shared domain types. The billing layer and application
  * code depend only on this contract, so swapping gateways is a config change.
  */
+/** See {@link PaymentsDriver.webhookVerification}. */
+export type WebhookVerificationState = 'configured' | 'unconfigured' | 'unsupported';
+
 export interface PaymentsDriver {
   /** Stable provider name, e.g. `'stripe'`, `'abacate'`, `'asaas'`, `'woovi'`. */
   readonly provider: string;
@@ -51,6 +54,32 @@ export interface PaymentsDriver {
     /** Recurring subscriptions. InfinitePay-style links lack it. */
     subscriptions?: boolean;
   };
+
+  /**
+   * Whether this driver can authenticate an incoming webhook delivery, and whether it was
+   * given what it needs to.
+   *
+   * The failure it exists to close: a driver with a credential SLOT and no credential in it
+   * verified nothing — `if (this.#webhookToken !== undefined)` — so the mounted
+   * `POST /payments/webhook/:provider` accepted any body anyone posted, and the built-in sync
+   * dutifully marked payments paid. Nothing anywhere said so. The ecosystem app that found it
+   * had to write the warning into its config, into `start/env.ts`, and into a dedicated test
+   * asserting the env var was non-empty, because otherwise its two webhook-security tests
+   * passed vacuously.
+   *
+   * Reporting `'unconfigured'` here makes the provider refuse at boot instead
+   * ({@link import('./webhook_security.js').assertWebhookVerification}).
+   *
+   * - `'configured'` — it can verify and it has the credential.
+   * - `'unconfigured'` — it CAN verify but nothing was configured. Fails the boot check.
+   * - `'unsupported'` — the gateway signs nothing (Efí's Pix callback carries no signature;
+   *   authenticity is the edge's job), so there is nothing to configure and nothing to warn
+   *   about.
+   *
+   * Optional so a custom driver outside this package keeps compiling; absent is read as
+   * `'unsupported'`, because a driver that never opted in cannot be assumed to verify.
+   */
+  readonly webhookVerification?: WebhookVerificationState;
 
   // ── Customers ────────────────────────────────────────────────────────────────────────
 

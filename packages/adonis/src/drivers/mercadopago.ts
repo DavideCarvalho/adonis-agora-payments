@@ -12,6 +12,7 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { headerValue, httpRequest, isNotFound } from '../http.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
@@ -538,6 +539,15 @@ export class MercadoPagoDriver implements PaymentsDriver {
    * A failed fetch throws, so the mounted route answers 400 and Mercado Pago retries.
    * Reporting a status the gateway did not confirm would be worse than a retry.
    */
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * Without the secret `#verify` hands the payload back unchecked.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#webhookSecret !== undefined ? 'configured' : 'unconfigured';
+  }
+
   async parseWebhook(
     rawBody: string,
     headers: Record<string, string | string[] | undefined>,

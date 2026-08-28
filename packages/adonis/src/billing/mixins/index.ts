@@ -5,3 +5,4 @@ export { BillingPayment, withPayment } from './with_payment.js';
 export { BillingWebhookEvent } from './with_webhook_event.js';
 export { BillingDispute } from './with_dispute.js';
 export { BillingUsageEvent } from './with_usage_event.js';
+export { BillingAuditEvent } from './with_audit_event.js';

@@ -139,7 +139,7 @@ describe('billingHealth (integration)', () => {
     expect(report.deadlines[0]?.evidenceDueBy).toEqual(new Date(NOW.getTime() + 12 * HOUR));
   });
 
-  it('reports healthy once the thresholds are widened past every row', async () => {
+  it('quiets every THRESHOLD check once the thresholds are widened past every row', async () => {
     const report = await billingHealth(store, {
       now: NOW,
       stuckAfter: 48 * HOUR,
@@ -147,9 +147,27 @@ describe('billingHealth (integration)', () => {
       failedWithin: MINUTE,
       // The one threshold here that looks FORWARD, so NARROWING it is what quiets it.
       disputeDueWithin: MINUTE,
+      rejectedWithin: MINUTE,
     });
-    expect(report.healthy).toBe(true);
     expect(report.failures).toEqual([]);
     expect(report.deadlines).toEqual([]);
+    expect(
+      report.checks.filter((check) => !check.healthy).map((check) => check.key),
+      'every windowed check goes quiet; the open chargeback does not, because it has no window',
+    ).toEqual(['open_disputes']);
+  });
+
+  it('keeps the open-dispute check red with NO threshold that can turn it off', async () => {
+    // Deliberate, and the reason the check exists: `disputes_due` can be narrowed until it
+    // reports zero, and on a gateway that publishes no deadline it reports zero anyway. An open
+    // chargeback is money already out of the account, so there is no horizon at which it stops
+    // mattering — the way to quiet this one is to record how the dispute ended.
+    const report = await billingHealth(store, { now: NOW, disputeDueWithin: MINUTE });
+    const open = report.checks.find((check) => check.key === 'open_disputes');
+    expect(open?.healthy).toBe(false);
+    expect(
+      report.openDisputes.map((row) => row.gatewayId).includes('dp_no_deadline'),
+      'the row the deadline read can never see',
+    ).toBe(true);
   });
 });

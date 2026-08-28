@@ -57,7 +57,7 @@ export function Overview({
   onNavigate,
 }: {
   /** Jump to the screen that shows a failing check's actual rows. */
-  onNavigate: (screen: 'payments' | 'webhooks' | 'disputes', status?: string) => void;
+  onNavigate: (screen: 'payments' | 'webhooks' | 'disputes' | 'activity', status?: string) => void;
 }) {
   const [period, setPeriod] = useState<PeriodPreset>('30d');
   const query = useQuery({

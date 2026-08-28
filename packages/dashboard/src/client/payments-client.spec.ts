@@ -257,20 +257,32 @@ describe('error handling', () => {
 });
 
 /**
- * The disputes screen is READ-ONLY, and this is the test that keeps it that way.
+ * The disputes surface has no DECISIONS on it, and this is the test that keeps it that way.
  *
  * Whether a chargeback is worth contesting turns on margin, customer value and fraud history —
- * a business rule that lives in the app's code. The JSON API has no action route for disputes, so
- * the client must not grow a method that implies one.
+ * a business rule that lives in the app's code, and the JSON API has no route for it. The one
+ * dispute write that does exist records how a dispute ENDED: it reaches no gateway, and it exists
+ * because most gateways publish no closing event, so a lost dispute otherwise sits `open` forever
+ * and holds the health check red until nobody reads it.
  */
-describe('disputes have no actions', () => {
-  it('exposes exactly one dispute call, and it is a read', async () => {
+describe('disputes carry a record, never a decision', () => {
+  it('exposes exactly two dispute calls: the read, and the outcome record', async () => {
     const disputeCalls = Object.keys(paymentsClient).filter((key) => /dispute/i.test(key));
-    expect(disputeCalls).toEqual(['disputes']);
+    expect(disputeCalls).toEqual(['disputes', 'resolveDispute']);
 
     window.__PAYMENTS_API__ = '/pd/api';
     const { inits } = stubFetch({ json: async () => ({ disputes: [] }) });
     await paymentsClient.disputes({ dueWithin: 72 });
     expect(inits[0]?.method).toBeUndefined();
+  });
+
+  it('sends the outcome record as a POST to that dispute’s resolve route', async () => {
+    window.__PAYMENTS_API__ = '/pd/api';
+    const { calls, inits } = stubFetch({ json: async () => ({ dispute: {}, audit: null }) });
+    await paymentsClient.resolveDispute('dp 1/2', { status: 'lost', note: 'bank ruled' });
+    // Encoded: a dispute id with a slash in it must not be able to select a different route.
+    expect(calls[0]).toBe('/pd/api/disputes/dp%201%2F2/resolve');
+    expect(inits[0]?.method).toBe('POST');
+    expect(JSON.parse(String(inits[0]?.body))).toEqual({ status: 'lost', note: 'bank ruled' });
   });
 });

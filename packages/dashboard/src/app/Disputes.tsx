@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import type { DisputeRow } from '../client/payments-client';
 import { displayCurrency, paymentsClient } from '../client/payments-client';
+import { ResolveDisputeDialog } from './ResolveDisputeDialog';
 import {
   DEFAULT_DUE_WITHIN_HOURS,
   type DeadlineTone,
@@ -16,7 +17,7 @@ import {
 } from './disputes';
 import { formatDay, formatWhen } from './money';
 import { Pager, Panel, QueryState } from './shell';
-import { disputeIsChargeback, disputeStatusClass } from './status';
+import { disputeIsChargeback, disputeIsOpen, disputeStatusClass } from './status';
 import { Badge } from './ui/badge';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';
@@ -53,12 +54,16 @@ const TONE_CLASS: Record<DeadlineTone, string> = {
  * log sits underneath it. Opening on "every dispute, newest first" would put the one that expires
  * tonight somewhere on page three.
  *
- * READ-ONLY, deliberately, and it must stay that way. There is no "fight this", no "accept", no
- * "refund": whether contesting is worth it turns on margin, customer value, the dispute fee, the
- * evidence the app actually holds and the chargeback ratio that puts a merchant into a card
- * network's monitoring programme. That is a business rule, it lives in the app's code, and a
- * button here would invite someone to press it without any of that context. The JSON API has no
- * action route for disputes either.
+ * There is still no "fight this", no "accept", no "refund": whether contesting is worth it turns
+ * on margin, customer value, the dispute fee, the evidence the app actually holds and the
+ * chargeback ratio that puts a merchant into a card network's monitoring programme. That is a
+ * business rule, it lives in the app's code, and a button here would invite someone to press it
+ * without any of that context.
+ *
+ * "Record outcome" is a different kind of control and the dialog is at pains to say so: it sends
+ * nothing to a gateway. It writes down how a dispute ENDED, because most gateways never publish
+ * that — Asaas publishes no lost-dispute event at all — so a lost dispute would otherwise sit
+ * `open` forever, holding the health check red until nobody reads it any more.
  */
 export function Disputes({ initialStatus }: { initialStatus?: string | undefined } = {}) {
   return (
@@ -183,6 +188,7 @@ function DisputeLog({ initialStatus }: { initialStatus?: string | undefined }) {
   });
 
   const rows = query.data?.disputes ?? [];
+  const [resolving, setResolving] = useState<DisputeRow | null>(null);
   const refilter = (apply: () => void) => {
     apply();
     setOffset(0);
@@ -220,6 +226,7 @@ function DisputeLog({ initialStatus }: { initialStatus?: string | undefined }) {
               <th className="px-4 py-2 font-normal">Provider</th>
               <th className="px-4 py-2 font-normal">Opened</th>
               <th className="px-4 py-2 font-normal">Closed</th>
+              <th className="px-4 py-2 text-right font-normal">Action</th>
             </tr>
           </thead>
           <tbody>
@@ -241,6 +248,20 @@ function DisputeLog({ initialStatus }: { initialStatus?: string | undefined }) {
                 </td>
                 <td className="mono px-4 py-2 text-zinc-500">{formatWhen(row.openedAt)}</td>
                 <td className="mono px-4 py-2 text-zinc-500">{formatWhen(row.closedAt)}</td>
+                <td className="px-4 py-2 text-right">
+                  {/* Offered only while the dispute is still open — the same set the health
+                      check counts. "Resolve" on a row that is already `lost` would be an edit
+                      box over a money table, not a resolution. */}
+                  {disputeIsOpen(row.status) && (
+                    <button
+                      type="button"
+                      onClick={() => setResolving(row)}
+                      className="rounded border border-line px-2 py-1 text-xs text-zinc-300 hover:bg-panel-2 hover:text-zinc-100"
+                    >
+                      Record outcome
+                    </button>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -252,6 +273,9 @@ function DisputeLog({ initialStatus }: { initialStatus?: string | undefined }) {
           onOffset={setOffset}
         />
       </QueryState>
+      {resolving !== null && (
+        <ResolveDisputeDialog dispute={resolving} onClose={() => setResolving(null)} />
+      )}
     </Panel>
   );
 }

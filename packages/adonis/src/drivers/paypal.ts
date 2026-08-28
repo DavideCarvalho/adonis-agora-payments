@@ -11,6 +11,7 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { headerValue, httpRequest, isNotFound } from '../http.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
@@ -617,6 +618,16 @@ export class PayPalDriver implements PaymentsDriver {
    * parsed unverified — the same "unconfigured means unenforced" rule the other drivers
    * follow, and what makes local development work without a dashboard webhook.
    */
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * Without the webhook id `parseWebhook` normalizes the body without ever calling PayPal's
+   * verify-signature endpoint.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#webhookId !== undefined ? 'configured' : 'unconfigured';
+  }
+
   async parseWebhook(
     rawBody: string,
     headers: Record<string, string | string[] | undefined>,

@@ -233,9 +233,10 @@ await local.merge({ pendingPlanId: 'plan_business' }).save()
 ```ts title="app/payment_handlers/subscription_updated.ts"
 static readonly eventType = 'subscription.updated'
 
-async handle(event: WebhookEvent) {
+async handle(event: WebhookEventFor<'subscription.updated'>) {
   // A subscription event routes on the gateway id, NOT on externalReference — see below.
-  const data = event.data as { gatewayId: string; status: string; planId?: string }
+  // `SubscriptionWebhookData`, typed from the event type.
+  const data = event.data
   const local = await Subscription.findBy('gatewayId', data.gatewayId)
   if (!local?.pendingPlanId) return
 

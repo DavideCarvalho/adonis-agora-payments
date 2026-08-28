@@ -20,7 +20,7 @@ import { Badge } from './ui/badge';
 export function HealthPanel({
   onNavigate,
 }: {
-  onNavigate: (screen: 'payments' | 'webhooks' | 'disputes', status?: string) => void;
+  onNavigate: (screen: 'payments' | 'webhooks' | 'disputes' | 'activity', status?: string) => void;
 }) {
   const query = useQuery({
     queryKey: ['health'],
@@ -128,6 +128,31 @@ export function HealthPanel({
                   }
                 >
                   {formatCountdown(dispute.evidenceDueBy)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {report.openDisputes.length > 0 && (
+        <div className="border-t border-bad/25 px-4 py-3">
+          <p className="text-[10px] uppercase tracking-wider text-zinc-500">Open and unanswered</p>
+          {/* Named separately from the closing windows, and overlapping them on purpose: on a
+              gateway that publishes no deadline this is the ONLY list that is ever non-empty,
+              and a dispute here with no countdown is not "no hurry" — nobody told us. */}
+          <ul className="mt-2 flex flex-wrap gap-2">
+            {report.openDisputes.map((dispute) => (
+              <li
+                key={dispute.id}
+                className="flex items-center gap-1.5 rounded border border-line bg-panel px-2 py-1"
+              >
+                <Badge variant="provider">{dispute.provider}</Badge>
+                <span className="mono text-[11px] text-zinc-400">{dispute.gatewayId}</span>
+                <span className="mono text-[11px] text-zinc-500">
+                  {dispute.evidenceDueBy === null
+                    ? 'no deadline sent'
+                    : formatCountdown(dispute.evidenceDueBy)}
                 </span>
               </li>
             ))}

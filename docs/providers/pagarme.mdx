@@ -22,10 +22,12 @@ account. Run your flow in test mode (an `sk_test_…` key) before you take real 
   `PAGARME_SECRET_KEY`. There is no sandbox host: the same URL serves both, and a
   `sk_test_…` key puts the account in test mode.
 - **Auth**: HTTP Basic with the secret key as the **username and an empty password**.
-- **Webhooks**: authenticated by the **optional HTTP Basic credentials** you set on the
-  webhook endpoint in the dashboard — Pagar.me signs nothing, and there is no HMAC to
-  verify. Set `webhookUser`/`webhookPassword` (or `PAGARME_WEBHOOK_USER` /
-  `PAGARME_WEBHOOK_PASSWORD`) and the driver rejects any request that does not carry them.
+- **Webhooks**: authenticated by the HTTP Basic credentials you set on the webhook endpoint in
+  the dashboard — Pagar.me signs nothing, and there is no HMAC to verify. Set
+  `webhookUser`/`webhookPassword` (or `PAGARME_WEBHOOK_USER` / `PAGARME_WEBHOOK_PASSWORD`) and the
+  driver rejects any request that does not carry them. They are **optional at Pagar.me and required
+  here**: with neither set the driver reports `'unconfigured'` and the app refuses to boot, because
+  nothing else about a Pagar.me delivery is authenticated.
 - **`externalReference`**: on a **charge**, sent as the order's `code` **and** as
   `metadata.external_reference` — order metadata is repeated on every charge the order
   generates, which is what makes the reference survive into the `charge.*` webhooks. On a
@@ -61,6 +63,17 @@ export default defineConfig({
   },
 })
 ```
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+neither `webhookUser` nor `webhookPassword` is configured (env fallbacks `PAGARME_WEBHOOK_USER` /
+`PAGARME_WEBHOOK_PASSWORD`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/pagarme` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
 
 ## Charging
 

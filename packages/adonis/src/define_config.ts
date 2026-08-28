@@ -314,6 +314,24 @@ export interface PaymentsConfig {
    * ```
    */
   methods?: Partial<Record<PaymentMethodName, string>>;
+  /**
+   * Providers whose webhook deliveries are allowed to arrive UNVERIFIED.
+   *
+   * By default the provider refuses to boot when a driver that can authenticate a webhook
+   * has no credential configured — an empty credential slot means the mounted
+   * `POST /payments/webhook/:provider` accepts anything anyone posts to it, and the built-in
+   * sync marks the payments in it paid.
+   *
+   * Set it when verification genuinely happens upstream (mutual TLS at the edge, an API
+   * gateway that checks the signature before forwarding), naming the providers:
+   *
+   * ```ts
+   * allowUnverifiedWebhooks: ['efi']
+   * ```
+   *
+   * `true` opts every provider out at once, which is almost never what you want.
+   */
+  allowUnverifiedWebhooks?: boolean | string[];
   /** Invoice emission settings. */
   invoice?: InvoiceSectionConfig;
   /** Billing (subscription) layer settings. */
@@ -323,6 +341,19 @@ export interface PaymentsConfig {
      * billing stores, mixins and webhook processor. Defaults to true.
      */
     enabled?: boolean;
+    /**
+     * Gateway event types your drivers pass through unmapped that you register a handler
+     * for, when the type happens to fall in the library's own `payment.*`/`subscription.*`
+     * namespace.
+     *
+     * A handler registered for a type nothing ever emits is a silent no-op — the ledger
+     * still records the delivery as processed — so a type in that namespace which is not one
+     * of the normalized `WEBHOOK_EVENT_TYPES` is refused at boot as a typo. A gateway type a
+     * driver could not map arrives lowercased as the gateway spells it
+     * (`payment_anticipated`), which needs no declaration; this is for the rare gateway that
+     * spells one WITH a dot in the same namespace.
+     */
+    passthroughEvents?: string[];
     /**
      * Whether the library creates its own tables on first use. Defaults to **true**, the
      * ecosystem convention — `@adonis-agora/durable` and `@adonis-agora/authz` both own

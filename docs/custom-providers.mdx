@@ -35,6 +35,7 @@ readonly capabilities?: {
   invoices?: boolean
   subscriptions?: boolean
 }
+readonly webhookVerification?: 'configured' | 'unconfigured' | 'unsupported'
 ```
 
 `capabilities` is what the manager checks **before** delegating, so an app discovers a
@@ -42,6 +43,29 @@ limitation early (e.g. a Pix-only gateway with no refunds) instead of at the gat
 the four required-method groups a driver that lacks a capability still implements the
 method — it just throws a clear error; the manager's `assertCapability` surfaces that
 before the call.
+
+### `webhookVerification` — declare it, or be treated as unable
+
+The provider mounts `POST /payments/webhook/:provider` for every configured driver, and that route
+is reachable from the public internet. A driver whose credential slot is empty verifies nothing, so
+anyone who knows the URL can post a body that marks a payment paid — and nothing used to say so.
+
+```ts
+get webhookVerification(): WebhookVerificationState {
+  return this.#webhookSecret !== undefined ? 'configured' : 'unconfigured'
+}
+```
+
+| Value | Meaning | At boot |
+| --- | --- | --- |
+| `'configured'` | it can verify and it has the credential | route mounts |
+| `'unconfigured'` | it *can* verify and nothing was configured | **throws**, unless the provider is in `allowUnverifiedWebhooks` |
+| `'unsupported'` | the gateway signs nothing — there is nothing to configure | route mounts |
+
+It is **optional**, so a driver written against an older version keeps compiling — and **absent is
+read as `'unsupported'`**, because a driver that never opted in cannot be assumed to verify.
+Declaring `'unsupported'` when your gateway *does* sign is the one dishonest answer available here;
+it turns the boot check off for your driver and nothing else will notice.
 
 ### `idempotencyKey` is a promise, not a hint
 
@@ -169,6 +193,13 @@ If it can send several, three rules are not optional:
 - **Every event needs an id of its own.** The idempotency ledger keys on `WebhookEvent.id`,
   so reusing one id across a batch makes the second event look like a redelivery of the
   first and it is silently skipped, with the money already moved.
+
+  The same rule bites outside a batch, and it caught this package: an id built from the event
+  **name** and the payment id is a (payment, event-type) identity, not an event identity, so the
+  second update about one payment is discarded as a replay of the first. Use the gateway's own
+  event id where there is one. Where there is not, hash the raw body — deterministic, so a genuine
+  redelivery still deduplicates, while two different notifications differ. Never `Math.random()`:
+  that turns deduplication off and every retry of a failing delivery looks new.
 - **You must have authenticated all of them.** Where the gateway signs per event, verifying
   the first and trusting the rest is a forgery hole — an attacker replays one genuine item
   and appends whatever they like. Verify every item in one pass, map in a second, and keep
@@ -180,6 +211,17 @@ If it can send several, three rules are not optional:
   bad signature or an unparsable body — a partly-forged batch is a forged request. Never
   throw for an event you merely did not recognize: map it to `payment.updated`, or return it
   unmapped and let the processor pass it through.
+
+  A rejected delivery leaves no ledger row — it is refused before an event exists — so the route
+  files a `webhook.rejected` audit row instead. That row and the `rejected_deliveries` health check
+  are the only places a refused delivery is visible.
+
+An unmapped event should be passed through **lowercased as the gateway spells it**
+(`PAYMENT_ANTICIPATED` → `payment_anticipated`). Do not invent a `payment.something` name for it:
+that namespace is the library's own, and the boot-time handler check treats an unknown type inside
+it as a typo. `payment.updated` is the right target only when the event really does mean "this
+payment changed" — and note that it now carries a built-in sync, so its `data` should include the
+payment's current `status`, `paidAt` and `refundedAmount` where the gateway states them.
 
 The return may be a promise, and one driver needs that: Mollie's webhook is a bare payment
 id with no status and no signature, so the only way to learn what happened — or that the

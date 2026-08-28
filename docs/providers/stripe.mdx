@@ -61,8 +61,11 @@ as processed and `billing_payments` stayed empty.
 | `payment_intent.canceled`, `.processing`, `.requires_action`, `.amount_capturable_updated` | `payment.updated` |
 | `charge.refunded` (fully refunded) | `payment.refunded` |
 | `charge.refunded` (partial) | `payment.updated` |
-| `charge.dispute.created` | `payment.disputed` |
-| `charge.dispute.updated`, `.closed`, `.funds_withdrawn`, `.funds_reinstated` | `payment.updated` |
+| `charge.dispute.created` (chargeback) | `payment.disputed` |
+| `charge.dispute.created` (inquiry — `warning_*` status) | `payment.dispute_warning` |
+| `radar.early_fraud_warning.created` | `payment.dispute_warning` |
+| `charge.dispute.closed` (`won` / `lost` / `warning_closed`) | `payment.dispute_closed` |
+| `charge.dispute.updated`, `.funds_withdrawn`, `.funds_reinstated` | `payment.updated` |
 | `checkout.session.completed` / `.async_payment_succeeded` with `payment_status: 'paid'` | `payment.succeeded` |
 | `checkout.session.completed` otherwise, `.expired` | `payment.updated` |
 | `checkout.session.async_payment_failed` | `payment.failed` |
@@ -81,17 +84,56 @@ Stripe retries forever.
 
 ### Disputes
 
-`charge.dispute.created` is the opening — the cardholder's bank has pulled the money back —
-and it moves the payment row to `disputed`. The rest of the family is the **resolution**
-(won, lost, funds withdrawn, funds reinstated), which every gateway reports differently and
-which this library deliberately does not name: those arrive as `payment.updated`, with the
-full Dispute object on `event.raw` for a handler to act on.
+**`charge.dispute.created` fires for two different things**, and reading it as one is
+expensive. A chargeback means the cardholder's bank has already pulled the money back. An
+**inquiry** — what Stripe calls the pre-dispute phase, and what the networks call a
+retrieval or a request for information — means the bank is asking a question and **no funds
+have been withdrawn**. Stripe distinguishes them only by a status prefix: an inquiry's
+`status` starts with `warning_`.
 
-The dispute is keyed on the **PaymentIntent**, because that is the id `charge()` returns
-and every other event here uses. `payment_intent` is nullable on Stripe's Dispute object —
-a legacy Charges-API charge has none — so the charge id is the fallback rather than an
-assumption. `radar.early_fraud_warning.created` is **not** a dispute: it is a pre-dispute
-fraud signal, no money has moved, and it passes through under its own name.
+So the driver splits them. A chargeback is `payment.disputed` and moves the payment row to
+`disputed`. An inquiry is `payment.dispute_warning` and moves nothing — the payment is still
+paid, because it is.
+
+| Stripe status | Normalized | The money |
+| --- | --- | --- |
+| `needs_response`, `under_review` | `payment.disputed` | withdrawn, held until the outcome |
+| `warning_needs_response`, `warning_under_review` | `payment.dispute_warning` | untouched |
+
+An inquiry payload carries `evidence_details.due_by`, which the driver surfaces as
+`actionableUntil` on the normalized event. That deadline is the entire value of the alert:
+Stripe's own guidance is that failing to answer an inquiry reads to the issuer as accepting
+the claim, and can produce a formal chargeback that is *probably irreversible*.
+
+**`radar.early_fraud_warning.created` is also a `payment.dispute_warning`.** It is the
+issuer's TC40/SAFE fraud report, and it arrives before any dispute exists — Stripe's own
+figure is that around 80% of them become a fraud dispute if you do nothing. It carries no
+deadline, because the window closes when the chargeback is filed, which is the thing you are
+trying to prevent; instead it carries Stripe's `actionable` flag, which is false once a
+dispute has already arrived or the charge is fully refunded, and `reason` from `fraud_type`.
+
+<Callout type="warn" title="Refunding every fraud warning is not the strategy">
+Stripe's published analysis is that the break-even for proactively refunding an early fraud
+warning is a charge worth roughly your dispute fee or less, and that refunding one worth 35%
+more than the fee is probably not worth it. The library gives you the event and the numbers;
+which ones to refund is a business rule, and it stays in your code.
+</Callout>
+
+**`charge.dispute.closed` carries the outcome** — `won`, `lost`, or `warning_closed` for an
+inquiry that sat 120 days without escalating. It normalizes to `payment.dispute_closed` with
+`outcome: 'won' | 'lost' | 'expired'`. `warning_closed` is `expired` rather than `won`
+because the networks send no explicit win for an inquiry: nothing was decided in your
+favour, the clock simply ran out the right way. A close whose status the driver cannot read
+stays a `payment.updated` rather than inventing a result.
+
+`charge.dispute.updated`, `.funds_withdrawn` and `.funds_reinstated` are movement inside an
+open dispute, not a resolution of it, and stay `payment.updated` with the full Dispute
+object on `event.raw`.
+
+Every one of these is keyed on the **PaymentIntent**, because that is the id `charge()`
+returns and every other event here uses. `payment_intent` is nullable on both the Dispute
+and the Early Fraud Warning — a legacy Charges-API charge has none — so the charge id is the
+fallback rather than an assumption.
 
 ## `authorized` — `requires_capture`
 

@@ -248,10 +248,9 @@ describe('StripeDriver webhooks', () => {
   });
 
   it('leaves the rest of the dispute family as payment.updated', () => {
-    // Won, lost, funds pulled, funds returned: the resolution, which every gateway reports
-    // differently and which this package deliberately does not name.
+    // Evidence submitted, funds pulled, funds returned: movement inside an open dispute,
+    // not a resolution of it.
     for (const type of [
-      'charge.dispute.closed',
       'charge.dispute.updated',
       'charge.dispute.funds_withdrawn',
       'charge.dispute.funds_reinstated',
@@ -259,6 +258,110 @@ describe('StripeDriver webhooks', () => {
       const event = webhook(type, { charge: 'ch_1', amount: 1990, currency: 'eur' });
       expect(event.type, type).toBe('payment.updated');
     }
+  });
+
+  // ── Inquiries are not chargebacks ──────────────────────────────────────────────────
+
+  /**
+   * `charge.dispute.created` fires for an inquiry too — the network asking a question
+   * before any chargeback exists — and on an inquiry Stripe withdraws NO funds. Mapping it
+   * to `payment.disputed` took a paid payment away over a question, and hid the one moment
+   * where a refund still prevents the chargeback from being filed at all.
+   */
+  it('calls an inquiry a warning, not a dispute', () => {
+    const event = webhook('charge.dispute.created', {
+      id: 'dp_inq',
+      charge: 'ch_1',
+      payment_intent: 'pi_1',
+      amount: 1990,
+      currency: 'eur',
+      reason: 'fraudulent',
+      status: 'warning_needs_response',
+      evidence_details: { due_by: 1_767_225_600 },
+    });
+    expect(event.type).toBe('payment.dispute_warning');
+    expect(event.data).toMatchObject({
+      gatewayId: 'pi_1',
+      disputeId: 'dp_inq',
+      // The deadline is the whole point of the alert: an inquiry left unanswered reads to
+      // the issuer as accepting the claim.
+      actionableUntil: '2026-01-01T00:00:00.000Z',
+    });
+  });
+
+  it('still calls a real chargeback a dispute', () => {
+    const event = webhook('charge.dispute.created', {
+      id: 'dp_1',
+      charge: 'ch_1',
+      payment_intent: 'pi_1',
+      amount: 1990,
+      currency: 'eur',
+      status: 'needs_response',
+    });
+    expect(event.type).toBe('payment.disputed');
+  });
+
+  it('maps an early fraud warning onto payment.dispute_warning', () => {
+    // The issuer's TC40/SAFE report, before any dispute exists. Stripe's own figure is
+    // that ~80% of them become a fraud dispute if you do nothing.
+    const event = webhook('radar.early_fraud_warning.created', {
+      id: 'issfr_1',
+      charge: 'ch_1',
+      payment_intent: 'pi_1',
+      fraud_type: 'made_with_stolen_card',
+      actionable: true,
+    });
+    expect(event.type).toBe('payment.dispute_warning');
+    expect(event.data).toEqual({
+      gatewayId: 'pi_1',
+      disputeId: 'issfr_1',
+      reason: 'made_with_stolen_card',
+      actionable: true,
+    });
+  });
+
+  it('keys an early fraud warning on the charge when there is no PaymentIntent', () => {
+    const event = webhook('radar.early_fraud_warning.created', {
+      id: 'issfr_1',
+      charge: 'ch_1',
+      payment_intent: null,
+      fraud_type: 'misc',
+      actionable: false,
+    });
+    expect(event.data).toMatchObject({ gatewayId: 'ch_1' });
+  });
+
+  // ── Closing a dispute ──────────────────────────────────────────────────────────────
+
+  it.each([
+    ['won', 'won'],
+    ['lost', 'lost'],
+    // An inquiry that sat 120 days without escalating. The networks send no explicit win
+    // for one, so nothing was decided in your favour — the clock ran out the right way.
+    ['warning_closed', 'expired'],
+  ])('closes a %s dispute with outcome %s', (status, outcome) => {
+    const event = webhook('charge.dispute.closed', {
+      id: 'dp_1',
+      charge: 'ch_1',
+      payment_intent: 'pi_1',
+      amount: 1990,
+      currency: 'eur',
+      status,
+    });
+    expect(event.type).toBe('payment.dispute_closed');
+    expect(event.data).toMatchObject({ gatewayId: 'pi_1', disputeId: 'dp_1', outcome });
+  });
+
+  it('will not invent an outcome for a close it cannot read', () => {
+    // A status Stripe adds later, or a payload without one. Naming a result for money that
+    // has not settled is worse than staying vague.
+    const event = webhook('charge.dispute.closed', {
+      id: 'dp_1',
+      charge: 'ch_1',
+      amount: 1990,
+      currency: 'eur',
+    });
+    expect(event.type).toBe('payment.updated');
   });
 
   it('only calls a fully refunded charge refunded', () => {

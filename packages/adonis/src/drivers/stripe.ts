@@ -566,13 +566,35 @@ export class StripeDriver implements PaymentsDriver {
           this.#chargeData(object),
         );
       }
-      // The dispute family. Only the opening one takes the payment away from `paid`; won,
-      // lost, funds withdrawn and funds reinstated are the resolution, which every gateway
-      // reports differently and which this package deliberately does not name.
-      case 'charge.dispute.created':
-        return as('payment.disputed', this.#disputeData(object));
+      // The dispute family. `charge.dispute.created` fires for BOTH a chargeback and an
+      // inquiry, and the two are not the same event at all: on an inquiry the card network
+      // is asking a question and **no funds are withdrawn**, so calling it
+      // `payment.disputed` took a paid payment away over a question. Stripe distinguishes
+      // them only by the status prefix — an inquiry's is `warning_*`.
+      case 'charge.dispute.created': {
+        const dispute = object as unknown as Stripe.Dispute;
+        return typeof dispute.status === 'string' && dispute.status.startsWith('warning_')
+          ? as('payment.dispute_warning', this.#disputeWarningData(object))
+          : as('payment.disputed', this.#disputeData(object));
+      }
+      // An early fraud warning is the issuer's TC40/SAFE fraud report, and it arrives
+      // before any dispute exists. Stripe's own figure is that ~80% of them become a fraud
+      // dispute if you do nothing, and a refund inside the window stops the chargeback
+      // being filed at all — which is worth doing even on one you would win, because the
+      // chargeback still counts against the ratio that triggers network monitoring.
+      case 'radar.early_fraud_warning.created':
+        return as('payment.dispute_warning', this.#fraudWarningData(object));
+      case 'charge.dispute.closed': {
+        const outcome = this.#disputeOutcome(object);
+        // Only a status that names an outcome becomes a close. Anything else stays an
+        // update rather than inventing a result for money that has not settled.
+        return outcome === undefined
+          ? as('payment.updated', this.#disputeData(object))
+          : as('payment.dispute_closed', this.#disputeClosedData(object, outcome));
+      }
+      // Funds moving during an open dispute, and evidence being submitted. Neither is a
+      // resolution.
       case 'charge.dispute.updated':
-      case 'charge.dispute.closed':
       case 'charge.dispute.funds_withdrawn':
       case 'charge.dispute.funds_reinstated':
         return as('payment.updated', this.#disputeData(object));
@@ -688,6 +710,72 @@ export class StripeDriver implements PaymentsDriver {
       return undefined;
     }
     return { gatewayId, amount: dispute.amount, currency: dispute.currency };
+  }
+
+  /**
+   * An inquiry (`warning_*`) or the pre-dispute half of the dispute family. Carries the
+   * deadline, which is the entire value of the alert: an inquiry left unanswered reads to
+   * the issuer as accepting the claim and becomes a chargeback that is probably
+   * irreversible.
+   */
+  #disputeWarningData(object: Record<string, unknown>): Record<string, unknown> | undefined {
+    const base = this.#disputeData(object);
+    if (base === undefined) return undefined;
+    const dispute = object as unknown as Stripe.Dispute;
+    const dueBy = dispute.evidence_details?.due_by;
+    return {
+      ...base,
+      disputeId: dispute.id,
+      ...(typeof dispute.reason === 'string' ? { reason: dispute.reason } : {}),
+      ...(typeof dueBy === 'number'
+        ? { actionableUntil: new Date(dueBy * 1000).toISOString() }
+        : {}),
+    };
+  }
+
+  /**
+   * An early fraud warning has no deadline of its own — the window closes when the
+   * chargeback is filed, which is the thing you are trying to prevent — so it carries no
+   * `actionableUntil`. `actionable` is Stripe's own flag for whether anything can still be
+   * done: false once a dispute has arrived or the charge is fully refunded.
+   */
+  #fraudWarningData(object: Record<string, unknown>): Record<string, unknown> | undefined {
+    const warning = object as unknown as Stripe.Radar.EarlyFraudWarning;
+    const gatewayId =
+      typeof warning.payment_intent === 'string'
+        ? warning.payment_intent
+        : typeof warning.charge === 'string'
+          ? warning.charge
+          : undefined;
+    if (gatewayId === undefined) return undefined;
+    return {
+      gatewayId,
+      disputeId: warning.id,
+      reason: warning.fraud_type,
+      actionable: warning.actionable,
+    };
+  }
+
+  /**
+   * `warning_closed` is an inquiry that sat 120 days without escalating. The networks send
+   * no explicit win for one, so it is `expired` rather than `won` — nothing was decided in
+   * your favour, the clock simply ran out in the right direction.
+   */
+  #disputeOutcome(object: Record<string, unknown>): 'won' | 'lost' | 'expired' | undefined {
+    const status = (object as unknown as Stripe.Dispute).status;
+    if (status === 'won') return 'won';
+    if (status === 'lost') return 'lost';
+    if (status === 'warning_closed') return 'expired';
+    return undefined;
+  }
+
+  #disputeClosedData(
+    object: Record<string, unknown>,
+    outcome: 'won' | 'lost' | 'expired',
+  ): Record<string, unknown> | undefined {
+    const base = this.#disputeData(object);
+    if (base === undefined) return undefined;
+    return { ...base, disputeId: (object as unknown as Stripe.Dispute).id, outcome };
   }
 
   /** A Checkout Session → the canonical payment payload, keyed on its PaymentIntent. */

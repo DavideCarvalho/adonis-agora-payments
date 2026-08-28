@@ -137,7 +137,7 @@ fallback rather than an assumption.
 
 ## Answering a dispute
 
-Stripe is one of the two drivers with `capabilities.disputes: true`, so `findDispute()` and
+Stripe is the only driver with `capabilities.disputes: true`, so `findDispute()` and
 `submitDisputeEvidence()` are real here: `GET /v1/disputes/{id}` and
 `POST /v1/disputes/{id}` with the `evidence` hash, on API version `2025-08-27.basil`.
 

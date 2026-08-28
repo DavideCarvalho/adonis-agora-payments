@@ -72,6 +72,7 @@ this small cannot leak a column somebody adds to `billing_payments` later withou
 
 | Status | Meaning |
 | --- | --- |
+| `400` | No `reference` in the query string, or a blank one. |
 | `401` | No caller could be resolved, or `authorize` said no. |
 | `403` | A caller was resolved and does not own this reference. |
 | `404` | No payment row for that reference — **including a charge whose webhook has not landed yet**. |
@@ -80,6 +81,13 @@ this small cannot leak a column somebody adds to `billing_payments` later withou
 The `404` is the one that surprises people: `billing_payments` is written by the **webhook**, so a
 Pix nobody has paid has no row at all. That is the waiting state, not a failure, and the hook keeps
 polling through it.
+
+It is also checked **before** the ownership guard, which is the one thing this endpoint tells a
+caller that it does not strictly have to: a reference that exists but is not yours answers `403`,
+while one that exists nowhere answers `404`. The alternative — `404` for both — would make the
+waiting state indistinguishable from a denial, and the hook has to keep polling through one and
+stop on the other. References are your own ids; if yours are guessable, that difference is worth
+knowing about.
 
 Every answer carries `Cache-Control: no-store`. The read is one indexed row
 (`billing_payments_external_reference_idx`, then the unique `billing_payments.gateway_id` when
@@ -138,9 +146,10 @@ export function PixPanel({ reference, pixCode, pixQrCodeImage }: Props) {
 }
 ```
 
-`status` is typed against the package's `BillingStatus`, so the `switch` above stays exhaustive: a
-status added to the library becomes a type error in your component rather than a branch that
-silently falls through.
+`status` is typed as `PaymentStatus` — the server's `BillingStatus` union restated as a value the
+browser can hold at runtime, with a compile-time assertion on the server that the two lists are
+still the same list. So the `switch` above stays exhaustive: a status added to the library becomes
+a type error in your component rather than a branch that silently falls through.
 
 | Returns | |
 | --- | --- |

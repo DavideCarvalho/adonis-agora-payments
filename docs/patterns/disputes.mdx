@@ -1,0 +1,353 @@
+---
+title: Disputes
+description: A chargeback is the only event that takes revenue back after it settled, and it runs on a clock. The three moments, why actionableUntil is the field that matters, how to reach the stored dispute and submit evidence where the gateway allows it — and why the decision to fight or refund stays in your code.
+icon: ShieldAlert
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Every other event in this library reports money arriving. A dispute reports money leaving, weeks
+after you granted what the customer bought — and unlike a refund, nobody at your end decided it.
+
+It also runs on a clock, and the clock is the part that costs money. Every card network gives a
+fixed window to respond, and past it the dispute is lost **by default rather than on the merits**:
+the evidence you had all along stops being admissible. That is the one thing this page exists to
+make impossible to miss.
+
+## The three moments
+
+A dispute is not one event. It is up to three, and what your code should do differs at each:
+
+| Event | What happened | The money | What the library writes |
+| --- | --- | --- | --- |
+| `payment.dispute_warning` | a pre-dispute alert — an inquiry, a retrieval request, an early fraud warning | **untouched** | a `billing_disputes` row with status `warning`. The payment row is not moved |
+| `payment.disputed` | a chargeback was filed | **withdrawn** | the payment row moves to `disputed`; a dispute row with status `open` |
+| `payment.dispute_closed` | the dispute reached an outcome | returned, or gone | the dispute row closes with its `outcome`; `won` puts the payment row back to `paid` |
+
+**The warning is the valuable one, and it is the one most integrations do not have.** No money has
+moved yet, which is why the payment row is left alone — a row that says `paid` is telling the truth.
+What the alert buys you is the window in which refunding stops the chargeback from being filed
+**at all**: the card networks count filings against a ratio, and crossing that ratio puts a merchant
+into a network monitoring programme regardless of how many of those disputes were later won.
+
+`payment.dispute_closed` always carries `outcome`. A driver that cannot read one from the gateway
+emits `payment.updated` instead — the processor **throws** on a close without an outcome rather than
+defaulting to a result the gateway never sent.
+
+<Callout title="`won` moves the row back; `lost`, `expired` and `canceled` do not">
+`revenue()` sums payments that are `paid`, so a dispute you won would otherwise stay written off
+forever. `canceled` — the cardholder withdrawing — deliberately does not restore the row: on Stripe
+a withdrawn dispute still has to be closed in your favour with evidence, so booking it would count
+revenue the acquirer has not returned. `lost` moves the row TO `disputed` even if no
+`payment.disputed` ever arrived, which is the ordinary sequence on Razorpay, PayPal and Woovi.
+</Callout>
+
+## `actionableUntil` is the field that matters
+
+Every dispute event's `data` is a `DisputeWebhookData`:
+
+```ts
+{
+  gatewayId: string          // the PAYMENT's gateway id — the row this is about
+  disputeId?: string         // the dispute's own id, where the gateway issues one
+  reason?: string            // the gateway's own reason code, verbatim
+  actionableUntil?: string   // ISO 8601 — the deadline to respond
+  outcome?: 'won' | 'lost' | 'canceled' | 'expired'   // dispute_closed only
+  amount?: number
+  currency?: string
+}
+```
+
+`amount` and `currency` are optional on purpose: Stripe's early fraud warning object names a charge
+and a fraud type and carries no money at all, and refusing the alert for that would throw away the
+earliest notice the library gets.
+
+`actionableUntil` is the one to build on. It is normalized from whatever the gateway calls it —
+Stripe's `evidence_details.due_by`, Adyen's `additionalData.defensePeriodEndsAt`, Square's `due_at`,
+PayPal's `seller_response_due_date` — and it is persisted as `billing_disputes.evidence_due_by`,
+indexed together with `status` because that pair is exactly what the deadline read scans.
+
+<Callout type="warn" title="A missing deadline means the gateway told you nothing">
+`actionableUntil` is absent on eleven of the eighteen gateways, and `evidence_due_by` is then `null`.
+That is **not** "no hurry" — the window still exists, it just does not reach you as a field. Woovi
+publishes a three-day rule as policy rather than as a date; Dodo's ten days is real and appears in
+no payload. Do not render a null deadline as slack.
+</Callout>
+
+## Handling a warning
+
+The three events go where every other event goes — see
+[Reacting to payments](/docs/payments/patterns/reacting-to-payments). A warning handler's job is
+narrow: get it in front of a human, with the deadline attached, while a refund is still cheaper than
+losing.
+
+```ts title="app/payment_handlers/payment_dispute_warning.ts"
+import { inject } from '@adonisjs/core'
+import type { WebhookEvent } from '@adonis-agora/payments'
+import { LucidBillingStore } from '@adonis-agora/payments'
+
+@inject()
+export default class DisputeWarningHandler {
+  static readonly eventType = 'payment.dispute_warning'
+
+  constructor(
+    private store: LucidBillingStore,
+    private mail: MailService,
+  ) {}
+
+  async handle(event: WebhookEvent): Promise<void> {
+    const data = event.data as {
+      gatewayId: string
+      disputeId?: string
+      reason?: string
+      actionableUntil?: string
+    }
+
+    // The payment row still says `paid`, and that is correct — nothing has been withdrawn.
+    // What you are deciding is whether to refund BEFORE it is.
+    const payment = await this.store.findPaymentByGatewayId(data.gatewayId)
+    if (!payment) return
+
+    await this.mail.send(
+      new ChargebackIncoming({
+        provider: event.provider,
+        paymentGatewayId: data.gatewayId,
+        disputeId: data.disputeId,
+        reason: data.reason,
+        // May be undefined. Say "this gateway sends no deadline" in the email rather
+        // than omitting the line — the absence is itself the operationally useful fact.
+        respondBy: data.actionableUntil,
+        amount: payment.amount,
+        currency: payment.currency,
+      }),
+    )
+  }
+}
+```
+
+A metric or a Slack ping can go on the diagnostics bus instead, which is cheaper and decoupled —
+the payload is `{ gatewayId, provider, reason?, actionableUntil? }`:
+
+```ts title="start/payments.ts"
+import { onDiagnostic } from '@adonis-agora/diagnostics'
+
+onDiagnostic('payments', 'payment.dispute_warning', ({ payload }) => {
+  metrics.increment('payments.dispute_warning', { provider: payload.provider })
+})
+```
+
+Remember what a diagnostics subscriber is: fire-and-forget. A throw there does not fail the webhook
+and is not retried. Use it for the ping, not for anything that must happen.
+
+## Reaching the stored dispute
+
+The dispute row is written by the processor on all three events, so nothing has to be reconstructed
+from `event.raw`. Read it through the store — never with a query against `billing_disputes`, because
+`billing.store` is a configured seam:
+
+```ts
+import { OPEN_DISPUTE_STATUSES } from '@adonis-agora/payments'
+
+// The windows closing in the next three days, soonest first. Only OPEN disputes that
+// actually carry a deadline — a dispute with none is never in this list.
+const closing = await store.listDisputesDueWithin({ withinHours: 72, limit: 20 })
+
+// The count behind it, unbounded by any page — a count taken off a capped page
+// saturates at the cap and reads as the same number forever.
+const total = await store.countDisputesDueWithin({ withinHours: 72 })
+
+// The log: newest first, filterable by status and provider.
+const warnings = await store.listDisputes({ status: 'warning', limit: 50 })
+
+// The dispute a payment currently has open, if any — status in OPEN_DISPUTE_STATUSES.
+const open = await store.findOpenDisputeByPayment(payment.gatewayId)
+```
+
+Each row is a `DisputeListItem`, and two of its fields are nullable in a way that matters:
+`evidenceDueBy` is `null` when the gateway sent no deadline, and `amount` is `null` when the alert
+named no money. Both mean "we were told nothing", and rendering either as a zero is a claim the
+gateway never made.
+
+<Callout title="Where the dispute id comes from when the gateway sends none">
+Several gateways issue no dispute id, and several more send one when the dispute opens and omit it
+when it closes. The processor keys a dispute row on `disputeId` when there is one, otherwise on the
+payment's newest unresolved dispute, otherwise on a synthesized `dispute:<provider>:<payment id>`.
+The cost is real and worth knowing: a payment disputed **twice** by a gateway that sends no dispute
+id collapses onto one row, because such a gateway gives nothing to tell the two apart.
+</Callout>
+
+## Submitting evidence
+
+`findDispute` and `submitDisputeEvidence` are **optional** on the driver contract, gated by
+`capabilities.disputes`. A gateway can settle money perfectly and give you nothing but an email when
+a chargeback lands; requiring the methods would have forced eighteen drivers to invent one.
+
+**Only Stripe implements them.** Adyen defines both and throws with an explanation — its Defend
+Disputes v30 API has no endpoint that reads a dispute back, so the `Dispute` the method must return
+would be invented, and a defense is a scheme-specific `defenseReasonCode` plus base64 documents that
+`DisputeEvidence` cannot carry. Every other driver omits them entirely, which is why the call is
+written with `?.`:
+
+```ts title="app/services/dispute_service.ts"
+import { getPayments } from '@adonis-agora/payments/services/main'
+import type { DisputeEvidence } from '@adonis-agora/payments'
+
+const payments = getPayments()
+const driver = payments.driver(dispute.provider)
+
+// Fails at your boundary with the gateway named, rather than at a missing method.
+payments.assertCapability(driver, 'disputes')
+
+const current = await driver.findDispute?.(dispute.gatewayId)
+if (!current?.canSubmitEvidence) return   // past due, already answered, or already decided
+
+const evidence: DisputeEvidence = {
+  explanation: 'Delivered and signed for; the account has six prior undisputed charges.',
+  customerName: order.customerName,
+  customerEmail: order.customerEmail,
+  customerIpAddress: order.checkoutIp,
+  shippingCarrier: shipment.carrier,
+  shippingTrackingNumber: shipment.trackingNumber,
+  shippingDate: shipment.shippedAt.toISO(),
+  // Documents are addressed by what they PROVE, and by a gateway file id — never a URL.
+  // No reviewing bank follows a link.
+  documents: [
+    { kind: 'receipt', id: 'file_1Nxxxx' },
+    { kind: 'shipping', id: 'file_1Nyyyy' },
+  ],
+  // Visa's Compelling Evidence 3.0 wants the prior charges themselves, not a count.
+  priorUndisputedPayments: previous.map((p) => ({
+    paymentGatewayId: p.gatewayId,
+    customerIpAddress: p.checkoutIp,
+  })),
+}
+
+const updated = await driver.submitDisputeEvidence?.(dispute.gatewayId, evidence)
+```
+
+<Callout type="warn" title="Submitting is final, and it happens once">
+Stripe forwards the response to the issuing bank immediately — you cannot edit it, add to it, or
+send a second one. The driver refuses in three places rather than guessing: it maps every
+`DisputeEvidence` field or throws naming the one it cannot carry, it re-reads the dispute and
+refuses when the gateway will not accept evidence, and it refuses an empty hash rather than spending
+the submission on nothing. `canSubmitEvidence` reads the status **and** `evidence_details.past_due`,
+because past the deadline the API rejects the update while the status still says `needs_response`.
+</Callout>
+
+## Noticing before the window shuts
+
+Nothing here is broken when a deadline passes, which is exactly why it needs a scheduled check
+rather than an alert on an error. `payments:health` has a check for it:
+
+```sh
+node ace payments:health
+node ace payments:health --dispute-window=168 --json
+```
+
+It exits non-zero when any check is non-zero, and it **names** the disputes rather than counting
+them — a count names nobody to email and no gateway dashboard to open:
+
+```text
+2  Open disputes whose evidence window closes within 3d
+     A chargeback window is closing. Past it the dispute is lost by default rather than on the
+     merits, and nothing can be done — submit evidence at the gateway, or refund if it is cheaper
+     than the fee. Rows already past their deadline are counted here too: they are still open, and
+     still unanswered.
+  stripe du_1NGiUn (payment pi_3Oa1): evidence due 2026-08-29T23:59:00.000Z
+```
+
+Two behaviours worth knowing before you wire an alert on it:
+
+- **A window already past stays in the list**, because the dispute is still open and still
+  unanswered. Going quiet the moment it expires reads as resolved.
+- **A dispute with no deadline is never in it.** `listDisputesDueWithin` filters on a date, and a
+  gateway that sends none produces no row here. It is in `listDisputes`, and nowhere else.
+
+The default horizon is 72 hours — late enough that the check is not permanently red, early enough
+that someone can still gather a receipt, a delivery confirmation and an IP log. Run it on a cron.
+The bundled console shows the same data on a **read-only** Disputes screen, leading with the windows
+closing rather than the log; see [Dashboard](/docs/payments/dashboard).
+
+## What this library will not do: decide
+
+The library normalizes the events, persists the dispute, surfaces the deadline and makes the
+submission one honest call. It never submits on its own, and it never chooses between fighting and
+refunding.
+
+That is not an unfinished feature. Whether a dispute is worth answering depends on facts no library
+can see: your margin on the sale, what the customer is worth over their lifetime, whether this
+account has a fraud history, what evidence your app actually holds, and how close you are to the
+chargeback ratio that puts a merchant into a network monitoring programme.
+
+The arithmetic is genuinely small and it is genuinely yours. Stripe's published analysis of early
+fraud warnings puts the break-even at roughly the dispute fee: refunding proactively costs you the
+sale, while letting a charge worth about your dispute fee or less become a chargeback costs you the
+sale **and** the fee **and** a mark against the ratio. Below that line, refunding on the warning is
+the cheaper move even when you would have won. Above it, a case worth building is worth building.
+
+Which makes the rule about four lines in your own handler:
+
+```ts
+// Your economics, not the library's. Written here so it can be read, argued with and changed.
+const DISPUTE_FEE_CENTS = 1500
+
+if (payment.amount <= DISPUTE_FEE_CENTS) {
+  await driver.refund(payment.gatewayId)     // cheaper than the fight, win or lose
+} else {
+  await this.disputes.queueForReview(payment, data.actionableUntil)
+}
+```
+
+Refunding inside the warning window is the only move that removes the chargeback from the ratio
+entirely, and it is only available while the alert is fresh. That is the whole reason
+`payment.dispute_warning` is a first-class event rather than a passthrough.
+
+## Which gateways send what
+
+Sixteen drivers went through the dispute vocabulary pass, and several genuinely have nothing. Those
+rows are honest answers, not gaps to be filled.
+
+| Gateway | Pre-dispute alert | Chargeback | Outcome | Deadline |
+| --- | --- | --- | --- | --- |
+| Stripe | inquiries (`warning_*`) + `radar.early_fraud_warning.created` | ✅ | won / lost / expired | ✅ `evidence_details.due_by` |
+| Adyen | `NOTIFICATION_OF_FRAUD`, `REQUEST_FOR_INFORMATION`, `NOTIFICATION_OF_CHARGEBACK` | ✅ `CHARGEBACK` | won / lost / expired | ✅ `defensePeriodEndsAt` |
+| Square | `INQUIRY_*` states | ✅ | won / lost | ✅ `due_at` |
+| PayPal | stage `INQUIRY` | ✅ | won / lost / canceled | ✅ `seller_response_due_date` |
+| Razorpay | phase `fraud`, `retrieval` | ✅ | won / lost / canceled | ✅ `respond_by` |
+| Efí | MED `devolução` executing | ✅ MED completed | — never | ❌ none |
+| Woovi | `DISPUTE_CREATED` | — never sends one | won / lost / canceled | ❌ none (3 days is policy) |
+| Mercado Pago | ❌ none | ✅ | won / lost | ✅ `date_documentation_deadline`, second call |
+| Asaas | ❌ none | ✅ | **won only** | ✅ `deadlineToSendDisputeDocuments` |
+| Mollie | ❌ none | ✅ | **won only** | ❌ none |
+| Dodo | ❌ none | ✅ | won / lost / expired / canceled | ❌ none (10 days, in no field) |
+| Paddle | ❌ none — `chargeback_warning` already refunds | ✅ | **won only** | ❌ none |
+| Pagar.me | ❌ none | ✅ `charge.chargedback` | — never | ❌ none |
+| AbacatePay | ❌ none | ✅ | — never | ❌ none |
+| PagBank | ❌ none | — never | — never | ❌ none |
+| InfinitePay | ❌ none | — never | — never | ❌ none |
+| Lemon Squeezy | ❌ none | — never | — never | ❌ none |
+| Polar | ❌ none | — never | — never | ❌ none |
+
+Read that table twice, because two rows in it are traps:
+
+- **Eleven gateways send no pre-dispute alert.** The first you hear is the chargeback, and by then
+  the refund that would have prevented it is no longer available. If pre-dispute alerting is what
+  you need, it is a reason to choose a gateway, not something to configure on the one you have.
+- **Four send no dispute notice at all.** On PagBank, InfinitePay, Lemon Squeezy and Polar the
+  library will never write a dispute row, because nothing arrives to write one from. On Lemon
+  Squeezy and Polar that is the merchant-of-record model working as sold — they contest chargebacks
+  on your behalf and there is nothing for you to answer. On PagBank the dispute lives in the legacy
+  form-encoded notification API this driver does not speak, and on InfinitePay it is handled inside
+  their app. In all four the first signal is the money missing from a payout.
+
+Two more that read wrong at a glance:
+
+- **Woovi never emits `payment.disputed`.** Its MED open is a warning (the balance is blocked, not
+  taken) and its resolution is a close, so the sequence is warning → closed. A `lost` close moves the
+  payment row to `disputed` on its own precisely so this case is not silently counted as revenue.
+- **Paddle's `chargeback_warning` is not a warning.** Paddle's own documentation says the disputed
+  amount is refunded when one is raised, so it maps to `payment.disputed`. Mapping it as an alert
+  would leave a row saying `paid` over money already returned to the buyer.
+
+Each provider page carries the full mapping for its gateway, including the events deliberately left
+as `payment.updated` — see [Providers](/docs/payments/providers).

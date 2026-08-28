@@ -166,11 +166,16 @@ rebuilding through the driver made Stripe, Adyen and every other signing gateway
 retry worked only for the minority that do not sign.
 
 <Callout type="warn" title="Events recorded before the `normalized` column existed">
-`billing_webhook_events.normalized` arrives in the second published migration
-(`add_billing_external_reference`). A row written before you ran it has nothing to replay — the raw
-payload alone is not enough — so the retry answers `422` saying exactly that and leaves the ledger
-row exactly as it was, original error and all. Redeliver those from the gateway's own dashboard.
-Events delivered after the migration replay normally.
+`billing_webhook_events.normalized` arrived after the first release. There is nothing to run for
+it — the library [owns its schema](/docs/payments/billing#the-billing-tables) and adds the column
+on the next boot — but the rows already in the ledger are not backfilled, because the normalized
+event was never stored to backfill from.
+
+So a row older than the column has nothing to replay (the raw payload alone is not enough, and
+rebuilding through `parseWebhook` would re-verify a signature computed from headers the ledger
+never kept). Retry answers `422` saying so and leaves the ledger row exactly as it was, original
+error and all. Redeliver those from the gateway's own dashboard; everything recorded since replays
+normally.
 </Callout>
 
 ## Configuration

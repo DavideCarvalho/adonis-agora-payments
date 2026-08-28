@@ -33,6 +33,13 @@ Six tables:
 | `billing_payments` | every payment, keyed by **gateway id**, and indexed on `external_reference` — **your** id for the charge |
 | `billing_webhook_events` | the **idempotency ledger**, keyed by gateway event id, storing the raw payload *and* the normalized event |
 | `billing_disputes` | chargebacks and pre-chargeback alerts, keyed by the **dispute's** gateway id — and `evidence_due_by`, the deadline to answer |
+| `billing_usage_events` | metered consumption, one row per event — the input to [usage-based billing](#usage-based-billing--metered-subscriptions) |
+
+`createBillingTables` also carries columns added *after* their table shipped, as guarded
+`ALTER`s: `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists, so an
+install upgrading from an earlier version would otherwise keep the old columns and fail on
+the first query naming a new one. `ensureSchema()` is public on `LucidBillingStore` for an
+app that turned `autoCreateSchema` off and wants it in a seeder.
 
 `billing_webhook_events` is the heart: it's what makes every redelivery a no-op instead of a
 double-grant.
@@ -65,6 +72,7 @@ await store.countPayments({ status: 'pending', createdBefore: cutoff })
 await store.findDisputeByGatewayId('dp_1Nx4')            // one dispute, by the DISPUTE's id
 await store.findOpenDisputeByPayment('pi_3Qx7')         // ...or the open one against a payment
 await store.listDisputes({ status: 'open', limit: 20 })
+await store.countDisputes({ status: 'open' })
 await store.listDisputesDueWithin({ withinHours: 72 })  // the windows closing soonest, first
 await store.countDisputesDueWithin({ withinHours: 72 })
 
@@ -310,8 +318,8 @@ const report = await store.usageReport({
 
 `usageReport` filters by `subscriptionId`, `customerId`, `meter`, and a `from`/`to` window,
 aggregating `quantity` per meter — the input to a usage-based invoice or overage charge.
-The table and model ship in the published migration; the in-memory store mirrors it for
-tests.
+`billing_usage_events` is created with the rest of the schema, so there is nothing to run
+first; the in-memory store mirrors it for tests.
 
 ### Pricing a period — `meteredBill`
 
@@ -385,7 +393,7 @@ export default class UsageService {
 }
 ```
 
-The default is Lucid over the tables the configure command published — that is what makes the
+The default is Lucid over the tables the library creates for itself — that is what makes the
 billing layer work with no configuration at all. Name it only when you want different models behind
 it:
 

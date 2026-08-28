@@ -49,6 +49,7 @@ export const PAYMENTS_DIAGNOSTIC_EVENTS = [
   'payment.dispute_closed',
   'payment.updated',
   'invoice.emitted',
+  'invoice.failed',
   'webhook.received',
   'webhook.verification',
   'webhook.processed',
@@ -205,6 +206,22 @@ export interface InvoiceEmittedPayload {
   number?: string;
   url?: string;
 }
+
+/**
+ * A fiscal invoice that could not be emitted for a charge that DID go through.
+ *
+ * The charge is the money and the invoice is a side effect of it, so a failing invoice
+ * provider no longer rejects `charge()` — that reported a failure over money the gateway had
+ * already taken, and the caller could only conclude nothing happened. It is published here
+ * instead, loudly, because in Brazil an NFS-e is a legal obligation and a silently missing
+ * one is worse than a noisy one.
+ */
+export interface InvoiceFailedPayload {
+  /** The PAYMENT's gateway id — the charge that exists and has no invoice. */
+  gatewayId: string;
+  provider: string;
+  error: string;
+}
 export interface WebhookReceivedPayload {
   id: string;
   provider: string;
@@ -312,6 +329,7 @@ export interface PaymentsDiagnosticPayloads {
   'payment.dispute_closed': PaymentDisputeClosedPayload;
   'payment.updated': PaymentUpdatedPayload;
   'invoice.emitted': InvoiceEmittedPayload;
+  'invoice.failed': InvoiceFailedPayload;
   'webhook.received': WebhookReceivedPayload;
   'webhook.verification': WebhookVerificationPayload;
   'webhook.processed': WebhookProcessedPayload;
@@ -633,6 +651,15 @@ export function publishSubscriptionDiagnostics(
       provider: subscription.provider,
     });
   }
+}
+
+/** Publish `invoice.failed` — a charge that went through with no fiscal invoice behind it. */
+export function publishInvoiceFailedDiagnostics(failure: {
+  gatewayId: string;
+  provider: string;
+  error: string;
+}): void {
+  publishPayments('invoice.failed', failure);
 }
 
 export function publishInvoiceEmittedDiagnostics(invoice: {

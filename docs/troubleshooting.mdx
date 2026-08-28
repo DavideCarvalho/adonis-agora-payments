@@ -1,6 +1,6 @@
 ---
 title: Troubleshooting
-description: The symptoms that actually happen — webhooks returning 400, handlers that never run, double grants, routing errors, missing invoices — and how to tell the causes apart quickly.
+description: The symptoms that actually happen — webhooks returning 400 or 500, handlers that never run, double grants, routing errors, missing invoices, a schema that upgraded halfway — and how to tell the causes apart quickly.
 icon: LifeBuoy
 ---
 
@@ -24,6 +24,37 @@ Signature validation failed. In order of likelihood:
 
 Confirm which by pointing the gateway at a staging endpoint with verification unconfigured. If it
 passes there, it is the credential or the body — not the payload.
+
+## The webhook route started returning `500`
+
+This is the fix, not a regression. A delivery whose handler threw used to answer `200`; it answers
+`500` now.
+
+A 2xx tells the gateway it never has to send that delivery again. Answering it over an event that
+failed is how a payment is lost for good — the effect never happened, the gateway never retries, and
+the in-process retry that was supposed to cover it dies with the next deploy. Adyen queues a failed
+delivery for up to 30 days of retries and Efí makes nine attempts; neither starts on a 2xx. So the
+`500` was always the truth, and the gateway's delivery log was already showing it as a failure at the
+gateway's end.
+
+The body says what actually landed:
+
+```json
+{ "received": true, "processed": 3, "failed": ["evt_4"], "error": "Order 1042 not found" }
+```
+
+`error` is the first failed handler's message and is the thing to read first. Then treat it exactly
+like a `failed` ledger row — same cause, same fix. The redelivery is cheap: the three that succeeded
+are already `processed` in the ledger, so the claim skips them and only `evt_4` re-runs.
+
+A `400` is a different animal and did not change: the delivery was rejected before any handler ran —
+a bad signature, an unparsable body, an unknown provider — and redelivering it would fail
+identically.
+
+<Callout type="warn" title="Your 5xx alert will fire where it used to be silent">
+If you page on 5xx from `/payments/webhook/*`, expect it. Nothing new is breaking; the failure is
+just visible on your side now instead of only in the gateway's dashboard.
+</Callout>
 
 ## The webhook returns `200` but nothing happened
 
@@ -173,11 +204,94 @@ Something passed reais where cents were expected. `1990` is R$ 19,90; `19.90` is
 rounded. `toDecimal`/`fromDecimal` are for driver implementations only — application code should
 never call them. See [Money](/docs/payments/concepts/money).
 
+If the gateway is **Woovi/OpenPix** and the charge at the gateway is a hundredth of what you asked
+for — `charge({ amount: 1990 })` creating a 20-centavo charge — that was a bug in the driver, not in
+your call, and it is fixed. OpenPix documents `value` in **centavos**, which is the unit this package
+already works in, and the driver converted anyway. Upgrade; nothing in your code changes. Charges
+already created at the wrong amount have to be cancelled and recreated — the gateway has them at the
+value it was sent.
+
+The reason it survived review: the charge path and the webhook path agreed with each other, and the
+tests agreed with both. Nothing was inconsistent, only wrong.
+
+## A dispute was won but the payment still reads `disputed`
+
+A chargeback moves the payment row to `disputed`, and on an older version nothing ever moved it back.
+`revenue()` sums rows that are `paid`, so a dispute you **won** — money already returned to the
+account — stayed written off permanently. `payment.dispute_warning` and `payment.dispute_closed` were
+declared on the bus and published by nobody: the processor's switch had no case for them and they
+fell through to the no-op branch.
+
+Fixed: a `payment.dispute_closed` carrying `outcome: 'won'` puts a `disputed` row back to `paid`.
+`lost` and `expired` deliberately leave it alone, because that money is gone, and so does `canceled` —
+on Stripe a withdrawn dispute still has to be closed in your favour with evidence, so booking it would
+count revenue the acquirer has not returned. Understating is the safe direction.
+
+**Upgrading does not repair the rows you already have.** Those `dispute_closed` events are in
+`billing_webhook_events` as `processed`, so replaying them from the gateway dashboard is a no-op —
+the ledger deduplicates on the gateway event id, which is exactly what it is for. Find them and fix
+them directly:
+
+```ts
+const stuck = await store.listDisputes({ status: 'won', limit: 200 })
+// then, for each, confirm at the gateway and put the payment row back:
+//   await store.savePayment({ ...existing fields..., status: 'paid' })
+```
+
+A close that carries **no** outcome throws rather than defaulting to one. That is deliberate: a
+driver that cannot read the outcome is required to emit `payment.updated` instead, and defaulting
+here would report a result the gateway never sent. See
+[Disputes](/docs/payments/patterns/disputes).
+
 ## Durable is installed but webhooks run in-process
 
 `dispatcher: 'auto'` falls back silently when durable's provider is not **registered in the app** —
 installing the package is not enough. Set `dispatcher: 'durable'` to make the fallback a boot error
 instead of a surprise. See [Production](/docs/payments/production).
+
+## `column ... does not exist`, or a table the library seems to ignore
+
+You are running with `billing.autoCreateSchema: false` and the schema has not caught up with the
+package. The library creates its own tables by default and carries later columns onto a database
+that already has them; turning that off moves both halves to you.
+
+`createBillingTables` is idempotent and does apply the columns added after a table shipped — but a
+migration you already ran does not run again. So an upgrade needs a **new** migration calling it once
+more, shipped in the same deploy as the code:
+
+```ts
+import { BaseSchema } from '@adonisjs/lucid/schema'
+import { createBillingTables } from '@adonis-agora/payments'
+
+export default class extends BaseSchema {
+  async up() {
+    this.defer(async (db) => { await createBillingTables(db) })
+  }
+}
+```
+
+The harder half of this is that skipping it does not always fail loudly. Three things are probed
+before use and **skipped when absent**, because failing every gateway delivery over a missing column
+is worse than recording less:
+
+| Missing | What you see instead of an error |
+| --- | --- |
+| `billing_payments.external_reference` | references are never stored, `findPaymentByExternalReference` always answers `null`, and handlers that route on it hit their silent `return` |
+| `billing_webhook_events.normalized` | the dashboard's retry cannot rebuild the event and answers `422` on any signed gateway |
+| the `billing_disputes` table | disputes are never recorded, and `payments:health` reports a healthy **zero** closing windows over a table that does not exist |
+
+Anything else — a table that was never created at all — does raise `relation ... does not exist` or
+`column ... does not exist` on the first query that touches it.
+
+<Callout type="warn" title="Restart after running the DDL">
+Each probe runs once per process and the answer is cached for the life of it. Running the migration
+against a live process does not change its mind: it keeps skipping the column it decided was absent.
+</Callout>
+
+One more place `autoCreateSchema: false` does not do what it says: setting `billing.store` — including
+`billingStores.lucid({ models })` — makes the store the app's own as far as the config is concerned,
+and the flag is not threaded into it. The tables get created anyway. Construct
+`new LucidBillingStore(models, { autoCreateSchema: false })` in your own factory if you need both.
 
 ## Events stuck in `failed`
 

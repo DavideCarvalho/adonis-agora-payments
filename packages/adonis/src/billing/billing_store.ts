@@ -32,7 +32,7 @@ export interface PaymentListItem {
    * The app's own id for this charge, as the gateway echoed it back.
    *
    * `null` on a payment whose gateway sent none, and on every row an install wrote before
-   * it ran the `add_billing_external_reference` migration.
+   * it ran an earlier schema.
    */
   externalReference: string | null;
   paidAt: Date | null;
@@ -301,7 +301,7 @@ export interface BillingStore<
    * `billing_payments_external_reference_idx`.
    *
    * `null` when no row carries it — including on a payment written before the install ran
-   * the `add_billing_external_reference` migration, whose column is `null` for every row.
+   * an earlier schema, whose column is `null` for every row.
    * Ties are broken newest-first: nothing stops an app reusing a reference across retries.
    */
   findPaymentByExternalReference(reference: string): Promise<PaymentRow | null>;
@@ -336,7 +336,7 @@ export interface BillingStore<
    * the deadline is the entire reason this table exists. Pass `null` explicitly to clear.
    *
    * Returns `null` — and writes nothing — when the install has no `billing_disputes` table
-   * yet, i.e. it upgraded the package before running `add_billing_disputes`. The dispute row
+   * yet, i.e. it upgraded the package before running an earlier schema. The dispute row
    * is ADDITIONAL (the payment row still moves, the diagnostics still publish), so the write
    * is skipped rather than failing every gateway delivery until someone runs the migration.
    */

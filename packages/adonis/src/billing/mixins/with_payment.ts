@@ -60,7 +60,7 @@ export class BillingPayment extends BaseModel {
    * payment up by, and an unindexed one on a table that grows with every charge is a
    * sequential scan on the hot path.
    *
-   * `null` on rows written before the `add_billing_external_reference` migration ran.
+   * `null` on rows written before an earlier schema ran.
    */
   @column()
   declare externalReference: string | null;

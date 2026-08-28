@@ -123,7 +123,7 @@ export function normalizePayment(row: unknown): ClientPayment | null {
  * 1. `external_reference` — the app's OWN id for the charge. This is the routing key: a
  *    checkout page polls for `order-1042`, not for `pi_3Qx...`, and the column exists so it
  *    can. Answers `null` for every row an install wrote before it ran the
- *    `add_billing_external_reference` migration, which is exactly why (2) is still here.
+ *    an earlier schema migration, which is exactly why (2) is still here.
  * 2. `gateway_id` — the old behaviour, kept because several Pix gateways make the two equal
  *    (Woovi's `correlationID`, Efí's `txid`) and because a not-yet-migrated install has
  *    nothing else to match on.

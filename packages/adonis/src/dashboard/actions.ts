@@ -114,7 +114,7 @@ export type ReplayOutcome =
   | { kind: 'conflict' }
   /**
    * The ledger row carries no normalized event, so there is nothing to replay. That means the
-   * row was written before this install ran the `add_billing_external_reference` migration —
+   * row was written before this install ran the `the schema this package now creates itself` migration —
    * the raw payload alone is not replayable, because turning it back into an event would mean
    * calling `parseWebhook`, which re-verifies a signature computed from headers the ledger
    * never kept. The row is put back exactly as it was, original error and all.
@@ -183,7 +183,7 @@ export function createReplayAction(deps: {
       return {
         kind: 'undeliverable',
         message:
-          'This event was recorded before the `add_billing_external_reference` migration added `billing_webhook_events.normalized`, so the normalized event it carried was never stored and cannot be rebuilt without re-verifying the gateway signature. Run the migration; events delivered after it replay normally.',
+          'This event was recorded before `billing_webhook_events.normalized` existed, so the normalized event it carried was never stored and cannot be rebuilt without re-verifying the gateway signature — which needs headers this table has never kept. Deliveries received since then replay normally; nothing can backfill this one.',
       };
     }
 

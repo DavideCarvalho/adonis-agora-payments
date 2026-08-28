@@ -44,8 +44,20 @@ await payments.driver('credit_card').charge({
 })
 ```
 
-The charge succeeds or fails on its own — invoice emission is best-effort from the
-gateway's perspective, resolved right after the payment is created.
+Emission runs **after** the gateway created the charge, inside the same `charge()` call —
+and it is not best-effort. If the invoice provider throws (a rejected CPF, a municipality
+timing out, a missing token), the exception propagates out of `charge()` **after the
+payment already exists at the gateway**. The caller sees a failed call over money that was
+in fact taken.
+
+So treat `charge({ invoice: true })` as two operations that share a return value. If your
+flow cannot tolerate that asymmetry, omit `invoice` and emit separately — the payment's
+`gatewayId` is all `InvoiceEmitInput.payment` needs, and a retry then costs a note rather
+than a second charge.
+
+Two defaults worth knowing: with no `service.description` anywhere the emitted note is
+described as `"Payment"`, and requesting an invoice with **no** `invoice.providers`
+configured throws with a message naming the config key rather than silently skipping.
 
 ### The payer's data
 
@@ -73,10 +85,14 @@ const payment = await payments.driver('pix').charge({
   invoice: true,
 })
 
-payment.invoice?.number  // '12345'
-payment.invoice?.key     // access key (chave de acesso)
-payment.invoice?.url     // hosted PDF
+payment.invoice?.number        // '12345'
+payment.invoice?.key           // access key (chave de acesso)
+payment.invoice?.hostedPdfUrl  // hosted PDF, when the provider gives one
+payment.invoice?.status        // 'issued' | 'pending' | 'failed' | ...
 ```
+
+The field is `hostedPdfUrl`, not `url`. Only the diagnostics payload calls it `url` — see
+below.
 
 The same event is also published on the diagnostics bus (`agora:payments:invoice.emitted`)
 with `number`/`url`, so receipts and notification flows can react to it without coupling to
@@ -106,6 +122,7 @@ Built-in providers:
   municipalities via REST; no SDK dependency.
 - **eNotas** (`invoice.enotas({ apiKey })`) — NFS-e/NF-e via `ENOTAS_API_KEY`.
 - **PlugNotas** (`invoice.plugnotas({ apiKey })`) — NFS-e via `PLUGNOTAS_API_KEY`.
+- **Tecnospeed** (`invoice.tecnospeed({ token })`) — NFS-e via the Tecnospeed API.
 - **Asaas** (`invoice.asaas({ apiKey })`) — **native NFS-e** through Asaas's own invoice
   API, so a charge through Asaas with `invoice: true` uses the same gateway that took the
   payment (also works as automatic emission per subscription configured in the Asaas
@@ -123,8 +140,9 @@ invoice: {
 }
 ```
 
-<Callout type="info" title="More providers, or your own">
-The roadmap includes Tecnospeed, eNotas and PlugNotas adapters. Until then — or for any
-other provider — custom providers are plain factories implementing the `InvoiceProvider`
-contract (`emit(input)`, `find(id)`). See [Custom providers](/docs/payments/custom-providers).
+<Callout type="info" title="Or your own">
+Five providers ship: Focus, eNotas, PlugNotas, Tecnospeed and Asaas. For anything else —
+a municipal API, a provider your accountant already uses — a custom provider is a plain
+factory implementing the `InvoiceProvider` contract (`emit(input)`, `find(id)`). See
+[Custom providers](/docs/payments/custom-providers#a-custom-invoice-provider).
 </Callout>

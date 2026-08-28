@@ -11,6 +11,12 @@ A subscription is created at the gateway; the billing layer keeps `billing_subsc
 from the webhooks after that. What you own is creating it correctly — and the gateways differ enough
 here that a generic example would be wrong for all of them.
 
+Fourteen of the eighteen drivers declare `subscriptions: true`. **Four do not** — Adyen, Efí,
+InfinitePay and PagBank have no subscription resource, and `assertCapability(driver,
+'subscriptions')` refuses at your boundary rather than at the gateway. The four worked through below
+are the ones whose differences are load-bearing; the rest are on their own
+[provider pages](/docs/payments/providers).
+
 ## The shape that is the same everywhere
 
 ```ts title="app/services/subscribe_service.ts"
@@ -19,13 +25,17 @@ const subscription = await getPayments().driver('credit_card').createSubscriptio
   planId: 'plan_pro',
   amount: 4990,                          // integer cents
   cycle: 'MONTHLY',
-  externalReference: `sub:${local.id}`,  // ← echoed on the subscription AND its charges
+  externalReference: `sub:${local.id}`,  // ← echoed on the subscription's CHARGES
 })
 ```
 
 <Callout type="warn" title="Set externalReference on the subscription, not just on charges">
 A subscription generates a webhook per charge, month after month. Without a reference on the
 subscription, the charge for month three arrives carrying gateway ids and nothing of yours.
+
+It reaches you on the `payment.*` events those charges produce. The `subscription.*` events
+themselves do **not** carry it — route those on `gatewayId`, and see
+[Upgrading mid-cycle](#upgrading-mid-cycle) below.
 </Callout>
 
 ## What each gateway needs
@@ -182,8 +192,18 @@ the manager will tell you so before any request goes out.
 | Customer | id, required | **inline object** | id | id + fiscal data |
 | `planId` means | your label | your label | a **Stripe Price id** | your label |
 | First charge needs | **`startDate`** | `startDate` → day of month | `trialDays` optional | — |
-| Reference on each charge | **propagated** | on the subscription | metadata | metadata |
+| Reference on each charge | **propagated** | on the subscription | **no** — see below | `externalId`, on every event |
 | Cancel at period end | no — immediate | — | yes | — |
+
+<Callout type="warn" title="On Stripe, a renewal charge carries no reference">
+`createSubscription` writes `external_reference` into the **subscription's** metadata, and Stripe
+does not copy subscription metadata onto the PaymentIntent that bills each cycle. The driver also
+maps no `invoice.*` events, so month three arrives as `payment_intent.succeeded` →
+`payment.succeeded` with no `externalReference` and no `subscriptionId` on `event.data`.
+
+Route it on `customerId`, or on the raw invoice on `event.raw`. Asaas is the gateway that gets this
+right: its `externalReference` really is propagated to every installment.
+</Callout>
 
 ## Trials
 
@@ -214,8 +234,9 @@ await local.merge({ pendingPlanId: 'plan_business' }).save()
 static readonly eventType = 'subscription.updated'
 
 async handle(event: WebhookEvent) {
-  const ref = (event.data as { externalReference?: string }).externalReference
-  const local = await Subscription.findBy('id', stripPrefix(ref))
+  // A subscription event routes on the gateway id, NOT on externalReference — see below.
+  const data = event.data as { gatewayId: string; status: string; planId?: string }
+  const local = await Subscription.findBy('gatewayId', data.gatewayId)
   if (!local?.pendingPlanId) return
 
   await local.merge({ planId: local.pendingPlanId, pendingPlanId: null }).save()
@@ -224,6 +245,19 @@ async handle(event: WebhookEvent) {
 
 Applying the new plan on the API response instead would hand the customer the upgrade even when the
 gateway rejected the change.
+
+<Callout type="warn" title="Subscription events do not carry `externalReference`">
+A `subscription.*` event's `data` is a `SubscriptionWebhookData`: `gatewayId`, `customerId`,
+`status`, and optionally `planId`, `trialEndsAt` and `endsAt`. No reference. Every driver maps its
+subscription payload onto exactly that shape — Stripe's `#subscriptionData` and Asaas'
+`#mapWebhookData` both drop it — so a handler reading `event.data.externalReference` on one gets
+`undefined` and silently returns.
+
+Store the subscription's `gatewayId` on your own row when you create it and route on that. The
+reference is still worth setting: it comes back on the subscription's **charges**, where
+`payment.*` events do carry it. If you need it on the subscription event itself, it is on
+`event.raw` under the gateway's own field.
+</Callout>
 
 ## Cancelling
 

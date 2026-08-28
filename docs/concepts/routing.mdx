@@ -71,7 +71,12 @@ someone else's API.
 interface PaymentsDriver {
   readonly provider: string
   readonly supportedMethods: readonly PaymentMethodName[]
-  readonly capabilities?: { refunds?: boolean; invoices?: boolean; subscriptions?: boolean }
+  readonly capabilities?: {
+    disputes?: boolean
+    refunds?: boolean
+    invoices?: boolean
+    subscriptions?: boolean
+  }
 
   createCustomer(input): Promise<Customer>
   findCustomer(customerId): Promise<Customer | null>
@@ -79,7 +84,7 @@ interface PaymentsDriver {
 
   charge(input): Promise<Payment>
   findPayment(gatewayId): Promise<Payment | null>
-  refund(paymentGatewayId, amount?): Promise<Refund>
+  refund(paymentGatewayId, amount?, options?: { idempotencyKey?: string }): Promise<Refund>
 
   createCheckout(input): Promise<CheckoutSession>
 
@@ -90,9 +95,23 @@ interface PaymentsDriver {
 
   listInvoices(customerId): Promise<Invoice[]>
 
-  parseWebhook(rawBody, headers): WebhookEvent
+  // Optional — a gateway can settle money perfectly and give you nothing but an email
+  // when a chargeback lands. Gated by `capabilities.disputes`.
+  findDispute?(disputeGatewayId): Promise<Dispute | null>
+  submitDisputeEvidence?(disputeGatewayId, evidence): Promise<Dispute>
+
+  parseWebhook(rawBody, headers):
+    | WebhookEvent
+    | WebhookEvent[]
+    | Promise<WebhookEvent | WebhookEvent[]>
 }
 ```
+
+Three details in `parseWebhook` are worth naming, because they are each a bug somebody shipped: it
+may return **several** events (Adyen's `notificationItems`, Efí's `pix`), it may be **async** (a
+Mollie callback is a bare payment id, and the fetch that resolves it is also what authenticates it),
+and every event it returns must carry an **id of its own** — the ledger keys on that id, so a batch
+that reuses one makes the second event look like a redelivery of the first.
 
 Every method returns a **normalized domain type** — `Payment`, `Subscription`, `Invoice` — with the
 gateway's untouched response tucked into `payload`. Application code reads the normalized fields;
@@ -111,7 +130,8 @@ Supported methods: pix, boleto, undefined.
 Route "credit_card" to a different provider in config.methods.
 ```
 
-**`capabilities`** is checked before delegating an operation that not every gateway has:
+**`capabilities`** is checked before delegating an operation that not every gateway has —
+`'refunds'`, `'invoices'`, `'subscriptions'` or `'disputes'`:
 
 ```ts
 const driver = payments.driver('pix')
@@ -119,9 +139,17 @@ payments.assertCapability(driver, 'refunds')   // throws on Woovi/OpenPix — no
 await driver.refund(payment.gatewayId)
 ```
 
-A driver missing a capability still *implements* the method — the interface demands it — and throws
-a clear "not supported" error. `assertCapability` surfaces that one step earlier, which is what
-`payments:sync` and `payments:webhook` use to avoid advertising events a gateway will never send.
+For the three core capabilities a driver missing one still *implements* the method — the interface
+demands it — and throws a clear "not supported" error. `assertCapability` surfaces that one step
+earlier, which is what `payments:sync` and `payments:webhook` use to avoid advertising events a
+gateway will never send.
+
+`disputes` is the exception, and deliberately: `findDispute` and `submitDisputeEvidence` are
+**optional members**, so a gateway with no dispute API omits them rather than implementing a throw.
+Test for them the way you would any optional member — `typeof driver.findDispute === 'function'` —
+and note that this is why a method-bound driver is a Proxy rather than a wrapper object: a wrapper
+that defined every method would turn "this gateway cannot do that" into "it can, until you call
+it".
 
 <Callout title="Capabilities are opt-in, so check rather than assume">
 A driver that declares no `capabilities` object is treated as supporting none of them. That is

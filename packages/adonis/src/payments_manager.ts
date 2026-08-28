@@ -1,6 +1,7 @@
 import type { PaymentsConfig } from './define_config.js';
 import type { PaymentsDriver } from './driver.js';
 import type { InvoiceManager } from './invoice/invoice_manager.js';
+import { PAYMENT_METHOD_NAMES } from './types.js';
 import type { PaymentMethodName } from './types.js';
 
 export interface PaymentsManagerOptions {
@@ -160,7 +161,7 @@ export class PaymentsManager {
     // Unknown method/name: throw a helpful error pointing at the routing config.
     const providers = [...this.#drivers.keys()].join(', ') || '(none)';
     throw new Error(
-      `[payments] "${methodOrName}" is neither a configured provider nor a method routed in config.methods. Configured providers: ${providers}. Known methods: pix, credit_card, debit_card, boleto, undefined.`,
+      `[payments] "${methodOrName}" is neither a configured provider nor a method routed in config.methods. Configured providers: ${providers}. Known methods: ${PAYMENT_METHOD_NAMES.join(', ')}.`,
     );
   }
 }

@@ -9,9 +9,10 @@ Four ideas carry the whole library. Everything else in these docs is a consequen
 ## Money is an integer, in the smallest unit
 
 `1990` is R$ 19,90. Never `19.90`, never a float, never a string parsed at the boundary. The
-`PaymentsDriver` contract, the billing tables and every diagnostics payload speak cents, and the two
-conversions to the decimal reais the Brazilian gateway APIs want live in exactly one place. See
-[Money](/docs/payments/concepts/money).
+`PaymentsDriver` contract, the billing tables and every diagnostics payload speak the currency's
+smallest unit, and the conversion some gateway APIs demand — Asaas and AbacatePay want decimal
+reais — lives in exactly one place, inside those drivers. A gateway that already speaks minor units
+(Woovi does) converts nothing. See [Money](/docs/payments/concepts/money).
 
 ## One contract, many gateways
 

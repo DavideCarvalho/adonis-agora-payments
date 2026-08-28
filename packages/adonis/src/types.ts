@@ -74,18 +74,28 @@ export type PaymentMethodType =
  * `bnpl` the buy-now-pay-later ones; `upi` is named outright because in India it is the
  * default way people pay, not a local alternative.
  */
-export type PaymentMethodName =
-  | 'pix'
-  | 'credit_card'
-  | 'debit_card'
-  | 'boleto'
-  | 'wallet'
-  | 'bank_transfer'
-  | 'bank_debit'
-  | 'upi'
-  | 'bnpl'
-  | 'voucher'
-  | 'undefined';
+export const PAYMENT_METHOD_NAMES = [
+  'pix',
+  'credit_card',
+  'debit_card',
+  'boleto',
+  'wallet',
+  'bank_transfer',
+  'bank_debit',
+  'upi',
+  'bnpl',
+  'voucher',
+  'undefined',
+] as const;
+
+/**
+ * The union, derived from the list above rather than written twice.
+ *
+ * The list exists because the routing error message used to spell the members out by hand,
+ * and said "pix, credit_card, debit_card, boleto, undefined" long after six more were added
+ * — so a reader routing `wallet` was told, by the library, that it was not a known method.
+ */
+export type PaymentMethodName = (typeof PAYMENT_METHOD_NAMES)[number];
 
 export interface MoneyAmount {
   amount: Money;

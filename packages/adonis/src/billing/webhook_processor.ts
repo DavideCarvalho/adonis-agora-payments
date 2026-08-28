@@ -191,6 +191,10 @@ export class WebhookProcessor {
       provider: event.provider,
       amount,
       currency,
+      // `reason` is on the payload type and was never published, so a subscriber could not
+      // see it even on the gateways that normalize one. It is the field that answers "why",
+      // which is the only question anyone asks of a failed payment.
+      ...(event.data.reason !== undefined ? { reason: event.data.reason } : {}),
       ...(event.data.externalReference !== undefined
         ? { externalReference: event.data.externalReference }
         : {}),
@@ -275,8 +279,9 @@ export class WebhookProcessor {
 
   /**
    * A pre-dispute alert: a Stripe inquiry or early fraud warning, an Adyen notification of
-   * chargeback or fraud. **Nothing is written.** No money has moved, so a payment that says
-   * `paid` is telling the truth, and the one useful thing to do with the alert is put it in
+   * chargeback or fraud. **The PAYMENT row is not touched** — a dispute row is written, so the
+   * deadline is somewhere, but no money has moved and a payment that says `paid` is telling
+   * the truth, and the one useful thing to do with the alert is put it in
    * front of somebody while a refund still prevents the chargeback.
    *
    * That is what the diagnostics publish is for — and until this method existed, the event

@@ -182,11 +182,49 @@ describe('AbacateDriver', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  /**
+   * AbacatePay's own words: "valores monetários são sempre em centavos (ex.: 10000 = R$
+   * 100,00)". The driver passed the integer straight through on `charge()` — the v2
+   * transparent endpoint — and ran `toDecimal` on `createCheckout` and `createSubscription`,
+   * so a R$19,90 checkout was created for **19 centavos**.
+   *
+   * It disagreed with itself, on two code paths nobody compared. Pinned in both directions
+   * and on every operation that sends money.
+   */
+  it.each([
+    [
+      'createCheckout',
+      async (d: ReturnType<typeof makeDriver>) =>
+        d.createCheckout({ customerId: 'cus_1', amount: 1990, successUrl: 'https://x' }),
+    ],
+    [
+      'createSubscription',
+      async (d: ReturnType<typeof makeDriver>) =>
+        d.createSubscription({ customerId: 'cus_1', amount: 1990 }),
+    ],
+  ])('sends centavos to AbacatePay from %s', async (_name, call) => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: 'bill_1', status: 'PENDING', amount: 1990, currency: 'brl' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await call(makeDriver());
+      const body = JSON.parse(String(fetchMock.mock.calls[0]![1].body));
+      expect(body.amount).toBe(1990);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('still refunds when no key is given', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ id: 'bill_1', status: 'REFUNDED', amount: 19.9, currency: 'brl' }),
+      // Centavos. AbacatePay documents every monetary value that way; this fixture said
+      // `19.9` and the driver divided, so the two agreed with each other and with nothing else.
+      json: async () => ({ id: 'bill_1', status: 'REFUNDED', amount: 1990, currency: 'brl' }),
     });
     vi.stubGlobal('fetch', fetchMock);
     const refund = await makeDriver().refund('bill_1');

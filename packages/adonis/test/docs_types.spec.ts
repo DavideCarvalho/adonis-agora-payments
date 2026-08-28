@@ -15,7 +15,17 @@ describe('api-reference domain unions', () => {
   const read = (path: string) => readFile(fileURLToPath(new URL(path, import.meta.url)), 'utf-8');
 
   const members = (source: string, name: string): string[] => {
-    const body = source.split(new RegExp(`\\btype ${name}\\s*=`))[1];
+    // A union may be written out, or derived from a `const` list — `PaymentMethodName` is
+    // `(typeof PAYMENT_METHOD_NAMES)[number]`, because the routing error message needs the
+    // members at runtime and spelling them twice is how that message went stale. Read the
+    // list in that case; the docs still spell the union out, which is what a reader wants.
+    const derived = source.match(
+      new RegExp(`\\btype ${name}\\s*=\\s*\\(typeof (\\w+)\\)\\[number\\]`),
+    );
+    const key = derived ? `${derived[1]} = [` : `type ${name}\\s*=`;
+    const body = derived
+      ? source.split(key)[1]
+      : source.split(new RegExp(`\\btype ${name}\\s*=`))[1];
     if (body === undefined) throw new Error(`union ${name} not found`);
     // Stop at the first line that starts a new declaration or leaves the code block.
     const block = body.split(/\n(?=(?:\/\/|type |interface |```|export ))/)[0] ?? '';

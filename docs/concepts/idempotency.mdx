@@ -56,7 +56,10 @@ durable — would short-circuit on the claim and silently do nothing, which look
 webhook that was never delivered.
 
 So a throwing handler is not a lost event: it marks the ledger `failed`, and the dispatcher's retry
-picks it back up. Errors surface instead of being swallowed.
+picks it back up. The route also answers `500`, so the **gateway** redelivers as well — and that
+redelivery is cheap for exactly this reason: the events that already succeeded answer "processed"
+at the claim and skip, and only the `failed` row is claimed again. Errors surface instead of being
+swallowed.
 
 ## What the ledger does not guarantee
 
@@ -115,6 +118,58 @@ Derive it from something stable, not from a timestamp or a random value — a ke
 retry protects nothing. And keep it distinct from `externalReference`: one guards against duplicate
 charges, the other routes webhooks back to your record. See
 [The payment lifecycle](/docs/payments/concepts/lifecycle).
+
+It rides on six operations, which is every driver call that creates something:
+
+| Where | On what |
+| --- | --- |
+| `ChargeInput.idempotencyKey` | `charge()` |
+| `CheckoutInput.idempotencyKey` | `createCheckout()` |
+| `CreateCustomerInput.idempotencyKey` | `createCustomer()` |
+| `CreateSubscriptionInput.idempotencyKey` | `createSubscription()` |
+| `UpdateSubscriptionInput.idempotencyKey` | `updateSubscription()` |
+| `refund(id, amount?, { idempotencyKey })` | `refund()` |
+
+### A driver either honours it or refuses it
+
+There is no third behaviour, and that is the design. Accepting a key and dropping it is the worst
+option available: the caller believes their retry is safe, and the retry is a second charge, a
+second refund or a second subscription. So a driver whose gateway documents no deduplication for an
+operation **throws**, naming the endpoint and telling you to deduplicate on your side.
+
+Where it is honoured, it goes wherever that gateway put it — and no two agree:
+
+- **A request header.** Stripe, Adyen, Mollie and Polar take `Idempotency-Key`; Mercado Pago spells
+  it `X-Idempotency-Key`, Pagar.me `Idempotency-key`, PagBank `x-idempotency-key`, PayPal
+  `PayPal-Request-Id`, and Razorpay — on refunds and nothing else — `X-Refund-Idempotency`.
+- **A body field.** Square's `idempotency_key` is in the payload, not the headers, and it is
+  mandatory on the create calls.
+- **The id in the URL.** An Efí refund is a `PUT` to `/v2/pix/{e2eid}/devolucao/{id}`, so the id you
+  choose *is* the deduplication. Omit the key and the driver mints a random one, which protects a
+  retry inside one call and nothing across a restart.
+
+The gateway's own limits are enforced here rather than at the gateway: Adyen caps the key's length,
+Square caps it, Razorpay requires at least ten characters of a restricted charset, and Efí requires
+BACEN's 1–35 alphanumerics. Each throws with the limit in the message, because a key the gateway
+rejects is a key that does not deduplicate.
+
+Partial support is common and is refused per operation, not per driver. Mercado Pago documents the
+header for payments and refunds only; Pagar.me for order creation only; Razorpay for refunds only;
+Mollie for `POST` only, so `updateSubscription` — a `PATCH` — refuses; Square has no
+`idempotency_key` on a subscription update, so that one refuses too. Asaas, AbacatePay, Dodo, Lemon
+Squeezy and Paddle document no mechanism anywhere and refuse on every operation they implement —
+with one legacy exception on the first two, below.
+
+<Callout type="warn" title="Two places the key is not deduplication">
+On Asaas, AbacatePay, Woovi and Efí, a `charge()` with no `externalReference` uses the
+`idempotencyKey` **as** the reference — legacy behaviour, kept because removing it would silently
+stop routing webhooks for anyone relying on it. It is routing, not deduplication.
+
+InfinitePay is the one gateway that neither honours nor refuses it. Its only creating operation is
+`createCheckout`, its API documents no idempotency at all, and the key is used there as the last
+fallback for `order_nsu` — the field it echoes back. A repeated call makes a second payment link.
+Deduplicate before you call it.
+</Callout>
 
 ## Testing it
 

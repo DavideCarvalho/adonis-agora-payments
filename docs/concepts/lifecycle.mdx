@@ -1,6 +1,6 @@
 ---
 title: The payment lifecycle
-description: From charge to revenue — what a PENDING payment actually is, the five things the webhook route does in order, where your business logic belongs, and how externalReference routes a confirmation back to your row.
+description: From charge to revenue — what a PENDING payment actually is, the six things the webhook route does in order, the ten normalized event types, and how externalReference routes a confirmation back to your row.
 icon: GitBranch
 ---
 
@@ -44,43 +44,78 @@ The order below is the whole design, and each step depends on the one before it:
    token, always timing-safe — and throws on failure. A forged callback never reaches your data.
 2. **Normalize.** The gateway's own event (`PAYMENT_RECEIVED`, `checkout.session.completed`,
    `PIX_AUTOMATIC_COBR_COMPLETED`) becomes a canonical `payment.succeeded` with a stable `id`.
+   One delivery can normalize into **several** events — Adyen's `notificationItems` and Efí's `pix`
+   are arrays — and steps 3 to 5 then run once per event, in the order the gateway sent them.
 3. **Ledger it — before any work.** The event id is written to `billing_webhook_events`. Already
    there and not failed? This is a redelivery; processing stops and returns `false`. See
    [Idempotency](/docs/payments/concepts/idempotency).
-4. **Sync.** The normalized event is upserted into `billing_payments` and `billing_subscriptions`,
-   so your database mirrors the gateway without you writing a sync query.
+4. **Sync.** The normalized event is upserted into `billing_payments`, `billing_subscriptions` and
+   `billing_disputes`, so your database mirrors the gateway without you writing a sync query.
 5. **Run your handler, then mark processed.** Your business logic runs, and the ledger row is marked
    `processed` only after it returns. A throw marks it `failed` and the dispatcher retries.
+6. **Answer the gateway, and the status is an instruction.** A clean delivery is `200`. A delivery
+   where **any** event threw is `500`, because a 2xx promises the gateway it never has to send that
+   delivery again — over a failed event, that is the payment lost, while the in-process retry meant
+   to cover it dies with the process. A delivery rejected in step 1 stays `400`: redelivering a bad
+   signature would fail identically.
 
 Step 3 happening before step 5 is the guarantee: a redelivery never reaches your handler at all.
+Step 6 is why that redelivery is cheap — the events that succeeded are already `processed` and skip
+the claim, so only the failed one runs again.
+
+<Callout type="warn" title="A failed webhook now shows up in your 5xx rate">
+This changed: a delivery whose handler threw used to answer `200`. If you alert on 5xx from the
+webhook route, it will start firing — and that is the honest signal. It was firing at the gateway
+all along, in a delivery log nobody reads. See
+[Webhooks → When one event in a batch fails](/docs/payments/webhooks#when-one-event-in-a-batch-fails).
+</Callout>
 
 ## The normalized event types
 
-Every gateway maps onto these:
+There are ten. Every driver maps its own gateway's vocabulary onto them, and the processor's
+built-in sync switches on nothing else:
 
-| Type | Means |
-| --- | --- |
-| `payment.succeeded` | the money moved |
-| `payment.failed` | the attempt failed |
-| `payment.refunded` | a refund completed |
-| `payment.disputed` | a chargeback was opened — the money is going back |
-| `payment.updated` | a payment changed in some other way |
-| `subscription.created` | a recurring subscription now exists |
-| `subscription.updated` | its status or period changed |
-| `subscription.canceled` | it ended |
+| Type | Means | What the built-in sync does |
+| --- | --- | --- |
+| `payment.succeeded` | the money moved | the payment row becomes `paid` |
+| `payment.failed` | the attempt failed | the payment row becomes `failed` |
+| `payment.refunded` | a refund completed | a known payment row becomes `refunded` |
+| `payment.disputed` | a chargeback — the money is already going back | a known payment row becomes `disputed`, and a dispute row is opened |
+| `payment.dispute_warning` | an alert *before* any chargeback exists | the payment row is left alone; a dispute row is written with status `warning` |
+| `payment.dispute_closed` | the dispute reached an outcome | `won` puts a `disputed` row back to `paid`; `lost` moves a row that never went to `disputed`; the dispute row records the outcome |
+| `payment.updated` | a payment changed in some other way | nothing |
+| `subscription.created` | a recurring subscription now exists | upserted |
+| `subscription.updated` | its status or period changed | upserted |
+| `subscription.canceled` | it ended | a known subscription becomes `canceled` |
 
-`payment.disputed` is the one that takes revenue **away**, and it is why the list is not six. A
-chargeback used to arrive as an unknown type and pass through unprocessed, leaving the payment row
-saying `paid` while the money was already being pulled back — the app found out from its bank
-statement. The processor now moves the row to `disputed`. Which gateway event maps onto it is on
-each [provider page](/docs/payments/providers); a gateway with no dispute notification says so.
+### The three dispute events
 
-Two more are being wired driver by driver, and are live on **Stripe and Adyen** today:
-`payment.dispute_warning`, which arrives **before** a chargeback exists — a Stripe inquiry, an early
-fraud warning, Adyen's notification of chargeback — while refunding is still cheaper than losing, and
-`payment.dispute_closed`, which carries `outcome`. A warning carries `actionableUntil`, the deadline
-after which the money is lost by default rather than on the merits. On the other sixteen gateways a
-dispute is still the single `payment.disputed`; see [Roadmap](/docs/payments/roadmap).
+`payment.disputed` is the one that takes revenue **away**. A chargeback used to arrive as an unknown
+type and pass through unprocessed, leaving the payment row saying `paid` while the money was already
+being pulled back — the app found out from its bank statement.
+
+`payment.dispute_warning` is the moment before that, and it is the one worth acting on: a Stripe
+inquiry or early fraud warning, Adyen's notification of chargeback, a Razorpay `retrieval` phase,
+Square's `INQUIRY_*` states. No money has moved, so the payment row is not touched — a row saying
+`paid` is telling the truth. What the event carries is `actionableUntil`, the deadline past which
+the dispute is lost by default rather than on the merits, and refunding inside that window stops the
+chargeback from being filed at all. That is worth doing even on a dispute you would win, because a
+chargeback counts against the ratio that puts a merchant into a network monitoring programme.
+
+`payment.dispute_closed` carries `outcome` — `won`, `lost`, `canceled` or `expired` — and only `won`
+and `lost` move a payment row. `won` matters for a reason that is easy to miss: `revenue()` sums
+rows that are `paid`, so a dispute you won left money written off permanently until the row went
+back. `canceled` and `expired` deliberately move nothing; on Stripe a dispute the cardholder
+withdrew still has to be closed in your favour before the acquirer returns anything, and
+understating is the safe direction. A close that carries **no** outcome is refused: the processor
+throws rather than invent a result the gateway never sent, which is why a driver that cannot read
+one emits `payment.updated` instead.
+
+Not every gateway speaks all three. Eleven drivers report an outcome and seven relay a pre-chargeback
+alert; several genuinely have no dispute vocabulary at all, and their pages say so rather than
+implying one exists. Which gateway event maps onto which type is on each
+[provider page](/docs/payments/providers) — that, and the deadline each one does or does not send,
+are the details worth reading before you build a dispute workflow.
 
 An event type the processor does not recognize passes through: it is ledgered, no built-in sync runs,
 and a handler runs if one is registered. Unknown does not mean dropped.

@@ -336,12 +336,17 @@ onDiagnostic('payments', 'payment.succeeded', async ({ payload }) => {
 const row = await store.findPaymentByExternalReference(payment.id)
 ```
 
-<Callout type="warn" title="Existing installs need the new migration">
-`external_reference` arrived after `create_billing_tables`, in a second published migration
-(`add_billing_external_reference`). Until you run it, the column is not there: the reference is
-**not** stored, `findPaymentByExternalReference` answers `null` for every id, and the browser
-status endpoint falls back to reading your reference as a gateway id. Nothing else changes, and
-nothing is backfilled — a reference that was never stored cannot be recovered from the payload.
+<Callout type="warn" title="Rows written before the column existed stay null">
+`external_reference` arrived after the first release, and there is **nothing to run** for it: the
+library [owns its schema](/docs/payments/billing#the-billing-tables) and adds the column as a
+guarded `ALTER` on the next boot, whether the install is fresh or is upgrading. (The migration
+that used to carry it, `add_billing_external_reference`, no longer exists — a page telling you to
+run it is out of date.)
+
+What does **not** happen is a backfill. Every payment row written before the column was there
+keeps `external_reference` null: `findPaymentByExternalReference` answers `null` for those ids,
+and the browser status endpoint falls back to reading your reference as a gateway id. A reference
+that was never stored cannot be recovered from the payload.
 </Callout>
 
 How each gateway stores it:
@@ -360,9 +365,10 @@ How each gateway stores it:
 
 ## Webhook events
 
-The normalized event types the processor understands:
+The normalized event types the processor understands — ten of them:
 
 - `payment.succeeded` / `payment.failed` / `payment.refunded` / `payment.updated`
+- `payment.dispute_warning` / `payment.disputed` / `payment.dispute_closed`
 - `subscription.created` / `subscription.updated` / `subscription.canceled`
 
 Each gateway maps onto these — Stripe `invoice.payment_succeeded`, Asaas
@@ -370,3 +376,40 @@ Each gateway maps onto these — Stripe `invoice.payment_succeeded`, Asaas
 `PIX_AUTOMATIC_COBR_COMPLETED` all become `payment.succeeded`. An unknown event type is
 passed through unprocessed — the processor syncs what it understands and runs a handler if
 one is registered.
+
+### The three dispute events
+
+They are separate types, not shades of one, because they answer different questions about
+where the money is. That is the question every driver's mapping was checked against: **has
+the gateway taken it yet.**
+
+| Event | What happened | What the payment row does |
+| --- | --- | --- |
+| `payment.dispute_warning` | a pre-chargeback alert — Stripe's early fraud warning, Adyen's `NOTIFICATION_OF_FRAUD`. **No money has moved.** | nothing. It still says `paid`, because it still is. |
+| `payment.disputed` | the funds have been withdrawn | moves to `disputed` |
+| `payment.dispute_closed` | resolved, carrying `outcome` | `won` puts it back to `paid`; `lost`, `expired` and `canceled` leave it alone |
+
+All three also write a [`billing_disputes` row](/docs/payments/billing#disputes-and-their-clock),
+which is where the deadline lives.
+
+A warning is the one worth building on: nothing has been pulled back yet, and refunding
+inside the window stops the chargeback from ever being filed — which matters beyond the one
+sale, because a chargeback counts against the ratio that puts a merchant into a card
+network's monitoring programme. Subscribe to it and put it in front of somebody.
+
+`canceled` deliberately does **not** restore revenue. It means the cardholder withdrew, but
+on Stripe a withdrawn dispute still has to be closed in your favour with evidence, so
+booking it would count money the acquirer has not returned. Understating is the safe
+direction.
+
+A close that carries no outcome **throws** rather than defaulting. A driver that cannot read
+the result emits `payment.updated` instead, and the processor must not undo that by guessing
+on the other side.
+
+<Callout title="Several gateways have no pre-dispute vocabulary at all">
+Asaas, PagBank, InfinitePay, Lemon Squeezy, Polar and AbacatePay send no funds-untouched
+alert, and neither does Paddle — its `chargeback_warning` is not a warning, since the
+disputed amount is already refunded when one is raised, so it maps to `payment.disputed`.
+Each provider page says which of the three its gateway can actually emit. A gateway missing
+from your alerting is not necessarily misconfigured.
+</Callout>

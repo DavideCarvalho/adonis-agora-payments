@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Invoice, InvoiceProvider } from '../src/index.js';
-import { emitInvoice } from '../src/invoice/emit_invoice.js';
+import { emitInvoice, emitInvoiceIfRequested } from '../src/invoice/emit_invoice.js';
 
 function fakeProvider(name: string): InvoiceProvider {
   const calls: { input: Parameters<InvoiceProvider['emit']>[0] }[] = [];
@@ -71,5 +71,102 @@ describe('emitInvoice', () => {
     await expect(
       emitInvoice(ctx, true, { customer: { taxId: '1' }, amount: 1, currency: 'brl' }),
     ).rejects.toThrow(/no invoice provider is configured/);
+  });
+});
+
+describe('a failing invoice provider', () => {
+  /**
+   * The charge already exists at the gateway by the time the invoice is emitted. A throwing
+   * provider used to propagate out of `charge()`, so the caller saw a rejected call over
+   * money that had been taken — and the obvious response to a failed charge is to charge
+   * again.
+   */
+  it('does not fail the charge that already went through', async () => {
+    const ctx = {
+      config: () => ({
+        invoice: {
+          default: 'boom',
+          providers: {
+            boom: () => ({
+              provider: 'boom',
+              emit: async () => {
+                throw new Error('SEFAZ timed out');
+              },
+            }),
+          },
+        },
+      }),
+    } as never;
+
+    const payment = {
+      id: 'pi_1',
+      gatewayId: 'pi_1',
+      provider: 'stripe',
+      amount: { amount: 1990, currency: 'brl' },
+      status: 'paid' as const,
+      createdAt: new Date().toISOString(),
+    };
+
+    await expect(
+      emitInvoiceIfRequested(ctx, { invoice: true }, payment, { provider: 'stripe' }),
+    ).resolves.toBeUndefined();
+    // And the payment keeps saying what is true: it was charged, and it has no invoice.
+    expect((payment as { invoice?: unknown }).invoice).toBeUndefined();
+  });
+
+  it('publishes invoice.failed so a missing NFS-e is not silent', async () => {
+    // Swallowing without publishing would trade one bad failure for a worse one: in Brazil a
+    // fiscal invoice is a legal obligation, and nothing else would ever mention it.
+    const EMIT_SLOT = Symbol.for('@agora/diagnostics:emit');
+    const global = globalThis as Record<symbol, unknown>;
+    const previous = global[EMIT_SLOT];
+    const seen: unknown[] = [];
+    global[EMIT_SLOT] = (lib: string, event: string, payload: unknown) =>
+      seen.push({ lib, event, payload });
+
+    try {
+      const ctx = {
+        config: () => ({
+          invoice: {
+            default: 'boom',
+            providers: {
+              boom: () => ({
+                provider: 'boom',
+                emit: async () => {
+                  throw new Error('SEFAZ timed out');
+                },
+              }),
+            },
+          },
+        }),
+      } as never;
+
+      await emitInvoiceIfRequested(
+        ctx,
+        { invoice: true },
+        {
+          id: 'pi_1',
+          gatewayId: 'pi_1',
+          provider: 'stripe',
+          amount: { amount: 1990, currency: 'brl' },
+          status: 'paid' as const,
+          createdAt: new Date().toISOString(),
+        },
+        { provider: 'stripe' },
+      );
+
+      // The gateway id is the load-bearing field: it names the charge that exists and has
+      // no invoice, which is the only thing a human needs to go fix it.
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({
+        lib: 'payments',
+        event: 'invoice.failed',
+        payload: { gatewayId: 'pi_1', provider: 'stripe' },
+      });
+      expect((seen[0] as { payload: { error: string } }).payload.error).toBeTypeOf('string');
+    } finally {
+      if (previous === undefined) delete global[EMIT_SLOT];
+      else global[EMIT_SLOT] = previous;
+    }
   });
 });

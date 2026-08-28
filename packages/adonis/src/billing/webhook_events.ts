@@ -32,6 +32,13 @@ export interface PaymentWebhookData {
   gatewayId: string;
   amount: number;
   currency: string;
+  /**
+   * Why it failed, in the gateway's own words. Optional because most gateways send nothing
+   * useful — and declared here because `PaymentFailedPayload` has carried a `reason` since
+   * the bus was written while the processor never published one, so a subscriber could not
+   * see it even on the gateways that do normalize it.
+   */
+  reason?: string;
   customerId?: string;
   subscriptionId?: string;
   /**

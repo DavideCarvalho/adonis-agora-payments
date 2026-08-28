@@ -34,9 +34,6 @@ export async function configure(command: Configure) {
   await codemods.makeUsingStub(stubs, 'config/payments_dashboard.stub', {});
   await codemods.makeUsingStub(stubs, 'config/payments_client.stub', {});
   await codemods.makeUsingStub(stubs, 'database/migrations/create_billing_tables.stub', {});
-  // The third, same reasoning again: `billing_disputes` is a whole TABLE added after
-  // `create_billing_tables` shipped, so it reaches existing installs only as its own file.
-  // Guarded by `hasTable`, so on a fresh install (which gets all three) it does nothing.
 
   await codemods.defineEnvValidations({
     leadingComment: 'PAYMENTS_',

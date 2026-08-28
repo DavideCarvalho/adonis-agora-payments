@@ -72,7 +72,7 @@ function spaDirectory(): string {
  * `POST` (a refund reachable by URL is a refund a crawler can trigger) and both go through the same
  * {@link enforce} guard as every read.
  *
- * Routes (relative to the configured `path`, default `/payments-dashboard`):
+ * Routes (relative to the configured `path`, default `/payments`):
  * - `GET  /`                     -> the dashboard SPA's `index.html`
  * - `GET  /assets/:file`         -> the SPA's hashed JS/CSS bundle
  * - `GET  /api/health`           -> `billingHealth()` — what needs attention today

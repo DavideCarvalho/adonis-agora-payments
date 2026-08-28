@@ -52,3 +52,52 @@ describe('package exports', () => {
     );
   });
 });
+
+/**
+ * A published stub is code the library writes into somebody's app. If it imports a symbol
+ * the package does not export, the very first file `node ace make:billable` produces does
+ * not compile — and nothing inside this repo notices, because the stub is a `.stub` and no
+ * build ever reads it.
+ *
+ * That is exactly what happened: `make/billable/main.stub` imported `withBillable` from the
+ * package root, which exported `BillingCustomer` and friends but none of the three mixin
+ * functions. Every scaffold the command has ever produced was broken.
+ */
+describe('published stubs', () => {
+  it('only import symbols the package actually exports', async () => {
+    const stubsDir = fileURLToPath(new URL('../stubs/', import.meta.url));
+    const root = (await import('../src/index.js')) as Record<string, unknown>;
+
+    const missing: string[] = [];
+    const walk = async (dir: string): Promise<void> => {
+      for (const item of await readdir(dir, { withFileTypes: true })) {
+        const full = `${dir}${item.name}`;
+        if (item.isDirectory()) {
+          await walk(`${full}/`);
+          continue;
+        }
+        if (!item.name.endsWith('.stub')) continue;
+        const text = await readFile(full, 'utf-8');
+        // Only the package ROOT: a subpath is covered by the export-map test above.
+        for (const match of text.matchAll(
+          /import\s*\{([^}]+)\}\s*from\s*'@adonis-agora\/payments'/g,
+        )) {
+          for (const raw of (match[1] as string).split(',')) {
+            const name = raw
+              .trim()
+              .replace(/^type\s+/, '')
+              .split(/\s+as\s+/)[0]
+              ?.trim();
+            if (name && root[name] === undefined) missing.push(`${item.name}: ${name}`);
+          }
+        }
+      }
+    };
+    await walk(stubsDir);
+
+    expect(
+      missing,
+      `stubs import symbols the package root does not export: ${missing.join(', ')}`,
+    ).toEqual([]);
+  });
+});

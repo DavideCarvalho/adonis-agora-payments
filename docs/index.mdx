@@ -23,9 +23,10 @@ different provider, in a single call.
 <Callout type="info" title="The one rule">
 A payment is **confirmed only by the webhook**. A `charge()` returns a `PENDING` record —
 the money hasn't moved until the gateway calls your endpoint. The processor's idempotency
-ledger and durable dispatch are what make "trust only the webhook" safe: forged callbacks
-are rejected, redeliveries are no-ops, and a half-processed confirmation survives restarts.
-See [Webhooks](/docs/payments/webhooks).
+ledger is what makes "trust only the webhook" safe: forged callbacks are rejected and
+redeliveries are no-ops. Point `billing.dispatcher` at durable or a queue and a
+half-processed confirmation survives a restart as well. See
+[Webhooks](/docs/payments/webhooks).
 </Callout>
 
 ## The problem it solves
@@ -41,15 +42,16 @@ four guarantees:
 - **Money moves only on confirmation.** The idempotent webhook processor (a gateway-event
   ledger written *before* any work runs) makes redeliveries no-ops. Your business logic —
   grant credits, activate a subscription — runs at the right moment, exactly once.
-- **Billing mirrors the gateway.** Subscriptions, payments and trials sync into Lucid
-  tables automatically, Cashier-style, with billable mixins on your models.
+- **Billing mirrors the gateway.** Subscriptions, payments, disputes and trials sync into
+  Lucid tables automatically, Cashier-style, with billable mixins on your models — and the
+  library creates those tables itself, so adopting it is a config file, not a migration.
 - **Invoices are a separate concern.** Pay through one provider, emit the invoice
   through another — the `invoice` option on the charge call joins them.
 
 ## Quickstart
 
-The minimal loop — install, configure a gateway, run the migrations, charge — with one
-provider and no invoice provider:
+The minimal loop — install, configure a gateway, charge — with one provider and no invoice
+provider:
 
 <Steps>
 <Step>
@@ -60,8 +62,9 @@ Install and configure:
 node ace add @adonis-agora/payments
 ```
 
-This registers the `payments_provider` in `adonisrc.ts`, publishes `config/payments.ts`,
-the billing migrations, and the ace commands.
+This registers the providers in `adonisrc.ts`, publishes `config/payments.ts` (plus the dashboard
+and client config files), and registers the ace commands. **There is no migration to run**: the
+billing layer creates its own tables on first use.
 </Step>
 
 <Step>
@@ -102,6 +105,7 @@ const payment = await getPayments().driver('pix').charge({
   customerId: customer.id,
   amount: 1990, // R$ 19,90 — integer cents, never floats
 })
+// `driver('pix')` binds the method: the charge goes out as Pix without repeating it.
 ```
 </Step>
 
@@ -131,19 +135,21 @@ export default class PaymentSucceededHandler {
 <PaymentFlow />
 
 <Cards>
-  <Card title="Getting Started" href="/docs/payments/getting-started" description="Install, configure a gateway, run the migrations, register webhooks and make your first charge." />
+  <Card title="Getting Started" href="/docs/payments/getting-started" description="Install, configure a gateway, register webhooks and make your first charge — with no migration to run." />
   <Card title="Concepts" href="/docs/payments/concepts" description="Money as an integer, one contract over every gateway, the pending-until-webhook rule, and the idempotency ledger." />
-  <Card title="Configuration" href="/docs/payments/configuration" description="Providers, method routing, the invoice section, and the billing layer — durable + handlers." />
+  <Card title="Configuration" href="/docs/payments/configuration" description="Providers, method routing, the invoice section, and the billing layer — who owns the schema, which dispatcher runs a webhook, where handlers live." />
   <Card title="Providers" href="/docs/payments/providers" description="Eighteen gateways side by side — methods, subscriptions, disputes, externalReference." />
-  <Card title="Webhooks" href="/docs/payments/webhooks" description="Signature validation, the idempotency ledger, and the three ways to run your business logic." />
+  <Card title="Webhooks" href="/docs/payments/webhooks" description="Signature validation, a delivery that carries several events, the idempotency ledger, and the four homes for your business logic." />
   <Card title="Billing" href="/docs/payments/billing" description="Billable mixins, the billing tables, webhook sync, and durable-backed dispatch." />
   <Card title="Invoices" href="/docs/payments/invoices" description="Emit an invoice attached to a charge, through a provider independent of the gateway." />
+  <Card title="Client" href="/docs/payments/client" description="The browser status endpoint and the usePaymentStatus polling hook — ownership first, off until you enable it." />
+  <Card title="Dashboard" href="/docs/payments/dashboard" description="The console at /payments — health first, then revenue, payments, subscriptions, disputes and the webhook ledger, with refund and retry." />
   <Card title="Diagnostics" href="/docs/payments/diagnostics" description="Every milestone on the observability bus — gateway-action vs business events, Telescope." />
   <Card title="Custom providers" href="/docs/payments/custom-providers" description="Write a gateway or invoice provider as a config factory, or extend a bundled driver." />
   <Card title="Testing" href="/docs/payments/testing" description="The fake driver, in-memory store and mutable clock — exercise billing without a gateway or DB." />
   <Card title="Patterns" href="/docs/payments/patterns" description="A cookbook with the gateway differences side by side — Pix, subscriptions, where business logic lives, metered billing, splits, recovery." />
   <Card title="Production" href="/docs/payments/production" description="The operational checklist — webhook secrets, choosing a dispatcher, reconciliation, what to watch." />
   <Card title="Troubleshooting" href="/docs/payments/troubleshooting" description="The symptoms that actually happen, and how to tell the causes apart." />
-  <Card title="CLI" href="/docs/payments/cli" description="payments:webhook, payments:sync, make:billable and make:webhook-handler." />
+  <Card title="CLI" href="/docs/payments/cli" description="payments:webhook, payments:sync, payments:health, make:billable and make:webhook-handler." />
   <Card title="API reference" href="/docs/payments/api-reference" description="Every config option, driver method, exported helper, type, event and command — from source." />
 </Cards>

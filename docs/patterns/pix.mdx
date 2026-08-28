@@ -7,15 +7,21 @@ icon: QrCode
 import { Callout } from 'fumadocs-ui/components/callout';
 import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
 
-Pix is the flow most Brazilian apps start with, and the three gateways that serve it disagree on
-almost every detail: whether a customer is required, where your reference goes, what the QR looks
-like coming back. The library normalizes the **result**; it cannot normalize away what each gateway
+Pix is the flow most Brazilian apps start with, and the gateways that serve it disagree on almost
+every detail: whether a customer is required, where your reference goes, what the QR looks like
+coming back. The library normalizes the **result**; it cannot normalize away what each gateway
 *demands* on the way in.
+
+Ten drivers accept `pix`. This page works through the three you are most likely to start with —
+Asaas, Woovi and AbacatePay — and the other seven (Stripe, Efí, Pagar.me, PagBank, Mercado Pago,
+Dodo and InfinitePay) each have their own page under [Providers](/docs/payments/providers). Two of
+them are called out further down, because they behave in ways this page's three do not.
 
 ## The shape that is the same everywhere
 
 ```ts title="app/services/checkout_service.ts"
-import { ensureCustomer, getPayments } from '@adonis-agora/payments'
+import { ensureCustomer } from '@adonis-agora/payments'
+import { getPayments } from '@adonis-agora/payments/services/main'
 
 export async function startPixCheckout(user: User, plan: Plan) {
   const driver = getPayments().driver('pix')
@@ -133,6 +139,16 @@ const customer = await driver.createCustomer({
 })
 ```
 
+<Callout type="warn" title="Woovi works in centavos, and the driver no longer converts">
+OpenPix documents its `value` field as *o valor em centavos* — the same integer minor unit this
+package uses everywhere. The driver used to divide by 100 anyway, so `amount: 1990` was sent as
+`value: 19.9` and Woovi created a **20-centavo** charge. Both halves of the driver agreed with each
+other and the tests agreed with both, which is why it survived review.
+
+`input.amount` now goes straight through. If you carried a workaround that multiplied Woovi amounts
+by 100, remove it — it now creates charges a hundred times too large.
+</Callout>
+
 **No refunds.** Woovi/OpenPix has no refund API — `refund()` throws. Check before you offer the
 button:
 
@@ -223,3 +239,40 @@ copy-paste code as the fallback — it always works, and it is what most people 
 Nothing above moved money. The order stays `awaiting_payment` until a `payment.succeeded` arrives —
 see [Reacting to payments](/docs/payments/patterns/reacting-to-payments) for where that logic lives
 and how to make it safe to run twice.
+
+## A Pix can still be taken back
+
+A Pix cannot be charged back the way a card can — there is no issuing bank and no representment. It
+**can** be reversed, and the two gateways that report it do so as disputes rather than as refunds.
+
+**Efí — the Banco Central's MED.** A `devolução` on the Pix webhook carries a `natureza`, and three
+of its values (`MED_OPERACIONAL`, `MED_FRAUDE`, `MED_PIX_AUTOMATICO`) mean the money is being
+returned to a payer who reported fraud or an operational failure — not a refund the merchant chose
+to give. The driver used to map all of them to `payment.refunded`, which said the merchant decided
+to give the money back. Now:
+
+- `status: 'EM_PROCESSAMENTO'` → `payment.dispute_warning` (the return is executing)
+- `status: 'DEVOLVIDO'` → `payment.disputed` (the money is gone)
+- `status: 'NAO_REALIZADO'` → no dispute event at all; the return took nothing
+
+A non-MED `devolução` — `ORIGINAL`, `RETIRADA`, or no `natureza` — is still an ordinary
+`payment.refunded`. Note what the warning here is **not**: Efí's Pix webhook has no "a MED was
+opened" notification, so the warning means "this is happening now", not "you have time to defend".
+There is no deadline field anywhere in the payload, and none is invented.
+
+**Woovi — `OPENPIX:DISPUTE_CREATED`.** While a dispute is under analysis Woovi blocks the balance
+rather than taking it, so the open is a `payment.dispute_warning` and Woovi never emits
+`payment.disputed` at all; the sequence is warning → closed. The three-day window to send evidence
+is published policy, not a field, so `actionableUntil` is empty.
+
+<Callout type="warn" title="A Woovi dispute names the Pix, not the charge">
+The dispute payload carries no `charge` and no `correlationID` — only an `endToEndId` — so
+`gatewayId` on all four Woovi dispute events is the Pix end-to-end id, while charges are stored
+under `charge.globalID`. **The event does not find its payment row by itself.** Persist
+`event.data.metadata.endToEndId` from the paid webhook and the two join.
+</Callout>
+
+Both write a row into `billing_disputes` and both appear in the console's Disputes log. Neither
+appears in `payments:health`'s closing-window check, because that check reads a deadline and neither
+gateway sends one — which is exactly the case the [Disputes](/docs/payments/patterns/disputes) page
+warns about: a null deadline is "we were told nothing", not "there is time".

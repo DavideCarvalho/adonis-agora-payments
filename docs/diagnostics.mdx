@@ -18,7 +18,13 @@ The catalog spans three layers, and the distinction matters for how you react:
 
 - **Gateway-action** events fire when *your code calls the gateway* — `charge.created` when
   a charge is created, `charge.refunded`, `subscription.created`/`canceled`,
-  `invoice.emitted`. They describe what the app *did*.
+  `invoice.emitted`, `invoice.failed`. They describe what the app *did*.
+
+  `invoice.failed` is the one to subscribe to on day one if you emit fiscal invoices. A
+  failing invoice provider no longer rejects `charge()` — that reported a failure over money
+  the gateway had already taken, and the obvious response to a failed charge is to charge
+  again. The charge succeeds, the invoice does not, and this event is the only thing that
+  says so. In Brazil an NFS-e is a legal obligation, so a human has to act on it.
 - **Business** events fire when a *webhook confirms a state change* — `payment.succeeded`,
   `payment.failed`, `payment.refunded`, `payment.disputed`, `payment.dispute_warning`,
   `payment.dispute_closed`, `payment.updated`, `subscription.updated`. They describe what the
@@ -45,6 +51,7 @@ The catalog spans three layers, and the distinction matters for how you react:
 | `payment.dispute_closed` | business | a dispute reached its outcome | gatewayId, provider, disputeId, outcome, amount, currency |
 | `payment.updated` | business | a webhook reported a payment update | gatewayId, provider, status |
 | `invoice.emitted` | gateway-action | an invoice was emitted | gatewayId, provider, number, url |
+| `invoice.failed` | gateway-action | **the charge went through and the invoice did not** | gatewayId, provider, error |
 | `webhook.received` | lifecycle | a gateway webhook arrived | id, provider, type |
 | `webhook.verification` | debug | a delivery was authenticated (or was not) | provider, outcome, scheme, reason, durationMs |
 | `webhook.processed` | lifecycle | a webhook finished processing | id, provider, type |
@@ -98,25 +105,37 @@ entries with the payload preserved.
 
 ### The typed `payments` watcher
 
-For richer, typed `payments` entries instead of the generic `diagnostic` ones, use the
-ship-with watcher:
+**You do not wire this, and there is nothing to configure.** If `@adonis-agora/telescope` is
+registered in the app, the payments provider registers the typed watcher and releases it on
+shutdown. No import, no `start/telescope.ts`, no option.
 
-```ts title="start/telescope.ts"
-import app from '@adonisjs/core/services/app'
-import { TelescopeService } from '@adonis-agora/telescope'
-import { PaymentsWatcher } from '@adonis-agora/payments/telescope'
+Two things could have been options and are detected instead:
 
-app.booted(async () => {
-  const store = (await app.container.make(TelescopeService)).telescopeStore
-  new PaymentsWatcher().register({
-    record: (entry) => void store.record(entry).catch(() => {}),
-  })
-})
-```
+- **"I wire my own."** A watcher claims the payments channels when it registers, so an app
+  that already has one — the way this page used to tell you to — has claimed them before the
+  provider looks, and the provider stands down. Nothing is recorded twice. This is why the
+  registration happens in the provider's `ready()` rather than `boot()`: `start/` files run
+  first, so your wiring always wins the race.
+- **"I do not use telescope."** Then it is not in the app, and nothing happens. An app
+  without observability is a normal app, not a misconfigured one — it should not fail to boot
+  and it should not be told about it on every start.
 
-On `register()` it claims every payments channel via `claimPaymentsDiagnostics` (the
-reference-counted claims registry), so the generic `DiagnosticsWatcher` skips them — no
-event is recorded twice. `dispose()` releases the claims and detaches every subscription.
+<Callout title="Why this used to be your job">
+It was six lines every app copied into `start/telescope.ts`, and until someone copied them a
+payments timeline showed generic `diagnostic` entries with the payload buried instead of
+typed `payments` ones. The wiring never varied — read the store off the container, hand
+`record` to the watcher — so it belongs in the provider.
+
+If you have those six lines today, keep them or delete them; both work. Keeping them means
+your registration is the one that runs.
+</Callout>
+
+A write to the telescope store that fails is swallowed. Recording is observability, and
+`record` runs synchronously inside the charge that published the event — a store that is
+full, locked or briefly unreachable must not take a payment webhook down with it.
+
+`PaymentsWatcher` and `registerPaymentsWatcher` are exported from
+`@adonis-agora/payments/telescope` if you need to drive one yourself against a second store.
 
 The entry content is **shaped**, not spread blindly: `event`, then the correlation id,
 then the fields you scan a timeline by (`provider`, `gatewayId`, `id`, `type`, `method`,

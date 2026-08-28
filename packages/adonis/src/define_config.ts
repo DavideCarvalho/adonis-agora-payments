@@ -348,16 +348,17 @@ export interface PaymentsConfig {
      * How webhook events are processed:
      *
      * - `'auto'` (default) — `@adonis-agora/durable` when its provider is registered;
-     *   else `@adonisjs/queue` when it's installed; else in-process with retries.
+     *   else in-process with retries.
      * - `'durable'` — a durable workflow run (requires `@adonis-agora/durable`, throws when missing).
-     * - `'queue'` — an `@adonisjs/queue` job (requires the queue provider, throws when missing).
      * - `'in-process'` — inline with exponential-backoff retries.
      *
      * Mirrors how other Agora libraries pick a backend (`durable`'s `store`, etc.).
+     *
+     * There was a `'queue'` here. It was declared, documented, and implemented nowhere — the
+     * dispatcher's `queueDispatch` hook was never read, so the mode fell through and silently
+     * ran one of the other two. It is refused at boot now rather than left to look supported.
      */
-    dispatcher?: 'auto' | 'durable' | 'queue' | 'in-process';
-    /** Queue name the `'queue'` dispatcher enqueues to. Defaults to the queue's default. */
-    queue?: string;
+    dispatcher?: 'auto' | 'durable' | 'in-process';
     /**
      * Which half of a split deployment this process is.
      *
@@ -367,9 +368,9 @@ export interface PaymentsConfig {
      * - `'worker'` — do not mount the route; process what the API half enqueued.
      *
      * Splitting requires a dispatcher with a channel between the halves, so
-     * `'api'`/`'worker'` demand an explicit `dispatcher` of `'durable'` or
-     * `'queue'`. `'in-process'` has no channel — it calls the processor directly —
-     * and `'auto'` is too vague to split on, so both are refused at boot.
+     * `'api'`/`'worker'` demand an explicit `dispatcher: 'durable'`. `'in-process'` has no
+     * channel — it calls the processor directly — and `'auto'` is too vague to split on, so
+     * both are refused at boot.
      */
     role?: 'all' | 'api' | 'worker';
     /**

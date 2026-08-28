@@ -75,11 +75,17 @@ yourself if you bill on converted subscribers:
 
 ## Rendering it
 
-Revenue is cents. Divide once, in the formatter, and never in the arithmetic:
+Revenue is in the currency's **minor units**, and the divisor is not always 100 — JPY has no minor
+unit at all and KWD has three. Shift once, at the edge, using the package's own exponent table
+rather than a hardcoded `/ 100`:
 
 ```tsx title="app/components/billing_overview.tsx"
-const money = (cents: number) =>
-  new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cents / 100)
+import { currencyExponent } from '@adonis-agora/payments'
+
+const money = (minorUnits: number, currency = 'brl') =>
+  new Intl.NumberFormat('pt-BR', { style: 'currency', currency: currency.toUpperCase() }).format(
+    minorUnits / 10 ** currencyExponent(currency),
+  )
 
 export function BillingOverview({ overview }: { overview: BillingOverview }) {
   return (
@@ -117,11 +123,29 @@ const stranded = await store.countPayments({ status: 'pending', createdBefore: t
 // Which gateway and which event type is failing
 const breakdown = await store.webhookEventBreakdown({ status: 'failed', createdAfter: yesterday })
 // [{ provider: 'stripe', type: 'payment.succeeded', count: 4 }]
+
+// Chargeback windows closing in the next three days, soonest first — and the unbounded
+// count behind them, because a count read off a capped page saturates at the cap.
+const closing = await store.listDisputesDueWithin({ withinHours: 72, limit: 20 })
+const closingTotal = await store.countDisputesDueWithin({ withinHours: 72 })
+
+// Every dispute, newest first — including the ones that carry no deadline and therefore
+// never appear above. `status` takes any DisputeStatus; OPEN_DISPUTE_STATUSES is the
+// unresolved set.
+const disputes = await store.listDisputes({ status: 'warning', limit: 50 })
 ```
 
 The full read API is listed under [Reading the billing tables](/docs/payments/billing#reading-the-billing-tables),
 and [`billingHealth(store)`](/docs/payments/production#health-checks) rolls the operational ones into
-a single report.
+a single report — its four checks plus, on `deadlines`, the closing dispute windows by name.
+
+<Callout type="warn" title="Two dispute fields are nullable and must not render as zero">
+`evidenceDueBy` is `null` when the gateway sent no deadline — eleven of the eighteen never do — and
+`amount` is `null` when the alert named no money (Stripe's early fraud warning carries neither
+amount nor currency). Both mean "we were told nothing". Say so in the cell; a dash reads as slack
+and `R$ 0,00` is a claim about an amount that does not exist. See
+[Disputes](/docs/payments/patterns/disputes).
+</Callout>
 
 <Callout type="warn" title="Do not query the billing tables directly">
 `billing.store` is a configured seam — an app can point it at its own implementation, and one day

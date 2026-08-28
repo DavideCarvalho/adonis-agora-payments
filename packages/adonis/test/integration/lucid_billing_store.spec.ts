@@ -636,7 +636,7 @@ describe('LucidBillingStore (integration)', () => {
 
       expect(outcome.kind).toBe('undeliverable');
       expect(outcome.kind === 'undeliverable' && outcome.message).toContain(
-        'add_billing_external_reference',
+        'billing_webhook_events.normalized',
       );
       // The row is exactly as the operator found it: original error, still failed.
       const stored = await legacy.findWebhookEventByGatewayEventId('evt_legacy');

@@ -1,6 +1,6 @@
 ---
 title: Roadmap
-description: What is still missing — dispute submission, subscription amounts on Stripe, partial refunds in the tables, splits beyond Asaas, batched webhooks and fiscal invoice reconciliation.
+description: What is still missing — a queue dispatcher, subscription amounts on Stripe, partial refunds in the tables, splits beyond Asaas, dispute submission beyond Stripe, and fiscal invoice reconciliation.
 icon: Map
 ---
 
@@ -9,6 +9,20 @@ already works lives in the guides — start at [Providers](/docs/payments/provid
 per-gateway matrix.
 
 ## Gateways
+
+- **`billing.dispatcher: 'queue'` does not exist.** It was in the config type, in the docs and in
+  the dispatcher's own comments, and it was implemented nowhere: the `queueDispatch` hook was
+  declared and never read, so the mode fell through and silently ran durable-or-in-process.
+  Splitting `billing.role` across api/worker was even *permitted* on it, which produced an api
+  process doing all the work and a worker sitting idle. It is refused at boot now, and
+  `dispatcher: 'durable'` is the only mode that can split a deployment. An `@adonisjs/queue` backend
+  is still worth having — it is a smaller dependency than durable for an app that only needs a
+  channel — but it has to be written.
+- **AbacatePay maps subscription webhooks with a payment-shaped payload.** `#mapWebhookData` returns
+  `{ gatewayId, amount, currency, customerId?, externalReference? }` for every event, including
+  `subscription.completed` / `renewed` / `cancelled`. That satisfies the subscription guard
+  (gatewayId + customerId), so the processor writes a row with `status: undefined` and `planId: ''`.
+  Fixing it needs a real AbacatePay subscription payload to map from.
 
 - **`MGA` has no right answer.** ISO 4217 gives the Malagasy ariary two decimal places (it is
   subdivided into five iraimbilanja, not a hundred), while Stripe treats it as zero-decimal. The

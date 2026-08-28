@@ -19,7 +19,11 @@ describe('LucidBillingStore schema gate', () => {
     Object.getOwnPropertyNames(LucidBillingStore.prototype).filter(
       (name) =>
         name !== 'constructor' &&
+        // The two that legitimately do not query. `ensureSchema` IS the schema creation —
+        // gating it on itself deadlocks — and `disableAutoCreateSchema` only flips a flag.
+        // Everything else on this class talks to the database and must not do so first.
         name !== 'ensureSchema' &&
+        name !== 'disableAutoCreateSchema' &&
         typeof (LucidBillingStore.prototype as unknown as Record<string, unknown>)[name] ===
           'function',
     );

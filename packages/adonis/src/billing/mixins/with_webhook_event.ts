@@ -45,7 +45,7 @@ export class BillingWebhookEvent extends BaseModel {
    * which would re-verify a signature computed from headers the ledger never kept — the
    * reason a retry used to answer `422` on every gateway that signs its webhooks.
    *
-   * `null` on rows written before the `add_billing_external_reference` migration ran; the
+   * `null` on rows written before an earlier schema ran; the
    * retry says so rather than replaying half an event.
    */
   @column({ serializeAs: null })

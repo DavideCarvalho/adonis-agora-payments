@@ -67,6 +67,9 @@ export default class PaymentsProvider {
     });
   }
 
+  /** Kept so `shutdown()` can release the channel claims it took. */
+  #telescopeWatcher: { dispose(): void } | undefined;
+
   async boot() {
     await this.app.booted(async () => {
       const config = this.app.config.get<PaymentsConfig>('payments', {});
@@ -85,6 +88,31 @@ export default class PaymentsProvider {
         this.#registerWebhookRoute(router);
       }
     });
+  }
+
+  /**
+   * Wire the typed `payments` Telescope watcher, if telescope is in this app and nobody has
+   * already wired one.
+   *
+   * In `ready()`, not `boot()`, and that is the load-bearing part: `start/` files run before
+   * `ready`, so an app that registers its own `PaymentsWatcher` — the way the docs used to
+   * say to — has already claimed the payments channels by the time this looks, and this
+   * stands down. Doing it in `boot()` would race that and record every payment event twice
+   * for exactly the apps that followed the instructions.
+   *
+   * There is no config option. Every one that was drafted described something the code can
+   * detect: the claims registry answers "I wire my own", and a failed import answers "I do
+   * not use telescope".
+   */
+  async ready() {
+    const { registerPaymentsWatcher } = await import('../src/telescope/register.js');
+    this.#telescopeWatcher = await registerPaymentsWatcher(this.app);
+  }
+
+  /** Release the watcher's channel claims and subscriptions on shutdown. */
+  async shutdown(): Promise<void> {
+    this.#telescopeWatcher?.dispose();
+    this.#telescopeWatcher = undefined;
   }
 
   async #buildBillingLayer(config: PaymentsConfig): Promise<void> {

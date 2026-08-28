@@ -145,7 +145,7 @@ export class LucidBillingStore
    * Per-column answers to "does this install's table actually have it?", cached per store.
    *
    * `external_reference` and `normalized` arrive in a SECOND migration
-   * (`add_billing_external_reference`), because the first one is already in production
+   * (an earlier schema), because the first one is already in production
    * everywhere this package is installed. An app that upgrades the package before running it
    * must keep taking webhooks — a payment that records no reference, and a ledger row the
    * dashboard cannot replay, are both survivable; a `column ... does not exist` on every
@@ -200,6 +200,22 @@ export class LucidBillingStore
    * Public because an app that turns `autoCreateSchema` off may still want it in a seeder or
    * a test bootstrap without reaching for the standalone function.
    */
+  /**
+   * Turn the automatic schema creation off after construction.
+   *
+   * One direction only, and deliberately: the flag exists to keep a library from running
+   * DDL against a database somebody else owns, so honouring `false` wherever it appears is
+   * the safe move and there is no way to switch it back on from here.
+   *
+   * It exists because the flag can arrive after the store does. An app that builds its own
+   * store — `billing.store: () => lucidBillingStore({ paymentModel: MyPayment })` — has
+   * already constructed it by the time the provider reads the config, and skipping the flag
+   * there would create tables in exactly the shared database it was set to protect.
+   */
+  disableAutoCreateSchema(): void {
+    this.#autoCreateSchema = false;
+  }
+
   async ensureSchema(): Promise<void> {
     // NOT gated by `#ready()`: that is what calls this, and awaiting it here would have the
     // promise await itself. A deadlock, not a crash — every query would hang forever.
@@ -242,7 +258,7 @@ export class LucidBillingStore
    * Does this install have the `billing_disputes` table at all?
    *
    * Same question as {@link LucidBillingStore.hasColumn}, one level up, and for the same
-   * reason: `billing_disputes` arrives in a THIRD migration (`add_billing_disputes`), so an
+   * reason: `billing_disputes` arrives in a THIRD migration (an earlier schema), so an
    * app that upgrades the package before running it has a processor that wants to write
    * disputes and no table to write them to. The dispute row is ADDITIONAL — the payment row
    * still moves, the diagnostics still publish — so a missing table skips the write and
@@ -443,7 +459,7 @@ export class LucidBillingStore
 
   async findPaymentByExternalReference(reference: string): Promise<PaymentInstance | null> {
     await this.#ready();
-    // An install that has not run `add_billing_external_reference` has no column to match on,
+    // An install that has not run an earlier schema has no column to match on,
     // and every row it holds would answer `null` anyway — so say `null` instead of raising
     // `column "external_reference" does not exist` at a browser that is merely polling.
     if (!(await this.#hasColumn(this.#paymentModel, 'external_reference'))) return null;

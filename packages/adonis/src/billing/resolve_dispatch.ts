@@ -8,11 +8,21 @@ export type BillingRole = 'all' | 'api' | 'worker';
  * The dispatch backend for a config: `billing.dispatcher` when set, else the
  * legacy `billing.durable` alias, else `'auto'`.
  *
- * `dispatcher` is read FIRST because it is the only option able to name every
- * backend — the boolean alias cannot express `'queue'` at all.
+ * `dispatcher` is read FIRST because it is the only option able to name every backend; the
+ * boolean alias can only say durable or not.
  */
 export function resolveDispatchMode(config: PaymentsConfig): WebhookDispatchMode {
   const dispatcher = config.billing?.dispatcher;
+  // `'queue'` was in the type, in the config docs and in the dispatcher's own comments, and
+  // was implemented nowhere: `queueDispatch` was declared and never read, so the mode fell
+  // through to the `'auto'` branch and silently ran durable-or-in-process. Worse, splitting
+  // api/worker was ALLOWED on it, which produced an api process doing all the work and a
+  // worker sitting idle. Refusing at boot is the only honest answer until it exists.
+  if ((dispatcher as string) === 'queue') {
+    throw new Error(
+      '[payments] `billing.dispatcher: "queue"` is not implemented — it never was, and it silently ran the in-process or durable backend instead. Use "durable" (a real channel, and the only mode that can split billing.role) or "in-process". Track the queue backend in the roadmap.',
+    );
+  }
   if (dispatcher !== undefined) return dispatcher;
 
   const legacy = config.billing?.durable ?? 'auto';
@@ -34,9 +44,9 @@ export function resolveRole(config: PaymentsConfig): BillingRole {
  */
 export function assertRoleIsDispatchable(role: BillingRole, mode: WebhookDispatchMode): void {
   if (role === 'all') return;
-  if (mode === 'durable' || mode === 'queue') return;
+  if (mode === 'durable') return;
 
   throw new Error(
-    `[payments] billing.role is "${role}", which splits receiving from processing — but billing.dispatcher is "${mode}", which has no channel between the two halves. Set dispatcher to "durable" or "queue", or drop billing.role.`,
+    `[payments] billing.role is "${role}", which splits receiving from processing — but billing.dispatcher is "${mode}", which has no channel between the two halves. Set dispatcher to "durable", or drop billing.role.`,
   );
 }

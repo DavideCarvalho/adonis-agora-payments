@@ -51,7 +51,7 @@ export type ClientAuthorizeReferenceHook = (
  * now stores the reference a charge carried, so by default the endpoint looks the payment up
  * by it directly and falls back to reading the reference AS a gateway id — which covers both
  * the gateways that make the two equal (Woovi's `correlationID`, Efí's `txid`) and any row
- * written before the `add_billing_external_reference` migration ran.
+ * written before an earlier schema ran.
  *
  * Configure this only when your browser polls with something that is NEITHER — a checkout
  * session id you map yourself, a hashed token. Doing so REPLACES the default lookup: the

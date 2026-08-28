@@ -138,14 +138,16 @@ node ace payments:health --dispute-window=168   # a week of chargeback windows
 ```
 
 The dispute check names each closing window — the dispute id, the payment it is against and the
-deadline — because a count sends nobody anywhere. A window that has **already** closed keeps being
-counted: it is still open and still unanswered, and going quiet the moment it expires would read as
-"resolved" at exactly the wrong moment. A dispute the gateway sent no deadline for is never counted;
-there is nothing to be late for.
+deadline — because a count sends nobody anywhere. The list stops at twenty; the count does not, so a
+report can name twenty of fifty without pretending it named all of them. A window that has
+**already** closed keeps being counted: it is still open and still unanswered, and going quiet the
+moment it expires would read as "resolved" at exactly the wrong moment. A dispute the gateway sent
+no deadline for is never counted; there is nothing to be late for.
 
 It **exits non-zero** when any count is non-zero, so a cron entry or a container healthcheck pages
-on it without parsing the output. The same report is a function — `billingHealth(store)` — for a
-scheduled job that ships it to your metrics. See
+on it without parsing the output. It also exits non-zero, with nothing checked, when
+`billing.enabled` is `false` — there is no install to report on. The same report is a function —
+`billingHealth(store)` — for a scheduled job that ships it to your metrics. See
 [Health checks](/docs/payments/production#health-checks).
 
 ## `make:billable`
@@ -156,14 +158,23 @@ Scaffolds a Lucid model composed with the billing mixins:
 node ace make:billable user
 ```
 
-```ts title="app/models/user.ts"
-import { BaseModel, compose, column } from '@adonisjs/lucid/orm'
+The file is `app/models/<name>_model.ts` — `make:billable user` writes `app/models/user_model.ts`,
+not `user.ts`. The class is named after the argument:
+
+```ts title="app/models/user_model.ts"
+import { BaseModel, compose } from '@adonisjs/lucid/orm'
+import { column } from '@adonisjs/lucid/orm'
 import { withBillable } from '@adonis-agora/payments'
 
 export default class User extends compose(BaseModel, withBillable()) {
   @column({ isPrimary: true }) declare id: string
 }
 ```
+
+<Callout type="warn" title="That import does not resolve today">
+`withBillable` is declared in the package's `src/billing/index.ts`, which has no export subpath, so
+the scaffolded file does not compile as written. Checked against `src/index.ts` on 2026-08-28.
+</Callout>
 
 See [Billing](/docs/payments/billing) for what the mixins add and how to stack the narrower ones.
 

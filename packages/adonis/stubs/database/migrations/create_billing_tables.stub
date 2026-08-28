@@ -26,10 +26,12 @@ import { createBillingTables, dropBillingTables } from '@adonis-agora/payments'
  * is a schema that drifts, and this package spent a release finding the consequences of two
  * things that were supposed to agree and did not.
  *
- * `this.defer` is how a Lucid migration hands over the query client. Note that
- * `createBillingTables` only CREATES: a column added to the library after you run this
- * reaches your database through a migration you write, exactly as it would for any other
- * dependency.
+ * `this.defer` is how a Lucid migration hands over the query client.
+ *
+ * `createBillingTables` is idempotent in both directions: it creates what is missing AND
+ * applies the guarded `ALTER`s for columns the library added after a table shipped. So
+ * re-running this migration after upgrading the package carries those columns — which is
+ * why running it twice is safe and why there is no second file.
  */
 export default class extends BaseSchema {
   async up() {

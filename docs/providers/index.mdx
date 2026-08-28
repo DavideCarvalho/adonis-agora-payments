@@ -62,10 +62,16 @@ Three questions decide it, in this order:
    operation the API does not expose. Those are named on each page, and the driver throws
    rather than reporting a change the gateway never saw.
 
-<Callout title="Routing picks the provider; `method` picks the method">
-`payments.driver('pix')` resolves *which gateway* handles Pix in your config. It does not
-tell that gateway what to create — set `method: 'pix'` on the charge as well. A driver that
-supports several methods otherwise falls back to its own account defaults.
+<Callout title="Routing picks the provider AND the method">
+`payments.driver('pix')` resolves which gateway handles Pix in your config, and hands back
+that driver **bound to `pix`** — so a charge made through it is created as Pix without
+repeating yourself. An explicit `method` on the charge still wins; routing is a default, not
+an override.
+
+It did not always. Until recently the method reached the driver only when the caller set it
+twice, so a charge routed as Pix was created with whatever the gateway's dashboard defaults
+are — and could come back a card. If you have `method: 'pix'` on charges that already route
+by method, it is now redundant rather than load-bearing.
 </Callout>
 
 ## Nothing here is region-locked

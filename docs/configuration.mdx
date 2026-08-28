@@ -1,17 +1,24 @@
 ---
 title: Configuration
-description: The config/payments.ts reference — named providers built with lazy factories, method routing with capability checks, the invoice section, and the billing layer (durable webhook processing, business handlers).
+description: The config/payments.ts reference — named providers built with lazy factories, method routing with capability checks, the invoice section, and the billing layer (who owns the schema, how a webhook is processed, where business handlers live).
 icon: Settings2
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
 
-`config/payments.ts` is the whole wiring surface of the library. It answers four questions:
+`config/payments.ts` answers four questions:
 
 1. **Which gateways do I accept payments through?** — `providers` (a named map of driver factories).
 2. **Which gateway handles each payment method?** — `methods` (e.g. `pix → woovi`, `credit_card → stripe`).
 3. **Who emits my invoices?** — `invoice` (independent of the gateway).
-4. **How are webhooks processed?** — `billing` (durable/in-process, and where your business logic runs).
+4. **How are webhooks processed, and where do the tables come from?** — `billing`.
+
+`configure` publishes two more files, each with its own page: `config/payments_dashboard.ts`
+([Dashboard](/docs/payments/dashboard)) and `config/payments_client.ts`
+([Client](/docs/payments/client)). Both are separate because they are separate **authorization
+surfaces** — the dashboard mounts at `/payments` and the client status endpoint at
+`/payments/client`, sharing that prefix with `POST /payments/webhook/:provider`. Nothing on this
+page opens a route to a browser.
 
 A minimal config is two blocks:
 
@@ -53,9 +60,12 @@ providers: {
 
 ### Driver config options
 
+A sample — the other twelve gateways document their own options on their
+[provider page](/docs/payments/providers):
+
 | Driver | Key config | Convenience env fallback |
 | --- | --- | --- |
-| Stripe | `apiKey`, `currency`, `webhookSecret` | `STRIPE_KEY`, `STRIPE_WEBHOOK_SECRET` |
+| Stripe | `apiKey`, **`currency` (required)**, `webhookSecret` | `STRIPE_KEY`, `STRIPE_WEBHOOK_SECRET` |
 | AbacatePay | `apiKey`, `webhookSecret`/`publicKey` | `ABACATE_API_KEY`, `ABACATE_PUBLIC_KEY` |
 | Asaas | `apiKey`, `sandbox`, `webhookToken` | `ASAAS_API_KEY`, `ASAAS_WEBHOOK_ACCESS_TOKEN` |
 | Woovi | `appId`, `webhookSecret`, `webhookPublicKey` | `WOOVI_APP_ID`, `WOOVI_WEBHOOK_SECRET`, `WOOVI_WEBHOOK_PUBLIC_KEY` |
@@ -139,6 +149,42 @@ billing: {
 }
 ```
 
+Every option, and what you get by omitting it:
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `enabled` | `true` | `false` wires no store, processor or dispatcher. The webhook route still mounts and verifies, and then does nothing with what it verified. |
+| `autoCreateSchema` | `true` | The library creates its own tables on first use. See below. |
+| `dispatcher` | `'auto'` | Which backend runs a validated webhook. See below. |
+| `queue` | the queue's own default | Queue name for `dispatcher: 'queue'`. Ignored by the others. |
+| `role` | `'all'` | `'api'` mounts the route and never processes; `'worker'` processes and never mounts. Both demand an explicit `'durable'` or `'queue'` dispatcher — there is no channel between the halves otherwise, and it is refused at boot. See [Production → Splitting api and worker](/docs/payments/production#splitting-api-and-worker). |
+| `store` | the Lucid store over the billing tables | Where the layer persists. `billingStores.lucid({ models })` swaps the models; a factory of your own replaces the store entirely. See [Billing → The billing store](/docs/payments/billing#the-billing-store). |
+| `handlers` | none | Your business logic, keyed by normalized event type. See below. |
+| `durable` | — | Legacy alias for `dispatcher`. See the callout below. |
+
+### `autoCreateSchema` — who owns the DDL
+
+`true` by default, and there is **no migration to run**: on its first query the Lucid store
+creates the six billing tables itself, the same convention `@adonis-agora/durable` and
+`@adonis-agora/authz` follow. The DDL is idempotent (`CREATE TABLE IF NOT EXISTS`, plus guarded
+`ALTER`s for columns added after a table shipped), so it costs one round trip per process and an
+install that already ran an older migration gets no-ops.
+
+```ts title="config/payments.ts"
+billing: { autoCreateSchema: false }
+```
+
+Turn it off when the schema is managed elsewhere — a shared database you do not own, a team that
+reviews every DDL, a deploy that runs migrations as their own step. Then run the migration
+`configure` published:
+
+```sh
+node ace migration:run
+```
+
+That file calls the same exported `createBillingTables`, so the two paths cannot drift. Leaving
+both on is harmless; leaving both *off* means the first query fails on a missing table.
+
 ### `dispatcher` — how a webhook gets processed
 
 Webhook processing is exactly the kind of work that must not be lost when a deploy or a crash
@@ -169,7 +215,7 @@ queue backend.
 
 The route validates the signature, syncs the billing tables, then runs **your** logic. Two
 equivalent authoring forms (plus a third — the `app/payment_handlers/` folder — covered
-in [Webhooks](/docs/payments/webhooks#running-your-business-logic)):
+in [Webhooks](/docs/payments/webhooks#running-your-business-logic--four-options)):
 
 - A **DI service class** — the lib resolves it from the container and calls its
   `handle(event)` method. Inject whatever you need; no boilerplate:
@@ -200,3 +246,19 @@ Webhooks must respond fast. The recommended shape is: the handler only **dispatc
 durable workflow** (durable owns retry + exactly-once) and returns — never doing the heavy
 grant inline. See [Webhooks → The money-flow pattern](/docs/payments/webhooks#the-money-flow-pattern-handlers-dispatch-to-durable).
 </Callout>
+
+## `telescope` — the typed watcher
+
+A top-level key, not part of `billing`. `'auto'` (the default) registers the typed `payments`
+Telescope watcher when `@adonis-agora/telescope` is resolvable in the app and does nothing when it
+is not; `true` requires it and throws at boot when it is missing; `false` never registers it.
+
+```ts title="config/payments.ts"
+telescope: 'auto',
+```
+
+The asymmetry is the point: an app that never asked for Telescope should not fail to boot without
+it, and an app that asked for it should not discover it is absent by noticing an empty timeline.
+With `false` the generic diagnostics watcher still records the payments channels as ordinary
+entries — they are plain `node:diagnostics_channel` publishes. See
+[Diagnostics](/docs/payments/diagnostics).

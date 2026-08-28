@@ -17,7 +17,6 @@ import type {
 import { headerValue, httpRequest, isNotFound } from '../http.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
 import type { EmitInvoiceContext } from '../invoice/emit_invoice.js';
-import { fromDecimal, toDecimal } from '../money.js';
 import type {
   CheckoutSession,
   Customer,
@@ -251,7 +250,7 @@ export class AbacateDriver implements PaymentsDriver {
       gatewayId: data.id,
       provider: this.provider,
       amount: {
-        amount: data.amount !== undefined ? fromDecimal(data.amount) : 0,
+        amount: data.amount !== undefined ? Math.round(data.amount) : 0,
         currency: data.currency ?? 'brl',
       },
       status: 'succeeded',
@@ -271,7 +270,15 @@ export class AbacateDriver implements PaymentsDriver {
       method: 'POST',
       body: {
         customerId: input.customerId,
-        amount: toDecimal(input.amount),
+        // Centavos, straight through. AbacatePay documents it outright — "valores
+        // monetários são sempre em centavos (ex.: 10000 = R$ 100,00)" — which is the same
+        // integer minor unit this package uses, so there is nothing to convert.
+        //
+        // This ran `toDecimal` and created a checkout for **1/100 of the amount**: R$19,90
+        // went out as `19.9` and AbacatePay read 19 centavos. `charge()` on the neighbouring
+        // v2 endpoint always passed the integer through, so the driver disagreed with itself
+        // and the two paths were never compared.
+        amount: input.amount,
         ...(input.description !== undefined ? { description: input.description } : {}),
       },
     });
@@ -282,7 +289,7 @@ export class AbacateDriver implements PaymentsDriver {
       url: data.url ?? '',
       status: 'open',
       amount: {
-        amount: data.amount !== undefined ? fromDecimal(data.amount) : input.amount,
+        amount: data.amount !== undefined ? Math.round(data.amount) : input.amount,
         currency: data.currency ?? 'brl',
       },
       customerId: input.customerId,
@@ -300,7 +307,8 @@ export class AbacateDriver implements PaymentsDriver {
       method: 'POST',
       body: {
         customerId: input.customerId,
-        ...(input.amount !== undefined ? { amount: toDecimal(input.amount) } : {}),
+        // Centavos — see the note in `createCheckout`.
+        ...(input.amount !== undefined ? { amount: input.amount } : {}),
         frequency: input.cycle ?? 'MONTHLY',
         ...(input.startDate !== undefined ? { nextBillingAt: input.startDate } : {}),
         ...(input.description !== undefined ? { description: input.description } : {}),
@@ -346,7 +354,8 @@ export class AbacateDriver implements PaymentsDriver {
       {
         method: 'PATCH',
         body: {
-          ...(input.amount !== undefined ? { amount: toDecimal(input.amount) } : {}),
+          // Centavos — see the note in `createCheckout`.
+          ...(input.amount !== undefined ? { amount: input.amount } : {}),
           ...(input.description !== undefined ? { description: input.description } : {}),
         },
       },
@@ -367,7 +376,7 @@ export class AbacateDriver implements PaymentsDriver {
       customerId,
       status: billing.status === 'PAID' ? 'paid' : billing.status === 'CANCELED' ? 'void' : 'open',
       amount: {
-        amount: billing.amount !== undefined ? fromDecimal(billing.amount) : 0,
+        amount: billing.amount !== undefined ? Math.round(billing.amount) : 0,
         currency: billing.currency ?? 'brl',
       },
       createdAt: billing.createdAt ?? new Date().toISOString(),
@@ -453,7 +462,7 @@ export class AbacateDriver implements PaymentsDriver {
       gatewayId: data.id,
       provider: this.provider,
       amount: {
-        amount: data.amount !== undefined ? fromDecimal(data.amount) : 0,
+        amount: data.amount !== undefined ? Math.round(data.amount) : 0,
         currency: data.currency ?? 'brl',
       },
       status:
@@ -496,7 +505,7 @@ export class AbacateDriver implements PaymentsDriver {
       status: statusMap[data.status] ?? 'active',
       planId: data.frequency ?? '',
       amount: {
-        amount: data.amount !== undefined ? fromDecimal(data.amount) : 0,
+        amount: data.amount !== undefined ? Math.round(data.amount) : 0,
         currency: 'brl',
       },
       ...(data.nextBillingAt !== undefined ? { endsAt: data.nextBillingAt } : {}),

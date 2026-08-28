@@ -228,8 +228,11 @@ describe('createReplayAction', () => {
     const outcome = await replay(input);
 
     expect(outcome.kind).toBe('undeliverable');
+    // The message names the COLUMN, not a migration file. It used to name
+    // `add_billing_external_reference`, which no longer exists — and this string renders in
+    // an operator's console, where a filename that leads nowhere is worse than no hint.
     expect(outcome.kind === 'undeliverable' && outcome.message).toContain(
-      'add_billing_external_reference',
+      'billing_webhook_events.normalized',
     );
     const stored = await store.findWebhookEventByGatewayEventId('evt_1');
     expect(stored?.status).toBe('failed');

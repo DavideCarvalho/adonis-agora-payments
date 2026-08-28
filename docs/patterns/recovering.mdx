@@ -43,6 +43,14 @@ export default class PaymentFailedHandler {
 }
 ```
 
+<Callout type="warn" title="`reason` is usually not there">
+`data.reason` is not part of the normalized payment payload — `PaymentWebhookData` is `gatewayId`,
+`amount`, `currency`, and optionally `customerId`, `subscriptionId`, `externalReference` and
+`metadata`. Only the Adyen driver fills a `reason` in, from the notification's own field. Everywhere
+else it is `undefined`, and the decline code is on `event.raw` under the gateway's own name. Write
+the email so it reads correctly without one.
+</Callout>
+
 <Callout type="warn" title="Reset the counter on recovery">
 Without a reset in the `payment.succeeded` handler, a customer who fails once in March and once in
 July is one decline away from suspension forever.
@@ -88,17 +96,21 @@ async handle(event: WebhookEvent) {
 }
 ```
 
-Gateways without refunds:
+Sixteen of the eighteen drivers declare `refunds: true`. **Two do not**, and they are the two the
+capability check exists for:
 
 | Gateway | Refunds |
 | --- | --- |
-| Stripe | yes |
-| Asaas | yes |
-| AbacatePay | yes |
-| Woovi / OpenPix | **no** — no refund API |
+| Woovi / OpenPix | **no** — no refund API; its `capabilities` declares only `subscriptions` |
+| InfinitePay | **no** — `refunds: false`, along with invoices and subscriptions |
 
 For Woovi, a refund is an out-of-band Pix transfer you make yourself; record it in your own tables
-and revoke access there, because no webhook is coming.
+and revoke access there, because no webhook is coming. InfinitePay is the same shape — the driver is
+a payment link and nothing more.
+
+The other sixteen — Stripe, Adyen, Square, Mollie, PayPal, Razorpay, Paddle, Lemon Squeezy, Polar,
+Dodo, Asaas, AbacatePay, Efí, Pagar.me, PagBank and Mercado Pago — all support `refund()`, in full or
+partially.
 
 ## Reconciling after an outage
 
@@ -111,20 +123,54 @@ node ace payments:sync --all
 node ace payments:sync --customer=cus_123 --provider=stripe
 ```
 
+**One of `--customer` or `--all` is required** — with neither, the command prints the fix and exits
+without touching anything. `--all` pages the customer mappings written by
+`ensureCustomer({ store })` / `store.saveCustomer()`; if none exist it says so rather than reporting
+a healthy zero.
+
+<Callout type="warn" title="Sync goes through `listInvoices`, so it needs the `invoices` capability">
+Reconcile is invoice-shaped: it lists a customer's gateway invoices and upserts the **paid** ones.
+Seven drivers declare `invoices: false` — Adyen, Efí, InfinitePay, Mercado Pago, Mollie, PagBank and
+PayPal — and Woovi declares no `invoices` key at all. On any of them the command fails fast with the
+gateway named, before a request goes out. There is no charge-by-charge reconcile in this library;
+for those gateways, replay from the gateway's own dashboard.
+</Callout>
+
 <Callout type="warn" title="Sync repairs billing tables, not your business logic">
 It upserts into `billing_payments`. It does **not** run your handlers, so credits are not granted and
 subscriptions are not activated by it. After a large reconcile, diff against your own tables — or
 replay the events from the gateway dashboard so the normal path runs and the handlers fire.
 </Callout>
 
-One command worth running on a schedule to notice the gap before a customer does — it counts the
-events the dispatcher gave up on, and the charges that were created and never confirmed:
+### `payments:health` — the four checks
+
+One command worth running on a schedule to notice the gap before a customer does:
 
 ```sh
 node ace payments:health
+node ace payments:health --json          # for a metrics shipper
 ```
 
-It exits non-zero when either is non-zero. To read the failures themselves, page the ledger — the
+It asks **four** questions, each a failure that produces no error anywhere:
+
+| Check | Counts | What a non-zero means |
+| --- | --- | --- |
+| `stuck_webhooks` | events claimed in the ledger and unfinished for over **15 min** | nothing is consuming the dispatcher — the `durable:work` worker is not running |
+| `failed_webhooks` | events the dispatcher gave up on in the last **24 h** | handlers threw and retries ran out, so those events never took effect |
+| `unconfirmed_payments` | charges created over **2 h** ago and still `pending` | what a webhook endpoint that stopped being reachable looks like from the inside |
+| `disputes_due` | open disputes whose evidence window closes within **72 h** | a chargeback deadline is closing. Past it the dispute is lost by default rather than on the merits |
+
+Each threshold has a flag: `--stuck-after` and `--unconfirmed-after` in minutes, `--window` (the
+failure window) and `--dispute-window` in hours. See [CLI](/docs/payments/cli#paymentshealth).
+
+`disputes_due` is the odd one out and the reason to run this on a cron rather than when something
+looks wrong: **nothing is broken**, and the money goes anyway if nobody answers in time. The report
+prints the disputes by name — provider, dispute id, payment id, deadline — because a count names
+nobody to email. Windows already past stay counted; they are still open and still unanswered. See
+[Disputes](/docs/payments/patterns/disputes).
+
+It exits non-zero when **any** check is non-zero, so a cron entry or a container healthcheck can
+page on it without parsing the output. To read the failures themselves, page the ledger — the
 handler's error message survives nowhere else:
 
 ```ts

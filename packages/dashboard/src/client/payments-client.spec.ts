@@ -186,6 +186,39 @@ describe('actions are POSTs', () => {
     stubFetch({ ok: false, status: 502, json: async () => ({ error: 'charge_already_refunded' }) });
     await expect(paymentsClient.refundPayment('pi_1')).rejects.toThrow('charge_already_refunded');
   });
+
+  /**
+   * The console is mounted INSIDE a host application, and an AdonisJS app running
+   * `@adonisjs/shield` guards every state-changing route with CSRF. Shield publishes the
+   * token as an `XSRF-TOKEN` cookie precisely so a browser client can echo it in
+   * `x-xsrf-token`; without the header these two POSTs are rejected before they reach the
+   * dashboard's own authorization, and the refund button does nothing for a reason no
+   * message on screen explains.
+   */
+  it("echoes the host app's CSRF cookie on a refund", () => {
+    document.cookie = 'XSRF-TOKEN=abc%20123';
+    const { inits } = stubFetch({ json: async () => ({ refund: {} }) });
+    return paymentsClient.refundPayment('pi_1').then(() => {
+      expect((inits[0]?.headers as Record<string, string>)['x-xsrf-token']).toBe('abc 123');
+    });
+  });
+
+  it('echoes it on a webhook retry too', () => {
+    document.cookie = 'XSRF-TOKEN=tok2';
+    const { inits } = stubFetch({ json: async () => ({ status: 'processed' }) });
+    return paymentsClient.retryWebhookEvent('evt_1').then(() => {
+      expect((inits[0]?.headers as Record<string, string>)['x-xsrf-token']).toBe('tok2');
+    });
+  });
+
+  it('sends no CSRF header when the host sets no cookie', () => {
+    // A host without shield has no token to send, and an empty one would be worse than none.
+    document.cookie = 'XSRF-TOKEN=; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+    const { inits } = stubFetch({ json: async () => ({ refund: {} }) });
+    return paymentsClient.refundPayment('pi_1').then(() => {
+      expect(inits[0]?.headers as Record<string, string>).not.toHaveProperty('x-xsrf-token');
+    });
+  });
 });
 
 describe('error handling', () => {

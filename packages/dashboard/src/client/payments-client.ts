@@ -291,12 +291,32 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+/**
+ * The host app's CSRF token, when it sets one.
+ *
+ * `@adonisjs/shield` guards every state-changing route of the app this console is mounted
+ * in, and it publishes the token as an `XSRF-TOKEN` cookie for exactly this: a browser
+ * client echoes it back in `x-xsrf-token`. Without it the two POST actions below are
+ * rejected before they reach the dashboard's own authorization, and the refund button does
+ * nothing for a reason no message explains.
+ *
+ * Absent cookie → no header, which is the right answer for a host that does not use shield:
+ * sending an empty token would be worse than sending none.
+ */
+function csrfHeader(): Record<string, string> {
+  if (typeof document === 'undefined') return {};
+  const match = /(?:^|;\s*)XSRF-TOKEN=([^;]*)/.exec(document.cookie);
+  const token = match?.[1];
+  if (!token) return {};
+  return { 'x-xsrf-token': decodeURIComponent(token) };
+}
+
 /** A JSON `POST` — the two actions. Kept separate from `http` so no read can ever reach it by
  *  accident, and so the body/`content-type` are stated in exactly one place. */
 async function post<T>(path: string, body?: unknown): Promise<T> {
   return http<T>(path, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...csrfHeader() },
     body: JSON.stringify(body ?? {}),
   });
 }

@@ -222,6 +222,48 @@ describe('payment status handler', () => {
     expect((await call(bruno, 'pay_other', config)).status).toBe(403);
   });
 
+  it('finds the payment by the app’s OWN reference, not just the gateway id', async () => {
+    // The reason `billing_payments.external_reference` exists: a checkout page polls for
+    // "order-1042", not for "pay_ana". Before the column, this needed a `resolveReference` hook.
+    await store.savePayment({
+      gatewayId: 'pay_ana',
+      provider: 'asaas',
+      status: 'paid',
+      amount: 12_345,
+      currency: 'BRL',
+      customerId: 'cus_ana',
+      externalReference: 'order-1042',
+    });
+
+    const result = await call(ana, 'order-1042');
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ status: 'paid', amount: 12_345 });
+    // The guard still runs on it — resolving a reference is not owning the payment.
+    expect((await call(bruno, 'order-1042')).status).toBe(403);
+  });
+
+  it('still reads the reference AS a gateway id when nothing carries it', async () => {
+    // Two callers need this fallback: gateways that make the two equal (Woovi's
+    // `correlationID`, Efí's `txid`), and installs that have not run the migration that adds
+    // the column, whose rows are all `null`.
+    const spy = vi.spyOn(store, 'findPaymentByExternalReference');
+    expect((await call(ana, 'pay_ana')).status).toBe(200);
+    expect(spy).toHaveBeenCalledWith('pay_ana');
+    spy.mockRestore();
+  });
+
+  it('lets an app-supplied resolveReference REPLACE the built-in lookup', async () => {
+    // An app that says "my reference is neither of those, here is the gateway id" owns the
+    // question; second-guessing it with a fallback would answer one it did not ask.
+    const spy = vi.spyOn(store, 'findPaymentByExternalReference');
+    const config: PaymentsClientConfig = {
+      resolveReference: (_ctx, reference) => (reference === 'order-1' ? 'pay_ana' : null),
+    };
+    expect((await call(ana, 'order-1', config)).status).toBe(200);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
   it('maps an app-side reference onto the gateway id, with the guard still running', async () => {
     const config: PaymentsClientConfig = {
       resolveReference: (_ctx, reference) => (reference === 'order-1' ? 'pay_ana' : null),
@@ -237,6 +279,11 @@ describe('payment status handler', () => {
     // The Lucid store hands back `amount` as a string (Postgres bigint) and `paidAt` as a
     // Luxon DateTime. Reading either straight through produces `"12345"` or `{}` on the wire.
     const lucidish = {
+      // Nothing carries this as an external reference — the handler falls through to the
+      // gateway-id lookup, which is the path this test is about.
+      async findPaymentByExternalReference() {
+        return null;
+      },
       async findPaymentByGatewayId() {
         return {
           gatewayId: 'pay_lucid',

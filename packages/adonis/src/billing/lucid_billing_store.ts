@@ -52,6 +52,20 @@ function toCount(rows: unknown): number {
   return Number(first?.total ?? 0);
 }
 
+/**
+ * The normalized event, as a jsonb-storable value.
+ *
+ * Drivers normalize onto object shapes (`PaymentWebhookData`, `SubscriptionWebhookData`), but
+ * `WebhookEvent.data` is `unknown` and a driver may hand back anything. Anything that is not
+ * an object is stored as `null` rather than coerced: the retry checks for `null` and says it
+ * cannot replay, which is a better answer than rebuilding an event around a string.
+ */
+function normalizedColumn(value: unknown): Record<string, unknown> | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
 type CustomerInstance = InstanceType<typeof DefaultCustomer>;
 type SubscriptionInstance = InstanceType<typeof DefaultSubscription>;
 type PaymentInstance = InstanceType<typeof DefaultPayment>;
@@ -73,6 +87,22 @@ export class LucidBillingStore
       CustomerInstance
     >
 {
+  /**
+   * Per-column answers to "does this install's table actually have it?", cached per store.
+   *
+   * `external_reference` and `normalized` arrive in a SECOND migration
+   * (`add_billing_external_reference`), because the first one is already in production
+   * everywhere this package is installed. An app that upgrades the package before running it
+   * must keep taking webhooks — a payment that records no reference, and a ledger row the
+   * dashboard cannot replay, are both survivable; a `column ... does not exist` on every
+   * gateway delivery is not. So the write asks once, per column, and skips what is not there.
+   *
+   * Keyed by `table.column`. One `information_schema` read per column per process, then
+   * nothing. A probe that itself fails answers "present": dropping data quietly is the worse
+   * of the two failures, and the real INSERT will then say exactly what is wrong.
+   */
+  #columnCache: Map<string, Promise<boolean>> = new Map();
+
   #customerModel: typeof DefaultCustomer;
   #subscriptionModel: typeof DefaultSubscription;
   #paymentModel: typeof DefaultPayment;
@@ -88,6 +118,20 @@ export class LucidBillingStore
       DefaultWebhookEvent) as typeof DefaultWebhookEvent;
     this.#usageEventModel = (models.usageEventModel ??
       DefaultUsageEvent) as typeof DefaultUsageEvent;
+  }
+
+  async #hasColumn(model: typeof DefaultPayment | typeof DefaultWebhookEvent, column: string) {
+    const key = `${model.table}.${column}`;
+    let answer = this.#columnCache.get(key);
+    if (answer === undefined) {
+      answer = model
+        .query()
+        .client.columnsInfo(model.table)
+        .then((columns) => Object.hasOwn(columns as Record<string, unknown>, column))
+        .catch(() => true);
+      this.#columnCache.set(key, answer);
+    }
+    return answer;
   }
 
   async saveCustomer(customer: {
@@ -220,6 +264,7 @@ export class LucidBillingStore
     currency: string;
     customerId?: string | null;
     subscriptionId?: string | null;
+    externalReference?: string | null;
     paidAt?: Date | null;
     payload?: Record<string, unknown>;
   }): Promise<PaymentInstance> {
@@ -232,6 +277,16 @@ export class LucidBillingStore
     row.currency = payment.currency;
     row.customerId = payment.customerId ?? null;
     row.subscriptionId = payment.subscriptionId ?? null;
+    // An ABSENT reference does not erase the stored one — same rule as `saveCustomer`'s owner
+    // mapping, and for a sharper reason: `payment.succeeded` carries the app's reference,
+    // `payment.refunded` and `payment.disputed` frequently do not, and blanking it there would
+    // destroy the only key `findPaymentByExternalReference` can route on. `null` still clears.
+    if (
+      payment.externalReference !== undefined &&
+      (await this.#hasColumn(this.#paymentModel, 'external_reference'))
+    ) {
+      row.externalReference = payment.externalReference;
+    }
     row.paidAt = payment.paidAt ? DateTime.fromJSDate(payment.paidAt) : null;
     row.payload = payment.payload ?? {};
     await row.save();
@@ -240,6 +295,21 @@ export class LucidBillingStore
 
   async findPaymentByGatewayId(gatewayId: string): Promise<PaymentInstance | null> {
     const row = await this.#paymentModel.findBy('gateway_id', gatewayId);
+    return row as PaymentInstance | null;
+  }
+
+  async findPaymentByExternalReference(reference: string): Promise<PaymentInstance | null> {
+    // An install that has not run `add_billing_external_reference` has no column to match on,
+    // and every row it holds would answer `null` anyway — so say `null` instead of raising
+    // `column "external_reference" does not exist` at a browser that is merely polling.
+    if (!(await this.#hasColumn(this.#paymentModel, 'external_reference'))) return null;
+    // Newest first: nothing stops an app reusing a reference across retries, and the row an
+    // operator (or a polling checkout page) means is the most recent one.
+    const row = await this.#paymentModel
+      .query()
+      .where('external_reference', reference)
+      .orderBy('created_at', 'desc')
+      .first();
     return row as PaymentInstance | null;
   }
 
@@ -259,6 +329,7 @@ export class LucidBillingStore
       currency: row.currency,
       customerId: row.customerId ?? null,
       subscriptionId: row.subscriptionId ?? null,
+      externalReference: row.externalReference ?? null,
       paidAt: toDate(row.paidAt),
       createdAt: toDate(row.createdAt),
     }));
@@ -277,6 +348,7 @@ export class LucidBillingStore
     provider: string;
     type: string;
     payload: Record<string, unknown>;
+    normalized?: unknown;
   }): Promise<WebhookEventInstance | null> {
     const existing = await this.#webhookEventModel.findBy('gateway_event_id', event.gatewayEventId);
     if (existing) {
@@ -285,6 +357,8 @@ export class LucidBillingStore
       if (existing.status !== 'failed') return null;
       existing.status = 'received';
       existing.error = null;
+      // `payload` and `normalized` are deliberately NOT touched here: the retry re-claims
+      // this row precisely to read back what the original delivery recorded.
       await existing.save();
       return existing;
     }
@@ -294,6 +368,10 @@ export class LucidBillingStore
     row.type = event.type;
     row.status = 'received';
     row.payload = event.payload;
+    const normalized = normalizedColumn(event.normalized);
+    if (normalized !== null && (await this.#hasColumn(this.#webhookEventModel, 'normalized'))) {
+      row.normalized = normalized;
+    }
     row.error = null;
     await row.save();
     return row;

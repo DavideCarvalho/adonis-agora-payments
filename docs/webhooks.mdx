@@ -87,11 +87,14 @@ require gateway setup — it is not a recommendation for production.
 Once validated, an event flows through the processor in a strict order:
 
 1. **Ledgered first** — the event id is recorded in `billing_webhook_events` *before* any
-   processing. If that id was already processed, the event is a redelivery and processing
-   **stops** immediately (`false` returned). This is the idempotency guarantee: a gateway
-   retry can never double-grant, because the check happens before the work.
+   processing, together with the raw payload **and** the normalized event (the `normalized`
+   column, which is what the dashboard's retry replays). If that id was already processed, the
+   event is a redelivery and processing **stops** immediately (`false` returned). This is the
+   idempotency guarantee: a gateway retry can never double-grant, because the check happens
+   before the work.
 2. **Synced** — the normalized event (`payment.succeeded`, `subscription.canceled`, …) is
-   upserted into the billing tables (`billing_payments`, `billing_subscriptions`).
+   upserted into the billing tables (`billing_payments`, `billing_subscriptions`), including
+   the `externalReference` it carried.
 3. **Your business logic runs** — the handler for that event type (see below).
 4. **Marked processed** — only after the handler returns. A throwing handler marks the
    event `failed` (with the error) and the dispatcher retries it.
@@ -240,7 +243,9 @@ A webhook carries the gateway's ids — but your business logic needs *your* id 
 row, a subscription). `externalReference` is the bridge: set it on the charge or
 subscription, the gateway echoes it back, and the library surfaces it on the normalized
 `event.data.externalReference` and the `payment.succeeded` diagnostics payload — so you
-never dig into `event.raw`:
+never dig into `event.raw`. It is also **stored**, on
+`billing_payments.external_reference` (indexed), so you can ask the store for the payment
+behind one of your ids at any time, not only while handling the webhook:
 
 ```ts title="app/services/checkout_service.ts"
 const payment = await Payment.create({ ... })
@@ -257,6 +262,19 @@ onDiagnostic('payments', 'payment.succeeded', async ({ payload }) => {
   // grant the purchased credits...
 })
 ```
+
+```ts
+// ...or, later, from anywhere: the reference is a stored, indexed column.
+const row = await store.findPaymentByExternalReference(payment.id)
+```
+
+<Callout type="warn" title="Existing installs need the new migration">
+`external_reference` arrived after `create_billing_tables`, in a second published migration
+(`add_billing_external_reference`). Until you run it, the column is not there: the reference is
+**not** stored, `findPaymentByExternalReference` answers `null` for every id, and the browser
+status endpoint falls back to reading your reference as a gateway id. Nothing else changes, and
+nothing is backfilled — a reference that was never stored cannot be recovered from the payload.
+</Callout>
 
 How each gateway stores it:
 

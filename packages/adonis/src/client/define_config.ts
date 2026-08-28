@@ -47,11 +47,15 @@ export type ClientAuthorizeReferenceHook = (
  * Map the reference the browser polls with onto the `gateway_id` the billing store keys
  * payments by. Return `null` for "no such reference" (the endpoint answers `404`).
  *
- * Needed only when the two differ. `billing_payments` has no `external_reference` column —
- * the reference a charge carried is echoed on the gateway's webhook, not stored — so by
- * default the endpoint reads the reference AS the gateway id, which is what `charge()`
- * returned (`payment.id`) and what several Pix gateways make equal to the reference you
- * sent (Woovi's `correlationID`, Efí's `txid`).
+ * **An escape hatch, and no longer the normal path.** `billing_payments.external_reference`
+ * now stores the reference a charge carried, so by default the endpoint looks the payment up
+ * by it directly and falls back to reading the reference AS a gateway id — which covers both
+ * the gateways that make the two equal (Woovi's `correlationID`, Efí's `txid`) and any row
+ * written before the `add_billing_external_reference` migration ran.
+ *
+ * Configure this only when your browser polls with something that is NEITHER — a checkout
+ * session id you map yourself, a hashed token. Doing so REPLACES the default lookup: the
+ * endpoint then reads only what this returns, by gateway id.
  *
  * This is a LOOKUP, not a guard: {@link ClientAuthorizeReferenceHook} still runs on what it
  * resolves.
@@ -89,7 +93,10 @@ export interface PaymentsClientConfig {
    * a message saying so — never allowed by default.
    */
   authorizeReference?: ClientAuthorizeReferenceHook;
-  /** See {@link ClientResolveReferenceHook}. Defaults to the identity mapping. */
+  /**
+   * See {@link ClientResolveReferenceHook}. Unset by default — the endpoint looks the payment
+   * up by `external_reference`, then by gateway id.
+   */
   resolveReference?: ClientResolveReferenceHook;
 }
 
@@ -125,7 +132,11 @@ export interface ResolvedPaymentsClientConfig {
   path: string;
   authorize: ClientAuthorizeHook;
   owner: ClientOwnerHook;
-  resolveReference: ClientResolveReferenceHook;
+  /**
+   * `null` — the common case — means "no app-supplied mapping": the handler uses the built-in
+   * `external_reference` → gateway-id lookup. A hook here replaces it entirely.
+   */
+  resolveReference: ClientResolveReferenceHook | null;
   /** The app's `authorizeReference`, adapted — or the built-in registry check. */
   guard: ReferenceGuard;
 }
@@ -236,7 +247,7 @@ export function resolveConfig(config: PaymentsClientConfig = {}): ResolvedPaymen
     path: trimmed === '/' ? '' : trimmed,
     authorize: config.authorize ?? defaultAuthorize,
     owner: config.owner ?? defaultOwner,
-    resolveReference: config.resolveReference ?? ((_ctx, reference) => reference),
+    resolveReference: config.resolveReference ?? null,
     guard: config.authorizeReference
       ? adaptAuthorizeReference(config.authorizeReference)
       : registryReferenceGuard,

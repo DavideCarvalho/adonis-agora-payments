@@ -46,12 +46,18 @@ export default class extends BaseSchema {
       table.string('currency', 3)
       table.string('customer_id').nullable()
       table.string('subscription_id').nullable()
+      // The app's OWN id for this charge, echoed back by the gateway. Nullable (not every
+      // gateway echoes one) and INDEXED: this is the key an app looks a payment up by, and an
+      // unindexed lookup on a table that grows with every charge is a sequential scan on the
+      // hot path.
+      table.string('external_reference').nullable()
       table.jsonb('payload').nullable()
       table.timestamp('paid_at', { useTz: true }).nullable()
       table.timestamp('created_at', { useTz: true }).notNullable()
       table.timestamp('updated_at', { useTz: true }).notNullable()
       table.index(['customer_id'], 'billing_payments_customer_idx')
       table.index(['subscription_id'], 'billing_payments_subscription_idx')
+      table.index(['external_reference'], 'billing_payments_external_reference_idx')
     })
 
     this.schema.createTable('billing_webhook_events', (table) => {
@@ -61,6 +67,10 @@ export default class extends BaseSchema {
       table.string('type')
       table.string('status')
       table.jsonb('payload').nullable()
+      // The NORMALIZED event (`WebhookEvent.data`) beside the raw payload, so the dashboard's
+      // retry can replay a delivery without calling `parseWebhook` — which would re-verify a
+      // signature computed from headers this table never keeps.
+      table.jsonb('normalized').nullable()
       table.text('error').nullable()
       table.timestamp('created_at', { useTz: true }).notNullable()
       table.timestamp('updated_at', { useTz: true }).notNullable()

@@ -1,6 +1,6 @@
 ---
 title: Roadmap
-description: What is still missing — subscription amounts on Stripe, idempotency beyond charges, partial refunds in the tables, splits beyond Asaas, fiscal invoice reconciliation and the dashboard UI.
+description: What is still missing — dispute submission, subscription amounts on Stripe, partial refunds in the tables, splits beyond Asaas, batched webhooks and fiscal invoice reconciliation.
 icon: Map
 ---
 
@@ -10,13 +10,6 @@ per-gateway matrix.
 
 ## Gateways
 
-- **The dashboard's webhook retry cannot replay a signed gateway.** The ledger stores the raw
-  payload but neither the request headers nor the normalized event, and `parseWebhook` verifies a
-  signature — so a Stripe or Adyen retry answers `422` and leaves the ledger row untouched, while
-  unsigned gateways replay normally. Closing it means storing the normalized event alongside the
-  raw payload in `billing_webhook_events`, which is a new nullable column and therefore a migration
-  existing installs have to run. Worth doing: retrying a failed event after fixing a handler bug is
-  the single most useful thing an operator can do, and today it works for a minority of gateways.
 - **`MGA` has no right answer.** ISO 4217 gives the Malagasy ariary two decimal places (it is
   subdivided into five iraimbilanja, not a hundred), while Stripe treats it as zero-decimal. The
   exponent table follows ISO, so a Stripe charge in MGA will disagree with it. Nobody has hit this;
@@ -29,9 +22,6 @@ per-gateway matrix.
   nothing reconciles. This needs one real payload from a live account before the deadline. Until
   then the new event lands in the webhook ledger as an unknown type, which is visible rather than
   silent.
-- **Asaas maps fewer payment statuses than Asaas has.** `RECEIVED_IN_CASH`, `REFUND_REQUESTED`,
-  `REFUND_IN_PROGRESS`, `DUNNING_*` and `AWAITING_RISK_ANALYSIS` all fall through to `pending`.
-  `RECEIVED_IN_CASH` is the one that matters: it is paid, and it reads as unpaid.
 - **Batched webhook notifications.** `parseWebhook` returns a single event, while Adyen's
   `notificationItems` and Efí's Pix array can both carry several. Both drivers refuse a batch
   loudly rather than processing the first and dropping the rest, which is the safe half of the
@@ -44,18 +34,20 @@ per-gateway matrix.
   hands back a driver, not a pre-configured one, so it has nothing to write the routed method onto.
   Every driver that varies by method (Stripe's `payment_method_types`, Asaas' and AbacatePay's
   `billingType`) reads it off the charge. Routing without it silently gets the gateway's default.
-  Threading the routed method through the manager would fix it for all four at once.
+  Threading the routed method through the manager would fix it for every driver at once.
 - **Subscription amounts on Stripe.** `updateSubscription` takes an amount, a description and
   metadata. Asaas and AbacatePay apply the amount and the description; Stripe applies the
   description and metadata and drops the amount, because changing a price there needs the
   subscription item id and the shared input has no room for it. What is missing is a plan/price
   field on the input with proration handling. Woovi no longer fabricates a result here — it throws,
   because OpenPix subscriptions are immutable.
-- **Outbound idempotency beyond charges.** Stripe now sends `Idempotency-Key` as a request option on
-  `charge` and `createCheckout`, the two inputs that carry an `idempotencyKey`. `refund`,
-  `createCustomer`, `createSubscription` and `updateSubscription` have no key in the shared
-  contract at all, on any driver, so a retried subscription creation can still duplicate at the
-  gateway. Adding one means every driver honoring it, not just Stripe — see
+- **Idempotency where the gateway has none.** `idempotencyKey` now rides on `charge`,
+  `createCheckout`, `refund`, `createCustomer`, `createSubscription` and `updateSubscription`, and
+  every driver either wires it to the gateway's own deduplication or **throws** rather than
+  accepting a key it cannot honour. InfinitePay is the clearest case: it documents no idempotency
+  at all, so the key is used only for routing and a repeated `createCheckout` makes a second link.
+  Nothing in the library can fix that — it is a property of the gateway — but which operations are
+  genuinely deduplicated is on each provider page rather than in one table, which it should be. See
   [Idempotency](/docs/payments/concepts/idempotency).
 - **A method on checkout and on subscriptions.** `CheckoutInput` has no `method`, so a Stripe
   checkout session is always created with the account's default methods.
@@ -63,9 +55,35 @@ per-gateway matrix.
   whatever the Price and the customer's default payment method say.
 - **Partial refunds on AbacatePay.** `refund()` accepts an amount and ignores it — every call is a
   full refund at the gateway.
-- **More gateways.** Only Stripe, AbacatePay, Asaas and Woovi ship. The driver contract is the
-  extension point in the meantime, and a driver you write is a first-class citizen of the router and
-  the billing layer — see [Custom providers](/docs/payments/custom-providers).
+- **Gateways beyond the eighteen.** Eighteen drivers ship. The driver contract is the extension
+  point for the rest, and a driver you write is a first-class citizen of the router and the billing
+  layer — see [Custom providers](/docs/payments/custom-providers).
+
+## Disputes and chargebacks
+
+A chargeback is the one webhook that takes revenue **away**, and it has a clock: every network gives
+you a fixed window to respond, and missing it loses the money by default rather than on the merits.
+What exists today and what does not:
+
+- **Landed.** `payment.disputed` is a canonical webhook event, the processor moves the payment row to
+  `disputed` instead of leaving it saying `paid`, and the driver contract carries `Dispute`,
+  `DisputeEvidence`, `capabilities.disputes` and the optional `findDispute` /
+  `submitDisputeEvidence`. `Dispute` carries `evidenceDueBy` and `canSubmitEvidence`, which are the
+  two fields an operator actually acts on.
+- **Not landed.** Nothing persists a dispute yet — there is no `billing_disputes` table, so the
+  deadline lives only in the gateway's dashboard. `payment.dispute_warning` and
+  `payment.dispute_closed` are declared but not yet mapped by any driver, so the two moments around a
+  chargeback are both lost. The warning: Adyen's `NOTIFICATION_OF_FRAUD` flattens to
+  `payment.updated` and reads as an ordinary update, and Stripe's
+  `radar.early_fraud_warning.created` is not mapped at all — it lands in the ledger as an unknown
+  type, which is at least visible. Both are the moment when refunding is still cheaper than losing.
+  The close: Stripe's `charge.dispute.closed` also collapses into `payment.updated`, so the outcome —
+  won or lost — is in the payload and nowhere else. The dashboard has no dispute panel and
+  `payments:health` does not check a window about to expire.
+- **Not planned.** Deciding **for** you. The library will carry evidence to the gateway and tell you
+  the window is closing; whether a given dispute is worth fighting or cheaper to refund is a business
+  rule that depends on margin, customer value and fraud history, and a library that guesses it is a
+  library that refunds a customer you wanted to keep. That decision stays in your code.
 
 ## What the billing tables do not record
 
@@ -102,16 +120,20 @@ See [Invoices](/docs/payments/invoices).
   period's usage, and that is where it stops — nothing charges the overage or emits an invoice for
   it. The cron, the charge and the guard against billing a period twice are yours to write. See
   [Metered billing](/docs/payments/patterns/metered-billing).
-- **A dashboard UI.** `billingOverview` is headless by design and returns aggregate metrics, but no
-  UI ships with the package. See [Billing dashboard](/docs/payments/patterns/dashboard).
+- **Dashboard beyond payments and webhooks.** A dashboard now ships — health, payments, webhook
+  events, refund and retry. Subscriptions and customers are listable from the store but have no
+  screen yet, and there is no export. See [Dashboard](/docs/payments/dashboard); the headless
+  `billingOverview` is still there for a UI of your own.
 
 ## Coverage
 
-All four gateways now have a driver test suite that exercises the request bodies against a stubbed
+Every gateway has a driver test suite that exercises the request bodies against a stubbed
 gateway — Stripe's fakes the SDK client and asserts what reaches each call, including the request
-options the idempotency key rides in. None of them touch a real gateway, so anything that depends on
-account configuration (whether Pix and boleto are enabled on a Stripe account, for one) is
-unverified here. The harness the suites use is documented in [Testing](/docs/payments/testing).
+options the idempotency key rides in. **None of them touch a real gateway.** The four original
+drivers were written and reviewed against sandbox behaviour; the fourteen added since are written
+against each gateway's published API reference and covered by unit tests only, which their pages say
+outright. Anything that depends on account configuration — whether Pix and boleto are enabled on a
+Stripe account, whether a Mercado Pago application has the right scopes — is unverified here. The harness the suites use is documented in [Testing](/docs/payments/testing).
 
 ## Not planned
 

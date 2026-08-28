@@ -112,7 +112,12 @@ describe('createRefundAction', () => {
 describe('createReplayAction', () => {
   const PAYLOAD = { id: 'evt_1', object: 'event', data: { amount: 4200 } };
 
-  /** A store with one failed ledger row carrying a real payload and a real handler error. */
+  const NORMALIZED = { gatewayId: 'pi_1', amount: 4200, currency: 'BRL' };
+
+  /**
+   * A store with one failed ledger row carrying a real payload, the normalized event beside it,
+   * and a real handler error — i.e. a delivery recorded by the processor as it is today.
+   */
   async function ledger(): Promise<InMemoryBillingStore> {
     const store = new InMemoryBillingStore();
     const row = await store.recordWebhookEvent({
@@ -120,6 +125,7 @@ describe('createReplayAction', () => {
       provider: 'stripe',
       type: 'payment.succeeded',
       payload: PAYLOAD,
+      normalized: NORMALIZED,
     });
     await store.markWebhookFailed(row?.id ?? '', 'TypeError: Cannot read properties of null');
     return store;
@@ -132,30 +138,40 @@ describe('createReplayAction', () => {
     previousError: 'TypeError: Cannot read properties of null',
   };
 
-  function event(): ReplayableWebhookEvent {
-    return {
+  it('rebuilds the event from the ledger row — the normalized event AND the raw payload', async () => {
+    // `recordWebhookEvent` is the ONLY way to read a stored delivery back through the store
+    // contract, and the re-claim path must not overwrite either column with the `{}` we pass in.
+    const seen: ReplayableWebhookEvent[] = [];
+    const replay = createReplayAction({
+      store: await ledger(),
+      process: async (e) => {
+        seen.push(e);
+      },
+    });
+
+    expect(await replay(input)).toEqual({ kind: 'processed' });
+    expect(seen[0]).toEqual({
       id: 'evt_1',
       provider: 'stripe',
       type: 'payment.succeeded',
-      data: { gatewayId: 'pi_1', amount: 4200, currency: 'BRL' },
+      data: NORMALIZED,
       raw: PAYLOAD,
-    };
-  }
-
-  it('hands the driver the payload the ledger recorded, not an empty one', async () => {
-    // `recordWebhookEvent` is the ONLY way to read a stored payload back through the store
-    // contract, and the re-claim path must not overwrite it with the `{}` we pass in.
-    const seen: string[] = [];
-    const replay = createReplayAction({
-      store: await ledger(),
-      parse: async (_provider, rawBody) => {
-        seen.push(rawBody);
-        return event();
-      },
-      process: async () => undefined,
     });
-    await replay(input);
-    expect(JSON.parse(seen[0] ?? '{}')).toEqual(PAYLOAD);
+  });
+
+  it('replays a SIGNED gateway without re-parsing anything', async () => {
+    // The whole reason `normalized` exists. Rebuilding by calling `parseWebhook` over the stored
+    // payload re-verifies a signature computed from headers the ledger never kept, so a Stripe or
+    // Adyen retry answered `422` while unsigned gateways replayed fine. Nothing in the replay path
+    // may reach a driver — this test fails the moment one does, because the store is all it gets.
+    const store = await ledger();
+    const processor = new WebhookProcessor({ store });
+    const replay = createReplayAction({ store, process: (e) => processor.process(e as never) });
+
+    expect(await replay(input)).toEqual({ kind: 'processed' });
+    expect((await store.findWebhookEventByGatewayEventId('evt_1'))?.status).toBe('processed');
+    // The built-in sync ran off the STORED normalized event: no driver was involved anywhere.
+    expect((await store.findPaymentByGatewayId('pi_1'))?.status).toBe('paid');
   });
 
   it('actually re-runs the handlers through a REAL processor and lands the row processed', async () => {
@@ -174,7 +190,6 @@ describe('createReplayAction', () => {
     });
     const replay = createReplayAction({
       store,
-      parse: async () => event(),
       process: (e) => processor.process(e as never),
     });
 
@@ -189,15 +204,22 @@ describe('createReplayAction', () => {
     expect((await store.findPaymentByGatewayId('pi_1'))?.status).toBe('paid');
   });
 
-  it('leaves the ledger EXACTLY as it was when the driver cannot rebuild the event', async () => {
-    // A gateway that signs its webhooks has no signature to check here. Stamping that over the
-    // handler's original message would destroy the only record of why the event failed.
-    const store = await ledger();
+  it('leaves the ledger EXACTLY as it was for a row recorded before `normalized` existed', async () => {
+    // An install that upgraded the package but has not run the migration — or a row written
+    // before it did — has no normalized event to replay, and the raw payload alone is not
+    // enough. Saying so is the point: stamping this refusal over the handler's original message
+    // would destroy the only record of why the event failed in the first place.
+    const store = new InMemoryBillingStore();
+    const row = await store.recordWebhookEvent({
+      gatewayEventId: 'evt_1',
+      provider: 'stripe',
+      type: 'payment.succeeded',
+      payload: PAYLOAD,
+    });
+    await store.markWebhookFailed(row?.id ?? '', 'TypeError: Cannot read properties of null');
+
     const replay = createReplayAction({
       store,
-      parse: async () => {
-        throw new Error('Missing `stripe-signature` header on webhook request.');
-      },
       process: async () => {
         throw new Error('must not run');
       },
@@ -206,10 +228,12 @@ describe('createReplayAction', () => {
     const outcome = await replay(input);
 
     expect(outcome.kind).toBe('undeliverable');
-    expect(outcome.kind === 'undeliverable' && outcome.message).toContain('stripe-signature');
-    const row = await store.findWebhookEventByGatewayEventId('evt_1');
-    expect(row?.status).toBe('failed');
-    expect(row?.error).toBe('TypeError: Cannot read properties of null');
+    expect(outcome.kind === 'undeliverable' && outcome.message).toContain(
+      'add_billing_external_reference',
+    );
+    const stored = await store.findWebhookEventByGatewayEventId('evt_1');
+    expect(stored?.status).toBe('failed');
+    expect(stored?.error).toBe('TypeError: Cannot read properties of null');
   });
 
   it('refuses to touch an event the ledger will not re-claim', async () => {
@@ -222,10 +246,9 @@ describe('createReplayAction', () => {
     });
     const replay = createReplayAction({
       store,
-      parse: async () => {
+      process: async () => {
         throw new Error('must not run');
       },
-      process: async () => undefined,
     });
     // Still `received` — in flight, not ours to re-run.
     expect(await replay(input)).toEqual({ kind: 'conflict' });
@@ -243,7 +266,6 @@ describe('createReplayAction', () => {
     });
     const replay = createReplayAction({
       store,
-      parse: async () => event(),
       process: (e) => processor.process(e as never),
     });
 

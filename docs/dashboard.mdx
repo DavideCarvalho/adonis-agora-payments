@@ -105,11 +105,19 @@ event described never happened and nothing will retry it. Retry re-runs the even
 It is safe to repeat. The ledger re-claims a `failed` event and refuses an in-flight or already
 processed one, which is the same guard that makes a gateway redelivery a no-op.
 
-<Callout type="warn" title="Gateways that sign their webhooks">
-Rebuilding the event needs the driver to parse the stored payload, and the signature headers are not
-stored. For a gateway that verifies a signature (Stripe among them) the retry answers `422` with the
-driver's message and leaves the ledger row exactly as it was — redeliver from the gateway's own
-dashboard instead. Gateways that do not sign replay normally.
+**Every gateway replays, signed ones included.** The event is rebuilt from the ledger row's own two
+columns — the raw `payload` and the `normalized` event recorded beside it — and handed straight to
+the processor. No driver is involved and `parseWebhook` is never called again, so there is no
+signature to re-verify from headers the ledger does not keep. That used to be the whole problem:
+rebuilding through the driver made Stripe, Adyen and every other signing gateway answer `422`, and
+retry worked only for the minority that do not sign.
+
+<Callout type="warn" title="Events recorded before the `normalized` column existed">
+`billing_webhook_events.normalized` arrives in the second published migration
+(`add_billing_external_reference`). A row written before you ran it has nothing to replay — the raw
+payload alone is not enough — so the retry answers `422` saying exactly that and leaves the ledger
+row exactly as it was, original error and all. Redeliver those from the gateway's own dashboard.
+Events delivered after the migration replay normally.
 </Callout>
 
 ## Configuration
@@ -218,7 +226,7 @@ select the whole table. A provider-filtered page also reports `scanned` and `tru
 
 The action responses distinguish their failures rather than collapsing them into `500`: `404` for a
 row that is not there, `409` for a row in the wrong state (a payment that is not `paid`, an event
-that is not `failed`), `422` for an event the driver cannot rebuild, `502` for a gateway or handler
+that is not `failed`), `422` for an event with no stored normalized form to rebuild from, `502` for a gateway or handler
 that refused, and `503` when the payments manager is not reachable at all.
 
 When the billing layer is disabled (`billing.enabled: false`) the API answers `503` rather than

@@ -6,11 +6,7 @@ import type { ApplicationService, HttpRouterService } from '@adonisjs/core/types
 import type { BillingStore } from '../src/billing/billing_store.js';
 import { WebhookProcessor } from '../src/billing/webhook_processor.js';
 import type { WebhookHandler } from '../src/billing/webhook_processor.js';
-import {
-  type ReplayableWebhookEvent,
-  createRefundAction,
-  createReplayAction,
-} from '../src/dashboard/actions.js';
+import { createRefundAction, createReplayAction } from '../src/dashboard/actions.js';
 import {
   type ResolvedDashboardAuth,
   SESSION_COOKIE_NAME,
@@ -219,11 +215,11 @@ export default class PaymentsDashboardProvider {
       refund: createRefundAction((provider) => manager.driver(provider)),
       replayWebhook: createReplayAction({
         store,
-        // No headers survive in the ledger, so a gateway that signs its webhooks will refuse
-        // here — reported to the operator as `422` with the driver's own message, ledger row
-        // untouched. Gateways that do not sign replay fine.
-        parse: async (provider, rawBody) =>
-          (await manager.driver(provider).parseWebhook(rawBody, {})) as ReplayableWebhookEvent,
+        // The event is rebuilt from the ledger's own `payload` + `normalized` columns and run
+        // straight through the processor — no driver, no `parseWebhook`, so no signature to
+        // re-verify from headers nobody kept. That is what makes a Stripe or Adyen row
+        // replayable at all. A row recorded before the `normalized` column existed is reported
+        // to the operator as `422`, ledger row untouched.
         process: (event) => processor.process(event as WebhookEvent),
       }),
     };

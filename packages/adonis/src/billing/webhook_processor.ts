@@ -53,6 +53,10 @@ export class WebhookProcessor {
       provider: event.provider,
       type: event.type,
       payload: event.raw,
+      // The NORMALIZED event, stored beside the raw payload so the dashboard's retry can
+      // replay this delivery without calling `parseWebhook` again — which would re-verify a
+      // signature computed from headers the ledger never kept.
+      normalized: event.data,
     });
 
     // Already seen → idempotent replay, skip.
@@ -114,7 +118,8 @@ export class WebhookProcessor {
     if (!isPaymentWebhookData(event.data)) {
       throw new Error(`[payments] Malformed payment.succeeded payload for event ${event.id}.`);
     }
-    const { gatewayId, amount, currency, customerId, subscriptionId } = event.data;
+    const { gatewayId, amount, currency, customerId, subscriptionId, externalReference } =
+      event.data;
     await this.#store.savePayment({
       gatewayId,
       provider: event.provider,
@@ -123,6 +128,10 @@ export class WebhookProcessor {
       currency,
       ...(customerId !== undefined ? { customerId } : {}),
       ...(subscriptionId !== undefined ? { subscriptionId } : {}),
+      // Spread away when absent, never passed as `null`: the store keeps what it already has
+      // for an `undefined` reference, and a later event that does not echo one must not blank
+      // the key the app routes on.
+      ...(externalReference !== undefined ? { externalReference } : {}),
       paidAt: new Date(),
       payload: event.raw,
     });
@@ -141,7 +150,8 @@ export class WebhookProcessor {
     if (!isPaymentWebhookData(event.data)) {
       throw new Error(`[payments] Malformed payment.failed payload for event ${event.id}.`);
     }
-    const { gatewayId, amount, currency, customerId, subscriptionId } = event.data;
+    const { gatewayId, amount, currency, customerId, subscriptionId, externalReference } =
+      event.data;
     await this.#store.savePayment({
       gatewayId,
       provider: event.provider,
@@ -150,6 +160,7 @@ export class WebhookProcessor {
       currency,
       ...(customerId !== undefined ? { customerId } : {}),
       ...(subscriptionId !== undefined ? { subscriptionId } : {}),
+      ...(externalReference !== undefined ? { externalReference } : {}),
       payload: event.raw,
     });
     publishPayments('payment.failed', {
@@ -167,7 +178,7 @@ export class WebhookProcessor {
     if (!isPaymentWebhookData(event.data)) {
       throw new Error(`[payments] Malformed payment.refunded payload for event ${event.id}.`);
     }
-    const { gatewayId, amount, currency } = event.data;
+    const { gatewayId, amount, currency, externalReference } = event.data;
     const existing = await this.#store.findPaymentByGatewayId(gatewayId);
     if (existing) {
       await this.#store.savePayment({
@@ -176,6 +187,7 @@ export class WebhookProcessor {
         status: 'refunded',
         amount,
         currency,
+        ...(externalReference !== undefined ? { externalReference } : {}),
         ...(existing.customerId !== undefined ? { customerId: existing.customerId } : {}),
         ...(existing.subscriptionId !== undefined
           ? { subscriptionId: existing.subscriptionId }
@@ -207,7 +219,7 @@ export class WebhookProcessor {
     if (!isPaymentWebhookData(event.data)) {
       throw new Error(`[payments] Malformed payment.disputed payload for event ${event.id}.`);
     }
-    const { gatewayId, amount, currency } = event.data;
+    const { gatewayId, amount, currency, externalReference } = event.data;
     const existing = await this.#store.findPaymentByGatewayId(gatewayId);
     if (existing) {
       await this.#store.savePayment({
@@ -216,6 +228,7 @@ export class WebhookProcessor {
         status: 'disputed',
         amount,
         currency,
+        ...(externalReference !== undefined ? { externalReference } : {}),
         ...(existing.customerId !== undefined ? { customerId: existing.customerId } : {}),
         ...(existing.subscriptionId !== undefined
           ? { subscriptionId: existing.subscriptionId }

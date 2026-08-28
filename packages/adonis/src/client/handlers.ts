@@ -17,7 +17,8 @@ import type { ClientPayment, ResolvedPaymentsClientConfig } from './define_confi
  *    added to `billing_payments` later (a payload, a customer, a gateway id) cannot start
  *    appearing in a browser because somebody forgot to exclude it.
  *
- * Reads one indexed row (`billing_payments.gateway_id` is unique) plus, for the default
+ * Reads one indexed row (`billing_payments_external_reference_idx`, then the unique
+ * `billing_payments.gateway_id` when nothing carries that reference) plus, for the default
  * guard, one more (`billing_customers_owner_idx`). It never calls a gateway: this endpoint
  * is polled, and a gateway call per poll is a rate-limit incident waiting for its first
  * busy afternoon.
@@ -115,6 +116,39 @@ export function normalizePayment(row: unknown): ClientPayment | null {
 }
 
 /**
+ * The payment behind the reference the browser sent.
+ *
+ * Two lookups, in this order, and both indexed:
+ *
+ * 1. `external_reference` — the app's OWN id for the charge. This is the routing key: a
+ *    checkout page polls for `order-1042`, not for `pi_3Qx...`, and the column exists so it
+ *    can. Answers `null` for every row an install wrote before it ran the
+ *    `add_billing_external_reference` migration, which is exactly why (2) is still here.
+ * 2. `gateway_id` — the old behaviour, kept because several Pix gateways make the two equal
+ *    (Woovi's `correlationID`, Efí's `txid`) and because a not-yet-migrated install has
+ *    nothing else to match on.
+ *
+ * An app-supplied `resolveReference` REPLACES both: it says "my reference is neither of
+ * those, here is the gateway id", and second-guessing that with a fallback would be the
+ * endpoint quietly answering a question the app already said it owns.
+ */
+async function findPayment(
+  store: BillingStore,
+  config: ResolvedPaymentsClientConfig,
+  ctx: HttpContext,
+  reference: string,
+): Promise<ClientPayment | null> {
+  if (config.resolveReference) {
+    const gatewayId = await config.resolveReference(ctx, reference);
+    if (typeof gatewayId !== 'string' || gatewayId === '') return null;
+    return normalizePayment(await store.findPaymentByGatewayId(gatewayId));
+  }
+  const byReference = normalizePayment(await store.findPaymentByExternalReference(reference));
+  if (byReference) return byReference;
+  return normalizePayment(await store.findPaymentByGatewayId(reference));
+}
+
+/**
  * `GET <path>/status?reference=<reference>`.
  *
  * See the module note above for the order the guards run in and why.
@@ -137,9 +171,7 @@ export async function paymentStatus(
   if (!owner) return unauthorized();
 
   // ── 2. The payment. ────────────────────────────────────────────────────────────────
-  const gatewayId = await config.resolveReference(ctx, trimmed);
-  if (typeof gatewayId !== 'string' || gatewayId === '') return notFound();
-  const payment = normalizePayment(await store.findPaymentByGatewayId(gatewayId));
+  const payment = await findPayment(store, config, ctx, trimmed);
   if (!payment) return notFound();
 
   // ── 3. Ownership. Nothing below this line is reachable without it. ─────────────────

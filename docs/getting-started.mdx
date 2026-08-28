@@ -63,7 +63,13 @@ The billing layer persists subscriptions, payments and the webhook idempotency l
 node ace migration:run
 ```
 
-If you only want payments without the subscription layer, delete the published migration —
+Two files are published: `create_billing_tables` and `add_billing_external_reference`, which
+carries the two columns added after the first shipped (`billing_payments.external_reference` and
+`billing_webhook_events.normalized`). A fresh install runs both and the second finds nothing to
+do; an existing install needs it, or references are not stored and failed webhooks cannot be
+retried from the dashboard.
+
+If you only want payments without the subscription layer, delete both published migrations —
 the drivers work standalone.
 </Step>
 

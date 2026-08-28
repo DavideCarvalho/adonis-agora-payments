@@ -47,7 +47,7 @@ export default defineConfig({
 | `authorize` | a resolved user | Is this request allowed at all. A denial is `401`. |
 | `owner` | `{ type: 'User', id: user.id }` | Who is asking. `null` is a `401`. |
 | `authorizeReference` | the customer registry | May this caller see THIS payment. A denial is `403`. |
-| `resolveReference` | identity | Map your own reference onto the gateway id. |
+| `resolveReference` | unset | Escape hatch: map a reference that is neither your `externalReference` nor a gateway id. |
 
 <Callout title="Disabled by default, unlike the dashboard">
 The [dashboard](/docs/payments/dashboard) is an operator console behind an admin gate. This
@@ -82,20 +82,27 @@ Pix nobody has paid has no row at all. That is the waiting state, not a failure,
 polling through it.
 
 Every answer carries `Cache-Control: no-store`. The read is one indexed row
-(`billing_payments.gateway_id` is unique) plus, for the default guard, one more over
+(`billing_payments_external_reference_idx`, then the unique `billing_payments.gateway_id` when
+nothing carries that reference) plus, for the default guard, one more over
 `billing_customers_owner_idx`. It never calls a gateway: this URL is polled, and a gateway call per
 poll is a rate-limit incident waiting for its first busy afternoon.
 
 ### The reference
 
-`reference` is the gateway payment id — `payment.id` from `charge()`, the value stored as
-`gateway_id`. On several Pix gateways it is literally the reference you sent (Woovi's
-`correlationID`, Efí's `txid`); on others it is the gateway's own id.
+`reference` is **your** id for the charge — the `externalReference` you set on it. The gateway
+echoes it back on the webhook and the processor stores it on
+`billing_payments.external_reference`, so the endpoint looks the payment up by it directly, through
+`billing_payments_external_reference_idx`.
 
-It is **not** read out of `externalReference`. `billing_payments` has no column for that: the
-reference a charge carried is echoed back on the gateway's webhook, not stored. If your browser
-polls with your own order id instead, map it with `resolveReference` — or write your own endpoint
-(section 3).
+If nothing carries that reference, it falls back to reading it as the **gateway payment id**
+(`payment.id` from `charge()`, stored as `gateway_id`). Two callers need that fallback: the Pix
+gateways where the two are literally the same value (Woovi's `correlationID`, Efí's `txid`), and an
+install that has not yet run the `add_billing_external_reference` migration, whose
+`external_reference` is `null` on every row — the endpoint keeps working there exactly as it did
+before, by gateway id.
+
+Polling with something that is neither — a checkout session id, a hashed token — is what
+`resolveReference` is for. It **replaces** both lookups; see below.
 
 ### The hook
 
@@ -291,7 +298,8 @@ The hook is never handed the payment. That is deliberate — a hook that receive
 guarding invites `return payment !== null`, which is the bug this endpoint exists to make
 unwritable.
 
-If your browser polls with your own id rather than the gateway's, map it as well:
+If your browser polls with something the store cannot match on its own — neither the
+`externalReference` recorded on the payment nor the gateway id — map it yourself:
 
 ```ts
 resolveReference: async (_ctx, reference) => {
@@ -299,6 +307,11 @@ resolveReference: async (_ctx, reference) => {
   return order?.gatewayPaymentId ?? null
 },
 ```
+
+Setting it **replaces** the built-in lookup: the endpoint then reads only what your hook returns,
+by gateway id. That is deliberate — an app that says "here is the gateway id" owns the question,
+and quietly falling back to a reference lookup would answer a different one. Most apps no longer
+need this hook at all: set `externalReference` on the charge and poll with it.
 
 `resolveReference` is a lookup, not a guard. `authorizeReference` still runs on whatever it
 resolves.

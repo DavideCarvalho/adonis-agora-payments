@@ -16,14 +16,16 @@ how many webhooks arrive, in which order, or how many times a gateway redelivers
 
 ## The billing tables
 
-The configure command publishes a migration creating four tables:
+The configure command publishes **two** migrations — `create_billing_tables` and, for installs
+that already ran it, `add_billing_external_reference`, which carries the two columns added
+afterwards. Run both (`node ace migration:run`). Together they create four tables:
 
 | Table | Purpose |
 | --- | --- |
 | `billing_customers` | the polymorphic mapping between your rows and their gateway customers — **opt-in** (see below) |
 | `billing_subscriptions` | subscriptions — `status`, `plan_id`, `trial_ends_at`, `ends_at` |
-| `billing_payments` | every payment, keyed by **gateway id** |
-| `billing_webhook_events` | the **idempotency ledger**, keyed by gateway event id |
+| `billing_payments` | every payment, keyed by **gateway id**, and indexed on `external_reference` — **your** id for the charge |
+| `billing_webhook_events` | the **idempotency ledger**, keyed by gateway event id, storing the raw payload *and* the normalized event |
 
 `billing_webhook_events` is the heart: it's what makes every redelivery a no-op instead of a
 double-grant.
@@ -48,7 +50,8 @@ await store.findCustomerByGatewayId(gatewayId)         // one customer mapping
 await store.findCustomerByOwner('User', userId, 'stripe')
 await store.listCustomers({ provider: 'stripe' })
 
-await store.findPaymentByGatewayId(gatewayId)          // one payment
+await store.findPaymentByGatewayId(gatewayId)          // one payment, by the GATEWAY's id
+await store.findPaymentByExternalReference('order-1042') // ...or by YOURS
 await store.listPayments({ status: 'failed', limit: 20 })
 await store.countPayments({ status: 'pending', createdBefore: cutoff })
 
@@ -60,6 +63,14 @@ await store.revenue({ from, to })                       // cents
 await store.countActiveSubscriptions()
 await store.usageReport({ subscriptionId, from, to })
 ```
+
+`findPaymentByExternalReference` is the direction an app actually has at hand: a checkout page
+polls for `order-1042`, not for `pi_3Qx...`. It reads the `external_reference` column — the
+`externalReference` you set on the charge, as the gateway echoed it back — through
+`billing_payments_external_reference_idx`, and `listPayments` carries the same value on every item.
+It answers `null` for a payment whose gateway sent no reference, and for **every** row an install
+wrote before it ran `add_billing_external_reference`: nothing backfills a reference that was never
+stored.
 
 Two aggregates sit on top of those: `billingOverview(store, { from, to })` for the KPI row a
 dashboard renders, and [`billingHealth(store)`](/docs/payments/production#health-checks) for the
@@ -188,8 +199,10 @@ redundancy. See [Webhooks → The lifecycle](/docs/payments/webhooks#the-lifecyc
 
 <Callout type="info" title="`externalReference` is your routing key">
 Sync keeps the *billing tables* correct, but your business logic needs *your* ids. The
-`externalReference` you set on the charge/subscription comes back on the webhook and routes
-the confirmation to your own `Payment`/`Subscription` rows. See
+`externalReference` you set on the charge/subscription comes back on the webhook, is **stored on
+the payment row** (`billing_payments.external_reference`, indexed), and routes the confirmation to
+your own `Payment`/`Subscription` rows. Look it up with
+`store.findPaymentByExternalReference(reference)`. See
 [Webhooks → externalReference](/docs/payments/webhooks#routing-payments-back-to-your-records-externalreference).
 </Callout>
 

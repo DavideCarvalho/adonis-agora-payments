@@ -62,8 +62,16 @@ describe('payments client config', () => {
     expect(await defaultOwner(ctx({ user: { id: '' } }))).toBeNull();
   });
 
-  it('resolveReference defaults to the identity mapping', async () => {
-    const config = resolveConfig();
-    expect(await config.resolveReference(ctx({}), 'pi_123')).toBe('pi_123');
+  it('leaves resolveReference unset so the built-in external-reference lookup runs', async () => {
+    // It used to default to the identity mapping, because `billing_payments` had no
+    // `external_reference` column and reading the reference AS a gateway id was the only
+    // lookup available. The column exists now: the default is "no app-supplied mapping", and
+    // the handler looks the payment up by reference first, gateway id second.
+    expect(resolveConfig().resolveReference).toBeNull();
+  });
+
+  it('keeps an app-supplied resolveReference as the escape hatch', async () => {
+    const config = resolveConfig({ resolveReference: (_ctx, reference) => `pi_${reference}` });
+    expect(await config.resolveReference?.(ctx({}), '123')).toBe('pi_123');
   });
 });

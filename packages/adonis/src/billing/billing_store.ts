@@ -27,6 +27,13 @@ export interface PaymentListItem {
   currency: string;
   customerId: string | null;
   subscriptionId: string | null;
+  /**
+   * The app's own id for this charge, as the gateway echoed it back.
+   *
+   * `null` on a payment whose gateway sent none, and on every row an install wrote before
+   * it ran the `add_billing_external_reference` migration.
+   */
+  externalReference: string | null;
   paidAt: Date | null;
   createdAt: Date | null;
 }
@@ -203,7 +210,15 @@ export interface BillingStore<
 
   // ── Payments ─────────────────────────────────────────────────────────────────────
 
-  /** Upsert a payment keyed by gateway id. Returns the stored row. */
+  /**
+   * Upsert a payment keyed by gateway id. Returns the stored row.
+   *
+   * `externalReference` left `undefined` does NOT erase a stored one: the first webhook of a
+   * charge usually carries the app's reference and a later one (a refund, a dispute) often
+   * does not, and blanking it there would throw away the only key
+   * {@link BillingStore.findPaymentByExternalReference} can route on. Pass `null` explicitly
+   * to clear it. Same rule, same reason, as `saveCustomer`'s owner mapping.
+   */
   savePayment(payment: {
     gatewayId: string;
     provider: string;
@@ -212,11 +227,26 @@ export interface BillingStore<
     currency: string;
     customerId?: string | null;
     subscriptionId?: string | null;
+    /** The app's own id for this charge (`ChargeInput.externalReference`), echoed by the gateway. */
+    externalReference?: string | null;
     paidAt?: Date | null;
     payload?: Record<string, unknown>;
   }): Promise<PaymentRow>;
 
   findPaymentByGatewayId(gatewayId: string): Promise<PaymentRow | null>;
+
+  /**
+   * The payment carrying one app-side reference — the id the APP knows the charge by.
+   *
+   * The other direction of {@link findPaymentByGatewayId}, and the one an app actually has
+   * at hand: a checkout page polls for "order-1042", not for `pi_3Qx...`. Backed by
+   * `billing_payments_external_reference_idx`.
+   *
+   * `null` when no row carries it — including on a payment written before the install ran
+   * the `add_billing_external_reference` migration, whose column is `null` for every row.
+   * Ties are broken newest-first: nothing stops an app reusing a reference across retries.
+   */
+  findPaymentByExternalReference(reference: string): Promise<PaymentRow | null>;
 
   /**
    * Page through recorded payments, newest first, optionally filtered by status.
@@ -254,6 +284,17 @@ export interface BillingStore<
     provider: string;
     type: string;
     payload: Record<string, unknown>;
+    /**
+     * The NORMALIZED event (`WebhookEvent.data`), stored alongside the raw payload.
+     *
+     * Without it the dashboard's retry had to rebuild the event by calling `parseWebhook`
+     * over the stored payload, which re-verifies a signature computed from headers the
+     * ledger never kept — so a retry on Stripe or Adyen answered `422` and only unsigned
+     * gateways could replay. Stored once, on the way in, where it is still in hand.
+     *
+     * Left `undefined` on the re-claim path (a retry), where the row keeps what it has.
+     */
+    normalized?: unknown;
   }): Promise<WebhookEventRow | null>;
 
   markWebhookProcessed(id: string): Promise<void>;

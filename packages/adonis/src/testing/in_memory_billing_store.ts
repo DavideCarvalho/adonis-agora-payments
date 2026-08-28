@@ -49,6 +49,8 @@ export interface InMemoryPaymentRow {
   currency: string;
   customerId: string | null;
   subscriptionId: string | null;
+  /** The app's own id for this charge, as the gateway echoed it back. */
+  externalReference: string | null;
   paidAt: Date | null;
   payload: Record<string, unknown>;
   /** Insertion timestamp — the Lucid rows have one, and the list queries order by it. */
@@ -62,6 +64,8 @@ export interface InMemoryWebhookEventRow {
   type: string;
   status: 'received' | 'processed' | 'failed';
   payload: Record<string, unknown>;
+  /** The normalized event this delivery carried — what the dashboard's retry replays. */
+  normalized: Record<string, unknown> | null;
   error: string | null;
   /** Insertion timestamp — the Lucid rows have one, and the list queries order by it. */
   createdAt: Date;
@@ -279,6 +283,7 @@ export class InMemoryBillingStore
     currency: string;
     customerId?: string | null;
     subscriptionId?: string | null;
+    externalReference?: string | null;
     paidAt?: Date | null;
     payload?: Record<string, unknown>;
   }): Promise<InMemoryPaymentRow> {
@@ -292,6 +297,13 @@ export class InMemoryBillingStore
       currency: payment.currency,
       customerId: payment.customerId ?? null,
       subscriptionId: payment.subscriptionId ?? null,
+      // Mirrors the Lucid store: an ABSENT reference keeps the stored one. `payment.refunded`
+      // and `payment.disputed` routinely carry no reference, and blanking it there would throw
+      // away the only key `findPaymentByExternalReference` can route on. `null` still clears.
+      externalReference:
+        payment.externalReference !== undefined
+          ? payment.externalReference
+          : (existing?.externalReference ?? null),
       paidAt: payment.paidAt ?? null,
       payload: payment.payload ?? {},
       createdAt: existing?.createdAt ?? this.#now(),
@@ -302,6 +314,18 @@ export class InMemoryBillingStore
 
   async findPaymentByGatewayId(gatewayId: string): Promise<InMemoryPaymentRow | null> {
     return this.payments.get(gatewayId) ?? null;
+  }
+
+  async findPaymentByExternalReference(reference: string): Promise<InMemoryPaymentRow | null> {
+    // Newest first, like the Lucid store's `order by created_at desc`: an app may reuse a
+    // reference across retries, and the row it means is the most recent one. Insertion order
+    // breaks ties — several rows inside one millisecond is the normal case in a test.
+    let found: InMemoryPaymentRow | null = null;
+    for (const row of this.payments.values()) {
+      if (row.externalReference !== reference) continue;
+      if (found === null || row.createdAt >= found.createdAt) found = row;
+    }
+    return found;
   }
 
   async listPayments(query: BillingListQuery): Promise<PaymentListItem[]> {
@@ -319,6 +343,7 @@ export class InMemoryBillingStore
       currency: row.currency,
       customerId: row.customerId,
       subscriptionId: row.subscriptionId,
+      externalReference: row.externalReference,
       paidAt: row.paidAt,
       createdAt: row.createdAt,
     }));
@@ -337,6 +362,7 @@ export class InMemoryBillingStore
     provider: string;
     type: string;
     payload: Record<string, unknown>;
+    normalized?: unknown;
   }): Promise<InMemoryWebhookEventRow | null> {
     const existing = this.webhookEvents.get(event.gatewayEventId);
     if (existing) {
@@ -345,10 +371,13 @@ export class InMemoryBillingStore
       if (existing.status !== 'failed') return null;
       existing.status = 'received';
       existing.error = null;
+      // `payload` and `normalized` are deliberately NOT touched: the retry re-claims this row
+      // precisely to read back what the original delivery recorded.
       existing.updatedAt = this.#now();
       return existing;
     }
     const now = this.#now();
+    const normalized = event.normalized;
     const row: InMemoryWebhookEventRow = {
       id: `wh_${this.#nextId++}`,
       gatewayEventId: event.gatewayEventId,
@@ -356,6 +385,13 @@ export class InMemoryBillingStore
       type: event.type,
       status: 'received',
       payload: event.payload,
+      // Only an object shape survives the jsonb column in the Lucid store; anything else is
+      // stored as `null` there, so it is `null` here too rather than a shape a test could pass
+      // and production could not.
+      normalized:
+        typeof normalized === 'object' && normalized !== null && !Array.isArray(normalized)
+          ? (normalized as Record<string, unknown>)
+          : null,
       error: null,
       createdAt: now,
       updatedAt: now,

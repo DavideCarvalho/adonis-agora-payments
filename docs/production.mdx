@@ -256,7 +256,11 @@ or replay the events from the gateway dashboard so the normal path runs. See [CL
 ## Migrations and the ledger
 
 The billing migrations create `billing_customers`, `billing_subscriptions`, `billing_payments`,
-`billing_webhook_events` and `billing_usage_events`. `billing_webhook_events` is the one with an
+`billing_webhook_events` and `billing_usage_events`. There are **two** files — the second,
+`add_billing_external_reference`, adds `billing_payments.external_reference` (indexed) and
+`billing_webhook_events.normalized`. Both columns are nullable and nothing is backfilled: an
+install that has not run it keeps taking webhooks, but records no reference to look payments up
+by and cannot replay a failed event from the dashboard. `billing_webhook_events` is the one with an
 operational profile: it grows with every event, forever, and it is what makes redeliveries safe.
 
 Do not prune it aggressively. A gateway can redeliver an event days later, and a pruned id is an id

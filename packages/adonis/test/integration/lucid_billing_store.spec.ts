@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { LucidBillingStore } from '../../src/billing/lucid_billing_store.js';
+import { WebhookProcessor } from '../../src/billing/webhook_processor.js';
+import { createReplayAction } from '../../src/dashboard/actions.js';
 import { type IntegrationDatabase, createIntegrationDatabase } from './harness.js';
 
 /**
@@ -212,6 +214,231 @@ describe('LucidBillingStore (integration)', () => {
         { meter: 'api_calls', quantity: 7 },
         { meter: 'storage_gb', quantity: 9 },
       ]);
+    });
+  });
+  describe('external reference', () => {
+    it('round-trips the column and finds the payment by the app’s own id', async () => {
+      await store.savePayment({
+        gatewayId: 'pay_ref',
+        provider: 'stripe',
+        status: 'paid',
+        amount: 4200,
+        currency: 'BRL',
+        externalReference: 'order-1042',
+        paidAt: now,
+      });
+
+      const found = await store.findPaymentByExternalReference('order-1042');
+      expect(found?.gatewayId).toBe('pay_ref');
+      expect(found?.externalReference).toBe('order-1042');
+      expect(await store.findPaymentByExternalReference('order-nope')).toBeNull();
+    });
+
+    it('does NOT blank the stored reference when a later event omits it', async () => {
+      // The realistic sequence: `payment.succeeded` carries the reference, `payment.refunded`
+      // does not. A store that wrote `undefined` through would destroy the key the app routes on.
+      await store.savePayment({
+        gatewayId: 'pay_ref',
+        provider: 'stripe',
+        status: 'refunded',
+        amount: 4200,
+        currency: 'BRL',
+      });
+      expect((await store.findPaymentByGatewayId('pay_ref'))?.externalReference).toBe('order-1042');
+
+      // ...and an explicit `null` still clears it.
+      await store.savePayment({
+        gatewayId: 'pay_ref',
+        provider: 'stripe',
+        status: 'refunded',
+        amount: 4200,
+        currency: 'BRL',
+        externalReference: null,
+      });
+      expect((await store.findPaymentByGatewayId('pay_ref'))?.externalReference).toBeNull();
+    });
+
+    it('answers with the NEWEST row when a reference was reused', async () => {
+      await store.savePayment({
+        gatewayId: 'pay_first',
+        provider: 'stripe',
+        status: 'failed',
+        amount: 100,
+        currency: 'BRL',
+        externalReference: 'order-reused',
+      });
+      await store.savePayment({
+        gatewayId: 'pay_retry',
+        provider: 'stripe',
+        status: 'paid',
+        amount: 100,
+        currency: 'BRL',
+        externalReference: 'order-reused',
+        paidAt: now,
+      });
+      expect((await store.findPaymentByExternalReference('order-reused'))?.gatewayId).toBe(
+        'pay_retry',
+      );
+    });
+
+    it('carries the reference on the normalized list item', async () => {
+      const listed = await store.listPayments({ status: 'paid', limit: 100 });
+      expect(listed.find((row) => row.gatewayId === 'pay_retry')?.externalReference).toBe(
+        'order-reused',
+      );
+    });
+
+    it('is served by an index, not a sequential scan', async () => {
+      // An unindexed lookup key on a table that grows with every charge is a scan on the hot
+      // path — and a test table of four rows would never reveal it, because the planner rightly
+      // prefers a scan at that size. So the question asked here is the one that matters: WITH a
+      // scan taken off the table, can the planner answer this predicate from the index at all?
+      // It can only say yes if the index exists and covers the column the query filters on.
+      const trx = await database.db.transaction();
+      try {
+        await trx.rawQuery('SET LOCAL enable_seqscan = off');
+        const explained = await trx.rawQuery(
+          "EXPLAIN SELECT * FROM billing_payments WHERE external_reference = 'order-1042'",
+        );
+        const plan = (explained.rows as Array<Record<string, string>>)
+          .map((line) => Object.values(line)[0])
+          .join('\n');
+        expect(plan).toContain('billing_payments_external_reference_idx');
+      } finally {
+        await trx.rollback();
+      }
+    });
+  });
+
+  describe('dashboard retry', () => {
+    it('replays a SIGNED gateway’s ledger row from the stored normalized event', async () => {
+      // The bug this closes: the ledger kept only the raw payload, so rebuilding the event meant
+      // calling `parseWebhook`, which re-verifies a signature computed over headers nothing
+      // stored — a Stripe or Adyen retry answered `422` while unsigned gateways replayed fine.
+      // Nothing here has a driver: if the replay re-parsed, it could not run at all.
+      const processor = new WebhookProcessor({ store });
+      const stripeEvent = {
+        id: 'evt_signed_replay',
+        provider: 'stripe',
+        type: 'payment.succeeded',
+        data: {
+          gatewayId: 'pi_signed',
+          amount: 7700,
+          currency: 'BRL',
+          externalReference: 'order-signed',
+        },
+        raw: { id: 'evt_signed_replay', signature_verified_once: true },
+      } as never;
+
+      // First delivery: the handler throws, so the ledger row lands `failed` — the state an
+      // operator finds after fixing a handler bug.
+      const failing = new WebhookProcessor({
+        store,
+        handlers: {
+          'payment.succeeded': () => {
+            throw new Error('handler bug');
+          },
+        },
+      });
+      await expect(failing.process(stripeEvent)).rejects.toThrow('handler bug');
+      expect((await store.findWebhookEventByGatewayEventId('evt_signed_replay'))?.status).toBe(
+        'failed',
+      );
+
+      const replay = createReplayAction({ store, process: (e) => processor.process(e as never) });
+      const outcome = await replay({
+        gatewayEventId: 'evt_signed_replay',
+        provider: 'stripe',
+        type: 'payment.succeeded',
+        previousError: 'handler bug',
+      });
+
+      expect(outcome).toEqual({ kind: 'processed' });
+      const row = await store.findWebhookEventByGatewayEventId('evt_signed_replay');
+      expect(row?.status).toBe('processed');
+      expect(row?.error).toBeNull();
+      // And the built-in sync ran off the stored normalized event, reference included.
+      expect((await store.findPaymentByExternalReference('order-signed'))?.gatewayId).toBe(
+        'pi_signed',
+      );
+    });
+  });
+
+  describe('an install that has not run the add_billing_external_reference migration', () => {
+    // Both columns are nullable and both writes are guarded, so an app that upgrades the package
+    // before running the migration keeps taking webhooks: it records a payment WITHOUT a stored
+    // reference, and a ledger row the dashboard's retry declines to replay. This block is the
+    // only place that claim is actually executed — the columns are dropped underneath a fresh
+    // store (a new one, so it re-asks the schema) and put back afterwards.
+    let legacy: LucidBillingStore;
+
+    beforeAll(async () => {
+      await database.db.rawQuery('ALTER TABLE billing_payments DROP COLUMN external_reference');
+      await database.db.rawQuery('ALTER TABLE billing_webhook_events DROP COLUMN normalized');
+      legacy = new LucidBillingStore();
+    });
+
+    afterAll(async () => {
+      await database.db.rawQuery(
+        'ALTER TABLE billing_payments ADD COLUMN external_reference varchar(255) NULL',
+      );
+      await database.db.rawQuery(
+        'CREATE INDEX billing_payments_external_reference_idx ON billing_payments (external_reference)',
+      );
+      await database.db.rawQuery(
+        'ALTER TABLE billing_webhook_events ADD COLUMN normalized jsonb NULL',
+      );
+    });
+
+    it('still records a payment, dropping only the reference it cannot store', async () => {
+      await legacy.savePayment({
+        gatewayId: 'pay_legacy',
+        provider: 'stripe',
+        status: 'paid',
+        amount: 999,
+        currency: 'BRL',
+        externalReference: 'order-legacy',
+        paidAt: now,
+      });
+      expect((await legacy.findPaymentByGatewayId('pay_legacy'))?.status).toBe('paid');
+    });
+
+    it('answers null instead of raising `column does not exist` at a polling browser', async () => {
+      expect(await legacy.findPaymentByExternalReference('order-legacy')).toBeNull();
+    });
+
+    it('still records the webhook, and the retry says plainly it cannot replay it', async () => {
+      const row = await legacy.recordWebhookEvent({
+        gatewayEventId: 'evt_legacy',
+        provider: 'stripe',
+        type: 'payment.succeeded',
+        payload: { id: 'evt_legacy' },
+        normalized: { gatewayId: 'pi_legacy', amount: 999, currency: 'BRL' },
+      });
+      expect(row).not.toBeNull();
+      await legacy.markWebhookFailed(String(row?.id), 'handler bug');
+
+      const replay = createReplayAction({
+        store: legacy,
+        process: async () => {
+          throw new Error('must not run');
+        },
+      });
+      const outcome = await replay({
+        gatewayEventId: 'evt_legacy',
+        provider: 'stripe',
+        type: 'payment.succeeded',
+        previousError: 'handler bug',
+      });
+
+      expect(outcome.kind).toBe('undeliverable');
+      expect(outcome.kind === 'undeliverable' && outcome.message).toContain(
+        'add_billing_external_reference',
+      );
+      // The row is exactly as the operator found it: original error, still failed.
+      const stored = await legacy.findWebhookEventByGatewayEventId('evt_legacy');
+      expect(stored?.status).toBe('failed');
+      expect(stored?.error).toBe('handler bug');
     });
   });
 });

@@ -113,9 +113,11 @@ export type ReplayOutcome =
   /** Something else claimed the row between the read and the write — it is no longer `failed`. */
   | { kind: 'conflict' }
   /**
-   * The driver would not rebuild the event from the stored payload — typically because the
-   * gateway signs its webhooks and the signature header was never stored. The ledger row is put
-   * back exactly as it was, original error and all.
+   * The ledger row carries no normalized event, so there is nothing to replay. That means the
+   * row was written before this install ran the `add_billing_external_reference` migration —
+   * the raw payload alone is not replayable, because turning it back into an event would mean
+   * calling `parseWebhook`, which re-verifies a signature computed from headers the ledger
+   * never kept. The row is put back exactly as it was, original error and all.
    */
   | { kind: 'undeliverable'; message: string }
   /** The handlers threw again. The ledger row carries the NEW error (the processor wrote it). */
@@ -130,15 +132,19 @@ export type ReplayAction = (input: {
 }) => Promise<ReplayOutcome>;
 
 /**
- * Build the retry action over the store plus the two halves of the webhook pipeline.
+ * Build the retry action over the store plus the app's webhook processor.
  *
  * The ledger dance is the fiddly part and it lives here, once:
  *
- * 1. `recordWebhookEvent` re-claims a `failed` row and hands the ORIGINAL payload back — that is
- *    the only way to read a stored payload through the `BillingStore` contract.
- * 2. `parse` rebuilds the normalized event from that payload via the provider's driver. The
- *    stored `data` is not enough: only `raw` is persisted, and the built-in sync handlers switch
- *    on the normalized shape.
+ * 1. `recordWebhookEvent` re-claims a `failed` row and hands the ORIGINAL delivery back — both
+ *    the raw payload and the NORMALIZED event recorded beside it. That is the only way to read
+ *    a stored delivery through the `BillingStore` contract.
+ * 2. The event is rebuilt from those two columns. It is NEVER re-parsed: `parseWebhook`
+ *    re-verifies a signature computed over headers the ledger does not keep, so rebuilding that
+ *    way answered `422` on Stripe, Adyen and every other gateway that signs — a retry that
+ *    worked for a minority of gateways, and only for the ones an attacker would not need to
+ *    forge. A row with no `normalized` (written before the migration) is `undeliverable`,
+ *    stated plainly, rather than half-replayed.
  * 3. The row is put BACK to `failed` before `process` runs, because `WebhookProcessor.process`
  *    claims through `recordWebhookEvent` itself, and a row sitting at `received` reads to it as
  *    "in flight" — it would return `false` and run nothing at all. This is the one place that
@@ -147,8 +153,6 @@ export type ReplayAction = (input: {
  */
 export function createReplayAction(deps: {
   store: BillingStore;
-  /** Rebuild a normalized event from a stored payload, via the provider's driver. */
-  parse: (provider: string, rawBody: string) => Promise<ReplayableWebhookEvent>;
   /** Run it through the app's `WebhookProcessor` (built-in sync + the app's own handlers). */
   process: (event: ReplayableWebhookEvent) => Promise<unknown>;
 }): ReplayAction {
@@ -157,32 +161,39 @@ export function createReplayAction(deps: {
       gatewayEventId,
       provider,
       type,
-      // Ignored on the re-claim path — the row keeps the payload it was recorded with, which is
-      // precisely the one we need back.
+      // Ignored on the re-claim path — the row keeps the payload and the normalized event it
+      // was recorded with, which is precisely what we need back.
       payload: {},
     });
     if (claimed === null) return { kind: 'conflict' };
 
-    const row = claimed as unknown as { id: string | number; payload?: Record<string, unknown> };
+    const row = claimed as unknown as {
+      id: string | number;
+      payload?: Record<string, unknown>;
+      normalized?: Record<string, unknown> | null;
+    };
     const ledgerId = String(row.id);
     const restore = () => deps.store.markWebhookFailed(ledgerId, previousError ?? '');
 
-    let event: ReplayableWebhookEvent;
-    try {
-      event = await deps.parse(provider, JSON.stringify(row.payload ?? {}));
-    } catch (error) {
-      // Put the row back exactly as the operator found it: the parse error is about THIS retry,
-      // and stamping it over the handler's original message would destroy the only record of why
-      // the event failed in the first place.
+    if (row.normalized === null || row.normalized === undefined) {
+      // Put the row back exactly as the operator found it: this refusal is about THIS retry, and
+      // stamping it over the handler's original message would destroy the only record of why the
+      // event failed in the first place.
       await restore();
       return {
         kind: 'undeliverable',
-        message: messageOf(
-          error,
-          'the driver could not rebuild this event from its stored payload',
-        ),
+        message:
+          'This event was recorded before the `add_billing_external_reference` migration added `billing_webhook_events.normalized`, so the normalized event it carried was never stored and cannot be rebuilt without re-verifying the gateway signature. Run the migration; events delivered after it replay normally.',
       };
     }
+
+    const event: ReplayableWebhookEvent = {
+      id: gatewayEventId,
+      provider,
+      type,
+      data: row.normalized,
+      raw: row.payload ?? {},
+    };
 
     await restore();
     try {

@@ -45,6 +45,17 @@ export class BillingPayment extends BaseModel {
   @column({ serializeAs: null })
   declare subscriptionId: string | null;
 
+  /**
+   * The app's own id for this charge (`ChargeInput.externalReference`), as the gateway
+   * echoed it back on the webhook. Nullable, and indexed — this is the key an app looks a
+   * payment up by, and an unindexed one on a table that grows with every charge is a
+   * sequential scan on the hot path.
+   *
+   * `null` on rows written before the `add_billing_external_reference` migration ran.
+   */
+  @column()
+  declare externalReference: string | null;
+
   @column({ serializeAs: null })
   declare payload: Record<string, unknown>;
 
@@ -67,6 +78,7 @@ export interface PaymentRow {
   currency: string;
   customerId: string | null;
   subscriptionId: string | null;
+  externalReference: string | null;
   payload: Record<string, unknown>;
   createdAt: DateTime;
   updatedAt: DateTime;
@@ -105,6 +117,10 @@ export function withPayment() {
 
       @column({ serializeAs: null })
       declare subscriptionId: string | null;
+
+      /** See {@link BillingPayment.externalReference}. */
+      @column()
+      declare externalReference: string | null;
 
       @column({ serializeAs: null })
       declare payload: Record<string, unknown>;

@@ -35,6 +35,16 @@ export interface PaymentListItem {
    * it ran an earlier schema.
    */
   externalReference: string | null;
+  /**
+   * How much of {@link PaymentListItem.amount} has come back, in the SAME integer minor
+   * units — `0` when nothing has, `null` on a row written before an earlier schema ran.
+   *
+   * Net revenue for a row is `amount - refundedAmount`. It is a separate figure precisely so
+   * a PARTIAL refund does not have to be spelled by mangling `amount` or `status`: a R$10
+   * refund on a R$100 charge leaves `amount: 10000, refundedAmount: 1000, status: 'paid'`.
+   * NEVER divide — format at the edge.
+   */
+  refundedAmount: number | null;
   paidAt: Date | null;
   createdAt: Date | null;
 }
@@ -276,6 +286,13 @@ export interface BillingStore<
    * does not, and blanking it there would throw away the only key
    * {@link BillingStore.findPaymentByExternalReference} can route on. Pass `null` explicitly
    * to clear it. Same rule, same reason, as `saveCustomer`'s owner mapping.
+   *
+   * **`paidAt` and `refundedAmount` follow exactly the same rule**, and the reason is money.
+   * A refund, a chargeback and a dispute close all write this row and none of them carries a
+   * settlement date; a store that wrote `undefined` through as `null` destroyed `paid_at` on
+   * every one of them, and {@link BillingStore.revenue} filters on `paid_at`. A dispute closed
+   * as WON therefore restored `status = 'paid'` with no date and the recovered money dropped
+   * out of every windowed revenue figure. Absent means "not stated"; `null` means "clear it".
    */
   savePayment(payment: {
     gatewayId: string;
@@ -288,6 +305,12 @@ export interface BillingStore<
     /** The app's own id for this charge (`ChargeInput.externalReference`), echoed by the gateway. */
     externalReference?: string | null;
     paidAt?: Date | null;
+    /**
+     * Integer minor units refunded so far — the whole point of the field is that a PARTIAL
+     * refund can be recorded without lying about `amount` or `status`. Absent leaves the
+     * stored figure alone; `null` clears it.
+     */
+    refundedAmount?: number | null;
     payload?: Record<string, unknown>;
   }): Promise<PaymentRow>;
 

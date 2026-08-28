@@ -47,6 +47,36 @@ export interface PaymentWebhookData {
    * digging into `event.raw` — the reason {@link ChargeInput.externalReference} exists.
    */
   externalReference?: string;
+  /**
+   * The payment's CURRENT status at the gateway, as a {@link import('../types.js').BillingStatus}
+   * value (`'paid'`, `'refunded'`, `'disputed'`, `'canceled'`, `'failed'`, `'pending'`,
+   * `'authorized'`).
+   *
+   * Only `payment.updated` reads it, and it is the reason that event can do anything at all:
+   * the other five payment events state their outcome in their TYPE, while an update says
+   * only "this payment changed" and the new state is on the payload. Optional, because most
+   * drivers do not normalize one — the built-in sync leaves the stored status alone when it
+   * is absent rather than guessing.
+   */
+  status?: string;
+  /**
+   * When the gateway settled the charge, ISO-8601 — the gateway's OWN date, never the
+   * webhook's arrival time.
+   *
+   * `revenue()` windows on this, so inventing it moves historic money into the current month.
+   * Optional: a driver that cannot read a settlement date must send nothing, and the
+   * processor then leaves whatever is stored alone.
+   */
+  paidAt?: string;
+  /**
+   * How much has been refunded so far, in the SAME integer minor units as `amount`.
+   *
+   * The field a PARTIAL refund needs and nothing else has: a R$10 refund on a R$100 charge is
+   * `amount: 10000, refundedAmount: 1000` and the status stays `paid`. Overwriting `amount`
+   * with the refunded figure — the only alternative before this existed — erased R$90 of
+   * revenue. NEVER divide.
+   */
+  refundedAmount?: number;
   /** Gateway-echoed metadata, when the gateway includes it in the webhook payload. */
   metadata?: Record<string, unknown>;
 }

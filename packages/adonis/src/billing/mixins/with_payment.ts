@@ -65,6 +65,22 @@ export class BillingPayment extends BaseModel {
   @column()
   declare externalReference: string | null;
 
+  /**
+   * How much of {@link BillingPayment.amount} has been refunded, in the SAME integer minor
+   * units. `0` on a charge nothing came back from, `null` on a row written before an earlier
+   * schema ran.
+   *
+   * It exists because a PARTIAL refund had nowhere to be recorded: the only honest options
+   * were to overwrite `status` with `refunded` (writing off the whole charge) or to drop the
+   * event, and the library dropped it — so a R$10 refund on a R$100 charge left R$100 of
+   * revenue standing forever. Net revenue is `amount - refunded_amount`; NEVER divide either.
+   *
+   * Same `consume` as `amount`, and for the same reason: the column is `BIGINT` and
+   * node-postgres hands bigints back as strings.
+   */
+  @column({ consume: (value: unknown) => (value === null ? null : Number(value)) })
+  declare refundedAmount: number | null;
+
   @column({ serializeAs: null })
   declare payload: Record<string, unknown>;
 
@@ -88,6 +104,8 @@ export interface PaymentRow {
   customerId: string | null;
   subscriptionId: string | null;
   externalReference: string | null;
+  /** Integer minor units already refunded. See {@link BillingPayment.refundedAmount}. */
+  refundedAmount: number | null;
   payload: Record<string, unknown>;
   createdAt: DateTime;
   updatedAt: DateTime;
@@ -131,6 +149,10 @@ export function withPayment() {
       /** See {@link BillingPayment.externalReference}. */
       @column()
       declare externalReference: string | null;
+
+      /** See {@link BillingPayment.refundedAmount}. Integer minor units; NEVER divide. */
+      @column({ consume: (value: unknown) => (value === null ? null : Number(value)) })
+      declare refundedAmount: number | null;
 
       @column({ serializeAs: null })
       declare payload: Record<string, unknown>;

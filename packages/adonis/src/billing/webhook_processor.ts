@@ -28,14 +28,15 @@ export interface WebhookProcessorOptions {
 }
 
 /**
- * `actionableUntil` as a `Date`, or `null` when there is nothing usable to store.
+ * A gateway-sent instant (`actionableUntil`, `paidAt`) as a `Date`, or `null` when there is
+ * nothing usable to store.
  *
- * An unparseable deadline is dropped rather than written: `new Date('soon')` is an Invalid
- * Date, which Postgres rejects — so a driver with one bad field would fail the whole webhook
- * and, through the ledger, every redelivery of it. Dropping one field loses the alert's
- * urgency; throwing here loses the chargeback itself.
+ * An unparseable value is dropped rather than written: `new Date('soon')` is an Invalid Date,
+ * which Postgres rejects — so a driver with one bad field would fail the whole webhook and,
+ * through the ledger, every redelivery of it. Dropping one field loses a deadline's urgency;
+ * throwing here loses the chargeback itself.
  */
-function parseDeadline(value: string | undefined): Date | null {
+function parseInstant(value: string | undefined): Date | null {
   if (value === undefined) return null;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
@@ -126,6 +127,8 @@ export class WebhookProcessor {
         return this.#onDisputeWarning(event);
       case 'payment.dispute_closed':
         return this.#onDisputeClosed(event);
+      case 'payment.updated':
+        return this.#onPaymentUpdated(event);
 
       case 'subscription.created':
       case 'subscription.updated':
@@ -155,7 +158,11 @@ export class WebhookProcessor {
       // for an `undefined` reference, and a later event that does not echo one must not blank
       // the key the app routes on.
       ...(externalReference !== undefined ? { externalReference } : {}),
-      paidAt: new Date(),
+      // The GATEWAY's settlement date when it sent one, and the arrival time only as a last
+      // resort. `revenue()` windows on `paid_at`, so stamping "now" over a confirmation that
+      // is being redelivered — or replayed from the ledger a month later — files the money in
+      // the wrong month.
+      paidAt: parseInstant(event.data.paidAt) ?? new Date(),
       payload: event.raw,
     });
     publishPayments('payment.succeeded', {
@@ -214,6 +221,10 @@ export class WebhookProcessor {
         status: 'refunded',
         amount,
         currency,
+        // A FULL refund, by definition — a partial one arrives as `payment.updated`, because
+        // this handler writes the whole charge off. Recorded so `amount - refundedAmount` is
+        // the net figure on every refunded row, not just the partial ones.
+        refundedAmount: amount,
         ...(externalReference !== undefined ? { externalReference } : {}),
         ...(existing.customerId !== undefined ? { customerId: existing.customerId } : {}),
         ...(existing.subscriptionId !== undefined
@@ -228,6 +239,80 @@ export class WebhookProcessor {
       amount,
       currency,
     });
+  }
+
+  /**
+   * "This payment changed" — the catch-all every driver falls back to, and until now the one
+   * case `#runBuiltIn` answered with `Promise.resolve()`.
+   *
+   * The cost of that no-op was not theoretical. A **partial refund** arrives as exactly this
+   * type on Asaas (`PAYMENT_PARTIALLY_REFUNDED`), deliberately: routing it to
+   * `payment.refunded` would overwrite the row's status with `refunded` and write off the
+   * whole charge. So the money came back, the ledger row went to `processed`, and nothing
+   * else happened — revenue stayed overstated by the refunded part, permanently. Same for a
+   * deleted charge, a restored one, a denied refund, and a cash receipt taken back.
+   *
+   * What it does now: keeps the row CURRENT — status, amount, refunded amount, settlement
+   * date — and nothing more. It never creates a row (an update about a charge this install
+   * never recorded is not a charge; a `payment.succeeded` or a reconcile creates those), and
+   * it moves nothing when the driver sends no `status`.
+   */
+  async #onPaymentUpdated(event: WebhookEvent): Promise<void> {
+    if (!isPaymentWebhookData(event.data)) {
+      throw new Error(`[payments] Malformed payment.updated payload for event ${event.id}.`);
+    }
+    const { gatewayId, amount, currency, status, refundedAmount, externalReference } = event.data;
+    const existing = await this.#store.findPaymentByGatewayId(gatewayId);
+    if (existing === null) return;
+
+    const settledAt = parseInstant(event.data.paidAt);
+    const target = this.#updatedStatus(existing.status, status);
+    await this.#store.savePayment({
+      gatewayId,
+      provider: event.provider,
+      status: target,
+      // The charge's own amount, which an update CAN legitimately change — editing the value
+      // of a pending boleto is what `PAYMENT_UPDATED` means on Asaas. A partial refund does
+      // not change it: the refunded part travels as `refundedAmount`, so `amount` stays the
+      // charge and `amount - refundedAmount` stays the net. Never divide either.
+      amount,
+      currency,
+      ...(existing.customerId !== null ? { customerId: existing.customerId } : {}),
+      ...(existing.subscriptionId !== null ? { subscriptionId: existing.subscriptionId } : {}),
+      ...(externalReference !== undefined ? { externalReference } : {}),
+      ...(refundedAmount !== undefined ? { refundedAmount } : {}),
+      // Absent leaves the stored one alone — see `savePayment`. An update is exactly the
+      // event that carries no settlement date, and blanking `paid_at` here would drop the row
+      // out of every windowed revenue figure.
+      ...(settledAt !== null ? { paidAt: settledAt } : {}),
+      payload: event.raw,
+    });
+
+    publishPayments('payment.updated', {
+      gatewayId,
+      provider: event.provider,
+      status: target,
+    });
+  }
+
+  /**
+   * The status an update is allowed to write, given what the row already says.
+   *
+   * Two rules, both about not losing money:
+   *
+   * 1. **No status, no move.** Most drivers normalize no status onto `payment.updated` — the
+   *    event says only "something changed" — and inventing one from an event that named none
+   *    is how a paid row becomes pending.
+   * 2. **An update never moves a row OUT of `disputed`.** A chargeback is the one webhook that
+   *    takes revenue away, and the gateway's own payment resource often goes on reporting the
+   *    charge as received while the bank holds the money. Only `payment.dispute_closed`, which
+   *    carries an outcome, resolves a dispute — the same rule `payments:sync` follows, for the
+   *    same reason.
+   */
+  #updatedStatus(current: string, incoming: string | undefined): string {
+    if (incoming === undefined) return current;
+    if (current === 'disputed' && incoming !== 'disputed') return current;
+    return incoming;
   }
 
   /**
@@ -429,7 +514,7 @@ export class WebhookProcessor {
     data: DisputeWebhookData,
     fields: { status: string; closedAt?: Date },
   ): Promise<void> {
-    const deadline = parseDeadline(data.actionableUntil);
+    const deadline = parseInstant(data.actionableUntil);
     await this.#store.saveDispute({
       gatewayId: await this.#disputeKey(event.provider, data),
       paymentGatewayId: data.gatewayId,

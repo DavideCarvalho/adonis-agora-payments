@@ -78,6 +78,8 @@ export interface InMemoryPaymentRow {
   subscriptionId: string | null;
   /** The app's own id for this charge, as the gateway echoed it back. */
   externalReference: string | null;
+  /** Integer minor units refunded so far. See `BillingPayment.refundedAmount`. */
+  refundedAmount: number | null;
   paidAt: Date | null;
   payload: Record<string, unknown>;
   /** Insertion timestamp — the Lucid rows have one, and the list queries order by it. */
@@ -336,6 +338,7 @@ export class InMemoryBillingStore
     subscriptionId?: string | null;
     externalReference?: string | null;
     paidAt?: Date | null;
+    refundedAmount?: number | null;
     payload?: Record<string, unknown>;
   }): Promise<InMemoryPaymentRow> {
     const existing = this.payments.get(payment.gatewayId);
@@ -355,7 +358,16 @@ export class InMemoryBillingStore
         payment.externalReference !== undefined
           ? payment.externalReference
           : (existing?.externalReference ?? null),
-      paidAt: payment.paidAt ?? null,
+      // Mirrors the Lucid store again, and this one is about money: `payment.refunded`,
+      // `payment.disputed` and `payment.dispute_closed` all save WITHOUT a `paidAt`, and
+      // `revenue()` filters on it. Writing `undefined` through as `null` erased the only
+      // record of when a charge landed, so a dispute closed as WON came back as `paid` with no
+      // date and left every windowed revenue figure. `null` still clears it.
+      paidAt: payment.paidAt !== undefined ? payment.paidAt : (existing?.paidAt ?? null),
+      refundedAmount:
+        payment.refundedAmount !== undefined
+          ? payment.refundedAmount
+          : (existing?.refundedAmount ?? null),
       payload: payment.payload ?? {},
       createdAt: existing?.createdAt ?? this.#now(),
     };
@@ -395,6 +407,7 @@ export class InMemoryBillingStore
       customerId: row.customerId,
       subscriptionId: row.subscriptionId,
       externalReference: row.externalReference,
+      refundedAmount: row.refundedAmount,
       paidAt: row.paidAt,
       createdAt: row.createdAt,
     }));
@@ -693,6 +706,13 @@ export class InMemoryBillingStore
     let total = 0;
     for (const row of this.payments.values()) {
       if (row.status !== 'paid') continue;
+      // A row with NO `paid_at` is in no window at all. The Lucid store emits
+      // `paid_at >= from AND paid_at < to`, and SQL `NULL` satisfies neither comparison — so
+      // counting it here would make the in-memory store report revenue the database cannot,
+      // and would hide the exact bug (a won dispute restored with `paid_at = NULL`) that the
+      // leave-alone rule in `savePayment` exists to prevent.
+      const windowed = query.from !== undefined || query.to !== undefined;
+      if (windowed && row.paidAt === null) continue;
       if (query.from !== undefined && row.paidAt !== null && row.paidAt < query.from) continue;
       if (query.to !== undefined && row.paidAt !== null && row.paidAt >= query.to) continue;
       total += row.amount;

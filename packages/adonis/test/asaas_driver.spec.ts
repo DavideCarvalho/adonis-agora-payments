@@ -43,6 +43,7 @@ describe('AsaasDriver', () => {
   it('maps PAYMENT_RECEIVED to payment.succeeded', () => {
     const driver = makeDriver();
     const raw = JSON.stringify({
+      id: 'evt_05b708f961d739ea7eba7e4db318f621&368604920',
       event: 'PAYMENT_RECEIVED',
       payment: {
         id: 'pay_1',
@@ -55,7 +56,9 @@ describe('AsaasDriver', () => {
     });
     const event = driver.parseWebhook(raw, {});
     expect(event.type).toBe('payment.succeeded');
-    expect(event.id).toContain('pay_1');
+    // Asaas' OWN event id, verbatim. It used to be `${event}-${paymentId}`, which is a
+    // (payment, type) identity rather than an event identity — see the dedicated spec.
+    expect(event.id).toBe('evt_05b708f961d739ea7eba7e4db318f621&368604920');
     const data = event.data as { gatewayId: string; amount: number };
     expect(data.gatewayId).toBe('pay_1');
     expect(data.amount).toBe(1990);
@@ -151,8 +154,14 @@ describe('AsaasDriver', () => {
         externalReference: 'pay_local_1',
         idempotencyKey: 'idem_1',
       });
-      const [_, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
-      expect(JSON.parse(String(init.body))).toMatchObject({ externalReference: 'pay_local_1' });
+      // The POST, not the first call: an `idempotencyKey` makes the driver look the charge up
+      // by `externalReference` BEFORE creating one (see the idempotency spec below).
+      const post = fetchMock.mock.calls.find(
+        (call) => (call[1] as RequestInit | undefined)?.method === 'POST',
+      ) as [string, RequestInit] | undefined;
+      expect(JSON.parse(String(post?.[1].body))).toMatchObject({
+        externalReference: 'pay_local_1',
+      });
     } finally {
       vi.unstubAllGlobals();
     }

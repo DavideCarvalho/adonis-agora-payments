@@ -423,6 +423,7 @@ export class LucidBillingStore
     subscriptionId?: string | null;
     externalReference?: string | null;
     paidAt?: Date | null;
+    refundedAmount?: number | null;
     payload?: Record<string, unknown>;
   }): Promise<PaymentInstance> {
     await this.#ready();
@@ -445,7 +446,25 @@ export class LucidBillingStore
     ) {
       row.externalReference = payment.externalReference;
     }
-    row.paidAt = payment.paidAt ? DateTime.fromJSDate(payment.paidAt) : null;
+    // An ABSENT `paidAt` does not erase the stored one — the same leave-alone rule as the
+    // reference above, and with a sharper consequence. `payment.refunded`,
+    // `payment.disputed` and `payment.dispute_closed` all call this WITHOUT a `paidAt`
+    // (a refund/dispute payload carries no settlement date), and `revenue()` filters on
+    // `status = 'paid' AND paid_at >= from AND paid_at < to`. Writing `null` through meant a
+    // dispute closed as WON restored `status = 'paid'` with `paid_at = NULL`, so the recovered
+    // money vanished from every windowed revenue figure — permanently, because `paid_at` is
+    // the only record of when the charge landed. `null` still clears it, explicitly.
+    if (payment.paidAt !== undefined) {
+      row.paidAt = payment.paidAt === null ? null : DateTime.fromJSDate(payment.paidAt);
+    }
+    // Same leave-alone rule, same reason: only a partial-refund event knows this figure, and
+    // every other write about the payment would otherwise reset it to zero.
+    if (
+      payment.refundedAmount !== undefined &&
+      (await this.#hasColumn(this.#paymentModel, 'refunded_amount'))
+    ) {
+      row.refundedAmount = payment.refundedAmount;
+    }
     row.payload = payment.payload ?? {};
     await row.save();
     return row;
@@ -491,6 +510,12 @@ export class LucidBillingStore
       customerId: row.customerId ?? null,
       subscriptionId: row.subscriptionId ?? null,
       externalReference: row.externalReference ?? null,
+      // `bigint` arrives as a STRING on Postgres, and `undefined` on an install whose table
+      // predates the column — both normalize to the same honest answer.
+      refundedAmount:
+        row.refundedAmount === null || row.refundedAmount === undefined
+          ? null
+          : Number(row.refundedAmount),
       paidAt: toDate(row.paidAt),
       createdAt: toDate(row.createdAt),
     }));

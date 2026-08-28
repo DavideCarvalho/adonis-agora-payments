@@ -101,15 +101,21 @@ describe('createBillingTables (integration)', () => {
     // phase exists — without it, upgrading the package leaves the old schema in place and the
     // first query naming a new column fails.
     await database.db.rawQuery('ALTER TABLE billing_payments DROP COLUMN external_reference');
+    await database.db.rawQuery('ALTER TABLE billing_payments DROP COLUMN refunded_amount');
     await database.db.rawQuery('ALTER TABLE billing_webhook_events DROP COLUMN normalized');
     await database.db.rawQuery('DROP TABLE billing_disputes');
 
     expect(await columnsOf('billing_payments')).not.toContain('external_reference');
+    expect(await columnsOf('billing_payments')).not.toContain('refunded_amount');
     expect(await existingTables()).not.toContain('billing_disputes');
 
     await createBillingTables(database.db.connection());
 
     expect(await columnsOf('billing_payments')).toContain('external_reference');
+    // 0.4.0's column, carried by the same ALTER phase. Without it an upgraded install takes a
+    // partial refund and fails on `column "refunded_amount" does not exist` — or, worse,
+    // silently skips the write, which is what `#hasColumn` does.
+    expect(await columnsOf('billing_payments')).toContain('refunded_amount');
     expect(await columnsOf('billing_webhook_events')).toContain('normalized');
     expect(await existingTables()).toContain('billing_disputes');
     // And the index that names the column it just added — the ordering bug, pinned.

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { AsaasDriverConfig } from '../define_config.js';
 import {
   publishPaymentDiagnostics,
@@ -100,6 +101,21 @@ interface AsaasPaymentResponse {
   paymentDate?: string;
   externalReference?: string;
   chargeback?: AsaasChargebackResponse;
+  /**
+   * The refunds filed against this payment. Asaas nests them on the payment resource, and
+   * `PAYMENT_PARTIALLY_REFUNDED` is a notification about the payment — so this is where the
+   * refunded figure lives, in reais, per refund.
+   *
+   * Read defensively (every field optional), the same posture as `chargeback` above and for
+   * the same reason: no published Asaas webhook example shows the array. Only entries whose
+   * status says the money actually went back are summed — an Asaas refund can be `PENDING`,
+   * can await approval, and can be `CANCELLED`, and counting those would write off money that
+   * is still in the account.
+   */
+  refunds?: Array<{
+    value?: number;
+    status?: 'PENDING' | 'AWAITING_CRITICAL_ACTION_APPROVAL' | 'CANCELLED' | 'DONE' | string;
+  }>;
 }
 
 interface AsaasSubscriptionResponse {
@@ -115,10 +131,47 @@ interface AsaasSubscriptionResponse {
 }
 
 interface AsaasWebhookPayload {
+  /**
+   * Asaas' OWN event id (`evt_05b708f9…&368604920`), sent on the body of every notification
+   * and stable across its retries of that notification.
+   *
+   * It was never declared here and never read, so `parseWebhook` synthesized an id out of the
+   * event name and the payment id — which is not an event identity, it is a
+   * (payment, event-type) identity. The ledger keys idempotency on it, so the SECOND
+   * `PAYMENT_UPDATED` for a payment was silently discarded as a replay of the first, and a
+   * partial refund arrives as exactly that type.
+   *
+   * Optional because a payload without it must still be processed — see the fallback in
+   * `parseWebhook`, which hashes the body rather than inventing a number.
+   */
+  id?: string;
+  /** When Asaas created the event (`YYYY-MM-DD HH:mm:ss`). Not an idempotency key. */
+  dateCreated?: string;
   event: string;
   payment?: AsaasPaymentResponse;
   subscription?: AsaasSubscriptionResponse;
 }
+
+/** The envelope Asaas wraps every list endpoint in. */
+interface AsaasListResponse<T> {
+  data?: T[];
+  /** Asaas' own "there is another page" flag — the loop's authority when it is present. */
+  hasMore?: boolean;
+  totalCount?: number;
+  limit?: number;
+  offset?: number;
+}
+
+/** Rows per page when iterating an Asaas list endpoint. 100 is Asaas' documented maximum. */
+const ASAAS_PAGE_SIZE = 100;
+
+/**
+ * A runaway guard on the paging loop, not a result limit: a gateway that answered `hasMore`
+ * forever would otherwise spin. Ten million charges for ONE customer is not a real number, so
+ * reaching this means something is wrong — and the loop throws rather than truncating,
+ * because a quietly partial list is the bug the paging was added to fix.
+ */
+const ASAAS_MAX_PAGES = 100_000;
 
 /**
  * Asaas driver — Brazilian gateway (Pix, boleto, card) with native subscription billing.
@@ -195,6 +248,34 @@ export class AsaasDriver implements PaymentsDriver {
 
   // ── Payments ─────────────────────────────────────────────────────────────────────────
 
+  /**
+   * Create a charge — and, when the caller passes an `idempotencyKey`, do not create a second
+   * one for the same key.
+   *
+   * **This method HONOURS `idempotencyKey`**, which is why it does not go through
+   * `#refuseIdempotencyKey` like every other method here. It used to quietly repurpose the key
+   * as an `externalReference` fallback and nothing else, so an app that passed
+   * `idempotencyKey: order.id` on the one call that moves money — believing it was protected
+   * against a double charge on a retry — got no protection at all and no warning either.
+   *
+   * Refusing it here (the consistent option) was the alternative and was rejected: `charge()`
+   * is the single call where a silent duplicate costs the customer real money, and the
+   * deduplication `#refuseIdempotencyKey`'s own message tells callers to do by hand —
+   * "looking the record up by `externalReference` first" — is one request the driver can make
+   * on their behalf, exactly and every time. Asaas still has no idempotency mechanism of its
+   * own; this is that documented workaround, implemented rather than described.
+   *
+   * The key travels as the charge's `externalReference` (Asaas echoes it back and accepts it
+   * as a query filter), so the guarantee is: **at most one Asaas charge per key**, scoped to
+   * the customer. A hit returns the charge that already exists — enriched with its Pix code,
+   * so the caller gets a usable payment — and deliberately re-runs NEITHER side effect: no
+   * second fiscal invoice is emitted (an NFS-e is a legal document, not a retryable write) and
+   * no `charge.created` diagnostic is published for a charge that was not created.
+   *
+   * What it is not: a lock. Two concurrent calls with the same key can both miss the lookup
+   * and both create — Asaas offers nothing to prevent that. It closes the retry case, which is
+   * the one that actually happens.
+   */
   async charge(input: ChargeInput): Promise<Payment> {
     if (!input.customerId) {
       throw new Error('[payments] Asaas requires a customer for every charge.');
@@ -203,6 +284,10 @@ export class AsaasDriver implements PaymentsDriver {
       input.method === 'credit_card' ||
       input.paymentMethodId !== undefined ||
       input.card !== undefined;
+    // The value that will land in `externalReference` — and therefore the value the
+    // idempotency lookup below has to search on. They must be the same string or the second
+    // call looks for a key the first one never wrote.
+    const reference = input.externalReference ?? input.idempotencyKey;
     const body: Record<string, unknown> = {
       customer: input.customerId,
       value: toDecimal(input.amount),
@@ -210,11 +295,10 @@ export class AsaasDriver implements PaymentsDriver {
       billingType: this.#mapMethod(isCard ? 'credit_card' : input.method),
       ...(input.description !== undefined ? { description: input.description } : {}),
       // `externalReference` is the app's own id echoed back on the payment — the routing
-      // key webhook handlers read. `idempotencyKey` doubles as it only when the app
-      // didn't pass an explicit reference (legacy behavior).
-      ...(input.externalReference !== undefined || input.idempotencyKey !== undefined
-        ? { externalReference: input.externalReference ?? input.idempotencyKey }
-        : {}),
+      // key webhook handlers read, AND the only thing Asaas can be asked to match a charge
+      // on, which is what makes `idempotencyKey` honourable at all. An explicit reference
+      // wins; the key stands in when there is none.
+      ...(reference !== undefined ? { externalReference: reference } : {}),
       // Checkout transparente: cartão tokenizado no front (Asaas tokenization).
       ...(input.card !== undefined ? { creditCardToken: input.card.token } : {}),
       ...(input.paymentMethodId !== undefined ? { creditCardToken: input.paymentMethodId } : {}),
@@ -233,33 +317,74 @@ export class AsaasDriver implements PaymentsDriver {
           }
         : {}),
     };
+    // The idempotency lookup, and it happens BEFORE the POST or it is worth nothing.
+    const duplicate =
+      input.idempotencyKey !== undefined && reference !== undefined
+        ? await this.#findChargeByReference(reference, input.customerId)
+        : null;
+    if (duplicate !== null) {
+      const existing = this.#mapPayment(duplicate);
+      await this.#attachPixQrCode(existing);
+      // No invoice, no diagnostic: nothing was charged. See the note on this method.
+      return existing;
+    }
+
     const data = await this.#request<AsaasPaymentResponse>('/payments', { method: 'POST', body });
     const payment = this.#mapPayment(data);
-
-    // PIX: busca o QR code da cobrança (o Asaas não retorna no create).
-    if (payment.method === 'pix') {
-      try {
-        const qr = await this.#request<{
-          encodedImage?: string | null;
-          payload?: string | null;
-          expirationDate?: string | null;
-        }>(`/payments/${data.id}/pixQrCode`);
-        if (qr.payload) {
-          payment.pixCode = qr.payload;
-          payment.pixCopiaECola = qr.payload;
-        }
-        if (qr.encodedImage) {
-          payment.pixQrCodeImage = qr.encodedImage;
-          payment.pixQrCode = qr.encodedImage;
-        }
-      } catch {
-        // QR code é best-effort — a cobrança já existe.
-      }
-    }
+    await this.#attachPixQrCode(payment);
 
     await emitInvoiceIfRequested(this.#invoiceCtx, input, payment, this);
     publishPaymentDiagnostics(payment);
     return payment;
+  }
+
+  /**
+   * The charge already recorded under one `externalReference` for this customer, or `null`.
+   *
+   * The whole of Asaas' idempotency story: it documents no idempotency header and no
+   * idempotency body field on any endpoint, and tells you to deduplicate on your side — so the
+   * only handle is `externalReference`, which it echoes back and accepts as a query filter.
+   * Scoped to the customer as well, because an app's own order ids are unique within the app,
+   * not across every merchant's tenant.
+   *
+   * Newest first, which is Asaas' own ordering: if an app really did reuse a key across two
+   * charges, the one it means is the last one it made.
+   */
+  async #findChargeByReference(
+    reference: string,
+    customerId: string,
+  ): Promise<AsaasPaymentResponse | null> {
+    const body = await this.#request<AsaasListResponse<AsaasPaymentResponse>>(
+      `/payments?externalReference=${encodeURIComponent(reference)}&customer=${encodeURIComponent(customerId)}&limit=1`,
+    );
+    const rows = Array.isArray(body.data) ? body.data : [];
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Fill in a Pix charge's QR code. Asaas does not return one from `POST /payments`, so it
+   * takes a second request — best-effort, because the charge already exists either way and
+   * failing here would report a failure over money that is already owed.
+   */
+  async #attachPixQrCode(payment: Payment): Promise<void> {
+    if (payment.method !== 'pix') return;
+    try {
+      const qr = await this.#request<{
+        encodedImage?: string | null;
+        payload?: string | null;
+        expirationDate?: string | null;
+      }>(`/payments/${payment.gatewayId}/pixQrCode`);
+      if (qr.payload) {
+        payment.pixCode = qr.payload;
+        payment.pixCopiaECola = qr.payload;
+      }
+      if (qr.encodedImage) {
+        payment.pixQrCodeImage = qr.encodedImage;
+        payment.pixQrCode = qr.encodedImage;
+      }
+    } catch {
+      // QR code é best-effort — a cobrança já existe.
+    }
   }
 
   async findPayment(gatewayId: string): Promise<Payment | null> {
@@ -413,11 +538,51 @@ export class AsaasDriver implements PaymentsDriver {
 
   // ── Invoices ─────────────────────────────────────────────────────────────────────────
 
+  /**
+   * Every charge Asaas holds for a customer — **all of them**, not the newest page.
+   *
+   * `GET /payments` is a paged endpoint (`limit`/`offset`, and an explicit `hasMore` in the
+   * envelope). This asked for it with neither, took whatever default page Asaas felt like
+   * returning, and handed it back as if it were the whole list — so `payments:sync` printed a
+   * confident "N invoice(s) synced" over the most recent page and left every older charge
+   * unreconciled, silently, with no way for the caller to tell.
+   *
+   * `hasMore` is the loop's authority; a short page ends it when the envelope omits one. The
+   * page cap is a runaway guard, not a limit: it THROWS rather than truncating, because
+   * returning a partial list quietly is the exact bug this replaced.
+   */
   async listInvoices(customerId: string): Promise<Invoice[]> {
-    const data = await this.#request<{ data: AsaasPaymentResponse[] }>(
-      `/payments?customer=${encodeURIComponent(customerId)}`,
-    );
-    return data.data.map((payment) => ({
+    const invoices: Invoice[] = [];
+    for (let page = 0; ; page += 1) {
+      if (page >= ASAAS_MAX_PAGES) {
+        throw new Error(
+          `[payments] Asaas listInvoices for customer ${customerId} did not stop after ${ASAAS_MAX_PAGES} pages of ${ASAAS_PAGE_SIZE}. Refusing to return a partial list — narrow the query at the gateway.`,
+        );
+      }
+      const offset = page * ASAAS_PAGE_SIZE;
+      const body = await this.#request<AsaasListResponse<AsaasPaymentResponse>>(
+        `/payments?customer=${encodeURIComponent(customerId)}&limit=${ASAAS_PAGE_SIZE}&offset=${offset}`,
+      );
+      const rows = Array.isArray(body.data) ? body.data : [];
+      for (const payment of rows) invoices.push(this.#mapInvoice(payment));
+      // `hasMore` when Asaas states one; otherwise a page shorter than the limit is the end.
+      const more =
+        typeof body.hasMore === 'boolean' ? body.hasMore : rows.length >= ASAAS_PAGE_SIZE;
+      if (!more || rows.length === 0) return invoices;
+    }
+  }
+
+  /**
+   * One Asaas payment as an `Invoice`.
+   *
+   * The status mapping is lossy in one direction worth naming: `Invoice['status']` has no
+   * `refunded` and no `disputed` member, so a refunded or charged-back Asaas payment lands on
+   * `draft` — "the gateway said something this vocabulary cannot spell". Nothing should read a
+   * reversal out of this; `payments:sync` asks `findPayment` for the authoritative status,
+   * which speaks `BillingStatus` and can say `refunded`.
+   */
+  #mapInvoice(payment: AsaasPaymentResponse): Invoice {
+    return {
       id: payment.id,
       gatewayId: payment.id,
       provider: this.provider,
@@ -435,7 +600,7 @@ export class AsaasDriver implements PaymentsDriver {
       createdAt: new Date(payment.dueDate).toISOString(),
       ...(payment.invoiceUrl !== undefined ? { hostedPdfUrl: payment.invoiceUrl } : {}),
       payload: payment as unknown as Record<string, unknown>,
-    }));
+    };
   }
 
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
@@ -452,7 +617,22 @@ export class AsaasDriver implements PaymentsDriver {
       requireMatchingCredential(token, this.#webhookToken, 'Asaas', 'token');
     }
     const payload = JSON.parse(rawBody) as AsaasWebhookPayload;
-    const id = `${payload.event}-${payload.payment?.id ?? payload.subscription?.id ?? Math.random()}`;
+    // Asaas' own event id, which is what the ledger's idempotency is supposed to key on.
+    //
+    // The previous id was `${event}-${paymentId}`, and that is not an event identity: every
+    // notification of the same type about the same payment collapsed onto one key, so the
+    // SECOND `PAYMENT_UPDATED` for a charge was dropped as a replay of the first — and a
+    // PARTIAL REFUND arrives as exactly that type. It also fell back to `Math.random()` when
+    // the payload named neither a payment nor a subscription, which turns deduplication OFF
+    // for those deliveries entirely: every retry of a failing one looked like a new event.
+    //
+    // The fallback below is used only when Asaas genuinely sends no `id`. It is a digest of
+    // the RAW BODY, so it is deterministic (a redelivery of the same notification hashes to
+    // the same key and is still deduplicated) while two genuinely different notifications —
+    // the two `PAYMENT_UPDATED`s above — differ, which is the property the old key lacked.
+    const id =
+      payload.id ??
+      `asaas:${payload.event}:${createHash('sha256').update(rawBody).digest('hex').slice(0, 32)}`;
     const type = this.#mapWebhookType(payload.event);
     return {
       id,
@@ -629,11 +809,14 @@ export class AsaasDriver implements PaymentsDriver {
       // contested it and the documents are in. Movement inside an open dispute, not a
       // resolution and not a second chargeback — `event.raw.event` still names it.
       case 'PAYMENT_CHARGEBACK_DISPUTE':
-      // A partial refund is deliberately NOT `payment.refunded`. That handler overwrites
-      // the row's status with `refunded` and its amount with the refunded amount, so a
-      // R$10 refund on a R$100 charge would erase R$90 of revenue. Until the tables carry
-      // a refunded amount this stays an update and the arithmetic stays right — see the
-      // roadmap.
+      // A partial refund is deliberately NOT `payment.refunded`. That handler writes the
+      // charge off whole — status `refunded` — so a R$10 refund on a R$100 charge would
+      // erase R$90 of revenue. It stays an update, and the update is now the handler that
+      // records it honestly: `payment.updated` carries `refundedAmount` (integer minor
+      // units, summed from the payment's settled `refunds`) onto `billing_payments`, so the
+      // charge keeps its amount, its status and its settlement date, and the net is
+      // `amount - refunded_amount`. Until that column existed this event reached a
+      // `default:` that did nothing at all and the refund was simply lost.
       case 'PAYMENT_PARTIALLY_REFUNDED':
       // Asked for, scheduled, denied. No money has moved back on any of the three; only
       // `PAYMENT_REFUNDED` means it did.
@@ -667,6 +850,7 @@ export class AsaasDriver implements PaymentsDriver {
   #mapWebhookData(payload: AsaasWebhookPayload, type: string): Record<string, unknown> {
     if (payload.payment) {
       const payment = this.#mapPayment(payload.payment);
+      const refunded = this.#refundedAmount(payload.payment);
       return {
         gatewayId: payment.gatewayId,
         amount: payment.amount.amount,
@@ -676,6 +860,13 @@ export class AsaasDriver implements PaymentsDriver {
         ...(payload.payment.externalReference !== undefined
           ? { externalReference: payload.payment.externalReference }
           : {}),
+        // The payment's CURRENT state, and the two figures that go with it. `payment.updated`
+        // is the only event whose type does not state its own outcome — Asaas sends eight
+        // different things through it — so without these the processor could keep nothing
+        // current and a partial refund had nothing to record.
+        status: payment.status,
+        ...(payment.paidAt !== undefined ? { paidAt: payment.paidAt } : {}),
+        ...(refunded !== null ? { refundedAmount: refunded } : {}),
         ...this.#disputeExtras(payload.payment, type),
       };
     }
@@ -724,6 +915,31 @@ export class AsaasDriver implements PaymentsDriver {
     };
   }
 
+  /**
+   * How much of this payment has actually gone back, in integer minor units — or `null` when
+   * Asaas said nothing about refunds at all.
+   *
+   * `null` and `0` are different answers and the difference matters: `null` leaves whatever is
+   * stored alone (the store's leave-alone rule), while `0` would assert that nothing has been
+   * refunded — which is a claim a notification carrying no `refunds` array is not making.
+   *
+   * Only `DONE` entries count. Asaas can hold a refund `PENDING`, park it awaiting approval,
+   * and deny it outright (`PAYMENT_REFUND_DENIED` is a real event) — summing those would write
+   * off money still sitting in the account. `fromDecimal` per entry, then integer addition:
+   * the reais never meet each other as floats.
+   */
+  #refundedAmount(payment: AsaasPaymentResponse): number | null {
+    const refunds = payment.refunds;
+    if (refunds === undefined || !Array.isArray(refunds)) return null;
+    let total = 0;
+    for (const refund of refunds) {
+      if (refund?.status !== 'DONE') continue;
+      if (typeof refund.value !== 'number') continue;
+      total += fromDecimal(refund.value);
+    }
+    return total;
+  }
+
   #mapMethod(method?: string): string {
     switch (method) {
       case 'pix':
@@ -756,9 +972,11 @@ export class AsaasDriver implements PaymentsDriver {
    * and dropping it would turn a caller's retry guarantee into a second refund or a
    * second subscription, so the driver refuses it instead.
    *
-   * `charge()` is the one exception, and it is not an exception to this rule: there
-   * `idempotencyKey` has never meant deduplication, it is a legacy fallback for
-   * `externalReference` (the routing key echoed on the payment) and is documented as such.
+   * `charge()` is the one exception, and it earns it by actually DOING the deduplication this
+   * message describes: it looks the charge up by `externalReference` before creating one, so
+   * the key is honoured rather than accepted and ignored. See {@link AsaasDriver.charge}.
+   * Every other method here would have to invent that lookup out of nothing, so it refuses
+   * loudly instead — an accepted-and-dropped key on `refund()` is a second refund.
    */
   #refuseIdempotencyKey(key: string | undefined, operation: string): void {
     if (key === undefined) return;

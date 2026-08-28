@@ -222,6 +222,7 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
       customer_id VARCHAR(255),
       subscription_id VARCHAR(255),
       external_reference VARCHAR(255),
+      refunded_amount BIGINT,
       payload ${t.json},
       paid_at ${t.timestamp},
       created_at ${t.timestamp} NOT NULL,
@@ -301,6 +302,13 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   // 0.3.0 — the app's own reference on a payment, and the normalized event on the ledger row.
   await addColumn(db, dialect, 'billing_payments', 'external_reference', 'VARCHAR(255)');
   await addColumn(db, dialect, 'billing_webhook_events', 'normalized', t.json);
+
+  // 0.4.0 — how much of a payment has been refunded, in the same integer minor units as
+  // `amount`. A PARTIAL refund had nowhere to be recorded before this, so the only two
+  // options were to overwrite the status with `refunded` (writing off the whole charge) or to
+  // drop the event — and the library dropped it, leaving revenue overstated forever.
+  // `BIGINT`, matching `amount`, so net revenue is one subtraction and never a division.
+  await addColumn(db, dialect, 'billing_payments', 'refunded_amount', 'BIGINT');
 
   // ── Indexes ───────────────────────────────────────────────────────────────────────────
   //

@@ -9,11 +9,38 @@ import { PaymentsManager } from '../src/payments_manager.js';
 const PAGE = 100;
 
 /**
+ * A gateway-sent settlement date as a `Date`, or `undefined` when there is nothing usable.
+ *
+ * Never a fallback to "now". `revenue()` windows on `paid_at`, so a manufactured date files
+ * money in the month the reconcile ran rather than the month it was earned — and running the
+ * reconcile twice, in two months, counted the same charge in both.
+ */
+function parseInstant(value: string | undefined): Date | undefined {
+  if (value === undefined) return undefined;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+}
+
+/**
  * `node ace payments:sync [--provider=stripe] [--customer=cus_123 | --all]` — reconcile
- * local billing records with the gateway. Useful after missed webhooks or manual
- * dashboard changes: pulls recent invoices for a customer (or every customer in
- * recorded customer with `--all`) and upserts the paid ones into the local store, so
- * the billing tables converge with the gateway.
+ * local billing records with the gateway. Useful after missed webhooks or manual dashboard
+ * changes: pages through every invoice for a customer (or for every recorded customer with
+ * `--all`), asks the gateway what each charge's payment actually says, and writes that into
+ * the local store — so the billing tables converge with the gateway.
+ *
+ * Three properties this command has to have, and did not:
+ *
+ * 1. **Every invoice, not the first page.** It read one unpaginated listing and reported the
+ *    total as if it were the whole customer.
+ * 2. **Both directions.** It wrote `status: 'paid'` and nothing else, counting everything
+ *    that was not paid as "skipped (non-paid)" — so a local row saying `paid` while the
+ *    gateway said refunded or charged back could never be corrected, which is precisely the
+ *    drift a gateway-is-truth reconcile exists for.
+ * 3. **The gateway's settlement date, or none.** It stamped `paidAt: new Date()`, which moved
+ *    historic revenue into the month the reconcile ran.
+ *
+ * One local state is deliberately NOT reconcilable from the gateway: `disputed`. See the
+ * comment on it below.
  */
 export default class PaymentsSync extends BaseCommand {
   static override commandName = 'payments:sync';
@@ -67,35 +94,101 @@ export default class PaymentsSync extends BaseCommand {
     }
 
     let synced = 0;
+    let protectedRows = 0;
     for (const customerId of customers) {
       const invoices = await driver.listInvoices(customerId);
-      let skipped = 0;
+      let changed = 0;
+      let unchanged = 0;
+      let undecided = 0;
       for (const invoice of invoices) {
-        // Only sync invoices that represent a settled/paid billing event.
-        if (invoice.status === 'paid') {
-          await store.savePayment({
-            gatewayId: invoice.gatewayId,
-            provider: invoice.provider,
-            status: 'paid',
-            amount: invoice.amount.amount,
-            currency: invoice.amount.currency,
-            ...(invoice.customerId !== undefined ? { customerId: invoice.customerId } : {}),
-            ...(invoice.subscriptionId !== undefined
-              ? { subscriptionId: invoice.subscriptionId }
-              : {}),
-            paidAt: new Date(),
-            payload: invoice.payload,
-          });
-          synced += 1;
-        } else {
-          skipped += 1;
+        const local = await store.findPaymentByGatewayId(invoice.gatewayId);
+
+        // The converged case, and the reason a second run of this command is cheap: the
+        // gateway says paid, the local row says paid, and it already carries a settlement
+        // date. There is nothing a `findPayment` could tell us, so it is not asked.
+        if (
+          local !== null &&
+          local.status === 'paid' &&
+          local.paidAt &&
+          invoice.status === 'paid'
+        ) {
+          unchanged += 1;
+          continue;
         }
+
+        // `Invoice.status` cannot say `refunded` or `disputed` — its vocabulary has no
+        // members for them, so a reversed charge arrives here as `draft`. That is the exact
+        // drift a gateway-is-truth reconcile exists to correct, so the authority is the
+        // PAYMENT resource, which speaks `BillingStatus`: the listing enumerates, the payment
+        // decides.
+        const remote = await driver.findPayment(invoice.gatewayId);
+        if (remote === null) {
+          undecided += 1;
+          continue;
+        }
+
+        // The one local state the gateway does not get to overwrite. A chargeback is money
+        // the bank has pulled back, it lives in `billing_disputes` with a deadline, and the
+        // gateway's payment resource frequently goes on reporting the charge as received
+        // while the dispute is open — so reconciling `disputed` back to `paid` here would
+        // re-count money that is gone and silence the dispute at the same time. Only
+        // `payment.dispute_closed`, which carries an outcome, resolves one.
+        if (local !== null && local.status === 'disputed' && remote.status !== 'disputed') {
+          protectedRows += 1;
+          this.logger.warning(
+            `  ${invoice.gatewayId}: local row is disputed, gateway says ${remote.status} — left alone. A dispute is resolved by its close event, not by a reconcile.`,
+          );
+          continue;
+        }
+
+        // Already agreed, with nothing left to add: same status, and either the settlement
+        // date is recorded or the gateway has none to give. Skipped so a reconcile over a
+        // stable install writes nothing at all rather than churning every row's `updated_at`.
+        if (
+          local !== null &&
+          local.status === remote.status &&
+          (local.paidAt || remote.paidAt === undefined)
+        ) {
+          unchanged += 1;
+          continue;
+        }
+
+        // The gateway's OWN settlement date, and never a substitute for it. Stamping
+        // `new Date()` here — which is what this did — relocated historic revenue into the
+        // month the reconcile ran, so running it twice in different months counted the same
+        // charge in both. An already-recorded `paid_at` is never overwritten, and an invoice
+        // that carries none records none: absent means "not stated" to `savePayment`, which
+        // leaves whatever is there alone.
+        const settledAt = local?.paidAt ? undefined : parseInstant(remote.paidAt);
+
+        await store.savePayment({
+          gatewayId: invoice.gatewayId,
+          provider: invoice.provider,
+          // Both directions. Writing only `paid` meant a local row saying `paid` while the
+          // gateway said refunded or charged back could never be corrected — and every such
+          // row was counted as "skipped (non-paid)", which read like nothing was wrong.
+          status: remote.status,
+          amount: remote.amount.amount,
+          currency: remote.amount.currency,
+          ...(invoice.customerId !== undefined ? { customerId: invoice.customerId } : {}),
+          ...(invoice.subscriptionId !== undefined
+            ? { subscriptionId: invoice.subscriptionId }
+            : {}),
+          ...(settledAt !== undefined ? { paidAt: settledAt } : {}),
+          payload: invoice.payload,
+        });
+        changed += 1;
+        synced += 1;
       }
       this.logger.info(
-        `  ${customerId}: ${invoices.length} invoice(s), ${invoices.length - skipped} synced, ${skipped} skipped (non-paid)`,
+        `  ${customerId}: ${invoices.length} invoice(s), ${changed} reconciled, ${unchanged} already current, ${undecided} undecidable (gateway had no payment)`,
       );
     }
-    this.logger.success(`Synced ${synced} paid invoice(s) across ${customers.length} customer(s).`);
+    this.logger.success(
+      `Reconciled ${synced} payment(s) across ${customers.length} customer(s)${
+        protectedRows > 0 ? `; ${protectedRows} disputed row(s) left alone` : ''
+      }.`,
+    );
   }
 
   /**

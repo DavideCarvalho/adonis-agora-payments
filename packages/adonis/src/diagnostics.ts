@@ -45,6 +45,8 @@ export const PAYMENTS_DIAGNOSTIC_EVENTS = [
   'payment.failed',
   'payment.refunded',
   'payment.disputed',
+  'payment.dispute_warning',
+  'payment.dispute_closed',
   'payment.updated',
   'invoice.emitted',
   'webhook.received',
@@ -168,6 +170,30 @@ export interface PaymentDisputedPayload {
   amount: number;
   currency: string;
 }
+/**
+ * The pre-chargeback alert the card networks relay (Stripe Early Fraud Warning, Adyen
+ * `NOTIFICATION_OF_FRAUD`). No money has moved yet, and refunding inside the window stops
+ * the chargeback from being filed at all — which is worth doing even on a dispute you would
+ * win, because the chargeback counts against the ratio that triggers network monitoring.
+ */
+export interface PaymentDisputeWarningPayload {
+  gatewayId: string;
+  provider: string;
+  reason?: string;
+  /** When the window to act closes. The whole value of the alert is this field. */
+  actionableUntil?: string;
+}
+
+/** A dispute reaching its outcome. `won` returns the money; `lost` is final. */
+export interface PaymentDisputeClosedPayload {
+  gatewayId: string;
+  provider: string;
+  disputeId: string;
+  outcome: 'won' | 'lost' | 'canceled' | 'expired';
+  amount?: number;
+  currency?: string;
+}
+
 export interface PaymentUpdatedPayload {
   gatewayId: string;
   provider: string;
@@ -282,6 +308,8 @@ export interface PaymentsDiagnosticPayloads {
   'payment.failed': PaymentFailedPayload;
   'payment.refunded': PaymentRefundedPayload;
   'payment.disputed': PaymentDisputedPayload;
+  'payment.dispute_warning': PaymentDisputeWarningPayload;
+  'payment.dispute_closed': PaymentDisputeClosedPayload;
   'payment.updated': PaymentUpdatedPayload;
   'invoice.emitted': InvoiceEmittedPayload;
   'webhook.received': WebhookReceivedPayload;

@@ -1,6 +1,8 @@
 import type {
   CheckoutSession,
   Customer,
+  Dispute,
+  DisputeEvidence,
   Invoice,
   InvoiceOptions,
   Money,
@@ -36,6 +38,12 @@ export interface PaymentsDriver {
    * the limitation early instead of at the gateway.
    */
   readonly capabilities?: {
+    /**
+     * Whether the gateway exposes a dispute API — reading a chargeback and submitting
+     * evidence for it. Separate from the rest because a gateway can settle money perfectly
+     * and give you nothing but an email when one is filed.
+     */
+    disputes?: boolean;
     /** Full refunds against a payment. Woovi/OpenPix lacks it. */
     refunds?: boolean;
     /** Lists gateway invoices. Woovi/OpenPix has no invoice concept. */
@@ -92,6 +100,28 @@ export interface PaymentsDriver {
 
   /** List invoices for a customer. */
   listInvoices(customerId: string): Promise<Invoice[]>;
+
+  // ── Disputes ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Fetch a chargeback by the gateway's dispute id.
+   *
+   * Optional: a gateway with no dispute API declares `capabilities.disputes = false` and
+   * omits this, rather than returning something invented. The webhook still reports the
+   * dispute — what is missing is the ability to read or answer it over the API.
+   */
+  findDispute?(disputeGatewayId: string): Promise<Dispute | null>;
+
+  /**
+   * Submit evidence for a chargeback — a representment.
+   *
+   * **Most gateways accept this ONCE.** A driver must not retry it on its own, and the
+   * library never submits automatically: whether to fight a dispute or refund it is a risk
+   * decision about the merchant's own economics — refunding costs the sale, losing costs
+   * the fee and the ratio — and no library has the standing to make it. The library's job
+   * ends at making the deadline visible and the submission one honest call.
+   */
+  submitDisputeEvidence?(disputeGatewayId: string, evidence: DisputeEvidence): Promise<Dispute>;
 
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
 

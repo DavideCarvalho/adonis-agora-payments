@@ -92,6 +92,81 @@ export interface MoneyAmount {
   currency: Currency;
 }
 
+/**
+ * Where a dispute stands. A chargeback is the only thing in this library that takes money
+ * back AFTER it settled, and the window to answer is measured in days.
+ *
+ * `warning` is not a dispute yet — it is the pre-chargeback alert the card networks relay
+ * (Stripe's Early Fraud Warning, Adyen's `NOTIFICATION_OF_FRAUD`), where refunding inside
+ * the window stops the chargeback from ever being filed. That matters beyond the one sale:
+ * a chargeback counts against the ratio that puts a merchant into a card network's
+ * monitoring programme, so it can be worth refunding a dispute you would have won.
+ */
+export type DisputeStatus =
+  | 'warning'
+  | 'open'
+  | 'under_review'
+  | 'won'
+  | 'lost'
+  | 'canceled'
+  | 'expired';
+
+/** A chargeback or pre-chargeback alert, normalized across gateways. */
+export interface Dispute {
+  /** The gateway's id for the dispute itself — NOT the payment's. */
+  id: string;
+  provider: string;
+  /** The disputed payment's gateway id. */
+  paymentGatewayId: string;
+  status: DisputeStatus;
+  /**
+   * How much is being disputed, in the currency's smallest unit. Not always the whole
+   * payment: a partial chargeback is normal.
+   */
+  amount?: MoneyAmount;
+  /** The gateway's own reason code, verbatim — the vocabulary is per-network. */
+  reason?: string;
+  /**
+   * When evidence must be submitted by. The single most operationally important field
+   * here: past it, the dispute is lost by default and nothing can be done.
+   */
+  evidenceDueBy?: string;
+  /** Whether this gateway will still accept evidence — most accept it ONCE. */
+  canSubmitEvidence?: boolean;
+  createdAt?: string;
+  payload: Record<string, unknown>;
+}
+
+/**
+ * Evidence for a representment.
+ *
+ * Every field is optional because no gateway wants all of them and no app has all of them,
+ * but the shape is deliberately concrete rather than a bag: a driver has to map onto the
+ * gateway's own field names, and it cannot map what it cannot recognize.
+ */
+export interface DisputeEvidence {
+  /** Free-text explanation. Most gateways weigh this heavily. */
+  explanation?: string;
+  receiptUrl?: string;
+  invoiceUrl?: string;
+  shippingCarrier?: string;
+  shippingTrackingNumber?: string;
+  shippingDate?: string;
+  serviceDate?: string;
+  /** Where the customer accepted the terms, and when. */
+  termsUrl?: string;
+  termsAcceptedAt?: string;
+  customerName?: string;
+  customerEmail?: string;
+  customerIpAddress?: string;
+  /** Prior undisputed payments by the same customer — a strong signal for most networks. */
+  priorUndisputedPayments?: number;
+  /** Documents already uploaded to the gateway, by its own file id. */
+  documentIds?: string[];
+  /** Anything gateway-specific the shape above has no name for. */
+  metadata?: Record<string, unknown>;
+}
+
 /** A customer as seen by the gateway. */
 export interface Customer {
   id: string;

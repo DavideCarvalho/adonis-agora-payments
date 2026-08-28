@@ -3,7 +3,11 @@ import { useState } from 'react';
 import { paymentsClient } from '../client/payments-client';
 import { formatCount, formatDay, formatDaysUntil, formatWhen } from './money';
 import { Pager, Panel, QueryState, ScanNotice } from './shell';
-import { subscriptionIsBilling, subscriptionNeedsAttention, subscriptionStatusClass } from './status';
+import {
+  subscriptionIsBilling,
+  subscriptionNeedsAttention,
+  subscriptionStatusClass,
+} from './status';
 import { Badge } from './ui/badge';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';

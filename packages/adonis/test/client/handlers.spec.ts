@@ -69,6 +69,17 @@ describe('payment status handler', () => {
     expect(result.body).toEqual({ error: 'unauthorized' });
   });
 
+  it('refuses when authorize says no, even though an owner would resolve', async () => {
+    // Pins `authorize` on its own. Ana is a perfectly resolvable owner, so the only thing
+    // that can refuse her here is the first guard — and if it stopped running, the store
+    // would be read for a request the app said no to.
+    const spy = vi.spyOn(store, 'findPaymentByGatewayId');
+    const result = await call(ana, 'pay_ana', { authorize: () => false });
+    expect(result.status).toBe(401);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
   it('refuses when authorize passes but no owner can be resolved', async () => {
     // A real shape: a guard that authenticates a machine token with no user row behind it.
     const result = await call(ana, 'pay_ana', { authorize: () => true, owner: () => null });
@@ -240,7 +251,11 @@ describe('payment status handler', () => {
       findCustomerByOwner: store.findCustomerByOwner.bind(store),
     } as never;
 
-    const result = await paymentStatus({ store: lucidish, config: resolveConfig() }, ana, 'pay_lucid');
+    const result = await paymentStatus(
+      { store: lucidish, config: resolveConfig() },
+      ana,
+      'pay_lucid',
+    );
     expect(result.body).toEqual({
       status: 'paid',
       amount: 98_765,

@@ -1,14 +1,20 @@
 ---
 title: Dashboard
-description: The embedded billing console — a React SPA plus the JSON API it runs on, mounted into your AdonisJS routes. Read revenue and active subscriptions for a period, page through payments, and see which webhook events failed and why.
+description: The embedded billing console — a React SPA plus the JSON API it runs on, mounted into your AdonisJS routes. Lead with what needs attention today, read revenue and subscriptions, find the customer who is stuck, and refund or retry from the same page.
 icon: LayoutDashboard
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
 
 The dashboard mounts a billing console into your app: a React single-page app plus the JSON API it
-runs on. It reads through the [billing store](/docs/payments/billing) — no gateway calls — so it
-works offline from the gateways, answers instantly, and shows exactly what your database recorded.
+runs on. It is built for **daily management** — someone opening it in the morning to ask *is money
+coming in, what needs my attention, which customer is stuck, and can I fix it from here* — not for
+debugging a single gateway call. Raw payloads, signature traces and timings belong in
+[`@adonis-agora/telescope`](/docs/payments/diagnostics); you will not find them here.
+
+Every screen reads through the [billing store](/docs/payments/billing), so it answers instantly and
+shows exactly what your database recorded. The only calls that leave your app are the two actions:
+a refund, and a webhook retry.
 
 ```sh
 node ace configure @adonis-agora/payments
@@ -28,16 +34,83 @@ a webhook ends up answering `403` to Stripe.
 
 | Screen | Reads | What it answers |
 | --- | --- | --- |
-| **Overview** | `billingOverview` | Revenue and active subscriptions for a period, plus usage per meter. |
-| **Payments** | `listPayments` | A page of payments, filterable by status — which charge failed, and when. |
-| **Webhook events** | `listWebhookEvents` | The ledger, defaulting to `failed`, with each handler's error rendered in full. |
+| **Overview** | `billingHealth` + `billingOverview` | What needs attention today, then revenue and active subscriptions for a period, plus usage per meter. |
+| **Payments** | `listPayments` | A page of payments, filterable by status and gateway — which charge failed, and when. Refund from here. |
+| **Subscriptions** | `listSubscriptions` | Who is `past_due` or `paused`, on which plan, with the trial and period end dates. |
+| **Webhook events** | `listWebhookEvents` | The ledger, defaulting to `failed`, with each handler's error rendered in full. Retry from here. |
 
-The webhook events screen is the one worth opening first after an incident: a `failed` row means a
-handler threw and the dispatcher gave up, so whatever that event described never happened. The
-`error` column is the only place that message survives.
+### The health panel
 
-Money is integer cents everywhere — on the wire too. The SPA formats at the edge with the `currency`
-you configure.
+The first thing on the Overview, above the revenue tiles, is [`billingHealth`](/docs/payments/production#health-checks)
+— the same three checks `node ace payments:health` runs, on the same thresholds:
+
+- **Events claimed and never finished.** Nothing is consuming the dispatcher; the worker is not running.
+- **Events the dispatcher gave up on.** Handlers threw and retries ran out, so those events never took effect.
+- **Charges created that never confirmed.** What a webhook endpoint that stopped being reachable looks like from the inside.
+
+Every one of these is a silent failure: the endpoints keep answering `200` while revenue quietly
+stops landing. A healthy install shows one green line. An unhealthy one leads with the count, says
+what it means, names which provider and event type is failing, and links straight to the rows.
+
+<Callout title="Why health sits above revenue">
+Revenue answers "how did we do". Health answers "is anything broken right now". On the morning the
+worker is dead, the revenue tile still shows yesterday's healthy number.
+</Callout>
+
+### Filtering by gateway
+
+Every list filters by **provider** as well as status, and the list of providers comes from your own
+data — not from the eighteen drivers this package ships. With Stripe and Pix in production, the
+filter offers Stripe and Pix.
+
+The store's list queries filter on status only, so the provider narrowing is applied over pages read
+from the store, up to a bounded scan. When that scan stops short the console says so, because "no
+Asaas failures" and "no Asaas failures in the rows I looked at" are different answers.
+
+### Money
+
+Amounts are integer **minor units** everywhere — on the wire too — and the divisor is not always
+100. The SPA renders with the currency's own exponent, the same table `src/money.ts` uses, so a
+`¥1990` charge shows as ¥1,990 rather than ¥19.90 and a `KWD` amount keeps its three decimals.
+
+## Actions
+
+Two things can be changed from the console. Both are `POST` (a refund reachable by URL is a refund a
+crawler can trigger) and both run through the same [`authorize`](#authorization) guard — and the
+`dashboardAuth` session, when configured — as every read.
+
+### Refund a payment
+
+Offered on a `paid` row. The dialog restates the **amount** and the **customer** before doing
+anything, takes an optional partial amount, and disables itself for the round-trip so a double click
+is not a double refund. The refund goes through the driver that took the payment, resolved by name
+from your `config/payments.ts`:
+
+- A gateway with no refund API (Woovi/OpenPix) is refused **before** the call, with a sentence
+  naming the gateway.
+- A provider no longer in your config answers `503` with the manager's own message, which lists the
+  providers that are configured.
+- A gateway that refuses answers `502` carrying **its** message verbatim.
+
+The local row is not rewritten. The gateway confirms a refund with a `payment.refunded` webhook, and
+that is what moves the row to `refunded` — writing it optimistically would show a refund that may
+never have settled.
+
+### Retry a failed webhook event
+
+The one thing that closes the loop after you fix a handler bug: a `failed` row means the effect that
+event described never happened and nothing will retry it. Retry re-runs the event through the same
+`WebhookProcessor` your app uses — built-in store sync **plus your own handlers**.
+
+It is safe to repeat. The ledger re-claims a `failed` event and refuses an in-flight or already
+processed one, which is the same guard that makes a gateway redelivery a no-op.
+
+<Callout type="warn" title="Gateways that sign their webhooks">
+Rebuilding the event needs the driver to parse the stored payload, and the signature headers are not
+stored. For a gateway that verifies a signature (Stripe among them) the retry answers `422` with the
+driver's message and leaves the ledger row exactly as it was — redeliver from the gateway's own
+dashboard instead. Gateways that do not sign replay normally.
+</Callout>
 
 ## Configuration
 
@@ -90,9 +163,10 @@ export default defineConfig({
 })
 ```
 
-<Callout type="warn" title="This console shows revenue">
-Payment amounts, customer ids and raw gateway payloads are all reachable through it. The default
-token gate is a floor for staging, not an answer for production — put a real guard in front of it.
+<Callout type="warn" title="This console shows revenue — and can move it">
+Payment amounts and customer ids are reachable through it, and the refund action moves money at your
+gateway. The default token gate is a floor for staging, not an answer for production — put a real
+guard in front of it.
 </Callout>
 
 ### A session instead of a token
@@ -128,14 +202,24 @@ console.
 
 The SPA is a client of a plain API, and so can you be — the same guard covers it:
 
-| Route | Query | Returns |
+| Route | Query / body | Returns |
 | --- | --- | --- |
-| `GET <path>/api/overview` | `from`, `to` | `billingOverview` metrics for the period |
-| `GET <path>/api/payments` | `status`, `limit`, `offset` | a page of payments, newest first |
-| `GET <path>/api/webhook-events` | `status`, `limit`, `offset` | a page of the ledger, newest first |
+| `GET <path>/api/health` | — | the `billingHealth` checks plus the failure breakdown |
+| `GET <path>/api/overview` | `period`, `from`, `to` | `billingOverview` metrics for the period |
+| `GET <path>/api/payments` | `status`, `provider`, `limit`, `offset` | a page of payments, newest first |
+| `GET <path>/api/subscriptions` | `status`, `provider`, `limit`, `offset` | a page of subscriptions, plus the whole-table `past_due` count |
+| `GET <path>/api/webhook-events` | `status`, `provider`, `limit`, `offset` | a page of the ledger, newest first |
+| `GET <path>/api/providers` | — | the gateways present in your data |
+| `POST <path>/api/payments/:gatewayId/refund` | `{ amount? }` | the gateway's refund; `amount` is integer minor units |
+| `POST <path>/api/webhook-events/:gatewayEventId/retry` | — | `{ status: 'processed' }` |
 
 Paging is clamped (50 by default, 200 maximum), so an unbounded `limit` from a query string cannot
-select the whole table.
+select the whole table. A provider-filtered page also reports `scanned` and `truncated`.
+
+The action responses distinguish their failures rather than collapsing them into `500`: `404` for a
+row that is not there, `409` for a row in the wrong state (a payment that is not `paid`, an event
+that is not `failed`), `422` for an event the driver cannot rebuild, `502` for a gateway or handler
+that refused, and `503` when the payments manager is not reachable at all.
 
 When the billing layer is disabled (`billing.enabled: false`) the API answers `503` rather than
 `500` — the store being absent is a deployment state, not a crash.

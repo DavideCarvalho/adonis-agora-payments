@@ -36,9 +36,8 @@ describe('payment status parity with @adonis-agora/payments-react', () => {
   it('treats every status that is not pending or authorized as terminal', async () => {
     // The two non-terminal ones are the two where money can still move: an unpaid Pix, and
     // card funds that are held rather than captured.
-    expect(PAYMENT_STATUSES.filter((status) => !TERMINAL_PAYMENT_STATUSES.includes(status as never))).toEqual([
-      'pending',
-      'authorized',
-    ]);
+    expect(
+      PAYMENT_STATUSES.filter((status) => !TERMINAL_PAYMENT_STATUSES.includes(status as never)),
+    ).toEqual(['pending', 'authorized']);
   });
 });

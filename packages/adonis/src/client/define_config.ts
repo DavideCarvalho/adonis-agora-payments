@@ -184,37 +184,26 @@ export const registryReferenceGuard: ReferenceGuard = async ({ payment, owner, s
   if (!payment.customerId) {
     return {
       allowed: false,
-      reason:
-        `[payments] Payment ${payment.gatewayId} has no customer recorded, so no owner can be ` +
-        'proven for it. Charge through a gateway customer, or supply your own `authorizeReference` ' +
-        'in config/payments_client.ts.',
+      reason: `[payments] Payment ${payment.gatewayId} has no customer recorded, so no owner can be proven for it. Charge through a gateway customer, or supply your own \`authorizeReference\` in config/payments_client.ts.`,
     };
   }
 
-  const mapping = (await store.findCustomerByOwner(
-    owner.type,
-    owner.id,
-    payment.provider,
-  )) as { gatewayId?: unknown } | null;
+  const mapping = (await store.findCustomerByOwner(owner.type, owner.id, payment.provider)) as {
+    gatewayId?: unknown;
+  } | null;
   const heldGatewayId = typeof mapping?.gatewayId === 'string' ? mapping.gatewayId : null;
 
   if (!heldGatewayId) {
     return {
       allowed: false,
-      reason:
-        `[payments] No billing_customers mapping for ${owner.type}:${owner.id} at "${payment.provider}", ` +
-        'so ownership of this payment cannot be proven and the request was denied. Record the mapping ' +
-        'with `ensureCustomer(driver, id, input, { store, owner })`, or supply your own ' +
-        '`authorizeReference` in config/payments_client.ts.',
+      reason: `[payments] No billing_customers mapping for ${owner.type}:${owner.id} at "${payment.provider}", so ownership of this payment cannot be proven and the request was denied. Record the mapping with \`ensureCustomer(driver, id, input, { store, owner })\`, or supply your own \`authorizeReference\` in config/payments_client.ts.`,
     };
   }
 
   if (heldGatewayId !== payment.customerId) {
     return {
       allowed: false,
-      reason:
-        `[payments] ${owner.type}:${owner.id} holds customer ${heldGatewayId} at "${payment.provider}", ` +
-        `but payment ${payment.gatewayId} belongs to ${payment.customerId}.`,
+      reason: `[payments] ${owner.type}:${owner.id} holds customer ${heldGatewayId} at "${payment.provider}", but payment ${payment.gatewayId} belongs to ${payment.customerId}.`,
     };
   }
 

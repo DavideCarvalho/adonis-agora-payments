@@ -50,7 +50,6 @@ describe('isActionable', () => {
   });
 });
 
-
 describe('subscriptionStatusClass', () => {
   it('gives every modelled subscription status its own hue', () => {
     expect(subscriptionStatusClass('active')).toBe('s-active');

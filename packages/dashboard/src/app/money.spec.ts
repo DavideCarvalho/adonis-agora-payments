@@ -124,8 +124,22 @@ describe('currencyExponent (agrees with the server’s money.ts)', () => {
 
   it('is 0 for every zero-decimal currency the server knows, ISK included', () => {
     for (const code of [
-      'BIF', 'CLP', 'DJF', 'GNF', 'ISK', 'JPY', 'KMF', 'KRW',
-      'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF',
+      'BIF',
+      'CLP',
+      'DJF',
+      'GNF',
+      'ISK',
+      'JPY',
+      'KMF',
+      'KRW',
+      'PYG',
+      'RWF',
+      'UGX',
+      'VND',
+      'VUV',
+      'XAF',
+      'XOF',
+      'XPF',
     ]) {
       expect([code, currencyExponent(code)]).toEqual([code, 0]);
     }

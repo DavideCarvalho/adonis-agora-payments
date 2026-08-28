@@ -129,7 +129,9 @@ describe('usePaymentStatus', () => {
 
   it('stops on every terminal status, not just paid', async () => {
     for (const status of ['failed', 'refunded', 'canceled', 'disputed'] as const) {
-      const fetchImpl = fakeFetch([() => json({ status, amount: 1, currency: 'BRL', paidAt: null })]);
+      const fetchImpl = fakeFetch([
+        () => json({ status, amount: 1, currency: 'BRL', paidAt: null }),
+      ]);
       const { result, unmount } = renderHook(() =>
         usePaymentStatus('pay_1', { fetchImpl: fetchImpl.impl }),
       );

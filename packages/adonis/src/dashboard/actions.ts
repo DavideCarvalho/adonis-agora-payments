@@ -177,7 +177,10 @@ export function createReplayAction(deps: {
       await restore();
       return {
         kind: 'undeliverable',
-        message: messageOf(error, 'the driver could not rebuild this event from its stored payload'),
+        message: messageOf(
+          error,
+          'the driver could not rebuild this event from its stored payload',
+        ),
       };
     }
 

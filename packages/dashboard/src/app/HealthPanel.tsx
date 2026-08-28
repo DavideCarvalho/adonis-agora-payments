@@ -69,7 +69,9 @@ export function HealthPanel({
         <div className="flex items-center gap-3">
           <span className="s-failed dot" aria-hidden />
           <h2 className="text-sm text-zinc-100">
-            {failing.length === 1 ? '1 thing needs attention' : `${failing.length} things need attention`}
+            {failing.length === 1
+              ? '1 thing needs attention'
+              : `${failing.length} things need attention`}
           </h2>
         </div>
         <p className="mono text-[11px] text-zinc-500">checked {formatWhen(report.checkedAt)}</p>

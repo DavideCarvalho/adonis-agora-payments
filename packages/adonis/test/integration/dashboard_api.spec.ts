@@ -324,9 +324,7 @@ describe('payments dashboard API (integration)', () => {
       const failures = (
         res.body as { failures: Array<{ provider: string; type: string; count: number }> }
       ).failures;
-      expect(failures).toEqual([
-        { provider: 'stripe', type: 'invoice.payment_failed', count: 1 },
-      ]);
+      expect(failures).toEqual([{ provider: 'stripe', type: 'invoice.payment_failed', count: 1 }]);
     });
   });
 
@@ -380,7 +378,10 @@ describe('payments dashboard API (integration)', () => {
         payments: Array<{ gatewayId: string; provider: string }>;
         page: { truncated: boolean };
       };
-      expect(body.payments.map((p) => p.gatewayId).sort()).toEqual(['pi_ancient', 'pi_unconfirmed']);
+      expect(body.payments.map((p) => p.gatewayId).sort()).toEqual([
+        'pi_ancient',
+        'pi_unconfirmed',
+      ]);
       expect(body.payments.every((p) => p.provider === 'asaas')).toBe(true);
       expect(body.page.truncated).toBe(false);
     });
@@ -399,11 +400,7 @@ describe('payments dashboard API (integration)', () => {
 
     it('reports the gateways this install actually has data for', async () => {
       const res = await providers(deps(), req());
-      expect((res.body as { providers: string[] }).providers).toEqual([
-        'asaas',
-        'stripe',
-        'woovi',
-      ]);
+      expect((res.body as { providers: string[] }).providers).toEqual(['asaas', 'stripe', 'woovi']);
     });
   });
 
@@ -415,7 +412,12 @@ describe('payments dashboard API (integration)', () => {
         calls.push(input);
         return {
           kind: 'ok',
-          refund: { gatewayId: 're_1', amount: input.amount ?? 123456, currency: 'BRL', status: 'succeeded' },
+          refund: {
+            gatewayId: 're_1',
+            amount: input.amount ?? 123456,
+            currency: 'BRL',
+            status: 'succeeded',
+          },
         };
       };
       return { calls, action };
@@ -473,7 +475,10 @@ describe('payments dashboard API (integration)', () => {
     });
 
     it('leaves the real row alone — the gateway’s webhook is what updates it', async () => {
-      await refundPayment({ ...deps(), actions: { refund: spyRefund().action } }, body('pi_recent'));
+      await refundPayment(
+        { ...deps(), actions: { refund: spyRefund().action } },
+        body('pi_recent'),
+      );
       const row = await store.findPaymentByGatewayId('pi_recent');
       expect(row?.status).toBe('paid');
     });

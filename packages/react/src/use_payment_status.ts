@@ -1,9 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  type PaymentStatus,
-  isPaymentStatus,
-  isTerminalPaymentStatus,
-} from './statuses.js';
+import { type PaymentStatus, isPaymentStatus, isTerminalPaymentStatus } from './statuses.js';
 
 /** What one successful read of the endpoint said. */
 export interface PaymentStatusSnapshot {
@@ -138,6 +134,10 @@ export function usePaymentStatus(
     setRunId((value) => value + 1);
   }, []);
 
+  // `runId` is not read inside the effect, and it is still a real dependency: bumping it is
+  // the whole of `refresh()` — it tears the run down and starts a fresh one with the backoff
+  // reset. Dropping it would make `refresh()` silently do nothing.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see above.
   useEffect(() => {
     if (!active) {
       setState(IDLE);
@@ -145,7 +145,10 @@ export function usePaymentStatus(
     }
 
     const opts = optionsRef.current;
-    const doFetch = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
+    // Resolved lazily: a host with no global `fetch` must fail on the first request with
+    // its own error, not while the effect is setting up.
+    const doFetch: typeof fetch =
+      opts.fetchImpl ?? ((input, init) => globalThis.fetch(input, init as RequestInit));
     const headers = { accept: 'application/json', ...(opts.headers ?? {}) };
     const credentials = opts.credentials ?? 'same-origin';
     const base = opts.baseUrl ?? '';
@@ -228,7 +231,9 @@ export function usePaymentStatus(
         // an error, so any earlier transient error is cleared along with it.
         if (!disposed) {
           setState((previous) =>
-            previous.error === null && previous.isPolling ? previous : { ...previous, error: null, isPolling: true },
+            previous.error === null && previous.isPolling
+              ? previous
+              : { ...previous, error: null, isPolling: true },
           );
         }
         schedule();
@@ -236,7 +241,10 @@ export function usePaymentStatus(
       }
 
       if (!response.ok) {
-        fail(new Error(`[payments] Payment status request failed (HTTP ${response.status}).`), true);
+        fail(
+          new Error(`[payments] Payment status request failed (HTTP ${response.status}).`),
+          true,
+        );
         schedule();
         return;
       }

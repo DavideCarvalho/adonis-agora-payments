@@ -39,13 +39,16 @@ export function RefundDialog({ payment, onClose }: { payment: PaymentRow; onClos
   const blocked = amountInvalid || amountTooLarge || mutation.isPending;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Confirm refund"
-    >
-      <div className="w-full max-w-md rounded border border-line bg-panel-2 shadow-xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+      {/* The native element, not a div with `role="dialog"`: it comes with the semantics for free
+          and browsers keep improving them. Its UA styles (absolute, auto margins, 1em padding,
+          `canvas` background) are all overridden below. */}
+      <dialog
+        open
+        aria-modal="true"
+        aria-label="Confirm refund"
+        className="relative m-0 w-full max-w-md rounded border border-line bg-panel-2 p-0 text-inherit shadow-xl"
+      >
         <header className="border-b border-line px-4 py-3">
           <h2 className="text-sm text-zinc-100">Refund this payment?</h2>
         </header>
@@ -134,7 +137,7 @@ export function RefundDialog({ payment, onClose }: { payment: PaymentRow; onClos
             </button>
           )}
         </footer>
-      </div>
+      </dialog>
     </div>
   );
 }

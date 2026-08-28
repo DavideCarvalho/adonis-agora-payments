@@ -79,7 +79,10 @@ const notFound = (message: string): ApiResponse => ({ status: 404, body: { error
  *  is not `failed`. Distinct from `400`: the request was well-formed, the world moved. */
 const conflict = (message: string): ApiResponse => ({ status: 409, body: { error: message } });
 /** The gateway/handler was reached and refused. `502`, not `500`: nothing here is broken. */
-const upstreamFailed = (message: string): ApiResponse => ({ status: 502, body: { error: message } });
+const upstreamFailed = (message: string): ApiResponse => ({
+  status: 502,
+  body: { error: message },
+});
 /** The capability is not wired in this deployment. Same shape the provider uses for a missing
  *  billing store, so the SPA reports both the same way. */
 const unavailable = (message: string): ApiResponse => ({ status: 503, body: { error: message } });

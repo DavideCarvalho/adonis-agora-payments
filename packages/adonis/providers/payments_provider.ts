@@ -10,6 +10,7 @@ import {
 } from '../src/billing/resolve_dispatch.js';
 import { isInjectableAsLucid, resolveBillingStore } from '../src/billing/resolve_store.js';
 import { WebhookDispatcher } from '../src/billing/webhook_dispatcher.js';
+import type { DurableEngineLike } from '../src/billing/webhook_dispatcher.js';
 import type { WebhookDispatchMode } from '../src/billing/webhook_dispatcher.js';
 import { WebhookProcessor } from '../src/billing/webhook_processor.js';
 import type { WebhookHandler } from '../src/billing/webhook_processor.js';
@@ -135,6 +136,9 @@ export default class PaymentsProvider {
       // In 'auto', durable is used only when its engine is resolvable in the app
       // (i.e. the durable provider is registered) — not merely installed.
       durableAvailable: () => this.#isDurableAvailable(),
+      // The engine itself, not just "is it there": the dispatcher has to REGISTER the
+      // webhook workflow on the app's engine before it can start a run on it.
+      durableEngine: () => this.#resolveDurableEngine(),
     });
   }
 
@@ -203,12 +207,23 @@ export default class PaymentsProvider {
   /** Whether the app has a resolvable durable workflow engine. */
   async #isDurableAvailable(): Promise<boolean> {
     try {
-      const { WorkflowEngine } = await import('@adonis-agora/durable');
-      await this.app.container.make(WorkflowEngine);
+      await this.#resolveDurableEngine();
       return true;
     } catch {
       return false;
     }
+  }
+
+  /**
+   * The app's durable engine, from the container.
+   *
+   * Deliberately the app's own instance and never a fresh one: the engine is bound to the
+   * store and transport the app configured, and a second engine would persist runs that
+   * nothing picks up.
+   */
+  async #resolveDurableEngine(): Promise<DurableEngineLike> {
+    const { WorkflowEngine } = await import('@adonis-agora/durable');
+    return (await this.app.container.make(WorkflowEngine)) as unknown as DurableEngineLike;
   }
 
   /** Map `billing.durable` (`'auto' | boolean`) onto the dispatcher's mode. */

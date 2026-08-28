@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { WebhookEvent } from '../types.js';
 import type { WebhookProcessor } from './webhook_processor.js';
 
@@ -42,16 +43,37 @@ export interface WebhookDispatcherOptions {
    */
   durableAvailable?: () => Promise<boolean>;
   /**
-   * Dispatch a webhook event as an `@adonisjs/queue` job. The provider wires this (it owns
-   * the job class, its container binding and the queue-manager registration). Absent =
-   * queue mode is unavailable.
+   * Resolve the app's durable {@link DurableEngineLike}. The provider wires this from the
+   * container; without it there is no engine to register the workflow ON, and durable mode
+   * cannot work — see {@link DurableEngineLike} for why registration is not optional.
    */
+  durableEngine?: () => Promise<DurableEngineLike>;
 }
 
-/** The minimal durable surface we use: a workflow class with a static `dispatch`. */
-export interface DurableWorkflowLike {
-  dispatch(input: { event: WebhookEvent }): Promise<{ runId: string }>;
+/**
+ * The slice of `@adonis-agora/durable`'s `WorkflowEngine` this needs.
+ *
+ * Both halves are load-bearing. `start` alone is not enough: the engine looks the workflow
+ * up by NAME in its registry and throws `workflow … is not registered` for anything it has
+ * not been told about, so the webhook workflow has to be REGISTERED before the first
+ * dispatch. This class used to build an anonymous `class extends BaseWorkflow` and call its
+ * static `dispatch`, which registers nothing and has no `static workflow = { name }` — so
+ * every delivery threw `workflow class PaymentsWebhookWorkflow has no registered name`, was
+ * collected as a failed event, and the route answered 500. In an app with durable installed
+ * — which is exactly what `'auto'` selects — that was every webhook, forever.
+ */
+export interface DurableEngineLike {
+  register(name: string, version: string, fn: (ctx: unknown, input: never) => Promise<void>): void;
+  start(name: string, input: unknown, runId: string): Promise<unknown>;
 }
+
+/**
+ * The durable workflow's identity. Stable and explicit: the engine registry is keyed by
+ * name, an in-flight run records the name+version it started on, and a name that changed
+ * between deploys would strand runs mid-flight.
+ */
+export const WEBHOOK_WORKFLOW_NAME = 'payments-webhook';
+export const WEBHOOK_WORKFLOW_VERSION = '1';
 
 /** One event of a delivery that did not get through, and why. */
 export interface WebhookDeliveryFailure {
@@ -87,9 +109,11 @@ export class WebhookDispatcher {
   #maxAttempts: number;
   #baseDelayMs: number;
   #maxDelayMs: number;
-  #workflow: DurableWorkflowLike | undefined;
+  #engine: DurableEngineLike | undefined;
+  #registered = false;
   #durableChecked = false;
   #durableAvailable: (() => Promise<boolean>) | undefined;
+  #durableEngine: (() => Promise<DurableEngineLike>) | undefined;
 
   constructor(options: WebhookDispatcherOptions) {
     this.#processor = options.processor;
@@ -98,6 +122,7 @@ export class WebhookDispatcher {
     this.#baseDelayMs = options.retries?.baseDelayMs ?? 500;
     this.#maxDelayMs = options.retries?.maxDelayMs ?? 30_000;
     this.#durableAvailable = options.durableAvailable;
+    this.#durableEngine = options.durableEngine;
   }
 
   /**
@@ -153,8 +178,16 @@ export class WebhookDispatcher {
   /** One event through the active backend. Durable/queue may throw; in-process reports. */
   async #dispatchOne(event: WebhookEvent): Promise<{ runId?: string; error?: Error }> {
     if (await this.#useDurable()) {
-      const workflow = await this.#resolveDurable();
-      const { runId } = await workflow.dispatch({ event });
+      const engine = await this.#resolveEngine();
+      this.#registerWorkflow(engine);
+      // A FRESH run id per delivery, deliberately. `engine.start` is idempotent by run id
+      // and returns the prior run's state for a repeat — so a deterministic id derived from
+      // the event would make the gateway's redelivery of a FAILED event a silent no-op,
+      // which is the one case redelivery exists for. Deduplication of an already-processed
+      // event is the ledger's job (the claim answers `null` and the run skips), and it
+      // makes that decision from the row's state rather than from the id alone.
+      const runId = randomUUID();
+      await engine.start(WEBHOOK_WORKFLOW_NAME, { event }, runId);
       return { runId };
     }
 
@@ -167,56 +200,64 @@ export class WebhookDispatcher {
   }
 
   /**
-   * Decide whether durable handles this event. `auto` performs the lazy import once and
-   * caches the answer; `durable` forces it (throwing when missing); `in-process` never.
+   * Decide whether durable handles this event. `auto` resolves the engine once and caches
+   * the answer; `durable` forces it (throwing when missing); `in-process` never.
    */
   async #useDurable(): Promise<boolean> {
     if (this.#mode === 'in-process') return false;
     if (this.#mode === 'durable') return true;
     // 'auto'
-    if (this.#durableChecked) return this.#workflow !== undefined;
+    if (this.#durableChecked) return this.#engine !== undefined;
     this.#durableChecked = true;
     try {
       if (this.#durableAvailable && !(await this.#durableAvailable())) {
-        this.#workflow = undefined;
+        this.#engine = undefined;
         return false;
       }
-      await import('@adonis-agora/durable');
-      this.#workflow = await this.#buildWorkflow();
+      this.#engine = await this.#resolveEngine();
       return true;
     } catch {
-      this.#workflow = undefined;
+      this.#engine = undefined;
       return false;
     }
   }
 
   /**
-   * Lazily build a durable workflow class that runs the event through the shared
-   * processor hook. Only called when durable is actually installed.
+   * The app's durable engine, from the seam the provider wires.
+   *
+   * There is no fallback that imports `@adonis-agora/durable` and builds its own: an engine
+   * is bound to a store and a transport that only the app has configured, and a second one
+   * would persist runs nothing ever executes.
    */
-  async #buildWorkflow(): Promise<DurableWorkflowLike> {
-    const durable = await import('@adonis-agora/durable');
-    const { BaseWorkflow } = durable as typeof import('@adonis-agora/durable');
-    const processor = this.#processor;
-    // The workflow's `run(ctx, input)` is the durable body; `dispatch` (static, inherited)
-    // enqueues it fire-and-forget. Input is the webhook event.
-    const workflow = class PaymentsWebhookWorkflow extends BaseWorkflow {
-      async run(_ctx: unknown, input: { event: WebhookEvent }): Promise<void> {
-        await processor.process(input.event);
-      }
-    };
-    return workflow as unknown as DurableWorkflowLike;
-  }
-
-  async #resolveDurable(): Promise<DurableWorkflowLike> {
-    const workflow = this.#workflow ?? (await this.#buildWorkflow());
-    if (!workflow) {
+  async #resolveEngine(): Promise<DurableEngineLike> {
+    if (this.#engine) return this.#engine;
+    if (!this.#durableEngine) {
       throw new Error(
-        '[payments] billing.durable is set to true/auto but @adonis-agora/durable is not installed. ' +
-          'Install it (`node ace add @adonis-agora/durable`) or set billing.durable to false.',
+        '[payments] billing.dispatcher is durable but no durable engine was provided. ' +
+          'The payments provider wires this from the container — install @adonis-agora/durable ' +
+          'and register its provider, or set billing.dispatcher to "in-process".',
       );
     }
-    return workflow;
+    this.#engine = await this.#durableEngine();
+    return this.#engine;
+  }
+
+  /**
+   * Register the webhook workflow on the engine. Idempotent, and it has to happen before
+   * the first `start`: the engine resolves a run by looking its NAME up in the registry and
+   * throws `workflow payments-webhook is not registered` otherwise.
+   */
+  #registerWorkflow(engine: DurableEngineLike): void {
+    if (this.#registered) return;
+    const processor = this.#processor;
+    engine.register(
+      WEBHOOK_WORKFLOW_NAME,
+      WEBHOOK_WORKFLOW_VERSION,
+      async (_ctx: unknown, input: never) => {
+        await processor.process((input as { event: WebhookEvent }).event);
+      },
+    );
+    this.#registered = true;
   }
 
   /**

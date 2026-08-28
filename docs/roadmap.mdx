@@ -29,12 +29,6 @@ per-gateway matrix.
   looping — Adyen documents one item per JSON webhook and Efí sends one in practice, so this has
   never fired, but "has never fired" is not "cannot".
 
-- **The method a router routed.** `payments.driver('pix')` resolves the provider by method, but the
-  method itself only reaches the driver when the charge also carries `method: 'pix'` — the manager
-  hands back a driver, not a pre-configured one, so it has nothing to write the routed method onto.
-  Every driver that varies by method (Stripe's `payment_method_types`, Asaas' and AbacatePay's
-  `billingType`) reads it off the charge. Routing without it silently gets the gateway's default.
-  Threading the routed method through the manager would fix it for every driver at once.
 - **Subscription amounts on Stripe.** `updateSubscription` takes an amount, a description and
   metadata. Asaas and AbacatePay apply the amount and the description; Stripe applies the
   description and metadata and drops the amount, because changing a price there needs the

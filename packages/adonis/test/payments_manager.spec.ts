@@ -54,11 +54,15 @@ describe('PaymentsManager', () => {
         methods: { pix: 'woovi', credit_card: 'stripe', boleto: 'asaas' },
       },
     );
-    expect(manager.driver('pix')).toBe(woovi);
-    expect(manager.driver('credit_card')).toBe(stripe);
-    expect(manager.driver('boleto')).toBe(asaas);
-    // A provider name still wins over method routing.
+    // Routed by METHOD, so what comes back is the driver bound to that method — the same
+    // provider, not the same object. `provider` is the identity that matters to a caller.
+    expect(manager.driver('pix').provider).toBe('woovi');
+    expect(manager.driver('credit_card').provider).toBe('stripe');
+    expect(manager.driver('boleto').provider).toBe('asaas');
+    // Routed by NAME: nothing to thread, so the driver comes back untouched.
     expect(manager.driver('stripe')).toBe(stripe);
+    // Stable across calls, so a caller can hold on to one.
+    expect(manager.driver('pix')).toBe(manager.driver('pix'));
   });
 
   it('throws when a routed method is not supported by the provider', () => {
@@ -69,10 +73,70 @@ describe('PaymentsManager', () => {
     const manager = makeManager([['woovi', pixOnly]], {
       methods: { pix: 'woovi', credit_card: 'woovi' },
     });
-    expect(manager.driver('pix')).toBe(pixOnly);
+    expect(manager.driver('pix').provider).toBe('woovi');
     expect(() => manager.driver('credit_card')).toThrow(
       /does not support payment method "credit_card"/,
     );
+  });
+
+  /**
+   * `payments.driver('pix')` picked the provider and then told it nothing. Every driver that
+   * varies by method reads it off the charge — Stripe's `payment_method_types`, Asaas' and
+   * AbacatePay's `billingType` — so a charge routed as Pix was created with whatever the
+   * gateway's dashboard defaults are. It read as working, and came back a card.
+   */
+  it('threads the routed method into the charge', async () => {
+    const woovi = new FakePaymentsDriver({ provider: 'woovi' });
+    const seen: unknown[] = [];
+    woovi.charge = async (input) => {
+      seen.push(input.method);
+      return {
+        id: 'p1',
+        gatewayId: 'p1',
+        provider: 'woovi',
+        amount: { amount: input.amount, currency: 'brl' },
+        status: 'pending' as const,
+        createdAt: new Date().toISOString(),
+      };
+    };
+    const manager = makeManager([['woovi', woovi]], { methods: { pix: 'woovi' } });
+
+    await manager.driver('pix').charge({ amount: 1990 });
+    expect(seen).toEqual(['pix']);
+  });
+
+  it('lets an explicit method on the charge win over the routed one', async () => {
+    // Routing is a default, not an override: a caller who names a method meant it.
+    const asaas = new FakePaymentsDriver({ provider: 'asaas' });
+    const seen: unknown[] = [];
+    asaas.charge = async (input) => {
+      seen.push(input.method);
+      return {
+        id: 'p1',
+        gatewayId: 'p1',
+        provider: 'asaas',
+        amount: { amount: input.amount, currency: 'brl' },
+        status: 'pending' as const,
+        createdAt: new Date().toISOString(),
+      };
+    };
+    const manager = makeManager([['asaas', asaas]], { methods: { pix: 'asaas' } });
+
+    await manager.driver('pix').charge({ amount: 1990, method: 'boleto' });
+    expect(seen).toEqual(['boleto']);
+  });
+
+  it('does not fabricate members the driver does not have', () => {
+    // The contract has optional members and callers test for them with `typeof x ===
+    // "function"`. A wrapper that defines everything turns "this gateway cannot do that"
+    // into "it can, until you call it".
+    const woovi = new FakePaymentsDriver({ provider: 'woovi' });
+    const manager = makeManager([['woovi', woovi]], { methods: { pix: 'woovi' } });
+    const routed = manager.driver('pix');
+    expect(typeof (routed as { findDispute?: unknown }).findDispute).toBe(
+      typeof (woovi as { findDispute?: unknown }).findDispute,
+    );
+    expect(routed.supportedMethods).toEqual(woovi.supportedMethods);
   });
 
   it('throws a clear error for an unknown driver', () => {

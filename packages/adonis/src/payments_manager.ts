@@ -17,6 +17,8 @@ export class PaymentsManager {
   #invoices: InvoiceManager | undefined;
   #methods: Partial<Record<PaymentMethodName, string>>;
   #defaultName: string;
+  /** Method-bound driver proxies, so repeated `driver('pix')` calls return the same object. */
+  #boundDrivers = new Map<PaymentMethodName, PaymentsDriver>();
 
   constructor(options: PaymentsManagerOptions) {
     this.#drivers = options.drivers;
@@ -57,7 +59,53 @@ export class PaymentsManager {
           `Route "${method}" to a different provider in config.methods.`,
       );
     }
-    return driver;
+    // Routing picked the provider; it must also reach the charge. Without this the method
+    // is only ever set when the CALLER repeats it — `driver('pix').charge({ method: 'pix' })`
+    // — and every driver that varies by method (Stripe's `payment_method_types`, Asaas' and
+    // AbacatePay's `billingType`) silently fell back to the gateway's dashboard default. A
+    // charge routed as Pix could come back a card.
+    return method === undefined ? driver : this.#bound(driver, method);
+  }
+
+  /**
+   * The driver, with the routed method filled in on the inputs that carry one.
+   *
+   * A Proxy rather than a hand-written wrapper for one reason: the driver contract has
+   * optional members (`findDispute`, `submitDisputeEvidence`, `capabilities`), and callers
+   * test for them with `typeof driver.x === 'function'`. A wrapper that defines every method
+   * turns "this gateway cannot do that" into "it can, until you call it" — which is the class
+   * of bug this package keeps finding. A Proxy passes absence through as absence.
+   *
+   * Cached per method so `driver('pix') === driver('pix')` still holds. Note that a driver
+   * resolved by NAME is returned untouched: `driver('stripe')` routed nothing, so there is no
+   * method to thread and no reason to wrap.
+   */
+  #bound(driver: PaymentsDriver, method: PaymentMethodName): PaymentsDriver {
+    const cached = this.#boundDrivers.get(method);
+    if (cached !== undefined) return cached;
+
+    const bound = new Proxy(driver, {
+      get(target, property, _receiver) {
+        // Bound to `target`, never to the proxy: driver methods read `#private` fields, and
+        // a proxy is not the instance those belong to.
+        const value = Reflect.get(target, property, target) as unknown;
+        if (typeof value !== 'function') return value;
+        if (property !== 'charge' && property !== 'createSubscription') {
+          return (value as (...args: unknown[]) => unknown).bind(target);
+        }
+        return (input: { method?: PaymentMethodName }, ...rest: unknown[]) =>
+          (value as (...args: unknown[]) => unknown).call(
+            target,
+            // An explicit method on the input wins. Routing is a default, not an override:
+            // `driver('pix')` picks the provider, and a caller who then names a method meant
+            // it.
+            { ...input, method: input?.method ?? method },
+            ...rest,
+          );
+      },
+    });
+    this.#boundDrivers.set(method, bound);
+    return bound;
   }
 
   /**

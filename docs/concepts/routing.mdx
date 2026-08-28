@@ -34,7 +34,24 @@ getPayments().driver()           // → config.default
 2. **A configured provider name** → that driver, directly. No method check applies, because you did
    not route a method.
 3. **Otherwise, a payment method** → the provider `config.methods` routes it to, **and** a check that
-   the provider actually supports that method.
+   the provider actually supports that method, **and** the method itself, threaded into the charge.
+
+The third part of rule 3 matters more than it looks. Routing picks the provider; it also has to tell
+the provider what it routed. `driver('pix')` hands back the driver **bound to `pix`**, so a charge
+made through it is created as Pix without you repeating yourself:
+
+```ts
+getPayments().driver('pix').charge({ amount: 1990 })
+// reaches the driver as { amount: 1990, method: 'pix' }
+```
+
+Every driver that varies by method reads it off the charge — Stripe's `payment_method_types`, Asaas'
+and AbacatePay's `billingType` — so before this, a charge routed as Pix was created with whatever the
+gateway's dashboard defaults are. It read as working and could come back a card.
+
+An explicit method on the charge still wins: routing is a default, not an override. And a driver
+resolved by **name** comes back untouched — `driver('stripe')` routed nothing, so there is nothing to
+thread.
 
 Anything that matches none of the three throws immediately, naming what *is* configured:
 
@@ -159,5 +176,7 @@ const payment = await getPayments()
   .driver(order.method)      // 'pix' | 'credit_card' | 'boleto'
   .charge({ customerId, amount: order.total, externalReference: order.id })
 ```
+
+Note what is **not** there: `method: order.method` repeated on the charge. Routing carries it.
 
 Moving Pix from Woovi to Asaas is one line of config, and this service does not change.

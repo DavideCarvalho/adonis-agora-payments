@@ -242,7 +242,9 @@ export class InMemoryBillingStore
 
   async listSubscriptions(query: BillingListQuery): Promise<SubscriptionListItem[]> {
     const matching = [...this.subscriptions.values()].filter(
-      (row) => query.status === undefined || row.status === query.status,
+      (row) =>
+        (query.status === undefined || row.status === query.status) &&
+        (query.provider === undefined || row.provider === query.provider),
     );
     return this.#page(matching, query).map((row) => ({
       id: row.id,
@@ -304,7 +306,9 @@ export class InMemoryBillingStore
 
   async listPayments(query: BillingListQuery): Promise<PaymentListItem[]> {
     const matching = [...this.payments.values()].filter(
-      (row) => query.status === undefined || row.status === query.status,
+      (row) =>
+        (query.status === undefined || row.status === query.status) &&
+        (query.provider === undefined || row.provider === query.provider),
     );
     return this.#page(matching, query).map((row) => ({
       id: row.id,
@@ -383,7 +387,9 @@ export class InMemoryBillingStore
 
   async listWebhookEvents(query: BillingListQuery): Promise<WebhookEventListItem[]> {
     const matching = [...this.webhookEvents.values()].filter(
-      (row) => query.status === undefined || row.status === query.status,
+      (row) =>
+        (query.status === undefined || row.status === query.status) &&
+        (query.provider === undefined || row.provider === query.provider),
     );
     return this.#page(matching, query).map((row) => ({
       id: row.id,

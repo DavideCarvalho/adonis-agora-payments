@@ -101,6 +101,14 @@ export interface BillingCountQuery {
 export interface BillingListQuery {
   /** Exact status match. Omit for every status. */
   status?: string;
+  /**
+   * Exact provider match. Omit for every provider.
+   *
+   * Not decorative: with eighteen gateways configurable at once, "what is failing on
+   * Asaas" is a different question from "what is failing", and without this the dashboard
+   * had to page the whole table and filter in memory.
+   */
+  provider?: string;
   limit?: number;
   offset?: number;
 }

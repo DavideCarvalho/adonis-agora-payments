@@ -10,6 +10,18 @@ per-gateway matrix.
 
 ## Gateways
 
+- **The dashboard's webhook retry cannot replay a signed gateway.** The ledger stores the raw
+  payload but neither the request headers nor the normalized event, and `parseWebhook` verifies a
+  signature — so a Stripe or Adyen retry answers `422` and leaves the ledger row untouched, while
+  unsigned gateways replay normally. Closing it means storing the normalized event alongside the
+  raw payload in `billing_webhook_events`, which is a new nullable column and therefore a migration
+  existing installs have to run. Worth doing: retrying a failed event after fixing a handler bug is
+  the single most useful thing an operator can do, and today it works for a minority of gateways.
+- **`MGA` has no right answer.** ISO 4217 gives the Malagasy ariary two decimal places (it is
+  subdivided into five iraimbilanja, not a hundred), while Stripe treats it as zero-decimal. The
+  exponent table follows ISO, so a Stripe charge in MGA will disagree with it. Nobody has hit this;
+  it is written down so that whoever does finds the reason rather than a bug.
+
 - **Pagar.me's `charge.chargedback` is deprecated.** Pagar.me's own event list says migrate to
   `chargeback.received` by **2026-09-30**. The driver maps the deprecated event to
   `payment.disputed` today; the replacement's payload shape is undocumented, and `data.id` there

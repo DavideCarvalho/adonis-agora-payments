@@ -182,6 +182,7 @@ export class LucidBillingStore
   async listSubscriptions(query: BillingListQuery): Promise<SubscriptionListItem[]> {
     const builder = this.#subscriptionModel.query().orderBy('created_at', 'desc');
     if (query.status !== undefined) builder.where('status', query.status);
+    if (query.provider !== undefined) builder.where('provider', query.provider);
     const rows = (await builder
       .limit(clampLimit(query.limit))
       .offset(clampOffset(query.offset))) as SubscriptionInstance[];
@@ -245,6 +246,7 @@ export class LucidBillingStore
   async listPayments(query: BillingListQuery): Promise<PaymentListItem[]> {
     const builder = this.#paymentModel.query().orderBy('created_at', 'desc');
     if (query.status !== undefined) builder.where('status', query.status);
+    if (query.provider !== undefined) builder.where('provider', query.provider);
     const rows = (await builder
       .limit(clampLimit(query.limit))
       .offset(clampOffset(query.offset))) as PaymentInstance[];
@@ -317,6 +319,7 @@ export class LucidBillingStore
   async listWebhookEvents(query: BillingListQuery): Promise<WebhookEventListItem[]> {
     const builder = this.#webhookEventModel.query().orderBy('created_at', 'desc');
     if (query.status !== undefined) builder.where('status', query.status);
+    if (query.provider !== undefined) builder.where('provider', query.provider);
     const rows = (await builder
       .limit(clampLimit(query.limit))
       .offset(clampOffset(query.offset))) as WebhookEventInstance[];

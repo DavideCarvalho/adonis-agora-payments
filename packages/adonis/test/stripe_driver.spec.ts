@@ -176,3 +176,287 @@ describe('StripeDriver', () => {
     expect(payment.hostedUrl).toBe('https://payments.stripe.com/boleto/1');
   });
 });
+
+/**
+ * The driver used to hand `event.type` and the raw Stripe object straight to the
+ * processor, which switches on the canonical names and therefore recognized none of them:
+ * every Stripe webhook was ledgered as processed and synced nothing. A chargeback cannot
+ * move a row that was never written, so the dispute mapping starts here.
+ */
+describe('StripeDriver webhooks', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  /** `constructEvent` is what the driver calls; the signature itself is Stripe's business. */
+  function webhook(type: string, object: Record<string, unknown>) {
+    stripeMock.webhooks.constructEvent.mockReturnValue({
+      id: 'evt_1',
+      type,
+      created: 1_767_225_600,
+      data: { object },
+    });
+    return new StripeDriver(
+      { config: () => ({}) },
+      { apiKey: 'sk_test', currency: 'eur', webhookSecret: 'whsec_test' },
+    ).parseWebhook('{}', { 'stripe-signature': 't=1,v1=x' });
+  }
+
+  it('normalizes a succeeded PaymentIntent onto payment.succeeded', () => {
+    const event = webhook('payment_intent.succeeded', {
+      id: 'pi_1',
+      amount: 1990,
+      currency: 'eur',
+      customer: 'cus_1',
+      metadata: { external_reference: 'order_7' },
+    });
+    expect(event.type).toBe('payment.succeeded');
+    expect(event.data).toEqual({
+      gatewayId: 'pi_1',
+      amount: 1990,
+      currency: 'eur',
+      customerId: 'cus_1',
+      externalReference: 'order_7',
+    });
+  });
+
+  it('maps charge.dispute.created onto payment.disputed, keyed on the PaymentIntent', () => {
+    const event = webhook('charge.dispute.created', {
+      id: 'dp_1',
+      charge: 'ch_1',
+      payment_intent: 'pi_1',
+      amount: 1990,
+      currency: 'eur',
+      reason: 'fraudulent',
+    });
+    expect(event.type).toBe('payment.disputed');
+    // `pi_1`, not `ch_1`: the row the processor has to move is the one `charge()` wrote.
+    expect(event.data).toEqual({ gatewayId: 'pi_1', amount: 1990, currency: 'eur' });
+  });
+
+  it('falls back to the charge id when the dispute has no PaymentIntent', () => {
+    // `payment_intent` is nullable on the Dispute object — a legacy Charges-API charge has
+    // none, and losing the dispute entirely would be worse than keying it on the charge.
+    const event = webhook('charge.dispute.created', {
+      id: 'dp_1',
+      charge: 'ch_1',
+      payment_intent: null,
+      amount: 1990,
+      currency: 'eur',
+    });
+    expect(event.data).toMatchObject({ gatewayId: 'ch_1' });
+  });
+
+  it('leaves the rest of the dispute family as payment.updated', () => {
+    // Won, lost, funds pulled, funds returned: the resolution, which every gateway reports
+    // differently and which this package deliberately does not name.
+    for (const type of [
+      'charge.dispute.closed',
+      'charge.dispute.updated',
+      'charge.dispute.funds_withdrawn',
+      'charge.dispute.funds_reinstated',
+    ]) {
+      const event = webhook(type, { charge: 'ch_1', amount: 1990, currency: 'eur' });
+      expect(event.type, type).toBe('payment.updated');
+    }
+  });
+
+  it('only calls a fully refunded charge refunded', () => {
+    const partial = webhook('charge.refunded', {
+      id: 'ch_1',
+      payment_intent: 'pi_1',
+      amount: 1990,
+      amount_refunded: 500,
+      currency: 'eur',
+      refunded: false,
+    });
+    // A partial refund leaves the payment paid; marking the row `refunded` would write off
+    // money the merchant kept.
+    expect(partial.type).toBe('payment.updated');
+
+    const full = webhook('charge.refunded', {
+      id: 'ch_1',
+      payment_intent: 'pi_1',
+      amount: 1990,
+      amount_refunded: 1990,
+      currency: 'eur',
+      refunded: true,
+    });
+    expect(full.type).toBe('payment.refunded');
+    expect(full.data).toMatchObject({ gatewayId: 'pi_1' });
+  });
+
+  it('does not call a completed subscription checkout a payment', () => {
+    // A subscription session completes with no payment at all; `payment_status` is the
+    // only field that says whether money moved.
+    const unpaid = webhook('checkout.session.completed', {
+      id: 'cs_1',
+      payment_status: 'unpaid',
+      payment_intent: 'pi_1',
+      amount_total: 1990,
+      currency: 'eur',
+    });
+    expect(unpaid.type).toBe('payment.updated');
+
+    const paid = webhook('checkout.session.completed', {
+      id: 'cs_1',
+      payment_status: 'paid',
+      payment_intent: 'pi_1',
+      amount_total: 1990,
+      currency: 'eur',
+      client_reference_id: 'order_7',
+    });
+    expect(paid.type).toBe('payment.succeeded');
+    expect(paid.data).toMatchObject({ gatewayId: 'pi_1', externalReference: 'order_7' });
+  });
+
+  it('normalizes the subscription lifecycle, including a paused one', () => {
+    const created = webhook('customer.subscription.created', {
+      id: 'sub_1',
+      customer: 'cus_1',
+      status: 'active',
+      items: { data: [{ price: { id: 'price_1' } }] },
+    });
+    expect(created.type).toBe('subscription.created');
+    expect(created.data).toMatchObject({
+      gatewayId: 'sub_1',
+      customerId: 'cus_1',
+      status: 'active',
+      planId: 'price_1',
+    });
+
+    const paused = webhook('customer.subscription.updated', {
+      id: 'sub_1',
+      customer: 'cus_1',
+      status: 'paused',
+      items: { data: [] },
+    });
+    expect(paused.type).toBe('subscription.updated');
+    expect((paused.data as { status: string }).status).toBe('paused');
+
+    const deleted = webhook('customer.subscription.deleted', {
+      id: 'sub_1',
+      customer: 'cus_1',
+      status: 'canceled',
+      items: { data: [] },
+    });
+    expect(deleted.type).toBe('subscription.canceled');
+  });
+
+  it('passes an unmapped event through under its Stripe name', () => {
+    const event = webhook('invoice.payment_succeeded', { id: 'in_1', total: 1990 });
+    expect(event.type).toBe('invoice.payment_succeeded');
+    expect(event.data).toMatchObject({ id: 'in_1' });
+  });
+
+  it('passes a canonical event through rather than emitting a payload the processor throws on', () => {
+    // The built-in handlers throw on a malformed payload, and a throw inside the webhook
+    // route is a 500 Stripe retries forever. An object with no amount is not a payment
+    // event, whatever its type says.
+    const event = webhook('payment_intent.succeeded', { id: 'pi_1' });
+    expect(event.type).toBe('payment_intent.succeeded');
+  });
+});
+
+describe('StripeDriver statuses', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('reads requires_capture as authorized — held, not captured, and not failed', async () => {
+    // It used to fall through to `failed`: a live authorization reported as a dead payment.
+    stripeMock.paymentIntents.retrieve.mockResolvedValue(intent({ status: 'requires_capture' }));
+    const payment = await makeDriver().findPayment('pi_1');
+    expect(payment?.status).toBe('authorized');
+    expect(payment?.paidAt).toBeUndefined();
+  });
+
+  it('reads requires_confirmation as pending, not failed', async () => {
+    stripeMock.paymentIntents.retrieve.mockResolvedValue(
+      intent({ status: 'requires_confirmation' }),
+    );
+    expect((await makeDriver().findPayment('pi_1'))?.status).toBe('pending');
+  });
+
+  it('reads a paused subscription as paused, not active', async () => {
+    // `active` entitled a subscriber nobody is billing — Stripe pauses collection exactly
+    // so the app can stop serving them.
+    stripeMock.subscriptions.retrieve.mockResolvedValue({
+      id: 'sub_1',
+      customer: 'cus_1',
+      status: 'paused',
+      items: { data: [{ price: { id: 'price_1', unit_amount: 1990, currency: 'eur' } }] },
+      trial_end: null,
+      ended_at: null,
+      cancel_at_period_end: false,
+      created: 1_767_225_600,
+    });
+    expect((await makeDriver().findSubscription('sub_1'))?.status).toBe('paused');
+  });
+
+  it('names the payment method by category, not by brand', async () => {
+    for (const [stripeType, method] of [
+      ['sepa_debit', 'bank_debit'],
+      ['us_bank_account', 'bank_debit'],
+      ['ideal', 'bank_transfer'],
+      ['paypal', 'wallet'],
+      ['klarna', 'bnpl'],
+      ['oxxo', 'voucher'],
+    ] as const) {
+      stripeMock.paymentIntents.retrieve.mockResolvedValue(
+        intent({ payment_method_types: [stripeType] }),
+      );
+      expect((await makeDriver().findPayment('pi_1'))?.method, stripeType).toBe(method);
+    }
+  });
+});
+
+describe('StripeDriver idempotency', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('sends the key as the request header on a refund', async () => {
+    stripeMock.refunds.create.mockResolvedValue({
+      id: 're_1',
+      amount: 1990,
+      currency: 'eur',
+      status: 'succeeded',
+      created: 1_767_225_600,
+    });
+
+    await makeDriver().refund('pi_1', 1990, { idempotencyKey: 'refund:1' });
+
+    // A retried refund job without this creates a SECOND refund.
+    expect(stripeMock.refunds.create.mock.calls[0]![1]).toEqual({ idempotencyKey: 'refund:1' });
+  });
+
+  it('sends the key on createCustomer, createSubscription and updateSubscription', async () => {
+    stripeMock.customers.create.mockResolvedValue({ id: 'cus_1', email: null, name: null });
+    const subscription = {
+      id: 'sub_1',
+      customer: 'cus_1',
+      status: 'active',
+      items: { data: [{ price: { id: 'price_1', unit_amount: 1990, currency: 'eur' } }] },
+      trial_end: null,
+      ended_at: null,
+      cancel_at_period_end: false,
+      created: 1_767_225_600,
+    };
+    stripeMock.subscriptions.create.mockResolvedValue(subscription);
+    stripeMock.subscriptions.update.mockResolvedValue(subscription);
+    const driver = makeDriver();
+
+    await driver.createCustomer({ email: 'a@b.c', idempotencyKey: 'cus:1' });
+    await driver.createSubscription({
+      customerId: 'cus_1',
+      planId: 'price_1',
+      idempotencyKey: 'sub:1',
+    });
+    await driver.updateSubscription('sub_1', { description: 'x', idempotencyKey: 'upd:1' });
+
+    expect(stripeMock.customers.create.mock.calls[0]![1]).toEqual({ idempotencyKey: 'cus:1' });
+    expect(stripeMock.subscriptions.create.mock.calls[0]![1]).toEqual({ idempotencyKey: 'sub:1' });
+    expect(stripeMock.subscriptions.update.mock.calls[0]![2]).toEqual({ idempotencyKey: 'upd:1' });
+  });
+});

@@ -200,6 +200,7 @@ export class PagarmeDriver implements PaymentsDriver {
   // ── Customers ────────────────────────────────────────────────────────────────────────
 
   async createCustomer(input: CreateCustomerInput): Promise<Customer> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createCustomer', 'POST /customers');
     const data = await this.#request<PagarmeCustomerResponse>('/customers', {
       method: 'POST',
       body: this.#customerBody(input),
@@ -259,7 +260,17 @@ export class PagarmeDriver implements PaymentsDriver {
       },
     };
 
-    const order = await this.#request<PagarmeOrderResponse>('/orders', { method: 'POST', body });
+    const order = await this.#request<PagarmeOrderResponse>('/orders', {
+      method: 'POST',
+      body,
+      // The `Idempotency-key` header, which Pagar.me documents for order creation and
+      // nothing else. It is separate from the `code` above: `code` routes the webhook
+      // back to your record, this stops a retry becoming a second order. Two footguns
+      // worth knowing — Pagar.me does NOT compare the bodies, so the same key with a
+      // different payload still returns the first order; and the key lives 24h in
+      // production but only 5 minutes in sandbox.
+      ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
+    });
     const charge = order.charges?.[0];
     if (!charge) {
       throw new Error(
@@ -284,7 +295,12 @@ export class PagarmeDriver implements PaymentsDriver {
     }
   }
 
-  async refund(paymentGatewayId: string, amount?: Money): Promise<Refund> {
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
+    this.#refuseIdempotencyKey(options?.idempotencyKey, 'refund', 'DELETE /charges/{id}');
     // Pagar.me has one endpoint for both: cancelling an unsettled charge and refunding a
     // paid one. Omitting `amount` cancels/refunds the full value.
     const data = await this.#request<PagarmeChargeResponse>(
@@ -387,6 +403,7 @@ export class PagarmeDriver implements PaymentsDriver {
    *   in that shape — there is no plan to read a price from.
    */
   async createSubscription(input: CreateSubscriptionInput): Promise<Subscription> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createSubscription', 'POST /subscriptions');
     const fromPlan = input.planId.startsWith('plan_');
     const method = this.#mapMethodOut(input.method ?? 'credit_card');
     const body: Record<string, unknown> = {
@@ -658,24 +675,6 @@ export class PagarmeDriver implements PaymentsDriver {
   }
 
   #mapCharge(data: PagarmeChargeResponse, order?: PagarmeOrderResponse): Payment {
-    const statusMap: Record<string, Payment['status']> = {
-      pending: 'pending',
-      processing: 'pending',
-      waiting_payment: 'pending',
-      paid: 'paid',
-      overpaid: 'paid',
-      underpaid: 'paid',
-      canceled: 'canceled',
-      partial_canceled: 'refunded',
-      refunded: 'refunded',
-      partial_refunded: 'refunded',
-      voided: 'canceled',
-      failed: 'failed',
-      payment_failed: 'failed',
-      not_authorized: 'failed',
-      with_error: 'failed',
-      chargedback: 'disputed',
-    };
     const method = this.#mapMethodIn(data.payment_method);
     const transaction = data.last_transaction;
     const payment: Payment = {
@@ -683,7 +682,7 @@ export class PagarmeDriver implements PaymentsDriver {
       gatewayId: data.id,
       provider: this.provider,
       amount: { amount: data.amount, currency: 'brl' },
-      status: statusMap[data.status] ?? 'pending',
+      status: this.#chargeStatus(data, transaction),
       payload: data as unknown as Record<string, unknown>,
       createdAt: this.#toIso(data.created_at) ?? new Date().toISOString(),
     };
@@ -704,6 +703,47 @@ export class PagarmeDriver implements PaymentsDriver {
     const paidAt = this.#toIso(data.paid_at);
     if (paidAt !== null) payment.paidAt = paidAt;
     return payment;
+  }
+
+  /**
+   * A charge's canonical status — which Pagar.me's `charge.status` alone cannot give.
+   *
+   * Pagar.me has no `authorized` charge status: a card taken with `operation_type:
+   * "auth_only"` leaves the CHARGE at `pending`, exactly like a boleto nobody has paid,
+   * and only `last_transaction.status` says `authorized_pending_capture`. So `pending`
+   * here is overloaded — "waiting for the payer" and "money held on the card, waiting for
+   * you to capture it" are the same word — and reading only the charge collapses a hold
+   * the issuer has already granted into a charge that may never happen.
+   */
+  #chargeStatus(
+    data: PagarmeChargeResponse,
+    transaction: PagarmeTransactionResponse | undefined,
+  ): Payment['status'] {
+    const statusMap: Record<string, Payment['status']> = {
+      pending: 'pending',
+      processing: 'pending',
+      waiting_payment: 'pending',
+      paid: 'paid',
+      overpaid: 'paid',
+      underpaid: 'paid',
+      canceled: 'canceled',
+      partial_canceled: 'refunded',
+      refunded: 'refunded',
+      partial_refunded: 'refunded',
+      voided: 'canceled',
+      failed: 'failed',
+      payment_failed: 'failed',
+      not_authorized: 'failed',
+      with_error: 'failed',
+      chargedback: 'disputed',
+    };
+    const mapped = statusMap[data.status] ?? 'pending';
+    if (mapped !== 'pending') return mapped;
+    // Both transaction statuses mean the same thing: authorized, nothing captured.
+    return transaction?.status === 'authorized_pending_capture' ||
+      transaction?.status === 'waiting_capture'
+      ? 'authorized'
+      : 'pending';
   }
 
   #mapSubscription(data: PagarmeSubscriptionResponse): Subscription {
@@ -773,10 +813,15 @@ export class PagarmeDriver implements PaymentsDriver {
       case 'order.updated':
       case 'order.closed':
         return 'payment.updated';
-      // The contract has no dispute or cancel event, and inventing one would route
-      // straight to the processor's no-op branch under a name nothing reads. These land
-      // as `payment.updated`; `event.raw.type` still says `charge.chargedback`.
+      // The chargeback: the issuer has pulled the money back. The charge's own status
+      // becomes `chargedback` too, and only the charge's — Pagar.me leaves the order's
+      // status alone. Note the spelling: `chargedback`, with the `d` in the middle, which
+      // Pagar.me's own docs call out because everyone gets it wrong.
       case 'charge.chargedback':
+        return 'payment.disputed';
+      // A cancel is not a dispute. The contract has no cancel event either, and inventing
+      // one would route straight to the processor's no-op branch under a name nothing
+      // reads — these land as `payment.updated` with `event.raw.type` intact.
       case 'order.canceled':
       case 'invoice.canceled':
         return 'payment.updated';
@@ -911,6 +956,21 @@ export class PagarmeDriver implements PaymentsDriver {
     return ['credit_card', 'pix', 'boleto'];
   }
 
+  /**
+   * Pagar.me documents `Idempotency-key` for **order creation and nothing else** — the
+   * reference for `DELETE /charges/{id}`, `POST /customers` and `POST /subscriptions`
+   * lists no header but `Authorization`. The header might well be honoured there too, on
+   * the same gateway; "might" is not a retry guarantee, and quietly forwarding a key the
+   * reference does not promise anything about turns a caller's retry into a second
+   * refund. So those operations refuse it and say where it does work.
+   */
+  #refuseIdempotencyKey(key: string | undefined, operation: string, endpoint: string): void {
+    if (key === undefined) return;
+    throw new Error(
+      `[payments] Pagar.me documents idempotency only for order creation, so \`${operation}\` cannot honour an idempotencyKey — its \`${endpoint}\` reference documents no such header. Only \`charge()\` (POST /orders) deduplicates; for the rest, deduplicate before you call.`,
+    );
+  }
+
   /** Parse a gateway timestamp into an ISO string, or `null` when absent/invalid. */
   #toIso(value: string | undefined): string | null {
     if (value === undefined || value === '') return null;
@@ -934,13 +994,18 @@ export class PagarmeDriver implements PaymentsDriver {
 
   async #request<T>(
     path: string,
-    options: { method?: string; body?: Record<string, unknown> } = {},
+    options: { method?: string; body?: Record<string, unknown>; idempotencyKey?: string } = {},
   ): Promise<T> {
     return httpRequest<T>(path, {
       baseUrl: this.#baseUrl,
       ...(options.method !== undefined ? { method: options.method } : {}),
       ...(options.body !== undefined ? { body: options.body } : {}),
       authHeader: this.#authHeader,
+      // Pagar.me spells it `Idempotency-key`; the value is case-sensitive, and two
+      // concurrent requests carrying the same one get a 409 rather than two orders.
+      ...(options.idempotencyKey !== undefined
+        ? { headers: { 'Idempotency-key': options.idempotencyKey } }
+        : {}),
     });
   }
 }

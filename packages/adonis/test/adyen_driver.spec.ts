@@ -489,3 +489,178 @@ describe('AdyenDriver — webhooks', () => {
     expect(event.type).toBe('payment.succeeded');
   });
 });
+
+describe('AdyenDriver — disputes', () => {
+  /** A chargeback notification item; Adyen names the disputed payment in originalReference. */
+  const chargebackItem = (eventCode: string) => ({
+    pspReference: '9916158720123456',
+    originalReference: '8836158720123456',
+    merchantAccountCode: 'TestMerchant',
+    merchantReference: 'order_local_1',
+    amount: { currency: 'EUR', value: 1990 },
+    eventCode,
+    success: 'true',
+  });
+
+  it('maps NOTIFICATION_OF_CHARGEBACK onto payment.disputed', () => {
+    const event = makeDriver().parseWebhook(
+      notification(chargebackItem('NOTIFICATION_OF_CHARGEBACK')),
+      {},
+    );
+    expect(event.type).toBe('payment.disputed');
+    // The row that has to stop saying `paid` is the PAYMENT's, not the notification's.
+    expect(event.data).toMatchObject({
+      gatewayId: '8836158720123456',
+      amount: 1990,
+      currency: 'eur',
+      externalReference: 'order_local_1',
+    });
+  });
+
+  it('maps a bare CHARGEBACK onto payment.disputed too', () => {
+    // An ACH return goes straight to CHARGEBACK with no notification of chargeback and
+    // cannot be defended at all — mapping only the notification would miss exactly the
+    // disputes nobody can fight.
+    const event = makeDriver().parseWebhook(notification(chargebackItem('CHARGEBACK')), {});
+    expect(event.type).toBe('payment.disputed');
+  });
+
+  it('leaves the resolution and the pre-dispute warnings as payment.updated', () => {
+    for (const eventCode of [
+      'CHARGEBACK_REVERSED',
+      'SECOND_CHARGEBACK',
+      'PREARBITRATION_WON',
+      'PREARBITRATION_LOST',
+      'DISPUTE_DEFENSE_PERIOD_ENDED',
+      // No money moves on either of these; calling them a chargeback would take a live
+      // payment away over a question.
+      'REQUEST_FOR_INFORMATION',
+      'NOTIFICATION_OF_FRAUD',
+    ]) {
+      const event = makeDriver().parseWebhook(notification(chargebackItem(eventCode)), {});
+      expect(event.type, eventCode).toBe('payment.updated');
+    }
+  });
+});
+
+describe('AdyenDriver — capture mode', () => {
+  it('reads Authorised as paid on an automatic-capture account', async () => {
+    // Adyen's default: the capture follows on its own and sends no CAPTURE webhook, so the
+    // authorization is the last word the driver ever gets about that money.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        pspReference: '8836158720123456',
+        resultCode: 'Authorised',
+        amount: { value: 1990, currency: 'EUR' },
+      }),
+      text: async () => '',
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const payment = await makeDriver().charge({
+      amount: 1990,
+      paymentMethodId: 'tok_1',
+      externalReference: 'order_local_1',
+    });
+    expect(payment.status).toBe('paid');
+  });
+
+  it('reads Authorised as authorized on a manual-capture account', async () => {
+    // Here it is a hold that expires unless something captures it — reporting `paid` would
+    // grant access against money that has not moved and may never.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        pspReference: '8836158720123456',
+        resultCode: 'Authorised',
+        amount: { value: 1990, currency: 'EUR' },
+      }),
+      text: async () => '',
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const payment = await makeDriver({ captureMode: 'manual' }).charge({
+      amount: 1990,
+      paymentMethodId: 'tok_1',
+      externalReference: 'order_local_1',
+    });
+    expect(payment.status).toBe('authorized');
+  });
+
+  it('makes CAPTURE the money event when capture is manual, and AUTHORISATION only an update', () => {
+    const driver = makeDriver({ captureMode: 'manual' });
+    expect(driver.parseWebhook(notification(authorisationItem), {}).type).toBe('payment.updated');
+    expect(
+      driver.parseWebhook(notification({ ...authorisationItem, eventCode: 'CAPTURE' }), {}).type,
+    ).toBe('payment.succeeded');
+  });
+
+  it('keeps AUTHORISATION as the money event when capture is automatic', () => {
+    // Automatic capture sends no CAPTURE webhook, so downgrading AUTHORISATION would leave
+    // every payment on such an account unsettled forever.
+    expect(makeDriver().parseWebhook(notification(authorisationItem), {}).type).toBe(
+      'payment.succeeded',
+    );
+  });
+});
+
+describe('AdyenDriver — refund idempotency and methods', () => {
+  it('sends the Idempotency-Key header on a refund', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        pspReference: '9916158720123456',
+        paymentPspReference: '8836158720123456',
+        amount: { value: 1990, currency: 'EUR' },
+        status: 'received',
+        merchantAccount: 'TestMerchant',
+      }),
+      text: async () => '',
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await makeDriver().refund('8836158720123456', 1990, { idempotencyKey: 'refund-1' });
+
+    const headers = fetchMock.mock.calls[0]![1].headers as Record<string, string>;
+    // Without it a retried refund job refunds the payment twice.
+    expect(headers['Idempotency-Key']).toBe('refund-1');
+  });
+
+  it('refuses a key longer than Adyen accepts instead of letting the gateway 422', async () => {
+    await expect(
+      makeDriver().refund('8836158720123456', 1990, { idempotencyKey: 'x'.repeat(65) }),
+    ).rejects.toThrow(/64 characters/);
+  });
+
+  it('names the instrument by category instead of calling everything a card', async () => {
+    for (const [paymentMethod, method] of [
+      ['visa', 'card'],
+      ['maestro', 'debit_card'],
+      ['sepadirectdebit', 'bank_debit'],
+      ['ideal', 'bank_transfer'],
+      ['paypal', 'wallet'],
+      ['klarna_account', 'bnpl'],
+    ] as const) {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          pspReference: '8836158720123456',
+          resultCode: 'Authorised',
+          amount: { value: 1990, currency: 'EUR' },
+          additionalData: { paymentMethod },
+        }),
+        text: async () => '',
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const payment = await makeDriver().charge({
+        amount: 1990,
+        paymentMethodId: 'tok_1',
+        externalReference: 'order_local_1',
+      });
+      expect(payment.method, paymentMethod).toBe(method);
+    }
+  });
+});

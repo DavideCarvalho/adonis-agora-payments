@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import type { OverviewMetric, PeriodPreset } from '../client/payments-client';
 import { paymentsClient } from '../client/payments-client';
+import { HealthPanel } from './HealthPanel';
 import { formatCents, formatCount } from './money';
 import { Panel, QueryState } from './shell';
 import { Segmented } from './ui/segmented';
@@ -52,7 +53,12 @@ function Stat({
   );
 }
 
-export function Overview() {
+export function Overview({
+  onNavigate,
+}: {
+  /** Jump to the screen that shows a failing check's actual rows. */
+  onNavigate: (screen: 'payments' | 'webhooks', status: string) => void;
+}) {
   const [period, setPeriod] = useState<PeriodPreset>('30d');
   const query = useQuery({
     queryKey: ['overview', period],
@@ -65,6 +71,11 @@ export function Overview() {
 
   return (
     <div className="flex flex-col gap-4">
+      {/* Health comes FIRST, above the money. Revenue answers "how did we do"; this answers "is
+          anything broken right now", and an operator opening the console in the morning needs the
+          second one before the first. */}
+      <HealthPanel onNavigate={onNavigate} />
+
       <div className="flex flex-wrap items-center justify-between gap-3">
         <Segmented
           aria-label="Period"

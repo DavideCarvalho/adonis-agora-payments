@@ -1,9 +1,16 @@
 import { readFile } from 'node:fs/promises';
 import { basename, resolve as resolvePath } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { HttpContext } from '@adonisjs/core/http';
 import type { ApplicationService, HttpRouterService } from '@adonisjs/core/types';
 import type { BillingStore } from '../src/billing/billing_store.js';
+import { WebhookProcessor } from '../src/billing/webhook_processor.js';
+import type { WebhookHandler } from '../src/billing/webhook_processor.js';
+import {
+  type ReplayableWebhookEvent,
+  createRefundAction,
+  createReplayAction,
+} from '../src/dashboard/actions.js';
 import {
   type ResolvedDashboardAuth,
   SESSION_COOKIE_NAME,
@@ -19,14 +26,29 @@ import {
 import {
   type ApiRequest,
   type ApiResponse,
+  type DashboardActions,
   type Deps,
+  health,
   overview,
   payments,
+  providers,
+  refundPayment,
+  retryWebhookEvent,
+  subscriptions,
   webhookEvents,
 } from '../src/dashboard/handlers.js';
 import { renderLoginPage } from '../src/dashboard/login_page.js';
 import { contentTypeFor, renderIndexHtml } from '../src/dashboard/spa.js';
+import type { BillingHandlers, PaymentsConfig } from '../src/define_config.js';
+import { PaymentsManager } from '../src/payments_manager.js';
 import { getBillingStore } from '../src/services/main.js';
+import type { WebhookEvent } from '../src/types.js';
+import {
+  type WebhookHandlersBarrel,
+  discoverWebhookHandlers,
+  loadWebhookHandlersFromBarrel,
+  resolveWebhookHandler,
+} from '../src/webhook_handlers.js';
 
 /**
  * Directory of the built SPA (`dist/assets/spa`, copied in by `copy:spa` — see `package.json`),
@@ -48,15 +70,22 @@ function spaDirectory(): string {
  * Mounts the payments dashboard into an AdonisJS app: the `@adonis-agora/payments-dashboard` React
  * SPA plus a JSON API over the resolved {@link BillingStore}, served under a configurable path.
  *
- * Everything it serves is a store read — there are NO gateway calls and no control actions, which is
- * why this console is so much smaller than durable's.
+ * Reads never touch a gateway. The two ACTIONS do — a refund calls the driver that took the
+ * payment, and a retry re-runs a failed webhook event through the app's own handlers — so both are
+ * `POST` (a refund reachable by URL is a refund a crawler can trigger) and both go through the same
+ * {@link enforce} guard as every read.
  *
  * Routes (relative to the configured `path`, default `/payments-dashboard`):
  * - `GET  /`                     -> the dashboard SPA's `index.html`
  * - `GET  /assets/:file`         -> the SPA's hashed JS/CSS bundle
+ * - `GET  /api/health`           -> `billingHealth()` — what needs attention today
  * - `GET  /api/overview`         -> `billingOverview()` metrics for a period
- * - `GET  /api/payments`         -> a page of `billing_payments` (status filter)
- * - `GET  /api/webhook-events`   -> a page of `billing_webhook_events` (status filter)
+ * - `GET  /api/payments`         -> a page of `billing_payments` (status/provider filters)
+ * - `GET  /api/subscriptions`    -> a page of `billing_subscriptions` (status/provider filters)
+ * - `GET  /api/webhook-events`   -> a page of `billing_webhook_events` (status/provider filters)
+ * - `GET  /api/providers`        -> the gateways this install actually has data for
+ * - `POST /api/payments/:gatewayId/refund`           -> refund through the payment's own gateway
+ * - `POST /api/webhook-events/:gatewayEventId/retry` -> re-run a failed event's handlers
  *
  * Plus, when `dashboardAuth` is configured, `GET|POST <path>/login`, `POST <path>/session` and
  * `GET <path>/logout`.
@@ -97,7 +126,10 @@ export default class PaymentsDashboardProvider {
 
     this.registerSpaRoutes(router, config, apiBase);
 
-    const json = (handler: (d: Deps, req: ApiRequest) => Promise<ApiResponse>) => {
+    const json = (
+      handler: (d: Deps, req: ApiRequest) => Promise<ApiResponse>,
+      needsActions = false,
+    ) => {
       return async (ctx: HttpContext) => {
         if (!(await this.enforce(config, ctx, 'api'))) return;
         let store: BillingStore;
@@ -111,7 +143,14 @@ export default class PaymentsDashboardProvider {
           });
         }
         try {
-          const result = await handler({ store, currency: config.currency }, toApiRequest(ctx));
+          const deps: Deps = {
+            store,
+            currency: config.currency,
+            // Resolved lazily and only for the routes that need it: a console whose payments
+            // manager is unreachable must still serve every read.
+            ...(needsActions ? { actions: await this.actions(store) } : {}),
+          };
+          const result = await handler(deps, toApiRequest(ctx));
           return ctx.response.status(result.status).json(result.body);
         } catch (error) {
           return ctx.response
@@ -121,11 +160,105 @@ export default class PaymentsDashboardProvider {
       };
     };
 
+    router.get(`${apiBase}/health`, json(health)).as('payments_dashboard.health');
     router.get(`${apiBase}/overview`, json(overview)).as('payments_dashboard.overview');
     router.get(`${apiBase}/payments`, json(payments)).as('payments_dashboard.payments');
     router
+      .get(`${apiBase}/subscriptions`, json(subscriptions))
+      .as('payments_dashboard.subscriptions');
+    router
       .get(`${apiBase}/webhook-events`, json(webhookEvents))
       .as('payments_dashboard.webhook_events');
+    router.get(`${apiBase}/providers`, json(providers)).as('payments_dashboard.providers');
+
+    // The console's only WRITE routes. `POST` is load-bearing, not stylistic: registering either of
+    // these as a `GET` would put "refund this customer" behind a link a prefetcher can follow.
+    router
+      .post(`${apiBase}/payments/:gatewayId/refund`, json(refundPayment, true))
+      .as('payments_dashboard.payments.refund');
+    router
+      .post(`${apiBase}/webhook-events/:gatewayEventId/retry`, json(retryWebhookEvent, true))
+      .as('payments_dashboard.webhook_events.retry');
+  }
+
+  /**
+   * The two write actions, built once and reused.
+   *
+   * Both need the app's `PaymentsManager` — the refund needs the driver that took the payment, and
+   * the retry needs that driver to rebuild the normalized event from the stored payload. Neither is
+   * fatal when it is missing: the ports are simply absent and the handlers answer `503` with a
+   * sentence saying so.
+   *
+   * Only a successful build is cached. A failure here usually means "the app has not finished
+   * booting", and caching THAT would disable both buttons for the life of the process.
+   */
+  private actionsCache: Partial<DashboardActions> | undefined;
+
+  private async actions(store: BillingStore): Promise<Partial<DashboardActions>> {
+    if (this.actionsCache) return this.actionsCache;
+
+    let manager: PaymentsManager;
+    try {
+      manager = await this.app.container.make(PaymentsManager);
+    } catch {
+      return {};
+    }
+
+    // The retry re-runs the app's OWN handlers, not just the built-in store sync — a retry that
+    // skipped them would silently do half the job, which is worse than no button. They are
+    // resolved the same way `payments_provider.ts` resolves them (config entries plus the
+    // `app/payment_handlers/` convention).
+    const config = this.app.config.get<PaymentsConfig>('payments', {});
+    const handlers = await this.resolveHandlers(config.billing?.handlers);
+    const processor = new WebhookProcessor({
+      store,
+      ...(handlers !== undefined ? { handlers } : {}),
+    });
+
+    const actions: Partial<DashboardActions> = {
+      refund: createRefundAction((provider) => manager.driver(provider)),
+      replayWebhook: createReplayAction({
+        store,
+        // No headers survive in the ledger, so a gateway that signs its webhooks will refuse
+        // here — reported to the operator as `422` with the driver's own message, ledger row
+        // untouched. Gateways that do not sign replay fine.
+        parse: async (provider, rawBody) =>
+          (await manager.driver(provider).parseWebhook(rawBody, {})) as ReplayableWebhookEvent,
+        process: (event) => processor.process(event as WebhookEvent),
+      }),
+    };
+    this.actionsCache = actions;
+    return actions;
+  }
+
+  /** Webhook handlers from `config.billing.handlers` plus `app/payment_handlers/` (build-time
+   *  barrel, runtime scan as fallback) — the same two sources the payments provider merges. */
+  private async resolveHandlers(
+    configHandlers: BillingHandlers | undefined,
+  ): Promise<Record<string, WebhookHandler> | undefined> {
+    const handlers: Record<string, WebhookHandler> = {};
+    if (configHandlers) {
+      for (const [type, entry] of Object.entries(configHandlers)) {
+        handlers[type] = await resolveWebhookHandler(entry, this.app.container);
+      }
+    }
+    for (const discovered of await this.discoverHandlers()) {
+      handlers[discovered.type] = await resolveWebhookHandler(discovered.entry, this.app.container);
+    }
+    return Object.keys(handlers).length > 0 ? handlers : undefined;
+  }
+
+  private async discoverHandlers() {
+    try {
+      const path = this.app.makePath('.adonisjs/payments/webhook_handlers.js');
+      const mod = (await import(pathToFileURL(path).href)) as {
+        webhookHandlers?: WebhookHandlersBarrel;
+      };
+      if (mod.webhookHandlers) return loadWebhookHandlersFromBarrel(mod.webhookHandlers);
+    } catch {
+      // No generated barrel — fall through to the runtime scan.
+    }
+    return discoverWebhookHandlers(this.app.makePath('app/payment_handlers'));
   }
 
   /** Mount the React SPA at `config.path` plus its hashed asset bundle. */

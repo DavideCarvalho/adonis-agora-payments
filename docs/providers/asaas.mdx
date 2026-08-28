@@ -15,7 +15,10 @@ native NFS-e.
 - **Webhooks**: authenticated by a shared token you set in the dashboard
   (`asaas-access-token` / `asaas-webhook-token` header), compared timing-safe against
   `webhookToken`. Events `PAYMENT_CREATED`, `PAYMENT_RECEIVED`, `PAYMENT_OVERDUE`,
-  `PAYMENT_REFUNDED`, `SUBSCRIPTION_*`.
+  `PAYMENT_REFUNDED`, `PAYMENT_CHARGEBACK_*`, `SUBSCRIPTION_*` — see
+  [Chargebacks](#chargebacks) for the dispute mapping.
+- **Idempotency**: Asaas has none, and `charge()` is the only method that takes an
+  `idempotencyKey` at all — see [Idempotency](#idempotency-asaas-has-none).
 - **`externalReference`**: sent as the Asaas `externalReference` field — and crucially
   **propagated to every installment** of a subscription's charges, so a webhook for the
   3rd monthly charge still routes back to your subscription record.
@@ -47,7 +50,58 @@ await payments.driver('credit_card').createSubscription({
 })
 ```
 
-### Transparent checkout — `card`
+## Chargebacks
+
+Asaas moves a disputed payment through three states, and sends one event for each:
+
+| Asaas event | Normalized | What it means |
+| --- | --- | --- |
+| `PAYMENT_CHARGEBACK_REQUESTED` | **`payment.disputed`** | The chargeback was filed and the money is gone. The payment row moves to `disputed`. |
+| `PAYMENT_CHARGEBACK_DISPUTE` | `payment.updated` | You contested it and submitted documents. |
+| `PAYMENT_AWAITING_CHARGEBACK_REVERSAL` | `payment.updated` | Dispute won; the acquirer's transfer is still pending. |
+
+Only the first one opens anything, so only the first one is a `payment.disputed`. The
+other two are the story afterwards, and the contract deliberately has no resolution
+event — every gateway reports a dispute won or lost differently, and a canonical type no
+driver emits is worse than none. `event.raw.event` still names which one arrived, so a
+handler that cares can switch on it.
+
+<Callout type="warn" title="Asaas sends no dispute-lost webhook">
+A dispute won ends with the payment returning to `PAYMENT_CONFIRMED`/`PAYMENT_RECEIVED`.
+A dispute **lost** has no event at all — it only shows up as `chargeback.status:
+"DISPUTE_LOST"` on the payment, which you have to fetch. Budget a reconciliation job for
+it rather than waiting for a webhook that never comes.
+</Callout>
+
+`PAYMENT_DUNNING_REQUESTED` and `PAYMENT_DUNNING_RECEIVED` are **not** disputes — that is
+*negativação*, registering a defaulting payer with a credit bureau, which is the opposite
+end of the story from money being pulled back. They are left unmapped rather than filed
+as one.
+
+## Pre-authorized cards
+
+A card charge created with `authorizeOnly: true` holds the money without capturing it, and
+is captured later through `POST /payments/{id}/captureAuthorizedPayment` (three days by
+default, up to 25 for eligible accounts). Asaas reports it as status `AUTHORIZED`, and the
+driver maps it to **`authorized`** — not `pending`, which understates a hold the issuer has
+already granted, and not `paid`, which would grant access against money that evaporates if
+nobody captures it. The `PAYMENT_AUTHORIZED` webhook normalizes to `payment.updated`: the
+contract has no authorization event, and the payment's own status already says it.
+
+## Idempotency: Asaas has none
+
+Asaas documents no idempotency mechanism — no header, no body field, on any endpoint; its
+own guidance is that you deduplicate on your side before you retry. So `refund`,
+`createCustomer`, `createSubscription` and `updateSubscription` **throw** when you pass an
+`idempotencyKey`, rather than accepting it and dropping it: a silently ignored key turns
+your retry guarantee into a second refund.
+
+`charge()` still accepts one, and always has, but it does not mean deduplication there
+either — it is a legacy fallback for `externalReference`, the routing key echoed on the
+payment. Pass `externalReference` explicitly and look the payment up by it before you
+retry.
+
+## Transparent checkout — `card`
 
 Asaas' card flow is "tokenize in the frontend, charge with the token" — the card number
 never touches your server. `card` carries the token plus the holder info the gateway

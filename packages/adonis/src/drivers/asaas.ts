@@ -50,7 +50,13 @@ interface AsaasPaymentResponse {
     | 'REFUNDED'
     | 'CANCELED'
     | 'FAILED'
-    | 'PROCESSING';
+    | 'PROCESSING'
+    /** `authorizeOnly: true` — the card is held and nothing is captured yet. */
+    | 'AUTHORIZED'
+    /** The three chargeback states of a payment, in the order Asaas moves through them. */
+    | 'CHARGEBACK_REQUESTED'
+    | 'CHARGEBACK_DISPUTE'
+    | 'AWAITING_CHARGEBACK_REVERSAL';
   dueDate: string;
   description?: string;
   invoiceUrl?: string;
@@ -116,6 +122,7 @@ export class AsaasDriver implements PaymentsDriver {
   // ── Customers ────────────────────────────────────────────────────────────────────────
 
   async createCustomer(input: CreateCustomerInput): Promise<Customer> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createCustomer');
     const body: Record<string, unknown> = {
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(input.email !== undefined ? { email: input.email } : {}),
@@ -230,7 +237,12 @@ export class AsaasDriver implements PaymentsDriver {
     }
   }
 
-  async refund(paymentGatewayId: string, amount?: Money): Promise<Refund> {
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
+    this.#refuseIdempotencyKey(options?.idempotencyKey, 'refund');
     const body: Record<string, unknown> = {
       ...(amount !== undefined ? { value: toDecimal(amount) } : {}),
     };
@@ -290,6 +302,7 @@ export class AsaasDriver implements PaymentsDriver {
   // ── Subscriptions ────────────────────────────────────────────────────────────────────
 
   async createSubscription(input: CreateSubscriptionInput): Promise<Subscription> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createSubscription');
     const body: Record<string, unknown> = {
       customer: input.customerId,
       billingType: this.#mapMethod(input.method),
@@ -336,6 +349,7 @@ export class AsaasDriver implements PaymentsDriver {
     subscriptionGatewayId: string,
     input: UpdateSubscriptionInput,
   ): Promise<Subscription> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'updateSubscription');
     const body: Record<string, unknown> = {
       ...(input.amount !== undefined ? { value: toDecimal(input.amount) } : {}),
       ...(input.description !== undefined ? { description: input.description } : {}),
@@ -435,6 +449,16 @@ export class AsaasDriver implements PaymentsDriver {
       REFUNDED: 'refunded',
       CANCELED: 'canceled',
       FAILED: 'failed',
+      // A pre-authorized card charge (`authorizeOnly: true`, captured later through
+      // `POST /payments/{id}/captureAuthorizedPayment`). The money is held, not moved:
+      // `pending` understated it and `paid` would grant access against a hold that
+      // expires — Asaas reserves it for three days by default.
+      AUTHORIZED: 'authorized',
+      // All three chargeback states are the payment being disputed. Asaas has taken the
+      // money back in every one of them; only the outcome is still open.
+      CHARGEBACK_REQUESTED: 'disputed',
+      CHARGEBACK_DISPUTE: 'disputed',
+      AWAITING_CHARGEBACK_REVERSAL: 'disputed',
     };
     const method = this.#mapMethodToType(data.billingType);
     const result: Payment = {
@@ -504,8 +528,22 @@ export class AsaasDriver implements PaymentsDriver {
         return 'payment.failed';
       case 'PAYMENT_REFUNDED':
         return 'payment.refunded';
+      // The chargeback is filed and the money is gone — the one webhook that takes
+      // revenue away, and the only Asaas event that opens a dispute.
+      case 'PAYMENT_CHARGEBACK_REQUESTED':
+        return 'payment.disputed';
       case 'PAYMENT_CREATED':
       case 'PAYMENT_UPDATED':
+      // Card authorized, awaiting capture (`authorizeOnly: true`). There is no canonical
+      // authorization event, and the payment's own status already says `authorized`.
+      case 'PAYMENT_AUTHORIZED':
+      // What happens AFTER a dispute is opened: documents submitted, and the dispute won
+      // with the acquirer's transfer still pending. The contract deliberately has no
+      // resolution event — every gateway reports one differently — so these stay
+      // `payment.updated`; `event.raw.event` still names which one it was. Asaas sends no
+      // "dispute lost" webhook at all: that shows up as `chargeback.status` on the payment.
+      case 'PAYMENT_CHARGEBACK_DISPUTE':
+      case 'PAYMENT_AWAITING_CHARGEBACK_REVERSAL':
         return 'payment.updated';
       case 'SUBSCRIPTION_CREATED':
         return 'subscription.created';
@@ -569,6 +607,23 @@ export class AsaasDriver implements PaymentsDriver {
       default:
         return 'unknown';
     }
+  }
+
+  /**
+   * Asaas documents no idempotency mechanism — no header, no body field, on any endpoint;
+   * its own guidance is to deduplicate on your side before you retry. Accepting the key
+   * and dropping it would turn a caller's retry guarantee into a second refund or a
+   * second subscription, so the driver refuses it instead.
+   *
+   * `charge()` is the one exception, and it is not an exception to this rule: there
+   * `idempotencyKey` has never meant deduplication, it is a legacy fallback for
+   * `externalReference` (the routing key echoed on the payment) and is documented as such.
+   */
+  #refuseIdempotencyKey(key: string | undefined, operation: string): void {
+    if (key === undefined) return;
+    throw new Error(
+      `[payments] Asaas has no idempotency mechanism, so \`${operation}\` cannot honour an idempotencyKey — no Asaas endpoint documents an idempotency header or field. Deduplicate before you call, e.g. by looking the record up by \`externalReference\` first.`,
+    );
   }
 
   #dueDate(input: ChargeInput): string {

@@ -563,3 +563,272 @@ describe('MollieDriver — webhooks', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe('MollieDriver — the widened contract', () => {
+  it('reports an authorized payment as authorized, not pending', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ ...paidPayment, status: 'authorized' })),
+    );
+
+    // Funds are held and nothing is captured. `pending` understated it: there is an
+    // authorization to capture or let expire, and Mollie has a word for that.
+    expect((await makeDriver().findPayment('tr_1'))?.status).toBe('authorized');
+  });
+
+  it('reports a charged-back payment as disputed even though Mollie still says paid', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          ...paidPayment,
+          status: 'paid',
+          amountChargedBack: { currency: 'EUR', value: '19.90' },
+        }),
+      ),
+    );
+
+    // Mollie leaves `status` at `paid` through a chargeback — `amountChargedBack` is the
+    // only field that says the bank pulled the money back.
+    expect((await makeDriver().findPayment('tr_1'))?.status).toBe('disputed');
+  });
+
+  it('turns the classic webhook for a charged-back payment into payment.disputed', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          ...paidPayment,
+          amountChargedBack: { currency: 'EUR', value: '19.90' },
+        }),
+      ),
+    );
+
+    const event = await makeDriver().parseWebhook('id=tr_1', {});
+
+    expect(event.type).toBe('payment.disputed');
+    expect(event.data).toMatchObject({ gatewayId: 'tr_1', amount: 1990, currency: 'eur' });
+    // The event id must NOT collide with the earlier `payment.succeeded` one — Mollie's own
+    // status is `paid` for both, so without the suffix the ledger drops the chargeback as a
+    // replay and the payment row goes on saying paid.
+    expect(event.id).toBe('mollie:tr_1:paid:chargeback');
+  });
+
+  it('gives a fully refunded payment its own event id too, for the same reason', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse({ ...paidPayment, amountRefunded: { currency: 'EUR', value: '19.90' } }),
+        ),
+    );
+    expect((await makeDriver().parseWebhook('id=tr_1', {})).id).toBe('mollie:tr_1:paid:refunded');
+  });
+
+  it('maps a next-gen chargeback event onto payment.disputed, keyed by the payment', async () => {
+    const body = JSON.stringify({
+      resource: 'event',
+      id: 'event_chb',
+      type: 'chargeback.received',
+      entityId: 'chb_1',
+      createdAt: '2026-08-27T11:00:00+00:00',
+      _embedded: {
+        entity: {
+          id: 'chb_1',
+          paymentId: 'tr_1',
+          amount: { currency: 'EUR', value: '19.90' },
+          reason: { code: 'AC01', description: 'Account identifier incorrect' },
+        },
+      },
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const event = await makeDriver().parseWebhook(body, {});
+
+    expect(event.type).toBe('payment.disputed');
+    expect(event.data).toMatchObject({
+      gatewayId: 'tr_1',
+      amount: 1990,
+      currency: 'eur',
+      chargebackId: 'chb_1',
+      reason: 'AC01',
+    });
+    // The snapshot carried everything; there is nothing to fetch.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('calls a reversed chargeback an update, not a second dispute', async () => {
+    const body = JSON.stringify({
+      resource: 'event',
+      id: 'event_chb_rev',
+      type: 'chargeback.reversed',
+      entityId: 'chb_1',
+      _embedded: {
+        entity: { id: 'chb_1', paymentId: 'tr_1', amount: { currency: 'EUR', value: '19.90' } },
+      },
+    });
+    // The package deliberately has no canonical resolution event.
+    expect((await makeDriver().parseWebhook(body, {})).type).toBe('payment.updated');
+  });
+
+  it('refuses an id-only chargeback event instead of dropping it silently', async () => {
+    const body = JSON.stringify({
+      resource: 'event',
+      id: 'event_chb',
+      type: 'chargeback.received',
+      entityId: 'chb_1',
+    });
+    // Mollie has no lookup by chargeback id, so this one cannot be resolved. Passing it
+    // through as an inert event is exactly the silent shape `payment.disputed` removes.
+    await expect(makeDriver().parseWebhook(body, {})).rejects.toThrow(
+      /no embedded entity.*snapshot payload/s,
+    );
+  });
+
+  it('routes a method category as the array of Mollie ids in it', async () => {
+    const methodFor = async (method: string) => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        jsonResponse({
+          ...paidPayment,
+          status: 'open',
+          _links: { checkout: { href: 'https://www.mollie.com/checkout/tr_1' } },
+        }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      await makeDriver().charge({
+        amount: 1990,
+        method,
+        metadata: { redirectUrl: 'https://example.org/done' },
+      });
+      return JSON.parse(String((fetchMock.mock.calls[0]! as [string, RequestInit])[1].body)).method;
+    };
+
+    // Mollie's `method` takes an array, and an array is exactly what a category is:
+    // `bank_transfer` is iDEAL in the Netherlands and Bancontact in Belgium.
+    expect(await methodFor('bank_transfer')).toEqual(
+      expect.arrayContaining(['ideal', 'bancontact']),
+    );
+    expect(await methodFor('bank_debit')).toEqual(expect.arrayContaining(['directdebit']));
+    expect(await methodFor('wallet')).toEqual(expect.arrayContaining(['paypal', 'applepay']));
+    expect(await methodFor('bnpl')).toEqual(expect.arrayContaining(['klarna']));
+    expect(await methodFor('voucher')).toEqual(expect.arrayContaining(['voucher', 'giftcard']));
+    // A one-member category goes out as the bare id Mollie's own examples use.
+    expect(await methodFor('credit_card')).toBe('creditcard');
+  });
+
+  it('pins one brand through Mollie’s own field, and refuses a brand from another category', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        ...paidPayment,
+        status: 'open',
+        _links: { checkout: { href: 'https://www.mollie.com/checkout/tr_1' } },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await makeDriver().charge({
+      amount: 1990,
+      method: 'bank_transfer',
+      metadata: { redirectUrl: 'https://example.org/done', mollieMethod: 'ideal' },
+    });
+    const body = JSON.parse(String((fetchMock.mock.calls[0]! as [string, RequestInit])[1].body));
+    expect(body.method).toBe('ideal');
+    // The brand key is an argument, not data — it must not be echoed back as metadata.
+    expect(body.metadata?.mollieMethod).toBeUndefined();
+
+    await expect(
+      makeDriver().charge({
+        amount: 1990,
+        method: 'bank_transfer',
+        metadata: { redirectUrl: 'https://example.org/done', mollieMethod: 'klarna' },
+      }),
+    ).rejects.toThrow(/is not a `bank_transfer` method/);
+  });
+
+  it('still refuses a method Mollie does not have, naming what it does route', async () => {
+    await expect(
+      makeDriver().charge({
+        amount: 1990,
+        method: 'debit_card',
+        metadata: { redirectUrl: 'https://example.org/done' },
+      }),
+    ).rejects.toThrow(/no separate debit-card method/);
+  });
+
+  it('names the method category a payment came back with', async () => {
+    const withMethod = async (method: string) => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ ...paidPayment, method })));
+      return (await makeDriver().findPayment('tr_1'))?.method;
+    };
+
+    expect(await withMethod('creditcard')).toBe('card');
+    // All of these used to leave `method` unset — `creditcard` was the only id with a name.
+    expect(await withMethod('ideal')).toBe('bank_transfer');
+    expect(await withMethod('directdebit')).toBe('bank_debit');
+    expect(await withMethod('paypal')).toBe('wallet');
+    expect(await withMethod('klarna')).toBe('bnpl');
+    expect(await withMethod('paysafecard')).toBe('voucher');
+  });
+
+  it('sends the idempotency key as a header on every POST that has one', async () => {
+    const headerOf = (mock: ReturnType<typeof vi.fn>, index = 0) =>
+      ((mock.mock.calls[index]! as [string, RequestInit])[1].headers as Record<string, string>)[
+        'Idempotency-Key'
+      ];
+
+    let mock = vi.fn().mockResolvedValue(jsonResponse({ id: 'cst_1' }));
+    vi.stubGlobal('fetch', mock);
+    await makeDriver().createCustomer({ email: 'a@b.test', idempotencyKey: 'k-customer' });
+    expect(headerOf(mock)).toBe('k-customer');
+
+    mock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(paidPayment))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: 're_1',
+          amount: { currency: 'EUR', value: '19.90' },
+          status: 'refunded',
+          createdAt: '2026-08-27T10:00:00+00:00',
+          paymentId: 'tr_1',
+        }),
+      );
+    vi.stubGlobal('fetch', mock);
+    await makeDriver().refund('tr_1', undefined, { idempotencyKey: 'k-refund' });
+    // The first call is the GET that reads the payment's currency; the POST carries the key.
+    expect(headerOf(mock, 1)).toBe('k-refund');
+
+    mock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        id: 'sub_1',
+        customerId: 'cst_1',
+        status: 'active',
+        amount: { currency: 'EUR', value: '19.90' },
+        interval: '1 month',
+        createdAt: '2026-08-27T10:00:00+00:00',
+      }),
+    );
+    vi.stubGlobal('fetch', mock);
+    await makeDriver().createSubscription({
+      customerId: 'cst_1',
+      planId: 'pro',
+      amount: 1990,
+      idempotencyKey: 'k-sub',
+    });
+    expect(headerOf(mock)).toBe('k-sub');
+  });
+
+  it('refuses a key on updateSubscription, which Mollie is a PATCH and cannot honour', async () => {
+    // Mollie's own words: "All POST endpoints accept idempotency keys. Sending idempotency
+    // keys for GET, PATCH, or DELETE requests is not necessary." Accepting it would promise
+    // a deduplication Mollie never performs.
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(
+      makeDriver().updateSubscription('cst_1/sub_1', { amount: 2990, idempotencyKey: 'k1' }),
+    ).rejects.toThrow(/POST requests only.*updateSubscription\(\)/s);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

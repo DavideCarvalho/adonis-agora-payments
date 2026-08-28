@@ -25,11 +25,13 @@ required `currency`.
   complaint. `cop` is treated as a two-decimal currency because ISO 4217 says so, even
   though Colombian prices are quoted in whole pesos; verify a COP charge in sandbox before
   trusting it.
-- **`idempotencyKey`**: sent as the `X-Idempotency-Key` **header**, which Mercado Pago
-  requires on `POST /v1/payments` and on refunds. It is a header, not a body field — a key
-  written into the payload deduplicates nothing. When you don't pass one the driver
-  generates a UUID to satisfy the API, and your retry is then a second charge; pass your
-  own key if you want the protection.
+- **`idempotencyKey`**: sent as the `X-Idempotency-Key` **header** on `charge()` and
+  `refund()` — the two endpoints Mercado Pago documents (and requires) it on. It is a
+  header, not a body field: a key written into the payload deduplicates nothing. When you
+  don't pass one the driver generates a UUID to satisfy the API, and your retry is then a
+  second charge; pass your own key if you want the protection. On `createCustomer`,
+  `createSubscription` and `updateSubscription` an `idempotencyKey` **throws** — see
+  [What it refuses](#what-it-refuses).
 - **Webhooks**: `x-signature` (`ts=…,v1=…`), an HMAC-SHA256 over
   `id:<data.id>;request-id:<x-request-id>;ts:<ts>;` keyed by the *secret signature* from
   Your integrations → Webhooks. Absent parts are dropped from the manifest, and the docs
@@ -101,6 +103,56 @@ where Mercado Pago also puts it. Should the two ever disagree for a notification
 signature check will reject a genuine webhook.
 </Callout>
 
+## Chargebacks and mediations
+
+Two things can put a Mercado Pago payment into dispute, and both normalize to
+**`payment.disputed`**:
+
+| Payment status | Meaning |
+| --- | --- |
+| `in_mediation` | A claim was opened inside Mercado Pago. |
+| `charged_back` | A card chargeback. `status_detail` says where it stands: `in_process` (awaiting a decision), `settled` (lost — money withdrawn), `reimbursed` (won — money returned). |
+
+`charged_back` used to arrive as `payment.refunded`, which says the seller gave the money
+back voluntarily — indistinguishable from a real refund, and the row read `refunded`
+either way.
+
+Disputes also arrive on their own webhook topic, **`topic_chargebacks_wh`**, which the
+driver handles:
+
+```jsonc
+{
+  "type": "topic_chargebacks_wh",
+  "actions": ["changed_case_status"],
+  "data": { "id": "233000061680860000", "payment_id": "999999999", "checkout": "cho-pro" }
+}
+```
+
+`data.id` there is the **chargeback case** id (`GET /v1/chargebacks/{id}`), *not* a payment
+id — so the driver fetches the payment named by `data.payment_id` and files the dispute
+against that. A notification with no `payment_id` stays `payment.updated` rather than
+writing a row under a case id nothing reconciles. Mercado Pago sends one action string for
+opening *and* for every later status change, so what the event means is decided by the
+payment's status, not by the notification.
+
+There is no canonical resolution event, by design. A dispute won or lost shows up as
+`status_detail` on `payment.payload`.
+
+## Authorized, not captured
+
+`status: "authorized"` (`status_detail: "pending_capture"`) maps to **`authorized`**: the
+card is held and nothing has moved. It used to collapse into `pending`, which understates a
+hold the issuer already granted — and `paid` would have granted access against money that
+evaporates if the authorization is never captured. The webhook for it is `payment.updated`;
+the contract has no authorization event.
+
+## Paused subscriptions
+
+A preapproval with `status: "paused"` maps to **`paused`** — billing has stopped, the
+subscription is alive and can be reactivated by PUT-ing `status: "authorized"`, and it must
+**not** entitle the payer meanwhile. It used to map to `past_due`, which says a charge
+failed; nothing failed, Mercado Pago was told to stop.
+
 ## What it refuses
 
 - **`listInvoices`** throws. `GET /authorized_payments/search` lists the charges of a
@@ -118,6 +170,12 @@ signature check will reject a genuine webhook.
   brand (`visa`, `master`, `debvisa`), which the frontend tokenizer returns next to the
   token; pass it as `metadata.paymentMethodId`.
 - **A charge with no method** throws, pointing you at `createCheckout`.
+- **An `idempotencyKey` on `createCustomer`, `createSubscription` or `updateSubscription`**
+  throws. `X-Idempotency-Key` is documented — and mandatory — on `POST /v1/payments` and
+  `POST /v1/payments/{id}/refunds`; the reference for `/v1/customers` and `/preapproval`
+  lists `Authorization` and nothing else. Sending it there anyway would be harmless and
+  unspecified, which is the worst combination: you would believe your retry is safe. Look a
+  preapproval up by `external_reference` before you retry instead.
 
 ## Gaps and things the docs would not settle
 
@@ -134,6 +192,11 @@ signature check will reject a genuine webhook.
   Brazil. For AR/MX/CL/CO/PE/UY pass the document type yourself.
 - The set of `action` values is not documented — only `payment.created` appears anywhere —
   so the driver keys off the notification's `type`, which is.
+- The docs never promise that a chargeback also reaches the `payment` topic; they only
+  document it on `topic_chargebacks_wh`. The driver handles both, so subscribe to both.
+- `subscription_authorized_payment` (a subscription's recurring charge) is still left as
+  `payment.updated`: it is read from `/authorized_payments/{id}`, whose response shape this
+  driver has not verified against the reference.
 
 <Callout type="warn" title="Not yet exercised against a live account">
 This driver was written against Mercado Pago's published API reference and is covered by

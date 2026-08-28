@@ -1,4 +1,5 @@
 import { createHash, createHmac, verify as cryptoVerify, timingSafeEqual } from 'node:crypto';
+import { reportWebhookVerification } from './diagnostics.js';
 import { headerValue } from './http.js';
 
 /**
@@ -33,9 +34,14 @@ export function verifyHmacSignature(
    */
   encoding: 'base64' | 'hex' = 'base64',
 ): boolean {
-  if (signature === undefined || signature === '') return false;
+  if (signature === undefined || signature === '') {
+    reportWebhookVerification(`hmac-${algorithm}`, false);
+    return false;
+  }
   const expected = createHmac(algorithm, secret).update(rawBody, 'utf8').digest(encoding);
-  return safeCompare(signature, expected);
+  const ok = safeCompare(signature, expected);
+  reportWebhookVerification(`hmac-${algorithm}`, ok);
+  return ok;
 }
 
 /**
@@ -54,9 +60,14 @@ export function verifyHmacOverPayload(
   algorithm: 'sha256' | 'sha1',
   encoding: 'base64' | 'hex' = 'base64',
 ): boolean {
-  if (signature === undefined || signature === '') return false;
+  if (signature === undefined || signature === '') {
+    reportWebhookVerification(`hmac-${algorithm}-over-payload`, false);
+    return false;
+  }
   const expected = createHmac(algorithm, secret).update(payload, 'utf8').digest(encoding);
-  return safeCompare(signature, expected);
+  const ok = safeCompare(signature, expected);
+  reportWebhookVerification(`hmac-${algorithm}-over-payload`, ok);
+  return ok;
 }
 
 /**
@@ -70,16 +81,21 @@ export function verifyRsaSha256Signature(
   signature: string | undefined,
   publicKey: string,
 ): boolean {
-  if (signature === undefined || signature === '') return false;
+  if (signature === undefined || signature === '') {
+    reportWebhookVerification('rsa-sha256', false);
+    return false;
+  }
   const pem = publicKey.includes('-----BEGIN')
     ? publicKey
     : Buffer.from(publicKey, 'base64').toString('utf8');
-  return cryptoVerify(
+  const ok = cryptoVerify(
     'RSA-SHA256',
     Buffer.from(rawBody, 'utf8'),
     pem,
     Buffer.from(signature, 'base64'),
   );
+  reportWebhookVerification('rsa-sha256', ok);
+  return ok;
 }
 
 /**
@@ -95,11 +111,14 @@ export function requireMatchingCredential(
   what: string,
 ): void {
   if (received === undefined || received === '') {
+    reportWebhookVerification('shared-token', false);
     throw new Error(`[payments] Missing webhook ${what} on ${provider} request.`);
   }
   if (!safeCompare(received, expected)) {
+    reportWebhookVerification('shared-token', false);
     throw new Error(`[payments] Invalid ${provider} webhook ${what}.`);
   }
+  reportWebhookVerification('shared-token', true);
 }
 
 /**
@@ -122,9 +141,14 @@ export function verifyPagBankAuthenticityToken(
   received: string | undefined,
   token: string,
 ): boolean {
-  if (received === undefined || received === '') return false;
+  if (received === undefined || received === '') {
+    reportWebhookVerification('sha256-token-prefix', false);
+    return false;
+  }
   const expected = createHash('sha256').update(`${token}-${rawBody}`, 'utf8').digest('hex');
-  return safeCompare(received.toLowerCase(), expected);
+  const ok = safeCompare(received.toLowerCase(), expected);
+  reportWebhookVerification('sha256-token-prefix', ok);
+  return ok;
 }
 
 /**
@@ -164,14 +188,23 @@ export function verifyStandardWebhookSignature(options: {
   const id = headerValue(options.headers, 'webhook-id');
   const timestamp = headerValue(options.headers, 'webhook-timestamp');
   const signature = headerValue(options.headers, 'webhook-signature');
-  if (!id || !timestamp || !signature) return false;
+  if (!id || !timestamp || !signature) {
+    reportWebhookVerification('standard-webhooks', false);
+    return false;
+  }
 
   const tolerance = options.toleranceSeconds ?? 300;
   if (tolerance > 0) {
     const sent = Number(timestamp);
-    if (!Number.isFinite(sent)) return false;
+    if (!Number.isFinite(sent)) {
+      reportWebhookVerification('standard-webhooks', false);
+      return false;
+    }
     const nowSeconds = Math.floor((options.now ?? new Date()).getTime() / 1000);
-    if (Math.abs(nowSeconds - sent) > tolerance) return false;
+    if (Math.abs(nowSeconds - sent) > tolerance) {
+      reportWebhookVerification('standard-webhooks', false);
+      return false;
+    }
   }
 
   const key =
@@ -184,8 +217,10 @@ export function verifyStandardWebhookSignature(options: {
 
   // Every `v1,<sig>` entry is checked: during a secret rotation the gateway signs with both
   // the old and the new key, and only one of them can match.
-  return signature
+  const ok = signature
     .split(' ')
     .filter((part) => part.startsWith('v1,'))
     .some((part) => safeCompare(part.slice(3), expected));
+  reportWebhookVerification('standard-webhooks', ok);
+  return ok;
 }

@@ -33,6 +33,11 @@
       "import": "./dist/providers/dashboard_provider.js",
       "default": "./dist/providers/dashboard_provider.js"
     },
+    "./payments_client_provider": {
+      "types": "./dist/providers/payments_client_provider.d.ts",
+      "import": "./dist/providers/payments_client_provider.js",
+      "default": "./dist/providers/payments_client_provider.js"
+    },
     "./configure": {
       "types": "./dist/configure.d.ts",
       "import": "./dist/configure.js",
@@ -72,6 +77,11 @@
       "types": "./dist/src/dashboard/index.d.ts",
       "import": "./dist/src/dashboard/index.js",
       "default": "./dist/src/dashboard/index.js"
+    },
+    "./client": {
+      "types": "./dist/src/client/index.d.ts",
+      "import": "./dist/src/client/index.js",
+      "default": "./dist/src/client/index.js"
     },
     "./drivers/*": {
       "types": "./dist/src/drivers/*.d.ts",

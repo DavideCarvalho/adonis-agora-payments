@@ -21,7 +21,9 @@ Pix charges (`cob`), the Pix that settle them, and their refunds (`devolução`)
 - **`externalReference`**: becomes the **txid** when it fits Efí's charset — see
   [Routing a webhook back](#routing-a-webhook-back-to-your-record).
 - **Refunds**: yes, `PUT /v2/pix/{e2eid}/devolucao/{id}`.
-- **No subscriptions, no customers, no invoice list.**
+- **`idempotencyKey`**: real, and it is the resource id, not a header — see
+  [Idempotency is an id, not a header](#idempotency-is-an-id-not-a-header).
+- **No subscriptions, no customers, no invoice list, no disputes.**
 
 <Callout type="warn" title="Efí is several APIs, and this driver speaks one of them">
 The **Pix API** (this driver) and the **Cobranças API** (`cobrancas.api.efipay.com.br`) are
@@ -159,6 +161,33 @@ it against homologation (`pix-h`) with your own `.p12` before it touches real mo
 mutual-TLS handshake in particular is something only a live call can prove.
 </Callout>
 
+## Idempotency is an id, not a header
+
+Efí has no `Idempotency-Key` header, and it does not need one: the two operations that move
+money are addressed by an id **you choose**, so choosing the same id twice is the
+deduplication.
+
+- **Charges and checkouts** — `charge()` and `createCheckout()` `PUT /v2/cob/{txid}` when
+  the `externalReference` (or, failing that, the `idempotencyKey`) fits the BACEN txid
+  charset. Same txid, same charge. See
+  [Routing a webhook back](#routing-a-webhook-back-to-your-record).
+- **Refunds** — `refund(gatewayId, amount?, { idempotencyKey })` uses the key as the
+  **devolução id** in `PUT /v2/pix/{e2eid}/devolucao/{id}`. A retry with the same key
+  returns the first refund instead of sending the money a second time. Without a key the
+  driver mints a random id, which protects a retry inside one call and nothing across a
+  process restart — so pass one if you retry.
+
+BACEN constrains the devolução id to **1–35 alphanumeric characters**: no dashes, no
+underscores. A key outside that charset **throws** rather than being replaced by a random
+id, because quietly minting one would turn your retry guarantee into a second refund. A
+UUID works with its dashes stripped.
+
+```ts
+await payments.driver('efi').refund('abc123def456ghi789jkl012mn', undefined, {
+  idempotencyKey: crypto.randomUUID().replaceAll('-', ''),
+})
+```
+
 ## What it does not do
 
 - **Subscriptions.** Recurring billing at Efí is either the Cobranças API
@@ -167,7 +196,18 @@ mutual-TLS handshake in particular is something only a live call can prove.
 - **Customers.** The Pix API has no customer resource; the payer (`devedor`) travels on the
   charge. Pass `customer: { name, taxId }` and the driver sends it — but only when both are
   present, because Efí rejects a half-filled `devedor`.
-- **Invoices.** `listInvoices` returns `[]`: charges are indexed by txid and by date range,
-  never by payer. Fiscal notes come from an [invoice provider](/docs/payments/invoices).
+- **Invoices.** `capabilities.invoices` is `false` and **`listInvoices` throws**. Pix
+  charges are indexed by txid and by date range, never by payer, and the API has no invoice
+  resource at all. It used to answer `[]`, which is indistinguishable from "this customer
+  has no invoices" — the reader concludes the customer never bought anything, and nothing
+  in the flow says otherwise. `PaymentsManager.assertCapability` already stops the
+  documented path, so the throw is for whoever reaches the driver directly. Fiscal notes
+  come from an [invoice provider](/docs/payments/invoices); to list charges, call
+  `GET /v2/cob` over a date range yourself.
+- **Disputes.** Pix has no chargeback: a Pix is a bank transfer that has already settled,
+  and there is no card network to reverse it. (BACEN's MED — *Mecanismo Especial de
+  Devolução*, for fraud — is a separate Efí product this driver does not speak.) So
+  `payment.disputed` never fires here, and the driver does not invent an event to carry it.
+  A `devolução` you initiate is a refund, and arrives as `payment.refunded`.
 - **Hosted checkout.** `createCheckout` creates a Pix charge and returns the BR Code with an
   empty `url`. There is no page for Efí to host.

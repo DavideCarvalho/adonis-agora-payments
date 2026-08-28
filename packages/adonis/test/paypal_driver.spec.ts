@@ -408,3 +408,211 @@ describe('PayPalDriver', () => {
     });
   });
 });
+
+describe('PayPalDriver disputes', () => {
+  const disputeEvent = (eventType: string) =>
+    JSON.stringify({
+      id: 'WH-DISPUTE-1',
+      event_type: eventType,
+      create_time: '2026-03-26T10:00:00Z',
+      resource_type: 'dispute',
+      resource: {
+        dispute_id: 'PP-D-1',
+        dispute_amount: { currency_code: 'USD', value: '19.90' },
+        reason: 'MERCHANDISE_OR_SERVICE_NOT_RECEIVED',
+        status: 'OPEN',
+        dispute_life_cycle_stage: 'CHARGEBACK',
+        disputed_transactions: [
+          {
+            // The SELLER's side of the transaction is the capture id this driver keys
+            // payments on; `buyer_transaction_id` would find no row here.
+            seller_transaction_id: 'CAPTURE-1',
+            buyer_transaction_id: 'BUYER-1',
+            custom: 'order_42',
+          },
+        ],
+      },
+    });
+
+  it('maps CUSTOMER.DISPUTE.CREATED onto payment.disputed, keyed on the capture', async () => {
+    const event = await makeDriver().parseWebhook(
+      disputeEvent('CUSTOMER.DISPUTE.CREATED'),
+      SIGNATURE_HEADERS,
+    );
+    expect(event.type).toBe('payment.disputed');
+    expect(event.data).toMatchObject({
+      gatewayId: 'CAPTURE-1',
+      amount: 1990,
+      currency: 'usd',
+      disputeId: 'PP-D-1',
+      externalReference: 'order_42',
+    });
+  });
+
+  it('also recognizes the deprecated RISK.DISPUTE.CREATED spelling', async () => {
+    // PayPal's reference says CUSTOMER.DISPUTE.CREATED supersedes it — an account still
+    // subscribed to the old one should not silently miss the chargeback.
+    const event = await makeDriver().parseWebhook(
+      disputeEvent('RISK.DISPUTE.CREATED'),
+      SIGNATURE_HEADERS,
+    );
+    expect(event.type).toBe('payment.disputed');
+  });
+
+  it('leaves the rest of the dispute case as payment.updated', async () => {
+    for (const eventType of ['CUSTOMER.DISPUTE.UPDATED', 'CUSTOMER.DISPUTE.RESOLVED']) {
+      const event = await makeDriver().parseWebhook(disputeEvent(eventType), SIGNATURE_HEADERS);
+      expect(event.type, eventType).toBe('payment.updated');
+    }
+  });
+});
+
+describe('PayPalDriver authorization and wallets', () => {
+  it('reports an authorization as an update carrying `authorized`, not as a success', async () => {
+    // PayPal holds an authorization for about 29 days and voids it if nobody captures.
+    const raw = JSON.stringify({
+      id: 'WH-AUTH-1',
+      event_type: 'PAYMENT.AUTHORIZATION.CREATED',
+      create_time: '2026-03-25T10:00:00Z',
+      resource_type: 'authorization',
+      resource: {
+        id: 'AUTH-1',
+        status: 'CREATED',
+        amount: { currency_code: 'USD', value: '19.90' },
+        custom_id: 'order_42',
+      },
+    });
+    const event = await makeDriver().parseWebhook(raw, SIGNATURE_HEADERS);
+    expect(event.type).toBe('payment.updated');
+    expect(event.data).toMatchObject({
+      gatewayId: 'AUTH-1',
+      amount: 1990,
+      currency: 'usd',
+      status: 'authorized',
+    });
+  });
+
+  it('names a vaulted charge a wallet payment', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(
+        jsonResponse({ ...capturedOrder(), payment_source: { paypal: { account_id: 'ACC-1' } } }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const payment = await makeDriver().charge({
+      amount: 1990,
+      paymentMethodId: '2w915838hr181240m',
+      externalReference: 'order_42',
+      idempotencyKey: 'charge-1',
+    });
+
+    // `charge()` sends `payment_source.paypal.vault_id` and nothing else, so the money came
+    // out of a PayPal account — which is what `wallet` means.
+    expect(payment.method).toBe('wallet');
+  });
+
+  it('still calls it a wallet payment when PayPal echoes no payment_source', async () => {
+    // The order was created with `payment_source.paypal.vault_id`, so the funding source is
+    // known from the request even when the response does not repeat it. Leaving `method`
+    // unset here would report a PayPal charge as an instrument nobody can name.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(jsonResponse(capturedOrder()));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const payment = await makeDriver().charge({
+      amount: 1990,
+      paymentMethodId: '2w915838hr181240m',
+      externalReference: 'order_42',
+      idempotencyKey: 'charge-1',
+    });
+
+    expect(payment.method).toBe('wallet');
+  });
+
+  it('refuses a charge routed as anything but the wallet', async () => {
+    await expect(
+      makeDriver().charge({
+        amount: 1990,
+        paymentMethodId: '2w915838hr181240m',
+        idempotencyKey: 'charge-1',
+        method: 'credit_card',
+      }),
+    ).rejects.toThrow(/charges the vaulted PayPal account/);
+  });
+
+  it('reads a SUSPENDED subscription as paused, not past_due', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(
+        jsonResponse({ id: 'I-SUB1', status: 'SUSPENDED', plan_id: 'P-1', subscriber: {} }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    // Suspension is PayPal's pause: nothing is owed, nothing bills today, `/activate`
+    // restarts it — and the subscriber is entitled to nothing either way.
+    expect((await makeDriver().findSubscription('I-SUB1'))?.status).toBe('paused');
+  });
+});
+
+describe('PayPalDriver idempotency', () => {
+  it('sends PayPal-Request-Id on a refund', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: 'REFUND-1',
+          status: 'COMPLETED',
+          amount: { currency_code: 'USD', value: '19.90' },
+          create_time: '2026-03-26T10:00:00Z',
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await makeDriver().refund('CAPTURE-1', 1990, { idempotencyKey: 'refund-1' });
+
+    const headers = fetchMock.mock.calls[1]![1].headers as Record<string, string>;
+    // Without it a retried refund job refunds the capture twice.
+    expect(headers['PayPal-Request-Id']).toBe('refund-1');
+  });
+
+  it('sends PayPal-Request-Id on createSubscription', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(tokenResponse())
+      .mockResolvedValueOnce(
+        jsonResponse({ id: 'I-SUB1', status: 'APPROVAL_PENDING', plan_id: 'P-1', subscriber: {} }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await makeDriver().createSubscription({
+      customerId: 'cus_1',
+      planId: 'P-1',
+      idempotencyKey: 'subscription-1',
+    });
+
+    const headers = fetchMock.mock.calls[1]![1].headers as Record<string, string>;
+    expect(headers['PayPal-Request-Id']).toBe('subscription-1');
+  });
+
+  it('refuses an idempotency key on a subscription update, which PayPal does not deduplicate', async () => {
+    await expect(
+      makeDriver().updateSubscription('I-SUB1', { amount: 2990, idempotencyKey: 'update-1' }),
+    ).rejects.toThrow(/does not deduplicate a subscription update/);
+  });
+
+  it('refuses a request id longer than PayPal documents', async () => {
+    await expect(
+      makeDriver().charge({
+        amount: 1990,
+        paymentMethodId: '2w915838hr181240m',
+        idempotencyKey: 'x'.repeat(39),
+      }),
+    ).rejects.toThrow(/38 single-byte characters/);
+  });
+});

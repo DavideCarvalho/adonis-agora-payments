@@ -326,6 +326,47 @@ describe('PagBankDriver refunds', () => {
     }
   });
 
+  it('forwards an idempotencyKey as the x-idempotency-key header on the cancel', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(PAID_ORDER))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: 'CHAR_1',
+          status: 'CANCELED',
+          amount: { value: 1990, summary: { total: 1990, paid: 1990, refunded: 1990 } },
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await makeDriver().refund('ORDE_1', undefined, { idempotencyKey: 'idem-refund-1' });
+      const [, cancelInit] = fetchMock.mock.calls[1]! as [string, RequestInit];
+      const headers = cancelInit.headers as Record<string, string>;
+      // The same 48-hour key the charge uses — without it a retried cancel takes the
+      // money out twice.
+      expect(headers['x-idempotency-key']).toBe('idem-refund-1');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('sends no idempotency header when the caller gave no key', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(PAID_ORDER))
+      .mockResolvedValueOnce(
+        jsonResponse({ id: 'CHAR_1', status: 'CANCELED', amount: { value: 1990 } }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await makeDriver().refund('ORDE_1');
+      const [, cancelInit] = fetchMock.mock.calls[1]! as [string, RequestInit];
+      expect((cancelInit.headers as Record<string, string>)['x-idempotency-key']).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('says why an unpaid Pix order cannot be refunded', async () => {
     const fetchMock = vi
       .fn()
@@ -367,6 +408,71 @@ describe('PagBankDriver capabilities', () => {
     const driver = makeDriver();
     await expect(driver.createCustomer({ name: 'Ana' })).rejects.toThrow(/no customer resource/);
     await expect(driver.findCustomer('cus_1')).rejects.toThrow(/no customer resource/);
+  });
+
+  it('reports an AUTHORIZED charge as authorized — money held, nothing captured', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        id: 'ORDE_2',
+        charges: [
+          {
+            id: 'CHAR_2',
+            status: 'AUTHORIZED',
+            amount: { value: 1990, currency: 'BRL', summary: { total: 1990, paid: 0 } },
+            payment_method: { type: 'CREDIT_CARD' },
+          },
+        ],
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      // PagBank's own word for it is "pré-autorizada"; it becomes PAID through
+      // `POST /charges/{id}/capture`. `pending` understated a hold the acquirer granted.
+      expect((await makeDriver().findPayment('ORDE_2'))?.status).toBe('authorized');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('does not report an authorization as a completed payment on the webhook', () => {
+    const driver = makeDriver();
+    const raw = JSON.stringify({
+      id: 'ORDE_2',
+      charges: [
+        {
+          id: 'CHAR_2',
+          status: 'AUTHORIZED',
+          amount: { value: 1990, summary: { total: 1990, paid: 0, refunded: 0 } },
+          payment_method: { type: 'CREDIT_CARD' },
+        },
+      ],
+    });
+    const event = driver.parseWebhook(raw, { 'x-authenticity-token': authenticityToken(raw) });
+    // There is no canonical authorization event, and it is certainly not a success.
+    expect(event.type).toBe('payment.updated');
+  });
+
+  it('refuses to list invoices rather than answering with an empty array', async () => {
+    const driver = makeDriver();
+    expect(driver.capabilities.invoices).toBe(false);
+    // `[]` is indistinguishable from "this customer has no invoices", which is not
+    // something PagBank told us — the Orders API has no invoice resource at all.
+    await expect(driver.listInvoices('cus_1')).rejects.toThrow(/PagBank has no invoices to list/);
+  });
+
+  it('has no dispute event to map: a chargeback is not an Orders API notification', () => {
+    // PagBank's chargeback arrives as the legacy form-encoded
+    // `notificationType=transaction` post-transaction notification (status 9, "Retenção
+    // temporária"), resolved against the v3 XML API with legacy credentials. It is not
+    // JSON, it carries no authenticity token, and this driver refuses it rather than
+    // half-parsing it — so no PagBank webhook maps to `payment.disputed`.
+    const legacy = 'notificationCode=ABC&notificationType=transaction';
+    // With verification on it does not even get as far as the parser: the legacy
+    // notification carries no `x-authenticity-token`.
+    expect(() => makeDriver().parseWebhook(legacy, {})).toThrow(/authenticity token/);
+    expect(() => makeDriver({ verifyWebhooks: false }).parseWebhook(legacy, {})).toThrow(
+      /not JSON/,
+    );
   });
 
   it('does not advertise a payment method it cannot create', () => {

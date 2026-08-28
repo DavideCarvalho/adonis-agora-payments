@@ -512,8 +512,68 @@ describe('EfiDriver capabilities', () => {
     await expect(driver.createCustomer({ name: 'Ana' })).rejects.toThrow(/no customer resource/);
   });
 
-  it('has no invoices to list', async () => {
-    await expect(makeDriver(fn).listInvoices('cus_1')).resolves.toEqual([]);
+  it('throws on listInvoices instead of answering with an empty list', async () => {
+    // An empty array is indistinguishable from "this customer has no invoices", which is
+    // the same silent shape as the bugs this batch exists to remove: the caller reads zero
+    // rows and concludes the customer never bought anything.
+    const driver = makeDriver(fn);
+    expect(driver.capabilities.invoices).toBe(false);
+    await expect(driver.listInvoices('cus_1')).rejects.toThrow(
+      /\[payments\] Ef\u00ed's Pix API has no invoices to list/,
+    );
+  });
+});
+
+describe('EfiDriver refund idempotency', () => {
+  const settled = (e2e: string) =>
+    [
+      [/oauth\/token/, () => ({ body: TOKEN_BODY })],
+      [
+        /v2\/cob/,
+        () => ({
+          body: { ...COB, status: 'CONCLUIDA', pix: [{ endToEndId: e2e, valor: '19.90' }] },
+        }),
+      ],
+      [
+        /devolucao/,
+        (call: Call) => ({
+          body: { id: call.url.split('/').at(-1), valor: '19.90', status: 'DEVOLVIDO' },
+        }),
+      ],
+    ] as Array<[RegExp, (call: Call) => { status?: number; body: unknown }]>;
+
+  it('uses the idempotency key as the devolução id, which is what Efí deduplicates on', async () => {
+    const e2e = 'E00038166201907261559y6j6mt1u0f6';
+    const { fn, calls } = fakeFetch(settled(e2e));
+    await makeDriver(fn).refund(COB.txid, undefined, { idempotencyKey: 'refundkey0001' });
+    // The devolução id IS the deduplication on this API — a PUT to the same id is the same
+    // refund — so the caller's key has to be the id, verbatim, not a random one beside it.
+    expect(calls.find((call) => call.url.includes('/devolucao/'))!.url).toContain(
+      `/v2/pix/${e2e}/devolucao/refundkey0001`,
+    );
+  });
+
+  it('still mints an id when no key is given, so the call works without one', async () => {
+    const e2e = 'E00038166201907261559y6j6mt1u0f6';
+    const { fn, calls } = fakeFetch(settled(e2e));
+    await makeDriver(fn).refund(COB.txid);
+    const id = calls
+      .find((call) => call.url.includes('/devolucao/'))!
+      .url.split('/')
+      .at(-1)!;
+    expect(id).toMatch(/^[a-f0-9]{32}$/);
+  });
+
+  it('refuses a key BACEN cannot accept rather than silently minting a random id', async () => {
+    const e2e = 'E00038166201907261559y6j6mt1u0f6';
+    const { fn } = fakeFetch(settled(e2e));
+    // A UUID with its dashes is the obvious thing a caller passes, and it is outside the
+    // charset. Dropping it here would turn the caller's retry guarantee into a second refund.
+    await expect(
+      makeDriver(fn).refund(COB.txid, undefined, {
+        idempotencyKey: '4f1c2b3a-0000-4000-8000-abcdefabcdef',
+      }),
+    ).rejects.toThrow(/1\u201335 alphanumeric characters/);
   });
 });
 

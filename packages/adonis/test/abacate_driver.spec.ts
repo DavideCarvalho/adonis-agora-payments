@@ -102,4 +102,69 @@ describe('AbacateDriver', () => {
     const raw = JSON.stringify({ id: 'log_4', event: 'checkout.completed', data: {} });
     expect(() => driver.parseWebhook(raw, {})).toThrow(/signature/);
   });
+
+  // ── Disputes ───────────────────────────────────────────────────────────────────────
+
+  it('maps checkout.disputed and transparent.disputed to payment.disputed', () => {
+    const driver = makeDriver();
+    // "Disputa/chargeback aberta" — both spellings are real AbacatePay v2 events, one per
+    // charge flow. They used to arrive as `payment.failed`, which files a chargeback as a
+    // payment that never went through.
+    for (const name of ['checkout.disputed', 'transparent.disputed']) {
+      const raw = JSON.stringify({ id: `log_${name}`, event: name, data: { id: 'bill_1' } });
+      const event = driver.parseWebhook(raw, { 'x-webhook-signature': sign(raw) });
+      expect(event.type, name).toBe('payment.disputed');
+    }
+  });
+
+  it('does not report a refund as a dispute, or a dispute as a refund', () => {
+    const driver = makeDriver();
+    const refund = JSON.stringify({ id: 'log_r', event: 'checkout.refunded', data: {} });
+    expect(driver.parseWebhook(refund, { 'x-webhook-signature': sign(refund) }).type).toBe(
+      'payment.refunded',
+    );
+    const dispute = JSON.stringify({ id: 'log_d', event: 'checkout.disputed', data: {} });
+    expect(driver.parseWebhook(dispute, { 'x-webhook-signature': sign(dispute) }).type).toBe(
+      'payment.disputed',
+    );
+  });
+
+  // ── Idempotency ────────────────────────────────────────────────────────────────────
+
+  it('refuses an idempotencyKey on every operation AbacatePay cannot deduplicate', async () => {
+    const driver = makeDriver();
+    // AbacatePay documents no idempotency header or field on any endpoint — the only
+    // request header on any of them is `Authorization`.
+    await expect(driver.refund('bill_1', 500, { idempotencyKey: 'k' })).rejects.toThrow(
+      /AbacatePay has no idempotency mechanism.*`refund`/s,
+    );
+    await expect(driver.createCustomer({ idempotencyKey: 'k', name: 'A' })).rejects.toThrow(
+      /`createCustomer`/,
+    );
+    await expect(
+      driver.createSubscription({ idempotencyKey: 'k', customerId: 'cus_1', planId: 'p' }),
+    ).rejects.toThrow(/`createSubscription`/);
+    await expect(driver.updateSubscription('sub_1', { idempotencyKey: 'k' })).rejects.toThrow(
+      /`updateSubscription`/,
+    );
+  });
+
+  it('refuses before it reaches the network', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(makeDriver().refund('bill_1', 500, { idempotencyKey: 'k' })).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('still refunds when no key is given', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: 'bill_1', status: 'REFUNDED', amount: 19.9, currency: 'brl' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const refund = await makeDriver().refund('bill_1');
+    expect(refund.status).toBe('succeeded');
+    expect(refund.amount).toEqual({ amount: 1990, currency: 'brl' });
+  });
 });

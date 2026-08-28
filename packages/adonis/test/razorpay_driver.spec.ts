@@ -427,7 +427,7 @@ describe('RazorpayDriver webhooks', () => {
 });
 
 describe('RazorpayDriver payment method mapping', () => {
-  it('leaves UPI unlabelled rather than borrowing a name from another country', async () => {
+  it('names a UPI payment `upi` — the method most Indian payers use has a name now', async () => {
     stubFetch({
       id: 'pay_1',
       entity: 'payment',
@@ -439,9 +439,30 @@ describe('RazorpayDriver payment method mapping', () => {
     });
     const payment = await makeDriver().findPayment('pay_1');
     expect(payment?.status).toBe('paid');
-    // `PaymentMethodType` has no `upi`; calling it `pix` because both are instant bank
-    // rails would put a Brazilian label on an Indian payment.
-    expect(payment?.method).toBeUndefined();
+    // It used to come back unset, because the union had no `upi` and calling it `pix`
+    // would have put a Brazilian label on an Indian payment. `upi` is a member now.
+    expect(payment?.method).toBe('upi');
+  });
+
+  it("maps the rest of Razorpay's methods by category, not by brand", async () => {
+    for (const [method, expected] of [
+      ['wallet', 'wallet'],
+      ['netbanking', 'bank_transfer'],
+      ['paylater', 'bnpl'],
+      ['cardless_emi', 'bnpl'],
+    ] as const) {
+      stubFetch({
+        id: 'pay_1',
+        entity: 'payment',
+        amount: 199000,
+        currency: 'INR',
+        status: 'captured',
+        method,
+        created_at: 1767225600,
+      });
+      expect((await makeDriver().findPayment('pay_1'))?.method).toBe(expected);
+      vi.unstubAllGlobals();
+    }
   });
 
   it('maps a debit card to debit_card and a credit card to card', async () => {
@@ -470,5 +491,182 @@ describe('RazorpayDriver payment method mapping', () => {
     const driver = makeDriver();
     expect((await driver.findPayment('pay_2'))?.method).toBe('debit_card');
     expect((await driver.findPayment('pay_3'))?.method).toBe('card');
+  });
+});
+
+describe('RazorpayDriver disputes', () => {
+  /** Razorpay's dispute envelope: the dispute entity, alongside the payment it is against. */
+  const disputeEvent = (event: string) => ({
+    entity: 'event',
+    event,
+    contains: ['payment', 'dispute'],
+    payload: {
+      payment: {
+        entity: {
+          id: 'pay_1',
+          entity: 'payment',
+          amount: 199000,
+          currency: 'INR',
+          status: 'captured',
+          method: 'card',
+          notes: { external_reference: 'order_local_1' },
+          created_at: 1767225600,
+        },
+      },
+      dispute: {
+        entity: {
+          id: 'disp_1',
+          entity: 'dispute',
+          payment_id: 'pay_1',
+          amount: 100000,
+          currency: 'INR',
+          amount_deducted: 0,
+          reason_code: 'chargeback',
+          respond_by: 1767830400,
+          status: 'open',
+          phase: 'chargeback',
+          created_at: 1767225600,
+        },
+      },
+    },
+    created_at: 1767225600,
+  });
+
+  it('maps payment.dispute.created onto payment.disputed, keyed on the payment', () => {
+    const raw = JSON.stringify(disputeEvent('payment.dispute.created'));
+    const event = makeDriver().parseWebhook(raw, { 'x-razorpay-signature': signature(raw) });
+    expect(event.type).toBe('payment.disputed');
+    expect(event.data).toMatchObject({
+      // The row that has to stop saying `paid` is the payment's, and the amount is the
+      // DISPUTED one — `payment.amount` is what was charged, which is a different number.
+      gatewayId: 'pay_1',
+      amount: 100000,
+      currency: 'inr',
+      disputeId: 'disp_1',
+      externalReference: 'order_local_1',
+    });
+  });
+
+  it('leaves the rest of the dispute family as payment.updated', () => {
+    for (const name of [
+      'payment.dispute.won',
+      'payment.dispute.lost',
+      'payment.dispute.closed',
+      'payment.dispute.under_review',
+      'payment.dispute.action_required',
+    ]) {
+      const raw = JSON.stringify(disputeEvent(name));
+      const event = makeDriver().parseWebhook(raw, { 'x-razorpay-signature': signature(raw) });
+      expect(event.type, name).toBe('payment.updated');
+    }
+  });
+});
+
+describe('RazorpayDriver authorize/capture', () => {
+  it('reads an authorized payment as authorized, not pending', async () => {
+    // Funds held on the instrument, nothing moved, and Razorpay voids the hold on its own
+    // after a few days. `pending` said "nobody has tried yet", which understated it.
+    stubFetch({
+      id: 'pay_1',
+      entity: 'payment',
+      amount: 199000,
+      currency: 'INR',
+      status: 'authorized',
+      method: 'upi',
+      created_at: 1767225600,
+    });
+    const payment = await makeDriver().findPayment('pay_1');
+    expect(payment?.status).toBe('authorized');
+    expect(payment?.paidAt).toBeUndefined();
+  });
+
+  it('keeps payment.authorized as payment.updated — no money has moved', async () => {
+    const raw = JSON.stringify({
+      entity: 'event',
+      event: 'payment.authorized',
+      payload: {
+        payment: {
+          entity: {
+            id: 'pay_1',
+            entity: 'payment',
+            amount: 199000,
+            currency: 'INR',
+            status: 'authorized',
+            created_at: 1767225600,
+          },
+        },
+      },
+      created_at: 1767225600,
+    });
+    const event = makeDriver().parseWebhook(raw, { 'x-razorpay-signature': signature(raw) });
+    // There is deliberately no `payment.authorized` canonical event: settling on this would
+    // have the billing layer report an order the merchant has not been paid for.
+    expect(event.type).toBe('payment.updated');
+    expect((event.data as { status?: string }).status).toBeUndefined();
+  });
+
+  it('reads a paused subscription as paused, not past_due', async () => {
+    stubFetch({
+      id: 'sub_1',
+      entity: 'subscription',
+      plan_id: 'plan_1',
+      status: 'paused',
+      created_at: 1767225600,
+    });
+    expect((await makeDriver().findSubscription('sub_1'))?.status).toBe('paused');
+  });
+});
+
+describe('RazorpayDriver idempotency', () => {
+  it('sends X-Refund-Idempotency on a refund — the one operation Razorpay deduplicates', async () => {
+    const fetchMock = stubFetch({
+      id: 'rfnd_1',
+      entity: 'refund',
+      amount: 199000,
+      currency: 'INR',
+      payment_id: 'pay_1',
+      status: 'processed',
+      created_at: 1767225600,
+    });
+
+    await makeDriver().refund('pay_1', 199000, { idempotencyKey: 'refund-local-1' });
+
+    const headers = fetchMock.mock.calls[0]![1].headers as Record<string, string>;
+    // Not `Idempotency-Key`: Razorpay names it per feature, and the generic header is
+    // ignored, which would leave a retried refund job refunding twice.
+    expect(headers['X-Refund-Idempotency']).toBe('refund-local-1');
+  });
+
+  it('refuses a refund key Razorpay itself would reject', async () => {
+    await expect(makeDriver().refund('pay_1', 199000, { idempotencyKey: 'short' })).rejects.toThrow(
+      /at least 10 characters/,
+    );
+    await expect(
+      makeDriver().refund('pay_1', 199000, { idempotencyKey: 'has spaces here' }),
+    ).rejects.toThrow(/letters, numbers, hyphens and underscores/);
+  });
+
+  it('throws on an idempotency key for a customer or a subscription instead of ignoring it', async () => {
+    // Razorpay documents no idempotency on either endpoint. Dropping the key silently would
+    // turn a retry into a second customer, or a second live subscription billing the same
+    // person every month.
+    const driver = makeDriver();
+    await expect(
+      driver.createCustomer({ email: 'a@b.c', idempotencyKey: 'customer-1' }),
+    ).rejects.toThrow(/does not deduplicate customer creation/);
+    await expect(
+      driver.createSubscription({
+        customerId: 'cust_1',
+        planId: 'plan_1',
+        metadata: { totalCount: 12 },
+        idempotencyKey: 'subscription-1',
+      }),
+    ).rejects.toThrow(/does not deduplicate subscription creation/);
+    await expect(
+      driver.updateSubscription('sub_1', {
+        metadata: { quantity: 2 },
+        idempotencyKey: 'update-1',
+      }),
+    ).rejects.toThrow(/does not deduplicate a subscription update/);
   });
 });

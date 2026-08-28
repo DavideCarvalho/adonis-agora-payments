@@ -398,13 +398,167 @@ describe('PagarmeDriver', () => {
     expect(data.customerId).toBe('cus_1');
   });
 
-  it('maps a chargeback onto payment.updated rather than a type nothing reads', () => {
+  it('maps charge.chargedback onto payment.disputed', () => {
     const event = makeDriver().parseWebhook(
-      JSON.stringify({ id: 'hook_3', type: 'charge.chargedback', data: paidCharge }),
+      JSON.stringify({
+        id: 'hook_3',
+        type: 'charge.chargedback',
+        data: { ...paidCharge, status: 'chargedback' },
+      }),
+      {},
+    );
+    expect(event.type).toBe('payment.disputed');
+    expect((event.raw as { type: string }).type).toBe('charge.chargedback');
+    // The processor writes the row from this payload, so it has to carry the money.
+    expect(event.data).toMatchObject({ gatewayId: 'ch_1', amount: 1990, currency: 'brl' });
+  });
+
+  it('does not mistake a cancel for a dispute', () => {
+    // `order.canceled` is an order that never went through, not money taken back. The
+    // contract has no cancel event, so it stays `payment.updated` with `raw.type` intact.
+    const event = makeDriver().parseWebhook(
+      JSON.stringify({
+        id: 'hook_4',
+        type: 'order.canceled',
+        data: { id: 'or_1', amount: 1990, status: 'canceled', charges: [paidCharge] },
+      }),
       {},
     );
     expect(event.type).toBe('payment.updated');
-    expect((event.raw as { type: string }).type).toBe('charge.chargedback');
+  });
+
+  it('flips a stored paid payment to disputed through the processor', async () => {
+    const driver = makeDriver();
+    const store = new InMemoryBillingStore();
+    await store.savePayment({
+      gatewayId: 'ch_1',
+      provider: 'pagarme',
+      status: 'paid',
+      amount: 1990,
+      currency: 'brl',
+      customerId: 'cus_1',
+    });
+    const event = driver.parseWebhook(
+      JSON.stringify({
+        id: 'hook_3',
+        type: 'charge.chargedback',
+        data: { ...paidCharge, status: 'chargedback' },
+      }),
+      {},
+    );
+    await new WebhookProcessor({ store, driver }).process(event);
+
+    const row = await store.findPaymentByGatewayId('ch_1');
+    expect(row?.status).toBe('disputed');
+    expect(row?.customerId).toBe('cus_1');
+  });
+
+  // ── Authorization vs capture ───────────────────────────────────────────────────────
+
+  it('reads authorized-not-captured off last_transaction, which is the only place it exists', async () => {
+    // Pagar.me has no `authorized` CHARGE status: an `auth_only` card leaves the charge at
+    // `pending`, exactly like an unpaid boleto, and only `last_transaction.status` tells
+    // them apart. Reading the charge alone collapses a granted hold into "may never pay".
+    const fetchMock = stubFetch({
+      id: 'ch_auth',
+      status: 'pending',
+      amount: 1990,
+      payment_method: 'credit_card',
+      customer: { id: 'cus_1' },
+      last_transaction: { transaction_type: 'credit_card', status: 'authorized_pending_capture' },
+    });
+    try {
+      expect((await makeDriver().findPayment('ch_auth'))?.status).toBe('authorized');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a boleto awaiting payment as pending, not authorized', async () => {
+    stubFetch({
+      id: 'ch_bol',
+      status: 'pending',
+      amount: 1990,
+      payment_method: 'boleto',
+      last_transaction: { transaction_type: 'boleto', status: 'waiting_payment' },
+    });
+    try {
+      expect((await makeDriver().findPayment('ch_bol'))?.status).toBe('pending');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('never lets last_transaction override a settled charge status', async () => {
+    // A captured charge's transaction reads `captured`; a chargedback one is still a
+    // dispute whatever the transaction says. Only `pending` is ambiguous.
+    stubFetch({
+      id: 'ch_cb',
+      status: 'chargedback',
+      amount: 1990,
+      payment_method: 'credit_card',
+      last_transaction: { status: 'authorized_pending_capture' },
+    });
+    try {
+      expect((await makeDriver().findPayment('ch_cb'))?.status).toBe('disputed');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // ── Idempotency ────────────────────────────────────────────────────────────────────
+
+  it('sends the documented Idempotency-key header on order creation', async () => {
+    const fetchMock = stubFetch({
+      id: 'or_1',
+      amount: 1990,
+      status: 'paid',
+      charges: [paidCharge],
+    });
+    try {
+      await makeDriver().charge({
+        customerId: 'cus_1',
+        amount: 1990,
+        method: 'pix',
+        idempotencyKey: 'idem-order-1',
+      });
+      const { headers } = lastCall(fetchMock);
+      // Pagar.me spells it exactly this way, and the value is case-sensitive.
+      expect(headers['Idempotency-key']).toBe('idem-order-1');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('refuses an idempotencyKey on the operations Pagar.me documents none for', async () => {
+    const driver = makeDriver();
+    // The reference for `DELETE /charges/{id}`, `POST /customers` and `POST /subscriptions`
+    // documents no header but `Authorization`. Forwarding a key anyway would hand back a
+    // retry guarantee the gateway never made.
+    await expect(driver.refund('ch_1', 500, { idempotencyKey: 'k' })).rejects.toThrow(
+      /Pagar\.me documents idempotency only for order creation.*`refund`/s,
+    );
+    await expect(driver.createCustomer({ idempotencyKey: 'k', name: 'A' })).rejects.toThrow(
+      /`createCustomer`/,
+    );
+    await expect(
+      driver.createSubscription({
+        idempotencyKey: 'k',
+        customerId: 'cus_1',
+        planId: 'plan_1',
+      }),
+    ).rejects.toThrow(/`createSubscription`/);
+  });
+
+  it('refuses before it reaches the network', async () => {
+    const fetchMock = stubFetch({});
+    try {
+      await expect(makeDriver().refund('ch_1', 500, { idempotencyKey: 'k' })).rejects.toThrow();
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('rejects a webhook without the configured Basic credentials', () => {

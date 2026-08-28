@@ -82,3 +82,93 @@ describe('PaymentsWatcher', () => {
     expect(c.recorded).toHaveLength(0);
   });
 });
+
+describe('PaymentsWatcher entry shape', () => {
+  it('leads with the fields a developer scans by, then the rest, then ts', () => {
+    watcher = new PaymentsWatcher();
+    const c = ctx();
+    watcher.register(c);
+
+    channel('agora:payments:gateway.request.failed').publish({
+      v: 1,
+      ts: 222,
+      lib: 'payments',
+      event: 'gateway.request.failed',
+      payload: {
+        requestBody: { value: 1990 },
+        error: 'HTTP 422',
+        durationMs: 143,
+        path: '/v3/payments',
+        method: 'POST',
+        host: 'api.asaas.com',
+        outcome: 'http_error',
+        status: 422,
+        provider: 'asaas',
+        traceId: 'trace-1',
+      },
+    });
+
+    expect(Object.keys(c.recorded[0]!.content as object)).toEqual([
+      'event',
+      'traceId',
+      'provider',
+      'method',
+      'host',
+      'path',
+      'status',
+      'outcome',
+      'durationMs',
+      'error',
+      'requestBody',
+      'ts',
+    ]);
+  });
+
+  it('surfaces the payload traceId, so one delivery reads as one chain', () => {
+    watcher = new PaymentsWatcher();
+    const c = ctx();
+    watcher.register(c);
+
+    for (const event of ['webhook.received', 'webhook.verification', 'payment.succeeded']) {
+      publish(event, { provider: 'asaas', traceId: 'trace-7' });
+    }
+
+    expect(c.recorded.map((e) => (e.content as { traceId?: string }).traceId)).toEqual([
+      'trace-7',
+      'trace-7',
+      'trace-7',
+    ]);
+  });
+
+  it('prefers the envelope traceId — the host request trace reaches other libraries too', () => {
+    watcher = new PaymentsWatcher();
+    const c = ctx();
+    watcher.register(c);
+
+    channel('agora:payments:webhook.received').publish({
+      v: 1,
+      ts: 1,
+      lib: 'payments',
+      event: 'webhook.received',
+      traceId: 'request-trace',
+      payload: { id: 'evt_1', provider: 'asaas', type: 'x', traceId: 'webhook-trace' },
+    });
+
+    expect((c.recorded[0]!.content as { traceId: string }).traceId).toBe('request-trace');
+  });
+
+  it('records the debug events too — a gateway call is a payments entry like any other', () => {
+    watcher = new PaymentsWatcher();
+    const c = ctx();
+    watcher.register(c);
+
+    publish('gateway.request', { provider: 'asaas', method: 'GET', status: 200, durationMs: 12 });
+    publish('webhook.verification', { provider: 'asaas', outcome: 'unreported' });
+
+    expect(c.recorded.map((e) => (e.content as { event: string }).event)).toEqual([
+      'gateway.request',
+      'webhook.verification',
+    ]);
+    expect(c.recorded[1]!.content).toMatchObject({ outcome: 'unreported' });
+  });
+});

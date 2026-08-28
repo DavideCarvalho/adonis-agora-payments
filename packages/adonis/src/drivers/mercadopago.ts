@@ -117,10 +117,19 @@ interface MercadoPagoNotification {
   id?: number | string;
   type?: string;
   action?: string;
+  /** `topic_chargebacks_wh` sends this instead of `action`, as an array. */
+  actions?: string[];
   date_created?: string;
   live_mode?: boolean;
   user_id?: number | string;
-  data?: { id?: string | number };
+  /**
+   * `id` is the id of whatever changed — a payment for `payment`, a preapproval for
+   * `subscription_preapproval`, the CHARGEBACK CASE for `topic_chargebacks_wh`. Only the
+   * chargeback topic also names the payment the case is about, and it has to: the case id
+   * is not a payment id, and filing a dispute under it would write a row nothing
+   * reconciles.
+   */
+  data?: { id?: string | number; payment_id?: string | number };
 }
 
 /** Mercado Pago rejects an `external_reference` outside this shape (max 64 chars). */
@@ -170,6 +179,7 @@ export class MercadoPagoDriver implements PaymentsDriver {
   // ── Customers ────────────────────────────────────────────────────────────────────────
 
   async createCustomer(input: CreateCustomerInput): Promise<Customer> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createCustomer', 'POST /v1/customers');
     const [firstName, ...rest] = (input.name ?? '').split(' ');
     const body: Record<string, unknown> = {
       ...(input.email !== undefined ? { email: input.email } : {}),
@@ -272,7 +282,11 @@ export class MercadoPagoDriver implements PaymentsDriver {
     }
   }
 
-  async refund(paymentGatewayId: string, amount?: Money): Promise<Refund> {
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
     const currency = this.#currency;
     // No `amount` is a full refund, per Mercado Pago's own wording.
     const body: Record<string, unknown> =
@@ -282,10 +296,12 @@ export class MercadoPagoDriver implements PaymentsDriver {
       {
         method: 'POST',
         body,
-        // The header is required here too, and the driver contract carries no key for a
-        // refund. A key derived from the payment would collapse two deliberate partial
-        // refunds of the same amount into one — a success reported for a refund never made.
-        idempotencyKey: randomUUID(),
+        // The header is required here too, so a caller's key finally reaches it. The
+        // generated fallback stays for the callers who pass none, and it is deliberately
+        // random rather than derived from the payment id: two partial refunds of the same
+        // amount are a normal thing to want, and a per-payment key would collapse the
+        // second into the first and report a success for a refund never made.
+        idempotencyKey: options?.idempotencyKey ?? randomUUID(),
       },
     );
     const refund: Refund = {
@@ -358,6 +374,7 @@ export class MercadoPagoDriver implements PaymentsDriver {
    * plan defines the price and the cycle.
    */
   async createSubscription(input: CreateSubscriptionInput): Promise<Subscription> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createSubscription', 'POST /preapproval');
     const currency = this.#currency;
     if (input.externalReference !== undefined) {
       this.#assertExternalReference(input.externalReference);
@@ -441,6 +458,7 @@ export class MercadoPagoDriver implements PaymentsDriver {
     subscriptionGatewayId: string,
     input: UpdateSubscriptionInput,
   ): Promise<Subscription> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'updateSubscription', 'PUT /preapproval/{id}');
     const currency = this.#currency;
     const body: Record<string, unknown> = {
       ...(input.amount !== undefined
@@ -514,21 +532,19 @@ export class MercadoPagoDriver implements PaymentsDriver {
     if (resourceId === '') return event;
 
     if (type === 'payment') {
-      const payment = await this.#request<MercadoPagoPaymentResponse>(`/v1/payments/${resourceId}`);
-      const currency = payment.currency_id?.toLowerCase() ?? this.#currency;
-      return {
-        ...event,
-        type: this.#paymentEventType(payment.status),
-        data: {
-          gatewayId: String(payment.id),
-          amount: this.#fromAmount(payment.transaction_amount, currency),
-          currency,
-          ...(payment.payer?.id !== undefined ? { customerId: String(payment.payer.id) } : {}),
-          ...(payment.external_reference !== undefined
-            ? { externalReference: payment.external_reference }
-            : {}),
-        },
-      };
+      return this.#paymentEvent(event, resourceId);
+    }
+    // A chargeback case: opened, or its status changed. Mercado Pago sends one action for
+    // both (`actions: ["changed_case_status"]`), so the notification itself cannot say
+    // whether this is the opening — the payment can, and it is the payment this library
+    // has a row for. `data.id` here is the CASE id (`GET /v1/chargebacks/{id}`), so the
+    // payment is read from `data.payment_id`; without it there is no payment to dispute
+    // and the event stays the `payment.updated` above rather than filing one under a case
+    // id that matches nothing.
+    if (type === 'topic_chargebacks_wh') {
+      const paymentId = payload.data?.payment_id;
+      if (paymentId === undefined) return event;
+      return this.#paymentEvent(event, String(paymentId));
     }
     if (type === 'subscription_preapproval') {
       const preapproval = await this.#request<MercadoPagoPreapprovalResponse>(
@@ -554,6 +570,31 @@ export class MercadoPagoDriver implements PaymentsDriver {
     // response shape this driver has not verified against the reference. Guessing the
     // field names of a settled charge is exactly the mistake that ships wrong money.
     return event;
+  }
+
+  /**
+   * Fetch a payment and turn it into the webhook event for whatever happened to it.
+   *
+   * Shared by the `payment` topic (where the notification names the payment) and the
+   * chargeback topic (where it names the case and the payment separately), so a dispute
+   * is normalized through exactly the same status mapping as everything else.
+   */
+  async #paymentEvent(event: WebhookEvent, paymentId: string): Promise<WebhookEvent> {
+    const payment = await this.#request<MercadoPagoPaymentResponse>(`/v1/payments/${paymentId}`);
+    const currency = payment.currency_id?.toLowerCase() ?? this.#currency;
+    return {
+      ...event,
+      type: this.#paymentEventType(payment.status),
+      data: {
+        gatewayId: String(payment.id),
+        amount: this.#fromAmount(payment.transaction_amount, currency),
+        currency,
+        ...(payment.payer?.id !== undefined ? { customerId: String(payment.payer.id) } : {}),
+        ...(payment.external_reference !== undefined
+          ? { externalReference: payment.external_reference }
+          : {}),
+      },
+    };
   }
 
   // ── Mappers ──────────────────────────────────────────────────────────────────────────
@@ -626,6 +667,12 @@ export class MercadoPagoDriver implements PaymentsDriver {
         return 'payment.updated';
       case 'subscription_preapproval':
         return 'subscription.updated';
+      // Deliberately not `payment.disputed`: the notification carries the chargeback case
+      // id, not the payment id, and the only honest dispute event is the one built after
+      // the payment named by `data.payment_id` has been fetched. This is what the topic
+      // degrades to when that id is missing.
+      case 'topic_chargebacks_wh':
+        return 'payment.updated';
       default:
         return type === '' ? 'unknown' : type.toLowerCase();
     }
@@ -639,8 +686,17 @@ export class MercadoPagoDriver implements PaymentsDriver {
       case 'cancelled':
         return 'payment.failed';
       case 'refunded':
-      case 'charged_back':
         return 'payment.refunded';
+      // Both are the payment being disputed, and `charged_back` used to arrive as
+      // `payment.refunded` — which says the seller gave the money back voluntarily and
+      // leaves nothing to distinguish a refund from revenue taken away by the issuer.
+      // `in_mediation` is a claim opened inside Mercado Pago; `charged_back` is the card
+      // chargeback. How it ENDS is `status_detail` — `settled` (lost) or `reimbursed`
+      // (won) — which stays on `payment.payload`: the contract has no resolution event,
+      // by design, because no two gateways report one the same way.
+      case 'in_mediation':
+      case 'charged_back':
+        return 'payment.disputed';
       default:
         return 'payment.updated';
     }
@@ -659,8 +715,11 @@ export class MercadoPagoDriver implements PaymentsDriver {
   #mapPayment(data: MercadoPagoPaymentResponse, fallbackCurrency: string): Payment {
     const statusMap: Record<string, Payment['status']> = {
       approved: 'paid',
-      // Authorized means the card was held, not captured — the money has not moved.
-      authorized: 'pending',
+      // The card was held (`status_detail: pending_capture`) and nothing was captured —
+      // the money has NOT moved. It used to collapse into `pending`, which understates a
+      // hold the issuer already granted; `paid` would have granted access against money
+      // that can still evaporate when the authorization expires uncaptured.
+      authorized: 'authorized',
       pending: 'pending',
       in_process: 'pending',
       in_mediation: 'disputed',
@@ -702,8 +761,10 @@ export class MercadoPagoDriver implements PaymentsDriver {
       authorized: 'active',
       // The payer has not authorized it yet — nothing has been charged.
       pending: 'incomplete',
-      // Nearest canonical state: billing has stopped but the subscription has not ended.
-      paused: 'past_due',
+      // Billing has stopped and the preapproval is still alive — it can be resumed, and
+      // it must not entitle the payer meanwhile. It used to map to `past_due`, which says
+      // a charge failed; nothing failed here, Mercado Pago was told to stop.
+      paused: 'paused',
       canceled: 'canceled',
     };
     const currency = data.auto_recurring?.currency_id?.toLowerCase() ?? this.#currency;
@@ -842,6 +903,20 @@ export class MercadoPagoDriver implements PaymentsDriver {
       default:
         return 'unknown';
     }
+  }
+
+  /**
+   * `X-Idempotency-Key` is documented — and mandatory — on `POST /v1/payments` and
+   * `POST /v1/payments/{id}/refunds`, and on nothing else: the reference for
+   * `/v1/customers` and `/preapproval` lists `Authorization` and no more. Sending it
+   * there anyway would be harmless and unspecified, which is the worst combination — the
+   * caller would believe their retry is safe. So those operations refuse it.
+   */
+  #refuseIdempotencyKey(key: string | undefined, operation: string, endpoint: string): void {
+    if (key === undefined) return;
+    throw new Error(
+      `[payments] Mercado Pago documents \`X-Idempotency-Key\` only for payments and refunds, so \`${operation}\` cannot honour an idempotencyKey — its \`${endpoint}\` reference documents no such header. \`charge()\` and \`refund()\` do honour it; for the rest, deduplicate before you call (a preapproval can be looked up by \`external_reference\`).`,
+    );
   }
 
   #numberOption(value: unknown): number | undefined {

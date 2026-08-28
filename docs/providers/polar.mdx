@@ -30,6 +30,11 @@ you create in Polar, and money moves through Polar's own checkout.
   `sandbox` defaults to `NODE_ENV !== 'production'` and switches the host to
   `https://sandbox-api.polar.sh` — sandbox tokens are not interchangeable with production
   ones, because the two environments hold separate organizations.
+- **`idempotencyKey`**: sent as Polar's `Idempotency-Key` request header. Polar documents
+  it for mutating requests (`POST`, `PATCH`, `DELETE`) and deduplicates on nothing else, so
+  a key written into `metadata` would be echoed back and protect nothing. The driver sends
+  it on `createCheckout`, `refund`, `createCustomer`, `createSubscription` and
+  `updateSubscription`; omitting the key omits the header entirely.
 - **API version**: pinned to `2026-04` via the `Polar-Version` header on every request.
   Polar defaults to that version when the header is absent, so pinning only protects you
   from the day it promotes a new default.
@@ -170,6 +175,28 @@ Two behaviours worth knowing, because they are not obvious:
 
 A refund event is keyed by its **order** id, not the refund id — the order is the row your
 handler is holding.
+
+### Paused subscriptions are `paused`, not `active`
+
+`subscription.paused` and a `paused` status from `findSubscription` now report
+`Subscription.status === 'paused'`. It used to report `active`, which handed entitlement to
+a subscriber who is not paying: a paused subscription exists and will bill again, but it is
+not billing *now*. Anything gating access on `status === 'active'` will start refusing
+paused subscribers, which is the point. The raw value is still on
+`subscription.payload.status`.
+
+### Disputes: your merchant of record absorbs them
+
+**Polar has no dispute or chargeback event, and this driver does not invent one.** That is
+not a gap in the integration — it is the deal. As merchant of record Polar is the seller on
+the buyer's statement, so a chargeback is raised against Polar and Polar bears it, together
+with the fee and the representment. Its event catalogue is checkouts, customers, orders,
+refunds, subscriptions, benefit grants, benefits, products, discounts and the organization;
+nothing in it is a dispute.
+
+So `payment.disputed` never fires on this provider. If your application has a "revoke access
+on chargeback" path, `order.refunded` / `refund.created` is what drives it here. Forcing an
+unrelated event into `payment.disputed` would invent a notification that does not exist.
 
 <Callout title="The webhook secret is used verbatim">
 Polar's secret derivation is not the Standard Webhooks default. `@polar-sh/sdk`

@@ -1,0 +1,42 @@
+{{{
+  exports({ to: app.configPath('payments_client.ts') })
+}}}
+import { defineConfig } from '@adonis-agora/payments/client'
+
+/**
+ * Configuration for the browser-facing payment status endpoint — the one
+ * \`usePaymentStatus()\` from \`@adonis-agora/payments-react\` polls while a Pix
+ * QR code or a boleto is on screen.
+ *
+ * DISABLED BY DEFAULT. Unlike the dashboard, this endpoint is reachable by every
+ * logged-in browser, so you turn it on deliberately.
+ *
+ * The three hooks below are the whole authorization story:
+ *
+ * - \`authorize\`          — is this request allowed at all (default: there is a
+ *                          resolved user on \`ctx.auth\`; no user is a 401).
+ * - \`owner\`              — who is asking (default: \`{ type: 'User', id: user.id }\`).
+ * - \`authorizeReference\` — may this caller see THIS payment. The default checks
+ *                          the payment's gateway customer against the one the owner
+ *                          holds in \`billing_customers\`. If you never recorded that
+ *                          mapping with \`ensureCustomer(..., { store, owner })\`, the
+ *                          default DENIES — write your own hook against your own
+ *                          tables instead.
+ */
+export default defineConfig({
+  // Turn it on. Nothing is mounted while this is false.
+  // enabled: true,
+  // path: '/payments/client',
+  // authorize: async (ctx) => {
+  //   await ctx.auth.check()
+  //   return ctx.auth.user !== undefined
+  // },
+  // owner: async (ctx) => {
+  //   const user = ctx.auth.user
+  //   return user ? { type: 'User', id: String(user.id) } : null
+  // },
+  // authorizeReference: async (ctx, reference) => {
+  //   const order = await Order.findBy('gatewayPaymentId', reference)
+  //   return order?.userId === ctx.auth.user?.id
+  // },
+})

@@ -82,6 +82,17 @@ describe('driver registry', () => {
         new RegExp(`${name}\\s*:\\s*true`).test(caps) ? '✅' : '—';
       const cells = (row ?? '').split('|').map((cell) => cell.trim());
       // | link | methods | refunds | subscriptions | invoices |
+      // The methods cell was NOT gated at first, so when two drivers widened their
+      // supportedMethods the table went stale in silence — the exact drift this test is
+      // supposed to make impossible.
+      const methods = (source.match(/supportedMethods = \[([^\]]*)\]/)?.[1] ?? '')
+        .split(',')
+        .map((entry) => entry.trim().replace(/'/g, ''))
+        .filter(Boolean)
+        .map((name) => (name === 'undefined' ? 'any' : name.replace(/_/g, ' ')));
+      expect(cells[2], `${slug}: methods cell disagrees with supportedMethods`).toBe(
+        methods.join(', ') || '—',
+      );
       expect(cells[3], `${slug}: refunds cell disagrees with the driver`).toBe(supports('refunds'));
       expect(cells[4], `${slug}: subscriptions cell disagrees`).toBe(supports('subscriptions'));
       expect(cells[5], `${slug}: invoices cell disagrees`).toBe(supports('invoices'));

@@ -61,6 +61,12 @@ interface MolliePaymentResponse {
   status: 'open' | 'pending' | 'authorized' | 'paid' | 'canceled' | 'expired' | 'failed';
   amount: MollieAmount;
   amountRefunded?: MollieAmount;
+  /**
+   * How much of this payment the payer's bank has pulled back. Mollie leaves `status` at
+   * `paid` when a chargeback lands — this field is the only thing on the payment that says
+   * the money went away, and it is what the classic webhook makes you fetch to find out.
+   */
+  amountChargedBack?: MollieAmount;
   description?: string;
   method?: string | null;
   metadata?: Record<string, unknown> | null;
@@ -102,14 +108,78 @@ interface MollieRefundResponse {
   paymentId: string;
 }
 
-/** The next-gen (Webhooks API) event envelope, when the account is set up for it. */
+/** A chargeback, as `GET /payments/{id}/chargebacks/{id}` and the event snapshot return it. */
+interface MollieChargeback {
+  id: string;
+  amount: MollieAmount;
+  paymentId: string;
+  createdAt?: string;
+  reversedAt?: string | null;
+  reason?: { code?: string; description?: string } | null;
+}
+
+/**
+ * The next-gen (Webhooks API) event envelope, when the account is set up for it.
+ *
+ * `_embedded.entity` is present only on a **snapshot** webhook; a "simple payload" webhook
+ * carries `entityId` and nothing else. That distinction matters for chargebacks: a
+ * chargeback id cannot be read back on its own (`GET /payments/{paymentId}/chargebacks/{id}`
+ * needs the payment id, and Mollie has no lookup by chargeback id), so a simple-payload
+ * chargeback event is unresolvable — see {@link MollieDriver.parseWebhook}.
+ */
 interface MollieEventPayload {
   resource?: string;
   id?: string;
   type?: string;
   entityId?: string;
   createdAt?: string;
+  _embedded?: { entity?: Record<string, unknown> };
 }
+
+/**
+ * Canonical method **category** → the Mollie method ids in it.
+ *
+ * Mollie's `method` parameter takes a single id *or an array of ids*, and an array is
+ * exactly what a category is: `bank_transfer` is not one brand, it is iDEAL in the
+ * Netherlands, Bancontact in Belgium, Multibanco in Portugal and eleven others. Sending
+ * the whole set restricts the hosted page to that category and lets Mollie show the
+ * buyer the ones their country and your profile actually enable.
+ *
+ * To pin one brand — "iDEAL, nothing else" — pass `metadata.mollieMethod` with the exact
+ * Mollie id; that is the gateway's own field, which is where a brand belongs.
+ */
+const MOLLIE_METHOD_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
+  credit_card: ['creditcard'],
+  // Push-from-your-bank. Mollie's own docs group these as its "bank-based" methods.
+  bank_transfer: [
+    'ideal',
+    'bancontact',
+    'banktransfer',
+    'belfius',
+    'bizum',
+    'blik',
+    'eps',
+    'kbc',
+    'mbway',
+    'mobilepay',
+    'multibanco',
+    'mybank',
+    'paybybank',
+    'przelewy24',
+    'satispay',
+    'swish',
+    'trustly',
+    'twint',
+    'vipps',
+    'bancomatpay',
+  ],
+  // Pull-from-your-account mandates: SEPA Direct Debit and its UK equivalent, Bacs.
+  bank_debit: ['directdebit', 'bacs'],
+  wallet: ['paypal', 'applepay', 'googlepay'],
+  bnpl: ['klarna', 'in3', 'riverty', 'billie', 'billink', 'alma'],
+  // Stored-value paper and plastic: meal/eco vouchers, gift cards, paysafecard.
+  voucher: ['voucher', 'giftcard', 'paysafecard'],
+};
 
 /**
  * Mollie driver — European gateway (api.mollie.com/v2), Bearer API key, multi-currency.
@@ -127,12 +197,27 @@ interface MollieEventPayload {
 export class MollieDriver implements PaymentsDriver {
   readonly provider = 'mollie';
   /**
-   * Only what `charge()` can genuinely ask Mollie for. Mollie's catalogue is mostly local
-   * European methods (iDEAL, Bancontact, SEPA direct debit, Klarna, PayPal, …) and the
-   * package's `PaymentMethodName` union has no name for any of them, so they cannot be
-   * declared here — see the driver's docs page.
+   * What `charge()` can genuinely ask Mollie for, now that the contract names **categories**
+   * instead of brands. Mollie's catalogue is almost entirely local European methods and
+   * none of them had a name here, so every one of iDEAL, Bancontact, SEPA Direct Debit,
+   * Klarna, PayPal, Apple Pay, EPS, Przelewy24, BLIK, TWINT, MB WAY, Multibanco, Trustly,
+   * paysafecard and the vouchers was unroutable. Each now falls into a category, and the
+   * category goes out as Mollie's own `method` array (see {@link MollieDriver.#mapMethod}).
+   *
+   * `debit_card` is still absent, and re-checking did not change that: Mollie folds debit
+   * cards (Maestro, V PAY) into the single `creditcard` method id and exposes no separate
+   * debit id, so a `debit_card` route could only be a `creditcard` charge wearing another
+   * name. `pix` and `boleto` are not European methods and Mollie has neither.
    */
-  readonly supportedMethods = ['credit_card', 'undefined'] as const;
+  readonly supportedMethods = [
+    'credit_card',
+    'bank_transfer',
+    'bank_debit',
+    'wallet',
+    'bnpl',
+    'voucher',
+    'undefined',
+  ] as const;
   /** No invoices: Mollie's Invoices API returns Mollie's own invoices to *you*, not yours. */
   readonly capabilities = { refunds: true, invoices: false, subscriptions: true };
 
@@ -170,6 +255,7 @@ export class MollieDriver implements PaymentsDriver {
         ...(input.email !== undefined ? { email: input.email } : {}),
         ...this.#customerMetadata(input),
       },
+      ...this.#idempotency(input.idempotencyKey),
     });
     return this.#mapCustomer(data);
   }
@@ -228,7 +314,7 @@ export class MollieDriver implements PaymentsDriver {
       );
     }
 
-    const method = this.#mapMethod(input.method);
+    const method = this.#mapMethod(input.method, input.metadata);
     const body: Record<string, unknown> = {
       amount: this.#toMollieAmount(input.amount, input.currency),
       // Mollie makes `description` mandatory — it is what the payer sees on their statement.
@@ -262,7 +348,16 @@ export class MollieDriver implements PaymentsDriver {
     }
   }
 
-  async refund(paymentGatewayId: string, amount?: Money): Promise<Refund> {
+  /**
+   * `options.idempotencyKey` goes out as Mollie's `Idempotency-Key` header — the only
+   * thing Mollie deduplicates on, and the difference between a retried refund and a second
+   * one. Mollie keeps a key for one hour; after that the same key refunds again.
+   */
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
     // Mollie makes `amount` mandatory on a refund and the amount must carry the *payment's*
     // currency, which a charge may have overridden — so read it off the payment rather than
     // assuming the driver's configured one.
@@ -277,7 +372,7 @@ export class MollieDriver implements PaymentsDriver {
 
     const data = await this.#request<MollieRefundResponse>(
       `/payments/${paymentGatewayId}/refunds`,
-      { method: 'POST', body: { amount: value } },
+      { method: 'POST', body: { amount: value }, ...this.#idempotency(options?.idempotencyKey) },
     );
     const refund: Refund = {
       id: data.id,
@@ -369,7 +464,7 @@ export class MollieDriver implements PaymentsDriver {
 
     const data = await this.#request<MollieSubscriptionResponse>(
       `/customers/${input.customerId}/subscriptions`,
-      { method: 'POST', body },
+      { method: 'POST', body, ...this.#idempotency(input.idempotencyKey) },
     );
     const subscription = this.#mapSubscription(data);
     publishSubscriptionDiagnostics(subscription, 'subscription.created');
@@ -391,10 +486,25 @@ export class MollieDriver implements PaymentsDriver {
     return subscription;
   }
 
+  /**
+   * `input.idempotencyKey` is REFUSED, not ignored. Mollie's own words: "All `POST`
+   * endpoints accept idempotency keys. Sending idempotency keys for `GET`, `PATCH`, or
+   * `DELETE` requests is not necessary since these API requests are repeatable by nature."
+   * Updating a subscription is a `PATCH`, so there is no key to send and accepting one
+   * would promise a deduplication Mollie never performs.
+   */
   async updateSubscription(
     subscriptionGatewayId: string,
     input: UpdateSubscriptionInput,
   ): Promise<Subscription> {
+    if (input.idempotencyKey !== undefined) {
+      throw new Error(
+        '[payments] Mollie accepts `Idempotency-Key` on POST requests only, and updating a ' +
+          'subscription is a PATCH — so `idempotencyKey` cannot be honoured on ' +
+          'updateSubscription(). The PATCH is repeatable by nature (it sets fields to the ' +
+          'values you pass), so drop the key rather than relying on one Mollie ignores.',
+      );
+    }
     const { customerId, subscriptionId } = await this.#resolveSubscription(subscriptionGatewayId);
     const data = await this.#request<MollieSubscriptionResponse>(
       `/customers/${customerId}/subscriptions/${subscriptionId}`,
@@ -472,6 +582,10 @@ export class MollieDriver implements PaymentsDriver {
       throw new Error('[payments] Mollie webhook body carried no resource id.');
     }
 
+    if (entityId.startsWith('chb_')) {
+      return this.#chargebackEvent(envelope, entityId);
+    }
+
     if (!entityId.startsWith('tr_')) {
       // A next-gen event about something that is not a payment (a payment link, a sales
       // invoice). There is nothing to map onto the payment shape, so report what the
@@ -491,16 +605,23 @@ export class MollieDriver implements PaymentsDriver {
     return {
       // Stable per *transition*, so a redelivery of the same status dedupes in the ledger
       // while the next status still gets through. A next-gen event has a real id of its own.
-      id: envelope?.id ?? `mollie:${data.id}:${data.status}`,
+      //
+      // Mollie's own `status` stays `paid` through a refund AND through a chargeback, so
+      // the derived id needs the mapped outcome too — without it the chargeback's event id
+      // is byte-identical to the earlier `payment.succeeded` one and the ledger discards
+      // the webhook that takes the money away as a replay.
+      id: envelope?.id ?? `mollie:${data.id}:${this.#transition(data.status, payment.status)}`,
       provider: this.provider,
       type:
-        payment.status === 'paid'
-          ? 'payment.succeeded'
-          : payment.status === 'refunded'
-            ? 'payment.refunded'
-            : payment.status === 'failed' || payment.status === 'canceled'
-              ? 'payment.failed'
-              : 'payment.updated',
+        payment.status === 'disputed'
+          ? 'payment.disputed'
+          : payment.status === 'paid'
+            ? 'payment.succeeded'
+            : payment.status === 'refunded'
+              ? 'payment.refunded'
+              : payment.status === 'failed' || payment.status === 'canceled'
+                ? 'payment.failed'
+                : 'payment.updated',
       createdAt: data.createdAt,
       data: {
         gatewayId: payment.gatewayId,
@@ -516,6 +637,49 @@ export class MollieDriver implements PaymentsDriver {
       // The request body carried only an id; the fetched payment is the gateway payload
       // this event was actually normalized from.
       raw: data as unknown as Record<string, unknown>,
+    };
+  }
+
+  /**
+   * A next-gen `chargeback.*` event: the one webhook that takes revenue away.
+   *
+   * The chargeback entity has to come from the event body. Mollie's only read endpoint is
+   * `GET /payments/{paymentId}/chargebacks/{id}` — there is no lookup by chargeback id —
+   * so a webhook configured with the "simple payload" (an `entityId` and nothing else)
+   * carries a chargeback that literally cannot be resolved. That throws rather than
+   * degrading to an inert event: the route answers 400, Mollie retries, and the message
+   * says which setting to change. A silent pass-through here is exactly the shape of bug
+   * `payment.disputed` exists to remove.
+   *
+   * Note this is the *next-gen* path only. On the classic webhook a chargeback arrives as
+   * an ordinary `tr_…` notification and is caught by `amountChargedBack` on the fetched
+   * payment — see {@link MollieDriver.#mapPayment}.
+   */
+  #chargebackEvent(envelope: MollieEventPayload | null, entityId: string): WebhookEvent {
+    const entity = envelope?._embedded?.entity as unknown as MollieChargeback | undefined;
+    if (entity?.paymentId === undefined || entity.amount === undefined) {
+      throw new Error(
+        `[payments] Mollie sent chargeback ${entityId} with no embedded entity, and a chargeback cannot be read back on its own — \`GET /payments/{paymentId}/chargebacks/{id}\` needs the payment id Mollie did not send. Configure this webhook to deliver the full snapshot payload instead of the id-only one.`,
+      );
+    }
+    const amount = this.#fromMollieAmount(entity.amount);
+    return {
+      id: envelope?.id ?? `mollie:${entityId}:${envelope?.type ?? 'chargeback'}`,
+      provider: this.provider,
+      // `chargeback.reversed` is a dispute RESOLVED in your favour. The package
+      // deliberately has no canonical resolution event, so it arrives as a plain update.
+      type: envelope?.type === 'chargeback.reversed' ? 'payment.updated' : 'payment.disputed',
+      ...(envelope?.createdAt !== undefined ? { createdAt: envelope.createdAt } : {}),
+      // Keyed by the PAYMENT, not the chargeback: the payment is the row whose status has
+      // to move to `disputed`.
+      data: {
+        gatewayId: entity.paymentId,
+        amount: amount.amount,
+        currency: amount.currency,
+        chargebackId: entity.id ?? entityId,
+        ...(entity.reason?.code !== undefined ? { reason: entity.reason.code } : {}),
+      },
+      raw: (envelope ?? { id: entityId }) as unknown as Record<string, unknown>,
     };
   }
 
@@ -537,10 +701,17 @@ export class MollieDriver implements PaymentsDriver {
     const refunded =
       data.amountRefunded !== undefined &&
       this.#fromMollieAmount(data.amountRefunded).amount >= amount.amount;
+    // A chargeback leaves Mollie's own `status` at `paid` — `amountChargedBack` is the only
+    // field that says the bank pulled the money back, and it outranks everything below it.
+    const chargedBack =
+      data.amountChargedBack !== undefined &&
+      this.#fromMollieAmount(data.amountChargedBack).amount > 0;
     const statusMap: Record<MolliePaymentResponse['status'], Payment['status']> = {
       open: 'pending',
       pending: 'pending',
-      authorized: 'pending',
+      // Funds held, nothing captured — a real Mollie state for pay-later methods and for
+      // manual-capture cards. It used to collapse into `pending`, which understated it.
+      authorized: 'authorized',
       paid: 'paid',
       canceled: 'canceled',
       // The payer never completed it and now cannot — the same outcome as `failed`, and
@@ -553,14 +724,19 @@ export class MollieDriver implements PaymentsDriver {
       gatewayId: data.id,
       provider: this.provider,
       amount,
-      status: refunded ? 'refunded' : (statusMap[data.status] ?? 'pending'),
+      status: chargedBack
+        ? 'disputed'
+        : refunded
+          ? 'refunded'
+          : (statusMap[data.status] ?? 'pending'),
       payload: data as unknown as Record<string, unknown>,
       createdAt: data.createdAt,
     };
     if (data.customerId !== undefined) result.customerId = data.customerId;
     if (data.subscriptionId !== undefined) result.subscriptionId = data.subscriptionId;
     if (data.paidAt !== undefined) result.paidAt = data.paidAt;
-    if (data.method === 'creditcard') result.method = 'card';
+    const method = this.#mapPaymentMethodType(data.method);
+    if (method !== undefined) result.method = method;
     const checkout = data._links?.checkout?.href;
     if (checkout !== undefined) result.hostedUrl = checkout;
     return result;
@@ -591,13 +767,61 @@ export class MollieDriver implements PaymentsDriver {
     };
   }
 
-  /** Canonical method name → Mollie method id. Anything else is a routing mistake. */
-  #mapMethod(method?: string): string | undefined {
-    if (method === undefined || method === 'undefined') return undefined;
-    if (method === 'credit_card') return 'creditcard';
-    throw new Error(
-      `[payments] Mollie has no "${method}" method. This driver asks Mollie for \`creditcard\`, or lets the shopper pick on the hosted page when no method is given.`,
+  /**
+   * Canonical method name → what goes in Mollie's `method` field. Anything else is a
+   * routing mistake and fails here rather than at the gateway.
+   */
+  #mapMethod(method: string | undefined, metadata: Record<string, unknown> | undefined): unknown {
+    const brand = metadata?.mollieMethod;
+    const category = method === undefined || method === 'undefined' ? undefined : method;
+
+    if (typeof brand === 'string') {
+      if (category !== undefined) {
+        const allowed = MOLLIE_METHOD_CATEGORIES[category];
+        if (allowed === undefined) throw this.#unknownMethod(category);
+        if (!allowed.includes(brand)) {
+          throw new Error(
+            `[payments] Mollie method "${brand}" is not a \`${category}\` method. \`metadata.mollieMethod\` names the exact Mollie id and must belong to the category being routed — ${category} covers: ${allowed.join(', ')}.`,
+          );
+        }
+      }
+      return brand;
+    }
+
+    if (category === undefined) return undefined;
+    const ids = MOLLIE_METHOD_CATEGORIES[category];
+    if (ids === undefined) throw this.#unknownMethod(category);
+    // A single-member category goes out as the bare id Mollie documents, not a 1-element
+    // array, so the request body reads the way Mollie's own examples do.
+    return ids.length === 1 ? ids[0] : [...ids];
+  }
+
+  #unknownMethod(method: string): Error {
+    return new Error(
+      `[payments] Mollie has no "${method}" method. This driver routes the categories ${Object.keys(
+        MOLLIE_METHOD_CATEGORIES,
+      ).join(
+        ', ',
+      )}, or lets the shopper pick on the hosted page when no method is given. Mollie has no separate debit-card method (debit cards are \`creditcard\`), and no Pix or boleto.`,
     );
+  }
+
+  /**
+   * A Mollie method id, as reported back on a payment, onto the contract's categories.
+   * Only `creditcard` had a name before, so an iDEAL or Klarna payment came back with no
+   * `method` at all.
+   */
+  #mapPaymentMethodType(method: string | null | undefined): Payment['method'] | undefined {
+    if (method === null || method === undefined) return undefined;
+    if (method === 'creditcard' || method === 'pointofsale') return 'card';
+    for (const [category, ids] of Object.entries(MOLLIE_METHOD_CATEGORIES)) {
+      if (!ids.includes(method)) continue;
+      if (category === 'credit_card') return 'card';
+      return category as Payment['method'];
+    }
+    // A method Mollie added since this table was written: it was paid, and saying so with
+    // `unknown` is honest, where leaving it unset would read as "Mollie did not tell us".
+    return 'unknown';
   }
 
   #mapCycle(cycle: CreateSubscriptionInput['cycle']): string {
@@ -628,9 +852,23 @@ export class MollieDriver implements PaymentsDriver {
       case 'payment.refunded':
       case 'refund.successful':
         return 'payment.refunded';
+      case 'chargeback.received':
+        return 'payment.disputed';
       default:
         return type ?? 'payment.updated';
     }
+  }
+
+  /**
+   * The event-id suffix for a payment webhook. Mollie's own `status` is the transition in
+   * every ordinary case, but it stays `paid` through both a refund and a chargeback — so
+   * those two get their own suffix, or their event id collides with the earlier
+   * `payment.succeeded` one and the idempotency ledger drops them as replays.
+   */
+  #transition(gatewayStatus: string, mapped: Payment['status']): string {
+    if (mapped === 'disputed') return `${gatewayStatus}:chargeback`;
+    if (mapped === 'refunded') return `${gatewayStatus}:refunded`;
+    return gatewayStatus;
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────────────────────
@@ -663,7 +901,15 @@ export class MollieDriver implements PaymentsDriver {
     webhookUrl?: string;
     rest: Record<string, unknown>;
   } {
-    const { redirectUrl, cancelUrl, webhookUrl, ...rest } = metadata ?? {};
+    // `mollieMethod` is read as an argument (the exact Mollie method id to pin), so it is
+    // consumed here rather than echoed back as gateway metadata.
+    const {
+      redirectUrl,
+      cancelUrl,
+      webhookUrl,
+      mollieMethod: _mollieMethod,
+      ...rest
+    } = metadata ?? {};
     return {
       ...(typeof redirectUrl === 'string' ? { redirectUrl } : {}),
       ...(typeof cancelUrl === 'string' ? { cancelUrl } : {}),
@@ -697,6 +943,10 @@ export class MollieDriver implements PaymentsDriver {
    * Mollie deduplicates on the `Idempotency-Key` request header and on nothing else — a key
    * written into `metadata` would be echoed back and protect nothing. Mollie keeps a key for
    * one hour; after that the same key creates a second payment.
+   *
+   * Applied to every POST the driver makes: `charge`, `createCheckout`, `refund`,
+   * `createCustomer` and `createSubscription`. `updateSubscription` is a PATCH, which
+   * Mollie does not accept keys for at all, so it refuses instead.
    */
   #idempotency(key: string | undefined): { headers?: Record<string, string> } {
     return key !== undefined ? { headers: { 'Idempotency-Key': key } } : {};

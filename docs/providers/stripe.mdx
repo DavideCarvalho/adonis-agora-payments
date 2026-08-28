@@ -18,12 +18,15 @@ import { Callout } from 'fumadocs-ui/components/callout';
   in whatever you hand it, so a default would be a guess at the app's country, and a wrong
   guess charges instead of failing. The BRL-only gateways below take no such option.
 - **Webhooks**: HMAC verified by the SDK's `constructEvent` — needs `webhookSecret`
-  (`STRIPE_WEBHOOK_SECRET`). Events `checkout.session.completed`,
-  `invoice.payment_succeeded`, `customer.subscription.*`.
+  (`STRIPE_WEBHOOK_SECRET`) — and then **normalized** onto the canonical event types. See
+  [the table below](#webhooks); anything unmapped keeps its Stripe name.
 - **`externalReference`**: mapped into `metadata.external_reference` on the PaymentIntent
   and the subscription, and read back from the webhook payload.
-- **`idempotencyKey`**: sent as Stripe's `Idempotency-Key` request header on `charge` and
-  `createCheckout` — the only thing Stripe deduplicates on. It is also copied into
+- **`idempotencyKey`**: sent as Stripe's `Idempotency-Key` request header — the only
+  thing Stripe deduplicates on — on **every** call that takes one: `charge`,
+  `createCheckout`, `refund`, `createCustomer`, `createSubscription` and
+  `updateSubscription`. Stripe accepts the header on all POST requests, so there is no
+  operation here that has to refuse a key. On a charge it is also copied into
   `metadata.idempotency_key`, because Stripe does not echo the header back on the object
   and that copy is what lets `payment.payload` trace a charge to its key.
 - **Pix and boleto payloads**: a Pix intent comes back with `pixCode` (the BR Code the
@@ -43,3 +46,88 @@ await payments.driver('credit_card').charge({
   invoice: true,
 })
 ```
+
+## Webhooks
+
+Every Stripe event is verified, then renamed onto the canonical type the library syncs on.
+The driver used to pass `event.type` through verbatim, which meant the processor — which
+switches on the canonical names — recognized nothing Stripe sent: the events were ledgered
+as processed and `billing_payments` stayed empty.
+
+| Stripe event | Normalized |
+| --- | --- |
+| `payment_intent.succeeded` | `payment.succeeded` |
+| `payment_intent.payment_failed` | `payment.failed` |
+| `payment_intent.canceled`, `.processing`, `.requires_action`, `.amount_capturable_updated` | `payment.updated` |
+| `charge.refunded` (fully refunded) | `payment.refunded` |
+| `charge.refunded` (partial) | `payment.updated` |
+| `charge.dispute.created` | `payment.disputed` |
+| `charge.dispute.updated`, `.closed`, `.funds_withdrawn`, `.funds_reinstated` | `payment.updated` |
+| `checkout.session.completed` / `.async_payment_succeeded` with `payment_status: 'paid'` | `payment.succeeded` |
+| `checkout.session.completed` otherwise, `.expired` | `payment.updated` |
+| `checkout.session.async_payment_failed` | `payment.failed` |
+| `customer.subscription.created` | `subscription.created` |
+| `customer.subscription.updated`, `.paused`, `.resumed`, `.trial_will_end` | `subscription.updated` |
+| `customer.subscription.deleted` | `subscription.canceled` |
+
+Anything else — `invoice.*`, `radar.*`, `payout.*` — passes through under its Stripe name
+with the raw object as `event.data`, ledgered and handed to a registered handler. Unknown
+does not mean dropped.
+
+A rename only happens when the canonical payload can actually be built from the object. An
+event whose object has no amount is not a payment event whatever its type says, and the
+built-in handlers throw on a malformed payload — a throw inside the webhook route is a 500
+Stripe retries forever.
+
+### Disputes
+
+`charge.dispute.created` is the opening — the cardholder's bank has pulled the money back —
+and it moves the payment row to `disputed`. The rest of the family is the **resolution**
+(won, lost, funds withdrawn, funds reinstated), which every gateway reports differently and
+which this library deliberately does not name: those arrive as `payment.updated`, with the
+full Dispute object on `event.raw` for a handler to act on.
+
+The dispute is keyed on the **PaymentIntent**, because that is the id `charge()` returns
+and every other event here uses. `payment_intent` is nullable on Stripe's Dispute object —
+a legacy Charges-API charge has none — so the charge id is the fallback rather than an
+assumption. `radar.early_fraud_warning.created` is **not** a dispute: it is a pre-dispute
+fraud signal, no money has moved, and it passes through under its own name.
+
+## `authorized` — `requires_capture`
+
+With `capture_method: 'manual'` a confirmed PaymentIntent sits at `requires_capture`: the
+funds are held on the card and nothing has moved. That now maps to `authorized`.
+
+It used to fall through to **`failed`** — a live authorization reported as a dead payment —
+and `requires_confirmation` fell there with it; that one is `pending` now. Capture itself
+is Stripe's `paymentIntents.capture`, which is not on the driver contract.
+
+## Paused subscriptions
+
+Stripe's `paused` status mapped to `active`, which entitled a subscriber nobody is billing —
+pausing collection is precisely how you stop serving them. It is `paused` now: the
+subscription exists, it will bill again, and it grants nothing today.
+
+## Payment methods
+
+`supportedMethods` is unchanged (`pix`, `credit_card`, `boleto`, `undefined`): those are
+the methods `charge()` can actually pin onto `payment_method_types`. Stripe has no single
+type for "a bank transfer" — it has iDEAL, Bancontact, EPS, P24, BLIK and a new one most
+quarters — so routing by the wider categories would promise an instrument this call cannot
+choose. Ask for one of those with `metadata` and Stripe's dashboard settings instead.
+
+What *did* widen is the method reported back on `Payment.method`, which is now a category
+rather than only `card`/`pix`/`boleto`/`unknown`:
+
+| Stripe type | `Payment.method` |
+| --- | --- |
+| `sepa_debit`, `us_bank_account`, `acss_debit`, `bacs_debit`, `au_becs_debit` | `bank_debit` |
+| `ideal`, `bancontact`, `eps`, `p24`, `blik`, `multibanco`, `sofort`, `customer_balance` | `bank_transfer` |
+| `link`, `paypal`, `wechat_pay`, `alipay`, `cashapp`, `revolut_pay`, `amazon_pay`, `twint` | `wallet` |
+| `klarna`, `afterpay_clearpay`, `affirm`, `zip` | `bnpl` |
+| `oxxo`, `konbini`, `paysafecard` | `voucher` |
+
+The brand stays readable on `payment.payload`. The type is read off
+`payment_method_types[0]`, which is the list of methods the intent *allows*: exact when the
+charge named a `method` (one entry), and Stripe's own ordering when the account's dynamic
+payment methods are in play.

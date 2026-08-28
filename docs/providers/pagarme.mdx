@@ -166,15 +166,63 @@ this:
 | `charge.payment_failed`, `order.payment_failed`, `invoice.payment_failed` | `payment.failed` |
 | `charge.refunded`, `charge.partial_canceled` | `payment.refunded` |
 | `charge.created/pending/processing/updated/underpaid/overpaid`, `order.created/updated/closed` | `payment.updated` |
-| `charge.chargedback`, `order.canceled`, `invoice.canceled` | `payment.updated` |
+| `charge.chargedback` | **`payment.disputed`** |
+| `order.canceled`, `invoice.canceled` | `payment.updated` |
 | `subscription.created` / `.updated` / `.canceled` | `subscription.created` / `.updated` / `.canceled` |
 
 `order.*` events deliver the order with its `charges[]`; `charge.*` deliver the charge
 itself. Both normalize onto the charge, which is what a payment row tracks.
 
-<Callout type="warn" title="Chargebacks arrive as payment.updated">
-The contract has no dispute event, and minting one would route straight to the processor's
-no-op branch under a name nothing reads. `charge.chargedback` is normalized to
-`payment.updated`; `event.raw.type` still says `charge.chargedback`, so a handler that cares
-can switch on it.
+### Chargebacks
+
+`charge.chargedback` — note the spelling, `chargedback` with the `d` in the middle, which
+Pagar.me's own docs call out because everyone gets it wrong — normalizes to
+**`payment.disputed`**, and the payment row moves to `disputed`. A chargeback changes only
+the **charge's** status; Pagar.me leaves the order's alone, which is why the driver keys
+payments on the charge.
+
+`order.canceled` is not a dispute — an order that never went through is not money taken
+back — so it stays `payment.updated`.
+
+Pagar.me's dispute *lifecycle* (evidence submitted, won, lost) is not on the webhook at
+all: it lives in a separate Stone-hosted Disputes API (`GET
+https://api.stone.com.br/v1/disputes`, its own static key), which this driver does not
+speak. The contract has no resolution event either, by design.
+
+<Callout type="warn" title="charge.chargedback is deprecated — migrate by 2026-09-30">
+Pagar.me's event list marks `charge.chargedback` as being replaced by **`chargeback.received`**,
+with a migration deadline of 30/09/2026. The driver does **not** map `chargeback.received`
+yet: its payload shape is undocumented, and `data.id` there may well be a chargeback id
+rather than a charge id — filing a dispute under the wrong id would write a row nothing
+reconciles, which is worse than the event landing in the webhook ledger as an unknown type.
+Verify the real payload against your account before that date, and watch the ledger for
+`chargeback.received` in the meantime.
 </Callout>
+
+### Authorized, not captured
+
+Pagar.me has **no `authorized` charge status**. A card taken with `operation_type:
+"auth_only"` leaves the charge at `pending` — exactly like a boleto nobody has paid — and
+only `last_transaction.status` says `authorized_pending_capture` (or `waiting_capture`).
+The driver reads both and reports **`authorized`**, so a granted hold is not collapsed into
+"may never pay". `pending` from this driver now really does mean waiting on the payer.
+
+The driver's own `charge()` always sends `operation_type: 'auth_and_capture'`, so this
+matters for charges created elsewhere (a payment link, the dashboard) that you then read
+through `findPayment` or a webhook.
+
+### Idempotency
+
+Pagar.me documents `Idempotency-key` for **order creation and nothing else**:
+
+- `charge()` sends it (`POST /orders`). Two footguns from Pagar.me's own docs — the bodies
+  are **not** compared, so the same key with a different payload still returns the first
+  order; and the key lives 24h in production but only **5 minutes** in sandbox. Concurrent
+  requests with the same key get a `409`.
+- `refund()`, `createCustomer()` and `createSubscription()` **throw** when given an
+  `idempotencyKey`. The reference for `DELETE /charges/{id}`, `POST /customers` and
+  `POST /subscriptions` documents no header but `Authorization`; forwarding a key anyway
+  would hand back a retry guarantee the gateway never made.
+
+`idempotencyKey` still doubles as the order `code` when no `externalReference` is given —
+that is routing, not deduplication, and the two are now genuinely separate on a charge.

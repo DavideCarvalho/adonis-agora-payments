@@ -211,6 +211,7 @@ export class PolarDriver implements PaymentsDriver {
     }
     const data = await this.#request<PolarCustomer>('/v1/customers/', {
       method: 'POST',
+      ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
       body: {
         email: input.email,
         ...(input.name !== undefined ? { name: input.name } : {}),
@@ -279,8 +280,16 @@ export class PolarDriver implements PaymentsDriver {
   /**
    * Refund an order. `paymentGatewayId` is a Polar **order** id, because an order is what
    * this driver maps onto `Payment`.
+   *
+   * `options.idempotencyKey` goes out as Polar's `Idempotency-Key` header, which is where
+   * Polar actually deduplicates — a retry with the same key returns the first refund
+   * instead of issuing a second one.
    */
-  async refund(paymentGatewayId: string, amount?: Money): Promise<Refund> {
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
     // `amount` is required by `POST /v1/refunds/` — a full refund has to name the figure,
     // so an omitted amount is resolved from the order's own `refundable_amount` rather
     // than guessed. Note it is the NET figure: Polar refunds the tax alongside it (in
@@ -294,6 +303,7 @@ export class PolarDriver implements PaymentsDriver {
     }
     const data = await this.#request<PolarRefund>('/v1/refunds/', {
       method: 'POST',
+      ...(options?.idempotencyKey !== undefined ? { idempotencyKey: options.idempotencyKey } : {}),
       body: {
         order_id: paymentGatewayId,
         amount: value,
@@ -336,6 +346,7 @@ export class PolarDriver implements PaymentsDriver {
     );
     const data = await this.#request<PolarCheckout>('/v1/checkouts/', {
       method: 'POST',
+      ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
       body: {
         products: [productId],
         success_url: input.successUrl,
@@ -403,6 +414,7 @@ export class PolarDriver implements PaymentsDriver {
     }
     const data = await this.#request<PolarSubscription>('/v1/subscriptions/', {
       method: 'POST',
+      ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
       body: {
         product_id: input.planId,
         customer_id: input.customerId,
@@ -466,6 +478,7 @@ export class PolarDriver implements PaymentsDriver {
       `/v1/subscriptions/${encodeURIComponent(subscriptionGatewayId)}`,
       {
         method: 'PATCH',
+        ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
         body: {
           product_id: productId,
           ...(prorationBehavior !== undefined ? { proration_behavior: prorationBehavior } : {}),
@@ -622,10 +635,9 @@ export class PolarDriver implements PaymentsDriver {
       past_due: 'past_due',
       canceled: 'canceled',
       unpaid: 'past_due',
-      // The shared contract has no paused state; a paused Polar subscription still exists
-      // and still belongs to the customer, which is what `active` means to the billing
-      // layer. Same choice the Stripe driver makes.
-      paused: 'active',
+      // A paused Polar subscription still exists and will bill again — but it is not
+      // billing NOW, so reporting it as `active` entitled a subscriber who is not paying.
+      paused: 'paused',
     };
     return {
       id: data.id,
@@ -704,6 +716,12 @@ export class PolarDriver implements PaymentsDriver {
       default:
         // checkout.*, customer.*, benefit*.*, product.*, organization.* — passed through so
         // an app handler can subscribe to them by their Polar name.
+        //
+        // There is deliberately no `payment.disputed` here: Polar's event catalogue has NO
+        // dispute or chargeback event. As merchant of record Polar is the seller on the
+        // buyer's statement, so the chargeback is raised against Polar and Polar absorbs
+        // it — which is a large part of why anyone picks an MoR. Forcing an unrelated
+        // event into `payment.disputed` would invent a notification that does not exist.
         return event;
     }
   }
@@ -782,16 +800,26 @@ export class PolarDriver implements PaymentsDriver {
     return rest;
   }
 
+  /**
+   * `idempotencyKey` goes out as Polar's `Idempotency-Key` header — Polar documents it for
+   * mutating requests (POST, PATCH, DELETE) and deduplicates on nothing else, so a key
+   * written into `metadata` would be echoed back and protect nothing.
+   */
   async #request<T>(
     path: string,
-    options: { method?: string; body?: Record<string, unknown> } = {},
+    options: { method?: string; body?: Record<string, unknown>; idempotencyKey?: string } = {},
   ): Promise<T> {
     return httpRequest<T>(path, {
       baseUrl: this.#baseUrl,
       ...(options.method !== undefined ? { method: options.method } : {}),
       ...(options.body !== undefined ? { body: options.body } : {}),
       bearerToken: this.#bearerToken,
-      headers: { 'Polar-Version': POLAR_API_VERSION },
+      headers: {
+        'Polar-Version': POLAR_API_VERSION,
+        ...(options.idempotencyKey !== undefined
+          ? { 'Idempotency-Key': options.idempotencyKey }
+          : {}),
+      },
     });
   }
 }

@@ -4,12 +4,13 @@
  * JSON API at `<base>/api`).
  *
  * Mirrors `@adonis-agora/durable-dashboard`'s `durable-client.ts`: the same injected-globals base
- * resolution, the same `http()` helper and the same 401 → auth-surface redirect. The surface is much
- * smaller — this console has three READ endpoints and no control actions, because payments has no
- * run graph and no retry/replay.
+ * resolution, the same `http()` helper and the same 401 → auth-surface redirect.
  *
- * MONEY: every amount here is INTEGER CENTS, exactly as stored. Nothing in this file divides by 100;
- * `src/app/money.ts` formats at render.
+ * Reads are `GET`; the two things that CHANGE something — refunding a payment and retrying a failed
+ * webhook event — are `POST`, and are the only calls in this file that are not idempotent.
+ *
+ * MONEY: every amount here is INTEGER MINOR UNITS, exactly as stored. Nothing in this file divides;
+ * the divisor is not always 100 either (`src/app/money.ts` knows the rule and formats at render).
  */
 
 // ── Wire types (every `Date` is already an ISO string by the time it reaches this client — see
@@ -45,6 +46,23 @@ export interface PaymentRow {
   subscriptionId: string | null;
   paidAt: string | null;
   createdAt: string | null;
+  /** Whether the server will accept a refund for this row (only a `paid` payment). Taken from the
+   *  server rather than re-derived, so the button and the endpoint can never disagree. */
+  refundable: boolean;
+}
+
+/** One `billing_subscriptions` row. `paused` is NOT a flavour of `active`: the subscriber is not
+ *  paying and must not be entitled. */
+export interface SubscriptionRow {
+  id: string;
+  gatewayId: string;
+  provider: string;
+  status: string;
+  planId: string;
+  customerId: string | null;
+  trialEndsAt: string | null;
+  endsAt: string | null;
+  createdAt: string | null;
 }
 
 export interface WebhookEventRow {
@@ -57,6 +75,32 @@ export interface WebhookEventRow {
   error: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+  /** Only a `failed` row can be retried — the ledger refuses to re-claim anything else. */
+  retryable: boolean;
+}
+
+/** One `billingHealth()` check. Every one is a "should be zero" check, so `count > 0` IS the alarm. */
+export interface HealthCheck {
+  key: 'stuck_webhooks' | 'failed_webhooks' | 'unconfirmed_payments';
+  label: string;
+  count: number;
+  healthy: boolean;
+  /** What a non-zero count means and what to do about it. */
+  hint: string;
+}
+
+/** Which provider/event pairs make up the failed-events count, worst first. */
+export interface HealthFailure {
+  provider: string;
+  type: string;
+  count: number;
+}
+
+export interface Health {
+  healthy: boolean;
+  checkedAt: string;
+  checks: HealthCheck[];
+  failures: HealthFailure[];
 }
 
 /** Echoed paging. `count === limit` is the ONLY "there might be more" signal: the server never
@@ -65,6 +109,12 @@ export interface Page {
   limit: number;
   offset: number;
   count: number;
+  /** How many rows the server read to build this page. Equal to `count` unless a provider filter
+   *  made it scan past non-matching rows. */
+  scanned: number;
+  /** `true` when the provider scan stopped at its cap before filling the page — "none found" here
+   *  means "none in the rows scanned", which is a different answer and has to look like one. */
+  truncated: boolean;
 }
 
 export interface PaymentsPage {
@@ -78,6 +128,31 @@ export interface WebhookEventsPage {
   events: WebhookEventRow[];
   page: Page;
   statuses: readonly string[];
+}
+
+export interface SubscriptionsPage {
+  subscriptions: SubscriptionRow[];
+  page: Page;
+  statuses: readonly string[];
+  /** Whole-table counts, not page counts — `past_due` is the figure that decides the morning. */
+  counts: { past_due: number };
+}
+
+/** The gateways this install actually has data for — the provider filter is built from this, never
+ *  from a hardcoded list of the eighteen drivers the package ships. */
+export interface ProvidersList {
+  providers: string[];
+}
+
+export interface RefundResult {
+  refund: { gatewayId: string; amount: number; currency: string; status: string };
+  payment: { gatewayId: string; provider: string; amount: number; currency: string };
+  note: string;
+}
+
+export interface RetryResult {
+  gatewayEventId: string;
+  status: 'processed';
 }
 
 declare global {
@@ -150,12 +225,26 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error('Session expired; redirecting to sign-in.');
   }
   if (res.status === 503) {
-    // The billing layer is off in this deployment. A generic "500" would send an operator hunting
-    // for a bug; the server's own message names the actual cause.
+    // The billing layer (or the payments manager) is off in this deployment. A generic "500" would
+    // send an operator hunting for a bug; the server's own message names the actual cause.
     throw new Error(await readError(res, 'The billing layer is disabled in this deployment.'));
   }
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    // The server's `{ error }` beats `502 Bad Gateway` every time: when a refund is refused, THAT
+    // sentence is the gateway's own reason, and it is the only thing the operator can act on.
+    throw new Error(await readError(res, `${res.status} ${res.statusText}`));
+  }
   return (await res.json()) as T;
+}
+
+/** A JSON `POST` — the two actions. Kept separate from `http` so no read can ever reach it by
+ *  accident, and so the body/`content-type` are stated in exactly one place. */
+async function post<T>(path: string, body?: unknown): Promise<T> {
+  return http<T>(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+  });
 }
 
 /** Read `{ error }` off a failed response, falling back to `fallback` for an unreadable body. */
@@ -185,26 +274,54 @@ export function buildQuery(params: Record<string, string | number | undefined>):
 
 export interface ListOptions {
   status?: string | undefined;
+  /** Gateway name (`'stripe'`, `'asaas'`, …). Comes from `providers()`, never from a fixed list. */
+  provider?: string | undefined;
   limit?: number | undefined;
   offset?: number | undefined;
 }
 
+/** The query every list endpoint takes, built once so the three screens cannot drift apart. */
+function listQuery(opts: ListOptions): string {
+  return buildQuery({
+    status: opts.status,
+    provider: opts.provider,
+    limit: opts.limit,
+    offset: opts.offset,
+  });
+}
+
 export const paymentsClient = {
+  health(): Promise<Health> {
+    return http<Health>('/health');
+  },
   overview(period?: PeriodPreset): Promise<Overview> {
     return http<Overview>(`/overview${buildQuery({ period })}`);
   },
+  providers(): Promise<ProvidersList> {
+    return http<ProvidersList>('/providers');
+  },
   payments(opts: ListOptions = {}): Promise<PaymentsPage> {
-    return http<PaymentsPage>(
-      `/payments${buildQuery({ status: opts.status, limit: opts.limit, offset: opts.offset })}`,
-    );
+    return http<PaymentsPage>(`/payments${listQuery(opts)}`);
+  },
+  subscriptions(opts: ListOptions = {}): Promise<SubscriptionsPage> {
+    return http<SubscriptionsPage>(`/subscriptions${listQuery(opts)}`);
   },
   webhookEvents(opts: ListOptions = {}): Promise<WebhookEventsPage> {
-    return http<WebhookEventsPage>(
-      `/webhook-events${buildQuery({
-        status: opts.status,
-        limit: opts.limit,
-        offset: opts.offset,
-      })}`,
+    return http<WebhookEventsPage>(`/webhook-events${listQuery(opts)}`);
+  },
+
+  // ── Actions. `POST` only — see the note on `post()`. ──────────────────────────────────────────
+
+  /** Refund a payment at its gateway. `amount` is INTEGER MINOR UNITS; omit it for the full amount. */
+  refundPayment(gatewayId: string, amount?: number): Promise<RefundResult> {
+    return post<RefundResult>(
+      `/payments/${encodeURIComponent(gatewayId)}/refund`,
+      amount === undefined ? {} : { amount },
     );
+  },
+  /** Re-run a failed webhook event's handlers. Safe to repeat: the ledger refuses to re-claim an
+   *  event that is in flight or already processed. */
+  retryWebhookEvent(gatewayEventId: string): Promise<RetryResult> {
+    return post<RetryResult>(`/webhook-events/${encodeURIComponent(gatewayEventId)}/retry`);
   },
 };

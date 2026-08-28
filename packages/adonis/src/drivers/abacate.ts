@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { AbacateDriverConfig } from '../define_config.js';
 import {
   publishPaymentDiagnostics,
@@ -82,7 +83,7 @@ export class AbacateDriver implements PaymentsDriver {
   readonly provider = 'abacate';
   // AbacatePay is Pix-first — no credit card.
   readonly supportedMethods = ['pix', 'boleto', 'undefined'] as const;
-  readonly capabilities = { refunds: true, subscriptions: true };
+  readonly capabilities = { refunds: true, invoices: true, subscriptions: true };
 
   #baseUrl: string;
   #publicKey: string | undefined;
@@ -107,6 +108,7 @@ export class AbacateDriver implements PaymentsDriver {
   // ── Customers ────────────────────────────────────────────────────────────────────────
 
   async createCustomer(input: CreateCustomerInput): Promise<Customer> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createCustomer');
     const data = await this.#request<AbacateCustomerResponse>('/customer/create', {
       method: 'POST',
       body: {
@@ -231,7 +233,12 @@ export class AbacateDriver implements PaymentsDriver {
     }
   }
 
-  async refund(paymentGatewayId: string, _amount?: Money): Promise<Refund> {
+  async refund(
+    paymentGatewayId: string,
+    _amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
+    this.#refuseIdempotencyKey(options?.idempotencyKey, 'refund');
     const data = await this.#request<AbacateBillingResponse>(
       `/billing/refund/${paymentGatewayId}`,
       {
@@ -288,6 +295,7 @@ export class AbacateDriver implements PaymentsDriver {
   // ── Subscriptions ────────────────────────────────────────────────────────────────────
 
   async createSubscription(input: CreateSubscriptionInput): Promise<Subscription> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createSubscription');
     const data = await this.#request<AbacateSubscriptionResponse>('/subscription/create', {
       method: 'POST',
       body: {
@@ -332,6 +340,7 @@ export class AbacateDriver implements PaymentsDriver {
     subscriptionGatewayId: string,
     input: UpdateSubscriptionInput,
   ): Promise<Subscription> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'updateSubscription');
     const data = await this.#request<AbacateSubscriptionResponse>(
       `/subscription/update/${subscriptionGatewayId}`,
       {
@@ -388,12 +397,41 @@ export class AbacateDriver implements PaymentsDriver {
     };
     const event = payload.event ?? 'unknown';
     return {
-      id: payload.id ?? `${event}-${Math.random()}`,
+      // A CONTENT hash, never a random id. A payload with no id used to get a fresh
+      // `Math.random()` on every delivery, so the ledger saw each redelivery as a new
+      // event and processed it again — the exact double-grant the ledger exists to stop.
+      id:
+        payload.id ??
+        `${event}-${createHash('sha256').update(rawBody, 'utf8').digest('hex').slice(0, 32)}`,
       provider: this.provider,
       type: this.#mapWebhookType(event),
       createdAt: new Date().toISOString(),
-      data: payload.data ?? {},
+      data: this.#mapWebhookData(payload.data),
       raw: payload as unknown as Record<string, unknown>,
+    };
+  }
+
+  /**
+   * The normalized shape the built-in sync needs (`gatewayId`, `amount`, `currency`).
+   *
+   * This used to hand the processor AbacatePay's raw `data`, which its shape guard
+   * rejected — so every AbacatePay webhook was ledgered, threw `Malformed`, and was retried
+   * forever while the billing tables never learned the payment was paid. `raw` still
+   * carries the original.
+   */
+  #mapWebhookData(data: Record<string, unknown> | undefined): Record<string, unknown> {
+    if (data === undefined) return {};
+    const billing = (data.billing ?? data) as AbacateBillingResponse;
+    if (billing?.id === undefined) return data;
+    const payment = this.#mapPayment(billing);
+    return {
+      gatewayId: payment.gatewayId,
+      amount: payment.amount.amount,
+      currency: payment.amount.currency,
+      ...(payment.customerId !== undefined ? { customerId: payment.customerId } : {}),
+      ...(typeof (billing as unknown as { externalId?: unknown }).externalId === 'string'
+        ? { externalReference: (billing as unknown as { externalId: string }).externalId }
+        : {}),
     };
   }
 
@@ -475,9 +513,14 @@ export class AbacateDriver implements PaymentsDriver {
       case 'checkout.refunded':
       case 'transparent.refunded':
         return 'payment.refunded';
+      // "Disputa/chargeback aberta" — the dispute is OPENED here. It used to arrive as
+      // `payment.failed`, which files a chargeback as a payment that never went through:
+      // the row stopped saying `paid`, but it said the wrong thing, and the customer
+      // whose access has to be reconsidered was never flagged. AbacatePay sends no
+      // resolution event of any kind, so this is the only dispute signal there is.
       case 'checkout.disputed':
       case 'transparent.disputed':
-        return 'payment.failed';
+        return 'payment.disputed';
       case 'subscription.completed':
         return 'subscription.created';
       case 'subscription.renewed':
@@ -487,6 +530,24 @@ export class AbacateDriver implements PaymentsDriver {
       default:
         return event;
     }
+  }
+
+  /**
+   * AbacatePay documents no idempotency mechanism — the only request header on any
+   * endpoint is `Authorization`, and its own guidance mentions idempotency solely for
+   * consuming webhooks (dedupe on the event `id`). Accepting the key and dropping it
+   * would turn a caller's retry guarantee into a second refund or a second subscription,
+   * so the driver refuses it instead.
+   *
+   * `charge()` is not an exception to this: there `idempotencyKey` has never meant
+   * deduplication, it is a legacy fallback for `externalReference` (sent as the
+   * transparent checkout's `externalId`) and is documented as such.
+   */
+  #refuseIdempotencyKey(key: string | undefined, operation: string): void {
+    if (key === undefined) return;
+    throw new Error(
+      `[payments] AbacatePay has no idempotency mechanism, so \`${operation}\` cannot honour an idempotencyKey — no AbacatePay endpoint documents an idempotency header or field. Deduplicate before you call.`,
+    );
   }
 
   #mapMethod(method: string): string {

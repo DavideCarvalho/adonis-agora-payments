@@ -406,3 +406,120 @@ describe('PaddleDriver', () => {
     expect(headers['Paddle-Version']).toBe('1');
   });
 });
+
+describe('PaddleDriver — the widened contract', () => {
+  it('reports a paused subscription as paused, not active', async () => {
+    stubFetch({
+      data: {
+        id: 'sub_1',
+        status: 'paused',
+        customer_id: 'ctm_1',
+        items: [{ price: { id: 'pri_1', unit_price: { amount: '1990', currency_code: 'USD' } } }],
+      },
+    });
+
+    // A paused subscriber is not paying. Reporting `active` handed them entitlement.
+    expect((await makeDriver().findSubscription('sub_1'))?.status).toBe('paused');
+  });
+
+  it('maps a chargeback adjustment onto payment.disputed, keyed by the transaction', () => {
+    // Paddle has no `dispute.*` event: it creates a `chargeback` ADJUSTMENT the moment a
+    // customer successfully disputes a charge, so `adjustment.created` is the only warning
+    // a seller gets that revenue was taken away.
+    const body = JSON.stringify({
+      event_id: 'evt_chargeback',
+      event_type: 'adjustment.created',
+      occurred_at: '2026-04-20T09:00:00Z',
+      data: {
+        id: 'adj_cb_1',
+        action: 'chargeback',
+        transaction_id: 'txn_1',
+        status: 'pending_approval',
+        totals: { total: '1990', currency_code: 'USD' },
+      },
+    });
+    const event = makeDriver().parseWebhook(body, sign(body));
+
+    expect(event.type).toBe('payment.disputed');
+    expect(event.data).toMatchObject({ gatewayId: 'txn_1', amount: 1990, currency: 'usd' });
+  });
+
+  it('does not call a refund, a credit or a chargeback warning a dispute', () => {
+    const adjustment = (action: string, eventType = 'adjustment.created') =>
+      JSON.stringify({
+        event_id: `evt_${action}`,
+        event_type: eventType,
+        data: {
+          id: 'adj_1',
+          action,
+          transaction_id: 'txn_1',
+          status: 'approved',
+          totals: { total: '1990', currency_code: 'USD' },
+        },
+      });
+    const typeOf = (raw: string) => makeDriver().parseWebhook(raw, sign(raw)).type;
+
+    expect(typeOf(adjustment('refund'))).toBe('payment.refunded');
+    // No money has moved yet on a warning, and a reversal is a dispute RESOLVED — the
+    // package deliberately has no canonical resolution event, so both are plain updates.
+    expect(typeOf(adjustment('chargeback_warning'))).toBe('payment.updated');
+    expect(typeOf(adjustment('chargeback_reverse'))).toBe('payment.updated');
+    expect(typeOf(adjustment('credit'))).toBe('payment.updated');
+    // A later status change on the same chargeback is not a second dispute opening.
+    expect(typeOf(adjustment('chargeback', 'adjustment.updated'))).toBe('payment.updated');
+  });
+
+  it('names the payment method category Paddle collected through', async () => {
+    const withMethod = async (type: string) => {
+      stubFetch({
+        data: {
+          id: 'txn_1',
+          status: 'completed',
+          currency_code: 'USD',
+          details: { totals: { total: '1990', currency_code: 'USD' } },
+          payments: [{ status: 'captured', method_details: { type } }],
+        },
+      });
+      return (await makeDriver().findPayment('txn_1'))?.method;
+    };
+
+    expect(await withMethod('card')).toBe('card');
+    // Every one of these used to come back with no `method` at all — `card` was the only
+    // name the contract had.
+    expect(await withMethod('paypal')).toBe('wallet');
+    // Paddle spells the same value hyphenated on some events and underscored on others.
+    expect(await withMethod('apple-pay')).toBe('wallet');
+    expect(await withMethod('ideal')).toBe('bank_transfer');
+    expect(await withMethod('wire_transfer')).toBe('bank_transfer');
+    expect(await withMethod('upi')).toBe('upi');
+    expect(await withMethod('pix')).toBe('pix');
+    // `offline`/`unknown` stay unset: "Paddle did not say" is not "it was paid by nothing".
+    expect(await withMethod('offline')).toBeUndefined();
+  });
+
+  it('refuses an idempotency key rather than accepting one it cannot honour', async () => {
+    // Paddle deduplicates NOTHING — no header, no request-id field. Accepting the key and
+    // dropping it turns a caller's retry guarantee into a second refund.
+    const driver = makeDriver();
+    await expect(driver.refund('txn_1', 500, { idempotencyKey: 'k1' })).rejects.toThrow(
+      /no idempotency mechanism.*refund\(\)/s,
+    );
+    await expect(
+      driver.createCustomer({ email: 'a@b.test', idempotencyKey: 'k1' }),
+    ).rejects.toThrow(/no idempotency mechanism/);
+    await expect(
+      driver.createCheckout({ amount: 1990, successUrl: 'https://a.test', idempotencyKey: 'k1' }),
+    ).rejects.toThrow(/no idempotency mechanism/);
+    await expect(driver.updateSubscription('sub_1', { idempotencyKey: 'k1' })).rejects.toThrow(
+      /no idempotency mechanism/,
+    );
+  });
+
+  it('refuses the key before it does anything else, so nothing reaches Paddle', async () => {
+    const fetchMock = stubFetch({ data: {} });
+    await expect(
+      makeDriver().createCustomer({ email: 'a@b.test', name: 'A', idempotencyKey: 'k1' }),
+    ).rejects.toThrow(/no idempotency mechanism/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

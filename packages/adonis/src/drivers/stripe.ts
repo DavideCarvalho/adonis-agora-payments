@@ -63,14 +63,17 @@ export class StripeDriver implements PaymentsDriver {
   // ── Customers ────────────────────────────────────────────────────────────────────────
 
   async createCustomer(input: CreateCustomerInput): Promise<Customer> {
-    const customer = await this.#stripe.customers.create({
-      ...(input.email !== undefined ? { email: input.email } : {}),
-      ...(input.name !== undefined ? { name: input.name } : {}),
-      ...(input.taxId !== undefined ? { tax_id: input.taxId } : {}),
-      ...(input.metadata !== undefined
-        ? { metadata: input.metadata as Record<string, string> }
-        : {}),
-    });
+    const customer = await this.#stripe.customers.create(
+      {
+        ...(input.email !== undefined ? { email: input.email } : {}),
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.taxId !== undefined ? { tax_id: input.taxId } : {}),
+        ...(input.metadata !== undefined
+          ? { metadata: input.metadata as Record<string, string> }
+          : {}),
+      },
+      this.#requestOptions(input.idempotencyKey),
+    );
     return this.#mapCustomer(customer);
   }
 
@@ -143,11 +146,18 @@ export class StripeDriver implements PaymentsDriver {
     }
   }
 
-  async refund(paymentGatewayId: string, amount?: Money): Promise<Refund> {
-    const refund = await this.#stripe.refunds.create({
-      payment_intent: paymentGatewayId,
-      ...(amount !== undefined ? { amount } : {}),
-    });
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
+    const refund = await this.#stripe.refunds.create(
+      {
+        payment_intent: paymentGatewayId,
+        ...(amount !== undefined ? { amount } : {}),
+      },
+      this.#requestOptions(options?.idempotencyKey),
+    );
     const result: Refund = {
       id: refund.id,
       gatewayId: refund.id,
@@ -250,7 +260,10 @@ export class StripeDriver implements PaymentsDriver {
           }
         : {}),
     };
-    const subscription = await this.#stripe.subscriptions.create(params);
+    const subscription = await this.#stripe.subscriptions.create(
+      params,
+      this.#requestOptions(input.idempotencyKey),
+    );
     const result = this.#mapSubscription(subscription);
     publishSubscriptionDiagnostics(result, 'subscription.created');
     return result;
@@ -298,7 +311,11 @@ export class StripeDriver implements PaymentsDriver {
         ? { metadata: input.metadata as Record<string, string> }
         : {}),
     };
-    const subscription = await this.#stripe.subscriptions.update(subscriptionGatewayId, params);
+    const subscription = await this.#stripe.subscriptions.update(
+      subscriptionGatewayId,
+      params,
+      this.#requestOptions(input.idempotencyKey),
+    );
     return this.#mapSubscription(subscription);
   }
 
@@ -377,16 +394,7 @@ export class StripeDriver implements PaymentsDriver {
       gatewayId: intent.id,
       provider: this.provider,
       amount: { amount: intent.amount, currency: intent.currency },
-      status:
-        intent.status === 'succeeded'
-          ? 'paid'
-          : intent.status === 'requires_payment_method' ||
-              intent.status === 'requires_action' ||
-              intent.status === 'processing'
-            ? 'pending'
-            : intent.status === 'canceled'
-              ? 'canceled'
-              : 'failed',
+      status: this.#mapIntentStatus(intent.status),
       payload:
         intent.metadata !== undefined && Object.keys(intent.metadata).length > 0
           ? (intent.metadata as unknown as Record<string, unknown>)
@@ -413,7 +421,41 @@ export class StripeDriver implements PaymentsDriver {
     return result;
   }
 
-  #mapSubscription(subscription: Stripe.Subscription): Subscription {
+  /**
+   * A PaymentIntent status → a `BillingStatus`.
+   *
+   * `requires_capture` is the manual-capture hold: Stripe has the funds reserved on the
+   * card and nothing has moved. It used to fall through to `failed` — the same shape of
+   * lie in the opposite direction, a live authorization reported as a dead payment — and
+   * `requires_confirmation` fell there with it. Neither is a failure; the first is
+   * `authorized` and the second is a payment nobody has confirmed yet.
+   */
+  #mapIntentStatus(status: Stripe.PaymentIntent.Status): Payment['status'] {
+    switch (status) {
+      case 'succeeded':
+        return 'paid';
+      case 'requires_capture':
+        return 'authorized';
+      case 'requires_payment_method':
+      case 'requires_confirmation':
+      case 'requires_action':
+      case 'processing':
+        return 'pending';
+      case 'canceled':
+        return 'canceled';
+      default:
+        return 'failed';
+    }
+  }
+
+  /**
+   * A Stripe subscription status → a `SubscriptionStatus`.
+   *
+   * `paused` used to answer `active`, which entitled a subscriber nobody is billing —
+   * Stripe pauses collection precisely so you can stop serving them. It has its own name
+   * now: the subscription exists, it will bill again, and it must not grant access today.
+   */
+  #mapSubscriptionStatus(status: string | undefined): Subscription['status'] {
     const statusMap: Record<string, Subscription['status']> = {
       trialing: 'trialing',
       active: 'active',
@@ -422,8 +464,12 @@ export class StripeDriver implements PaymentsDriver {
       canceled: 'canceled',
       unpaid: 'past_due',
       incomplete_expired: 'ended',
-      paused: 'active',
+      paused: 'paused',
     };
+    return (status !== undefined ? statusMap[status] : undefined) ?? 'active';
+  }
+
+  #mapSubscription(subscription: Stripe.Subscription): Subscription {
     return {
       id: subscription.id,
       gatewayId: subscription.id,
@@ -432,7 +478,7 @@ export class StripeDriver implements PaymentsDriver {
         typeof subscription.customer === 'string'
           ? subscription.customer
           : subscription.customer.id,
-      status: statusMap[subscription.status] ?? 'active',
+      status: this.#mapSubscriptionStatus(subscription.status),
       planId: subscription.items.data[0]?.price.id ?? '',
       ...(subscription.items.data[0]?.price.unit_amount !== null
         ? {
@@ -456,13 +502,231 @@ export class StripeDriver implements PaymentsDriver {
   }
 
   #mapWebhookEvent(event: Stripe.Event): WebhookEvent {
+    const object = event.data.object as unknown as Record<string, unknown>;
+    const normalized = this.#normalizeEvent(event.type, object);
     return {
       id: event.id,
       provider: this.provider,
-      type: event.type,
+      type: normalized.type,
       createdAt: new Date(event.created * 1000).toISOString(),
-      data: event.data.object as unknown,
+      data: normalized.data,
       raw: event as unknown as Record<string, unknown>,
+    };
+  }
+
+  /**
+   * Stripe's own event type → the canonical one, with the payload the processor syncs on.
+   *
+   * This driver used to pass `event.type` and the raw Stripe object straight through, so
+   * `WebhookProcessor` — which switches on the canonical names — recognized nothing Stripe
+   * sent and synced nothing: `billing_payments` stayed empty while every webhook was
+   * ledgered as processed. A chargeback could not move a row that was never written.
+   *
+   * A type is only renamed when the canonical payload can actually be built from the
+   * object; when it cannot, the event passes through under its Stripe name with the raw
+   * object as `data`, which is what the processor does with anything it does not know.
+   * That matters because the built-in handlers THROW on a malformed payload, and a throw
+   * inside the webhook route is a 500 that Stripe retries forever.
+   */
+  #normalizeEvent(type: string, object: Record<string, unknown>): { type: string; data: unknown } {
+    const passthrough = { type, data: object as unknown };
+    const as = (canonical: string, data: Record<string, unknown> | undefined) =>
+      data === undefined ? passthrough : { type: canonical, data: data as unknown };
+
+    switch (type) {
+      case 'payment_intent.succeeded':
+        return as('payment.succeeded', this.#intentData(object));
+      case 'payment_intent.payment_failed':
+        return as('payment.failed', this.#intentData(object));
+      // Real state changes with no canonical event of their own. `amount_capturable_updated`
+      // is the manual-capture authorization — money held, not moved — and there is
+      // deliberately no `payment.authorized` event for it to become.
+      case 'payment_intent.canceled':
+      case 'payment_intent.processing':
+      case 'payment_intent.requires_action':
+      case 'payment_intent.amount_capturable_updated':
+        return as('payment.updated', this.#intentData(object));
+      case 'charge.refunded': {
+        const charge = object as unknown as Stripe.Charge;
+        // Stripe fires this for a PARTIAL refund too, and the canonical `payment.refunded`
+        // marks the whole payment refunded. Only `refunded: true` — Stripe's own "nothing
+        // left" flag — means that; a partial one is an update.
+        return as(
+          charge.refunded === true ? 'payment.refunded' : 'payment.updated',
+          this.#chargeData(object),
+        );
+      }
+      // The dispute family. Only the opening one takes the payment away from `paid`; won,
+      // lost, funds withdrawn and funds reinstated are the resolution, which every gateway
+      // reports differently and which this package deliberately does not name.
+      case 'charge.dispute.created':
+        return as('payment.disputed', this.#disputeData(object));
+      case 'charge.dispute.updated':
+      case 'charge.dispute.closed':
+      case 'charge.dispute.funds_withdrawn':
+      case 'charge.dispute.funds_reinstated':
+        return as('payment.updated', this.#disputeData(object));
+      case 'checkout.session.completed':
+      case 'checkout.session.async_payment_succeeded': {
+        const session = object as unknown as Stripe.Checkout.Session;
+        // A completed session is not a paid one: a subscription checkout completes with no
+        // payment at all, and a delayed-notification method (boleto, SEPA) completes while
+        // the money is still in flight. `payment_status` is the only field that says so.
+        return as(
+          session.payment_status === 'paid' ? 'payment.succeeded' : 'payment.updated',
+          this.#sessionData(object),
+        );
+      }
+      case 'checkout.session.async_payment_failed':
+        return as('payment.failed', this.#sessionData(object));
+      case 'checkout.session.expired':
+        return as('payment.updated', this.#sessionData(object));
+      case 'customer.subscription.created':
+        return as('subscription.created', this.#subscriptionData(object));
+      case 'customer.subscription.updated':
+      case 'customer.subscription.paused':
+      case 'customer.subscription.resumed':
+      case 'customer.subscription.trial_will_end':
+        return as('subscription.updated', this.#subscriptionData(object));
+      case 'customer.subscription.deleted':
+        return as('subscription.canceled', this.#subscriptionData(object));
+      default:
+        // Everything else keeps its Stripe name and its raw object: unknown is ledgered
+        // and handed to a registered handler, never dropped.
+        return passthrough;
+    }
+  }
+
+  /** A PaymentIntent → the canonical payment payload, or `undefined` if it is not one. */
+  #intentData(object: Record<string, unknown>): Record<string, unknown> | undefined {
+    const intent = object as unknown as Stripe.PaymentIntent;
+    if (
+      typeof intent.id !== 'string' ||
+      typeof intent.amount !== 'number' ||
+      typeof intent.currency !== 'string'
+    ) {
+      return undefined;
+    }
+    const metadata = (intent.metadata ?? {}) as Record<string, string | undefined>;
+    return {
+      gatewayId: intent.id,
+      amount: intent.amount,
+      currency: intent.currency,
+      ...(typeof intent.customer === 'string' ? { customerId: intent.customer } : {}),
+      ...(typeof metadata.external_reference === 'string'
+        ? { externalReference: metadata.external_reference }
+        : {}),
+    };
+  }
+
+  /**
+   * A Charge → the canonical payment payload, keyed on the **PaymentIntent**.
+   *
+   * `charge()` returns `pi_…` and every other event here is keyed on it, so a refund
+   * ledgered under `ch_…` would write a second row for the same money instead of moving
+   * the first. The charge id is only used for a legacy Charges-API charge that has no
+   * intent at all.
+   */
+  #chargeData(object: Record<string, unknown>): Record<string, unknown> | undefined {
+    const charge = object as unknown as Stripe.Charge;
+    const gatewayId =
+      typeof charge.payment_intent === 'string'
+        ? charge.payment_intent
+        : typeof charge.id === 'string'
+          ? charge.id
+          : undefined;
+    if (
+      gatewayId === undefined ||
+      typeof charge.amount !== 'number' ||
+      typeof charge.currency !== 'string'
+    ) {
+      return undefined;
+    }
+    const metadata = (charge.metadata ?? {}) as Record<string, string | undefined>;
+    return {
+      gatewayId,
+      amount: charge.amount,
+      currency: charge.currency,
+      ...(typeof charge.customer === 'string' ? { customerId: charge.customer } : {}),
+      ...(typeof metadata.external_reference === 'string'
+        ? { externalReference: metadata.external_reference }
+        : {}),
+    };
+  }
+
+  /**
+   * A Dispute → the canonical payment payload.
+   *
+   * `payment_intent` is nullable on the Dispute object (a charge created without one has
+   * none), so the charge id is the fallback rather than an assumption. The amount is the
+   * DISPUTED amount, which for a partial dispute is less than the payment — the row moves
+   * to `disputed` either way, and `event.raw` carries the reason and the evidence deadline.
+   */
+  #disputeData(object: Record<string, unknown>): Record<string, unknown> | undefined {
+    const dispute = object as unknown as Stripe.Dispute;
+    const gatewayId =
+      typeof dispute.payment_intent === 'string'
+        ? dispute.payment_intent
+        : typeof dispute.charge === 'string'
+          ? dispute.charge
+          : undefined;
+    if (
+      gatewayId === undefined ||
+      typeof dispute.amount !== 'number' ||
+      typeof dispute.currency !== 'string'
+    ) {
+      return undefined;
+    }
+    return { gatewayId, amount: dispute.amount, currency: dispute.currency };
+  }
+
+  /** A Checkout Session → the canonical payment payload, keyed on its PaymentIntent. */
+  #sessionData(object: Record<string, unknown>): Record<string, unknown> | undefined {
+    const session = object as unknown as Stripe.Checkout.Session;
+    const gatewayId =
+      typeof session.payment_intent === 'string' ? session.payment_intent : undefined;
+    if (
+      gatewayId === undefined ||
+      typeof session.amount_total !== 'number' ||
+      typeof session.currency !== 'string'
+    ) {
+      return undefined;
+    }
+    const metadata = (session.metadata ?? {}) as Record<string, string | undefined>;
+    return {
+      gatewayId,
+      amount: session.amount_total,
+      currency: session.currency,
+      ...(typeof session.customer === 'string' ? { customerId: session.customer } : {}),
+      ...(typeof session.subscription === 'string' ? { subscriptionId: session.subscription } : {}),
+      ...(typeof metadata.external_reference === 'string'
+        ? { externalReference: metadata.external_reference }
+        : typeof session.client_reference_id === 'string'
+          ? { externalReference: session.client_reference_id }
+          : {}),
+    };
+  }
+
+  /** A Subscription → the canonical subscription payload. */
+  #subscriptionData(object: Record<string, unknown>): Record<string, unknown> | undefined {
+    const subscription = object as unknown as Stripe.Subscription;
+    const customerId =
+      typeof subscription.customer === 'string'
+        ? subscription.customer
+        : (subscription.customer as { id?: string } | undefined)?.id;
+    if (typeof subscription.id !== 'string' || typeof customerId !== 'string') return undefined;
+    const planId = subscription.items?.data?.[0]?.price?.id;
+    return {
+      gatewayId: subscription.id,
+      customerId,
+      status: this.#mapSubscriptionStatus(subscription.status),
+      ...(typeof planId === 'string' ? { planId } : {}),
+      ...(typeof subscription.trial_end === 'number'
+        ? { trialEndsAt: new Date(subscription.trial_end * 1000).toISOString() }
+        : {}),
+      ...(typeof subscription.ended_at === 'number'
+        ? { endsAt: new Date(subscription.ended_at * 1000).toISOString() }
+        : {}),
     };
   }
 
@@ -492,14 +756,67 @@ export class StripeDriver implements PaymentsDriver {
     return idempotencyKey !== undefined ? { idempotencyKey } : undefined;
   }
 
+  /**
+   * A Stripe `payment_method_types` entry → the canonical {@link PaymentMethodType}.
+   *
+   * By category, never by brand: Stripe adds a local method most quarters, and a driver
+   * that enumerated iDEAL, BLIK, TWINT and the rest would go stale between releases while
+   * `PaymentMethodType` — a closed union — could never keep up. So SEPA and ACH are one
+   * answer (`bank_debit`, pulled from an account), iDEAL and Bancontact another
+   * (`bank_transfer`, pushed from a bank), and the brand stays readable on
+   * `payment.payload`.
+   *
+   * The type is read off `payment_method_types[0]`, which is the list of methods the
+   * intent ALLOWS. With one entry — what this driver sends whenever the charge names a
+   * `method` — it is exact; with the account's dynamic payment methods it is Stripe's own
+   * ordering, and the settled method is only known once `latest_charge` exists.
+   */
   #mapMethod(method: string): Payment['method'] {
     switch (method) {
       case 'card':
+      case 'card_present':
         return 'card';
       case 'pix':
         return 'pix';
       case 'boleto':
         return 'boleto';
+      // Pulled from an account you hold a mandate on.
+      case 'sepa_debit':
+      case 'us_bank_account':
+      case 'acss_debit':
+      case 'bacs_debit':
+      case 'au_becs_debit':
+        return 'bank_debit';
+      // Pushed from the payer's own bank, in their own banking app.
+      case 'ideal':
+      case 'bancontact':
+      case 'eps':
+      case 'p24':
+      case 'blik':
+      case 'multibanco':
+      case 'sofort':
+      case 'customer_balance':
+        return 'bank_transfer';
+      // Stored-balance and device wallets.
+      case 'link':
+      case 'paypal':
+      case 'wechat_pay':
+      case 'alipay':
+      case 'cashapp':
+      case 'revolut_pay':
+      case 'amazon_pay':
+      case 'twint':
+        return 'wallet';
+      case 'klarna':
+      case 'afterpay_clearpay':
+      case 'affirm':
+      case 'zip':
+        return 'bnpl';
+      // Paid in cash at a counter against a printed reference.
+      case 'oxxo':
+      case 'konbini':
+      case 'paysafecard':
+        return 'voucher';
       default:
         return 'unknown';
     }

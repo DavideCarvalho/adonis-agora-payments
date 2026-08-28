@@ -191,6 +191,24 @@ interface SquareInvoiceResponse {
   created_at?: string;
 }
 
+/**
+ * The Dispute object as it arrives on `dispute.created`. The payment it is about is nested
+ * (`disputed_payment.payment_id`), not a top-level field — reading `payment_id` off the
+ * dispute itself finds nothing.
+ */
+interface SquareDisputeResponse {
+  id?: string;
+  amount_money?: SquareMoney;
+  disputed_payment?: { payment_id?: string } | null;
+  state?: string;
+  reason?: string;
+  card_brand?: string;
+  due_at?: string;
+  location_id?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
 interface SquareWebhookPayload {
   merchant_id?: string;
   type: string;
@@ -205,6 +223,7 @@ interface SquareWebhookPayload {
       subscription?: SquareSubscriptionResponse;
       invoice?: SquareInvoiceResponse;
       order?: SquareOrderResponse;
+      dispute?: SquareDisputeResponse;
       order_created?: { order_id?: string; location_id?: string; state?: string };
       order_updated?: { order_id?: string; location_id?: string; state?: string };
     };
@@ -240,12 +259,22 @@ export class SquareDriver implements PaymentsDriver {
   readonly provider = 'square';
   /**
    * `source_id` decides the instrument, and it is minted in the browser — the driver hands
-   * Square an opaque token and learns what it was only from `card_details.card.card_type`
-   * on the way back. So the honest list is the card pair (what a Web Payments SDK card
-   * token actually produces) plus `undefined` for the hosted payment link, where the payer
-   * picks. Pix and boleto are absent because Square does not sell in Brazil.
+   * Square an opaque token and learns what it was only from `source_type` on the way back.
+   * The Web Payments SDK mints more than card tokens, though: Cash App Pay and the device
+   * wallets (`WALLET`), ACH bank tokens (`BANK_ACCOUNT`) and Afterpay/Clearpay
+   * (`BUY_NOW_PAY_LATER`) all arrive at `POST /v2/payments` through the same `source_id`,
+   * so `charge()` genuinely produces those categories. `undefined` covers the hosted
+   * payment link, where the payer picks. Pix and boleto are absent because Square does not
+   * sell in Brazil.
    */
-  readonly supportedMethods = ['credit_card', 'debit_card', 'undefined'] as const;
+  readonly supportedMethods = [
+    'credit_card',
+    'debit_card',
+    'wallet',
+    'bank_debit',
+    'bnpl',
+    'undefined',
+  ] as const;
   readonly capabilities = { refunds: true, invoices: true, subscriptions: true };
 
   #baseUrl: string;
@@ -291,7 +320,7 @@ export class SquareDriver implements PaymentsDriver {
 
   async createCustomer(input: CreateCustomerInput): Promise<Customer> {
     const body: Record<string, unknown> = {
-      idempotency_key: randomUUID(),
+      idempotency_key: this.#idempotencyKey(input.idempotencyKey),
       // Square splits a person into `given_name`/`family_name` and has no single "name"
       // field. Splitting on whitespace guesses which token is the surname, which is wrong
       // for most of the world's names, so the whole string goes in `given_name` and the
@@ -355,9 +384,14 @@ export class SquareDriver implements PaymentsDriver {
         '[payments] Square needs a `source_id` to charge: a single-use card token from the Web Payments SDK, or a saved card id (`ccof:…`) together with `customerId`. Pass it as `paymentMethodId` (or `card.token`) — there is no server-side "charge this customer" call.',
       );
     }
-    if (input.method !== undefined && !['credit_card', 'debit_card'].includes(input.method)) {
+    if (
+      input.method !== undefined &&
+      !['credit_card', 'debit_card', 'wallet', 'bank_debit', 'bnpl', 'undefined'].includes(
+        input.method,
+      )
+    ) {
       throw new Error(
-        `[payments] Square has no "${input.method}" payment method. The instrument is fixed by the token in \`paymentMethodId\`; \`method\` may only be \`credit_card\` or \`debit_card\`, and even then Square — not this call — decides which of the two the token turns out to be.`,
+        `[payments] Square has no "${input.method}" payment method. The instrument is fixed by the token in \`paymentMethodId\`, so \`method\` is a declaration, not an instruction: it may name a card (\`credit_card\`/\`debit_card\`), a wallet, \`bank_debit\` (ACH) or \`bnpl\` (Afterpay), and Square — not this call — decides which the token turns out to be.`,
       );
     }
     if (input.split !== undefined && input.split.length > 0) {
@@ -417,7 +451,11 @@ export class SquareDriver implements PaymentsDriver {
     }
   }
 
-  async refund(paymentGatewayId: string, amount?: Money): Promise<Refund> {
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
     // `RefundPayment` has no "refund everything" mode — `amount_money` is mandatory. So a
     // full refund is a read followed by a write, and the amount refunded is the amount
     // Square reports for the payment, never a number this driver computed.
@@ -428,7 +466,10 @@ export class SquareDriver implements PaymentsDriver {
     const data = await this.#request<{ refund: SquareRefundResponse }>('/refunds', {
       method: 'POST',
       body: {
-        idempotency_key: randomUUID(),
+        // Square requires the key and takes it in the BODY. Generating one made Square's
+        // own retry safe and a retried job double-refund; the caller's key is what makes
+        // the second call return the first refund instead of issuing another.
+        idempotency_key: this.#idempotencyKey(options?.idempotencyKey),
         payment_id: paymentGatewayId,
         amount_money: target,
       },
@@ -458,10 +499,11 @@ export class SquareDriver implements PaymentsDriver {
   /**
    * Capture a payment created with `metadata: { autocomplete: false }`.
    *
-   * Not part of {@link PaymentsDriver}: only Square and Razorpay here separate authorization
-   * from capture, and `BillingStatus` has no `authorized` member to hang it off. It is
-   * public because the alternative is worse — an `APPROVED` payment reads as `pending`
-   * forever and Square voids the authorization on its own when `delay_duration` runs out.
+   * Not part of {@link PaymentsDriver}: the contract has one verb for taking money, and a
+   * driver-specific second half does not fit it. It is public because the alternative is
+   * worse — an `APPROVED` payment now reads as `authorized`, and Square voids the
+   * authorization on its own when `delay_duration` runs out, so something has to be able
+   * to finish the job.
    */
   async completePayment(paymentGatewayId: string): Promise<Payment> {
     const data = await this.#request<{ payment: SquarePaymentResponse }>(
@@ -563,7 +605,7 @@ export class SquareDriver implements PaymentsDriver {
       );
     }
     const body: Record<string, unknown> = {
-      idempotency_key: randomUUID(),
+      idempotency_key: this.#idempotencyKey(input.idempotencyKey),
       location_id: this.#locationId,
       plan_variation_id: input.planId,
       customer_id: input.customerId,
@@ -614,6 +656,11 @@ export class SquareDriver implements PaymentsDriver {
     subscriptionGatewayId: string,
     input: UpdateSubscriptionInput,
   ): Promise<Subscription> {
+    if (input.idempotencyKey !== undefined) {
+      throw new Error(
+        '[payments] Square has no idempotency key on a subscription update: neither `PUT /v2/subscriptions/{id}` nor `POST /v2/subscriptions/{id}/swap-plan` takes an `idempotency_key`, unlike the create call. Accepting one here would turn your retry guarantee into a second plan swap, so it is refused rather than dropped.',
+      );
+    }
     if (input.amount !== undefined) {
       throw new Error(
         '[payments] Square will not reprice a live subscription: `price_override_money` is set at creation and `UpdateSubscription` documents only `card_id` and `canceled_date` as changeable. Swap to a plan variation at the new price with `metadata: { planVariationId: "…" }`, which is a change Square actually applies.',
@@ -744,10 +791,12 @@ export class SquareDriver implements PaymentsDriver {
   /**
    * `APPROVED` means Square is holding the funds on the buyer's card and nothing has moved
    * to the seller; the authorization expires on its own if `CompletePayment` never runs.
-   * `BillingStatus` has no member for that, and of the six it has, `pending` is the only
-   * one meaning "not settled, not failed". A refunded payment stays `COMPLETED` at Square
-   * with a non-zero `refunded_money`, so that is read separately — otherwise a full refund
-   * would keep reporting as `paid`.
+   * That is exactly `authorized` — it used to collapse into `pending`, which reads like a
+   * payment nobody has attempted rather than one whose money is reserved and ticking.
+   * `PENDING` stays `pending`: Square has not approved anything yet.
+   *
+   * A refunded payment stays `COMPLETED` at Square with a non-zero `refunded_money`, so
+   * that is read separately — otherwise a full refund would keep reporting as `paid`.
    */
   #mapPaymentStatus(data: SquarePaymentResponse): Payment['status'] {
     const refunded = data.refunded_money?.amount ?? 0;
@@ -756,6 +805,8 @@ export class SquareDriver implements PaymentsDriver {
     switch (data.status) {
       case 'COMPLETED':
         return 'paid';
+      case 'APPROVED':
+        return 'authorized';
       case 'FAILED':
         return 'failed';
       case 'CANCELED':
@@ -766,21 +817,40 @@ export class SquareDriver implements PaymentsDriver {
   }
 
   /**
-   * Square's `source_type` is `CARD`, `BANK_ACCOUNT`, `WALLET`, `BUY_NOW_PAY_LATER`,
-   * `SQUARE_ACCOUNT`, `CASH` or `EXTERNAL`. Only cards have a name in `PaymentMethodType`;
-   * a Cash App or Afterpay payment is left unset rather than labelled `card`, which would
-   * be a lie the ledger cannot tell apart from a real card payment.
+   * Square's `source_type` → the canonical {@link PaymentMethodType}.
+   *
+   * All of these now have a name: a Cash App payment is a `wallet`, an ACH one is a
+   * `bank_debit` (pulled from the buyer's account), Afterpay is `bnpl`. They used to come
+   * back unset, which is indistinguishable from "Square did not say" — and the Square
+   * balance (`SQUARE_ACCOUNT`) is a stored balance, which is what `wallet` means.
+   *
+   * `CASH` and `EXTERNAL` stay unset on purpose: they are money recorded as taken outside
+   * Square altogether, and no member of the union describes that.
    */
   #mapMethodToType(data: SquarePaymentResponse): Payment['method'] | undefined {
-    if (data.source_type !== 'CARD') return undefined;
-    return data.card_details?.card?.card_type === 'DEBIT' ? 'debit_card' : 'card';
+    switch (data.source_type) {
+      case 'CARD':
+        return data.card_details?.card?.card_type === 'DEBIT' ? 'debit_card' : 'card';
+      case 'WALLET':
+      case 'SQUARE_ACCOUNT':
+        return 'wallet';
+      case 'BANK_ACCOUNT':
+        return 'bank_debit';
+      case 'BUY_NOW_PAY_LATER':
+        return 'bnpl';
+      default:
+        return undefined;
+    }
   }
 
   #mapSubscription(data: SquareSubscriptionResponse, customerId?: string): Subscription {
     const statusMap: Record<string, Subscription['status']> = {
       PENDING: 'incomplete',
       ACTIVE: 'active',
-      PAUSED: 'past_due',
+      // A paused Square subscription bills nothing and will bill again when it resumes.
+      // `past_due` said the buyer owed money they did not; the subscriber is entitled to
+      // nothing either way, which is the part that must not change.
+      PAUSED: 'paused',
       CANCELED: 'canceled',
       DEACTIVATED: 'canceled',
       COMPLETED: 'ended',
@@ -872,6 +942,17 @@ export class SquareDriver implements PaymentsDriver {
         return object?.refund?.status === 'COMPLETED' ? 'payment.refunded' : 'payment.updated';
       case 'invoice.payment_made':
         return 'payment.succeeded';
+      // `dispute.created` is the opening: the card brand has taken the money back pending
+      // the seller's evidence. Everything after it — the state changes, the evidence going
+      // in and out — is the resolution, which this package deliberately does not name, so
+      // it is an update. Square's own advice is to subscribe to both.
+      case 'dispute.created':
+        return 'payment.disputed';
+      case 'dispute.state.updated':
+      case 'dispute.evidence.added':
+      case 'dispute.evidence.created':
+      case 'dispute.evidence.removed':
+        return 'payment.updated';
       case 'subscription.created':
         return 'subscription.created';
       case 'subscription.updated': {
@@ -910,6 +991,20 @@ export class SquareDriver implements PaymentsDriver {
         ...(mapped.customerId !== undefined ? { customerId: mapped.customerId } : {}),
         ...(payment.order_id ? { orderId: payment.order_id } : {}),
         ...(externalReference !== undefined ? { externalReference } : {}),
+      };
+    }
+    const dispute = object?.dispute;
+    if (dispute !== undefined) {
+      // Keyed on the DISPUTED PAYMENT, not on the dispute: the ledger row that has to stop
+      // saying `paid` is the payment's. `amount_money` is the disputed amount, which for a
+      // partial dispute is less than the payment — `event.raw` carries the reason, the
+      // state and the evidence deadline.
+      return {
+        gatewayId: dispute.disputed_payment?.payment_id ?? '',
+        amount: dispute.amount_money?.amount ?? 0,
+        currency: (dispute.amount_money?.currency ?? this.#currency).toLowerCase(),
+        ...(dispute.id !== undefined ? { disputeId: dispute.id } : {}),
+        ...(dispute.state !== undefined ? { disputeState: dispute.state } : {}),
       };
     }
     const refund = object?.refund;

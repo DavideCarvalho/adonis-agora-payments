@@ -131,8 +131,19 @@ interface PaddleSubscriptionResponse {
   canceled_at?: string | null;
 }
 
+/**
+ * Paddle expresses a refund, a credit **and a chargeback** as the same resource. `action`
+ * is what separates them: `chargeback` is created by Paddle itself the moment a customer
+ * successfully disputes a charge, and `adjustment.created` carrying it is the only
+ * notification a Paddle seller gets that revenue was taken away.
+ */
 interface PaddleAdjustmentResponse {
   id: string;
+  /**
+   * `credit`, `refund`, `chargeback`, `chargeback_reverse`, `chargeback_warning`,
+   * `chargeback_warning_reverse`, `credit_reverse`. Left as `string` because Paddle adds
+   * actions and an unknown one must fall through to `payment.updated`, not fail to compile.
+   */
   action: string;
   transaction_id: string;
   status: 'pending_approval' | 'approved' | 'rejected' | 'reversed';
@@ -206,6 +217,7 @@ export class PaddleDriver implements PaymentsDriver {
   // ── Customers ────────────────────────────────────────────────────────────────────────
 
   async createCustomer(input: CreateCustomerInput): Promise<Customer> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createCustomer');
     if (input.email === undefined) {
       throw new Error('[payments] Paddle requires an email to create a customer.');
     }
@@ -284,8 +296,16 @@ export class PaddleDriver implements PaymentsDriver {
    *
    * On a live account most refunds come back `pending_approval` until Paddle reviews them,
    * so a `'pending'` status here is normal and not a failure.
+   *
+   * `options.idempotencyKey` is REFUSED, not ignored: Paddle deduplicates nothing, so
+   * accepting the key would turn a caller's retry guarantee into a second refund.
    */
-  async refund(paymentGatewayId: string, amount?: Money): Promise<Refund> {
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
+    this.#refuseIdempotencyKey(options?.idempotencyKey, 'refund');
     const body: Record<string, unknown> = {
       action: 'refund',
       transaction_id: paymentGatewayId,
@@ -341,6 +361,7 @@ export class PaddleDriver implements PaymentsDriver {
    * your catalog per checkout.
    */
   async createCheckout(input: CheckoutInput): Promise<CheckoutSession> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createCheckout');
     if (input.trialDays !== undefined) {
       // A Paddle trial lives on the price (`trial_period`), not on the transaction.
       // Accepting the option here would bill a customer who was promised a trial.
@@ -428,6 +449,7 @@ export class PaddleDriver implements PaymentsDriver {
     subscriptionGatewayId: string,
     input: UpdateSubscriptionInput,
   ): Promise<Subscription> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'updateSubscription');
     if (input.amount !== undefined) {
       throw new Error(
         '[payments] Paddle has no editable amount on a subscription — you change what a ' +
@@ -571,9 +593,10 @@ export class PaddleDriver implements PaymentsDriver {
     if (data.customer_id) result.customerId = data.customer_id;
     if (data.subscription_id) result.subscriptionId = data.subscription_id;
     if (data.checkout?.url) result.hostedUrl = data.checkout.url;
-    // Paddle reports the instrument only after an attempt, and only `card` maps onto a
-    // name this package has; PayPal, Apple Pay and the local methods have none.
-    if (data.payments?.[0]?.method_details?.type === 'card') result.method = 'card';
+    // Paddle reports the instrument only after an attempt. Every one of them now has a
+    // category name, so PayPal, Apple Pay, iDEAL and the rest stop collapsing into silence.
+    const method = this.#mapMethodType(data.payments?.[0]?.method_details?.type);
+    if (method !== undefined) result.method = method;
     // Paddle has no "paid at": `billed_at` is when the invoice was raised, which for an
     // automatically-collected transaction is the moment it was paid.
     if ((data.status === 'paid' || data.status === 'completed') && data.billed_at) {
@@ -588,8 +611,9 @@ export class PaddleDriver implements PaymentsDriver {
       trialing: 'trialing',
       past_due: 'past_due',
       canceled: 'canceled',
-      // Paddle keeps billing paused subscriptions alive; the raw status is on `payload`.
-      paused: 'active',
+      // A paused Paddle subscription still exists and will bill again — but it is not
+      // billing NOW, so reporting it as `active` entitled a subscriber who is not paying.
+      paused: 'paused',
     };
     const item = data.items?.[0];
     const unitAmount = this.#toCents(item?.price?.unit_price?.amount);
@@ -641,9 +665,23 @@ export class PaddleDriver implements PaymentsDriver {
       case 'transaction.revised':
         return 'payment.updated';
       case 'adjustment.created':
-      case 'adjustment.updated':
-        // Adjustments also carry credits and chargebacks; only a refund is a refund.
-        return data.action === 'refund' ? 'payment.refunded' : 'payment.updated';
+      case 'adjustment.updated': {
+        // Paddle has no `dispute.*` event. A chargeback IS an adjustment: Paddle creates
+        // one itself the moment a customer successfully disputes a charge, so
+        // `adjustment.created` with `action: 'chargeback'` is the only notification a
+        // seller gets that revenue was taken away — and it used to arrive as a bland
+        // `payment.updated`, leaving the payment row saying `paid`.
+        if (data.action === 'refund') return 'payment.refunded';
+        if (data.action === 'chargeback' && eventType === 'adjustment.created') {
+          return 'payment.disputed';
+        }
+        // `chargeback_warning` (a dispute is coming, no money moved yet),
+        // `chargeback_reverse` / `chargeback_warning_reverse` (Paddle contested it and
+        // won), `credit`, `credit_reverse`, and every later status change on a chargeback
+        // adjustment. The package deliberately has no canonical resolution event, so a
+        // dispute won or lost lands here.
+        return 'payment.updated';
+      }
       case 'subscription.created':
       case 'subscription.imported':
         return 'subscription.created';
@@ -767,6 +805,63 @@ export class PaddleDriver implements PaymentsDriver {
     throw new Error(
       '[payments] Paddle stores tax ids on a business (`/customers/{id}/businesses`), ' +
         'not on the customer. Create or update the business directly.',
+    );
+  }
+
+  /**
+   * Paddle's `payments[].method_details.type` onto the contract's method **categories**.
+   *
+   * Paddle collects through a dozen local methods and only `card` used to have a name
+   * here, so a PayPal or iDEAL payment came back with no `method` at all. The categories
+   * close that: PayPal, the device wallets and the Asian super-app wallets are `wallet`;
+   * iDEAL, Bancontact, BLIK, MB WAY and a wire are `bank_transfer`; Pix and UPI are
+   * themselves. Paddle spells the same value hyphenated on some events (`apple-pay`) and
+   * underscored on others, so both are normalized.
+   */
+  #mapMethodType(type: string | undefined): Payment['method'] | undefined {
+    if (type === undefined) return undefined;
+    switch (type.replace(/-/g, '_')) {
+      case 'card':
+      case 'korea_local':
+      case 'south_korea_local_card':
+        return 'card';
+      case 'paypal':
+      case 'apple_pay':
+      case 'google_pay':
+      case 'samsung_pay':
+      case 'alipay':
+      case 'wechat_pay':
+      case 'kakao_pay':
+      case 'naver_pay':
+      case 'payco':
+        return 'wallet';
+      case 'ideal':
+      case 'bancontact':
+      case 'blik':
+      case 'mb_way':
+      case 'wire_transfer':
+        return 'bank_transfer';
+      case 'pix':
+        return 'pix';
+      case 'upi':
+        return 'upi';
+      default:
+        // `offline`, `unknown`, and whatever Paddle adds next. Leaving `method` unset says
+        // "Paddle did not tell us"; `'unknown'` would claim it did and the answer was none.
+        return undefined;
+    }
+  }
+
+  /**
+   * Paddle has **no request deduplication of any kind** — no `Idempotency-Key` header, no
+   * request-id body field, nothing on a transaction or an adjustment. So a key handed to
+   * this driver is refused rather than accepted and dropped: silently dropping it turns a
+   * caller's retry guarantee into a second refund.
+   */
+  #refuseIdempotencyKey(key: string | undefined, operation: string): void {
+    if (key === undefined) return;
+    throw new Error(
+      `[payments] Paddle has no idempotency mechanism, so \`idempotencyKey\` cannot be honoured on ${operation}(). Paddle's API deduplicates nothing, and a retried request performs the operation a second time — deduplicate on your side (persist the key and check it) before calling.`,
     );
   }
 

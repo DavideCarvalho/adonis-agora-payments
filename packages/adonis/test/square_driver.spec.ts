@@ -180,10 +180,22 @@ describe('SquareDriver charge', () => {
     ).rejects.toThrow(/45 characters/);
   });
 
-  it('leaves a non-card source unlabelled rather than calling a wallet a card', async () => {
-    stubFetch({
-      payment: { ...COMPLETED_PAYMENT, source_type: 'WALLET', card_details: null },
-    });
+  it('names the source category instead of labelling everything a card', async () => {
+    for (const [sourceType, method] of [
+      ['WALLET', 'wallet'],
+      ['SQUARE_ACCOUNT', 'wallet'],
+      ['BANK_ACCOUNT', 'bank_debit'],
+      ['BUY_NOW_PAY_LATER', 'bnpl'],
+    ] as const) {
+      stubFetch({ payment: { ...COMPLETED_PAYMENT, source_type: sourceType, card_details: null } });
+      expect((await makeDriver().findPayment('pmt_1'))?.method).toBe(method);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('leaves money taken outside Square unlabelled rather than guessing a category', async () => {
+    // `CASH` and `EXTERNAL` are payments recorded, not rails this package has a name for.
+    stubFetch({ payment: { ...COMPLETED_PAYMENT, source_type: 'CASH', card_details: null } });
     expect((await makeDriver().findPayment('pmt_1'))?.method).toBeUndefined();
   });
 
@@ -197,11 +209,18 @@ describe('SquareDriver charge', () => {
     expect((await makeDriver().findPayment('pmt_1'))?.status).toBe('refunded');
   });
 
-  it('reads an APPROVED (authorized, not captured) payment as pending', async () => {
+  it('reads an APPROVED payment as authorized — funds held, nothing captured', async () => {
+    // It used to read `pending`, which is the status of a payment nobody has attempted;
+    // an APPROVED one has the buyer's money reserved and an expiry running against it.
     stubFetch({ payment: { ...COMPLETED_PAYMENT, status: 'APPROVED' } });
     const payment = await makeDriver().findPayment('pmt_1');
-    expect(payment?.status).toBe('pending');
+    expect(payment?.status).toBe('authorized');
     expect(payment?.paidAt).toBeUndefined();
+  });
+
+  it('still reads a PENDING payment as pending — Square has approved nothing yet', async () => {
+    stubFetch({ payment: { ...COMPLETED_PAYMENT, status: 'PENDING' } });
+    expect((await makeDriver().findPayment('pmt_1'))?.status).toBe('pending');
   });
 });
 
@@ -663,5 +682,146 @@ describe('SquareDriver webhooks', () => {
     expect(
       driver.parseWebhook(paused, { 'x-square-hmacsha256-signature': signature(paused) }).type,
     ).toBe('subscription.updated');
+  });
+});
+
+describe('SquareDriver disputes', () => {
+  /** Square's own published `dispute.created` shape, trimmed to what the driver reads. */
+  const disputeEvent = (type: string) => ({
+    merchant_id: 'MERCHANT',
+    type,
+    event_id: 'evt_dispute_1',
+    created_at: '2026-08-01T10:00:00Z',
+    data: {
+      type: 'dispute',
+      id: 'ORSEVtZAJxb37RA1EiGw',
+      object: {
+        dispute: {
+          id: 'ORSEVtZAJxb37RA1EiGw',
+          amount_money: { amount: 1990, currency: 'USD' },
+          // Nested, not a top-level `payment_id` — reading it off the dispute finds nothing.
+          disputed_payment: { payment_id: 'pmt_1' },
+          state: 'EVIDENCE_REQUIRED',
+          reason: 'AMOUNT_DIFFERS',
+          card_brand: 'VISA',
+          due_at: '2026-09-01T00:00:00Z',
+        },
+      },
+    },
+  });
+
+  it('maps dispute.created onto payment.disputed, keyed on the disputed payment', () => {
+    const raw = JSON.stringify(disputeEvent('dispute.created'));
+    const event = makeDriver().parseWebhook(raw, {
+      'x-square-hmacsha256-signature': signature(raw),
+    });
+    expect(event.type).toBe('payment.disputed');
+    expect(event.data).toMatchObject({ gatewayId: 'pmt_1', amount: 1990, currency: 'usd' });
+  });
+
+  it('leaves the rest of the dispute family as payment.updated', () => {
+    // The state changes and the evidence going in and out are the resolution, which every
+    // gateway reports differently and which this package deliberately does not name.
+    for (const type of [
+      'dispute.state.updated',
+      'dispute.evidence.added',
+      'dispute.evidence.created',
+      'dispute.evidence.removed',
+    ]) {
+      const raw = JSON.stringify(disputeEvent(type));
+      const event = makeDriver().parseWebhook(raw, {
+        'x-square-hmacsha256-signature': signature(raw),
+      });
+      expect(event.type, type).toBe('payment.updated');
+    }
+  });
+});
+
+describe('SquareDriver idempotency', () => {
+  it('sends the caller key as the refund body field instead of a generated one', async () => {
+    const fetchMock = stubFetch({
+      refund: {
+        id: 'ref_1',
+        status: 'PENDING',
+        amount_money: { amount: 1990, currency: 'USD' },
+        payment_id: 'pmt_1',
+      },
+    });
+
+    await makeDriver().refund('pmt_1', 1990, { idempotencyKey: 'refund-1' });
+
+    const body = JSON.parse(fetchMock.mock.calls[0]![1].body as string) as {
+      idempotency_key: string;
+    };
+    // A generated UUID makes Square's own retry safe and a retried JOB double-refund.
+    expect(body.idempotency_key).toBe('refund-1');
+  });
+
+  it('sends the caller key on createCustomer and createSubscription', async () => {
+    const customerFetch = stubFetch({ customer: { id: 'cus_1', given_name: 'Ana' } });
+    await makeDriver().createCustomer({ name: 'Ana', idempotencyKey: 'customer-1' });
+    expect(
+      (JSON.parse(customerFetch.mock.calls[0]![1].body as string) as { idempotency_key: string })
+        .idempotency_key,
+    ).toBe('customer-1');
+    vi.unstubAllGlobals();
+
+    const subscriptionFetch = stubFetch({
+      subscription: { id: 'sub_1', customer_id: 'cus_1', status: 'ACTIVE' },
+    });
+    await makeDriver().createSubscription({
+      customerId: 'cus_1',
+      planId: 'var_1',
+      idempotencyKey: 'subscription-1',
+    });
+    expect(
+      (
+        JSON.parse(subscriptionFetch.mock.calls[0]![1].body as string) as {
+          idempotency_key: string;
+        }
+      ).idempotency_key,
+    ).toBe('subscription-1');
+  });
+
+  it('refuses an idempotency key on a subscription update rather than dropping it', async () => {
+    // Neither `PUT /v2/subscriptions/{id}` nor `swap-plan` takes one, so accepting it would
+    // turn the caller's retry guarantee into a second plan swap.
+    await expect(
+      makeDriver().updateSubscription('sub_1', {
+        metadata: { planVariationId: 'var_2' },
+        idempotencyKey: 'update-1',
+      }),
+    ).rejects.toThrow(/no idempotency key on a subscription update/);
+  });
+
+  it('still refuses a refund key longer than Square accepts', async () => {
+    await expect(
+      makeDriver().refund('pmt_1', 1990, { idempotencyKey: 'x'.repeat(46) }),
+    ).rejects.toThrow(/45 characters/);
+  });
+});
+
+describe('SquareDriver methods and paused subscriptions', () => {
+  it('accepts the categories a Web Payments SDK token can actually be', async () => {
+    const fetchMock = stubFetch({ payment: { ...COMPLETED_PAYMENT, source_type: 'WALLET' } });
+    await expect(
+      makeDriver().charge({ amount: 1990, paymentMethodId: 'wlt:x', method: 'wallet' }),
+    ).resolves.toMatchObject({ method: 'wallet' });
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it('still refuses a method Square cannot produce at all', async () => {
+    await expect(
+      makeDriver().charge({ amount: 1990, paymentMethodId: 'cnon:x', method: 'pix' }),
+    ).rejects.toThrow(/Square has no "pix" payment method/);
+  });
+
+  it('reads a PAUSED subscription as paused, not past_due', async () => {
+    // Nobody is in arrears: it bills nothing today and resumes later. Either way the
+    // subscriber is entitled to nothing, which is the part that must not change.
+    stubFetch({
+      subscription: { id: 'sub_1', customer_id: 'cus_1', status: 'PAUSED', plan_variation_id: 'v' },
+    });
+    expect((await makeDriver().findSubscription('sub_1'))?.status).toBe('paused');
   });
 });

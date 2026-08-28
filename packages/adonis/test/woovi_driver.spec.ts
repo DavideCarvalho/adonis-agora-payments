@@ -27,8 +27,16 @@ describe('WooviDriver', () => {
     const event = driver.parseWebhook(raw, {});
     expect(event.type).toBe('subscription.created');
     expect(event.id).toBe('UGF5bWVudFN1YnNjcmlwdGlvbjox');
-    const data = event.data as { correlationID: string };
-    expect(data.correlationID).toBe('6f4131ea');
+
+    // `data` is the NORMALIZED shape the processor's built-in sync consumes, not Woovi's
+    // raw body — handing over the raw body is what made every Woovi webhook fail the shape
+    // guard. Woovi's `correlationID` is the app's own reference, so it survives as
+    // `externalReference`; the untouched original is still on `event.raw`.
+    expect(event.data).toMatchObject({
+      gatewayId: 'UGF5bWVudFN1YnNjcmlwdGlvbjox',
+      externalReference: '6f4131ea',
+    });
+    expect(event.raw).toMatchObject({ correlationID: '6f4131ea' });
   });
 
   it('maps PIX_AUTOMATIC_COBR_COMPLETED to payment.succeeded', () => {

@@ -10,6 +10,23 @@ per-gateway matrix.
 
 ## Gateways
 
+- **Pagar.me's `charge.chargedback` is deprecated.** Pagar.me's own event list says migrate to
+  `chargeback.received` by **2026-09-30**. The driver maps the deprecated event to
+  `payment.disputed` today; the replacement's payload shape is undocumented, and `data.id` there
+  may be a chargeback id rather than a charge id — which would write a `disputed` row under an id
+  nothing reconciles. This needs one real payload from a live account before the deadline. Until
+  then the new event lands in the webhook ledger as an unknown type, which is visible rather than
+  silent.
+- **Asaas maps fewer payment statuses than Asaas has.** `RECEIVED_IN_CASH`, `REFUND_REQUESTED`,
+  `REFUND_IN_PROGRESS`, `DUNNING_*` and `AWAITING_RISK_ANALYSIS` all fall through to `pending`.
+  `RECEIVED_IN_CASH` is the one that matters: it is paid, and it reads as unpaid.
+- **Batched webhook notifications.** `parseWebhook` returns a single event, while Adyen's
+  `notificationItems` and Efí's Pix array can both carry several. Both drivers refuse a batch
+  loudly rather than processing the first and dropping the rest, which is the safe half of the
+  answer. The real fix is `WebhookEvent | WebhookEvent[]` on the contract with the dispatcher
+  looping — Adyen documents one item per JSON webhook and Efí sends one in practice, so this has
+  never fired, but "has never fired" is not "cannot".
+
 - **The method a router routed.** `payments.driver('pix')` resolves the provider by method, but the
   method itself only reaches the driver when the charge also carries `method: 'pix'` — the manager
   hands back a driver, not a pre-configured one, so it has nothing to write the routed method onto.

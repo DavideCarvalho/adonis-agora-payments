@@ -12,8 +12,9 @@ import { Callout } from 'fumadocs-ui/components/callout';
   end before it touches real money.
 </Callout>
 
-- **Methods**: `credit_card`, `undefined`. That is the honest list, and it is short for a
-  reason — see [What this contract cannot name](#what-this-contract-cannot-name).
+- **Methods**: `credit_card`, `bank_transfer`, `bank_debit`, `wallet`, `bnpl`, `voucher`,
+  `undefined` — **categories, not brands**. Which Mollie brand sits in which category, and
+  how to pin one, is in [Payment methods](#payment-methods).
 - **Setup**: `payments.mollie({ apiKey, currency, webhookSecret })` — `MOLLIE_API_KEY`.
   There is no sandbox flag: a `test_...` key is test mode and a `live_...` key is live, on
   the same host. `currency` is **required** (lowercase ISO 4217) and the driver refuses to
@@ -27,10 +28,16 @@ import { Callout } from 'fumadocs-ui/components/callout';
 - **`externalReference`**: sent as `metadata.externalReference` on payments (from `charge`
   and `createCheckout`) and on subscriptions, and read back out of the fetched payment's
   metadata onto `event.data.externalReference`.
-- **`idempotencyKey`**: sent as Mollie's `Idempotency-Key` request header on `charge` and
-  `createCheckout` — the only thing Mollie deduplicates on. It is *not* copied into
-  `metadata`: a copy there would be echoed back and protect nothing. Mollie keeps a key for
-  one hour, after which the same key creates a second payment.
+- **`idempotencyKey`**: sent as Mollie's `Idempotency-Key` request header on every POST the
+  driver makes — `charge`, `createCheckout`, `refund`, `createCustomer` and
+  `createSubscription`. That header is the only thing Mollie deduplicates on; the key is
+  *not* copied into `metadata`, because a copy there would be echoed back and protect
+  nothing. Mollie keeps a key for one hour, after which the same key creates a second
+  resource. `updateSubscription` **throws** on a key: Mollie's own words are that "all
+  `POST` endpoints accept idempotency keys" and that sending one for `GET`, `PATCH` or
+  `DELETE` "is not necessary since these API requests are repeatable by nature" — updating
+  a subscription is a `PATCH`, so accepting a key would promise a deduplication Mollie
+  never performs.
 - **Subscriptions**: native. `POST /v2/customers/{customerId}/subscriptions` — so a
   customer is required, and so is a **mandate**: the shopper grants one by completing a
   first payment, and Mollie charges the schedule against it afterwards.
@@ -38,6 +45,12 @@ import { Callout } from 'fumadocs-ui/components/callout';
   Invoices API returns the monthly invoices Mollie issues to **you** for its fees, not
   documents you issue to your customers — returning those as `Invoice[]` would be a lie
   with a plausible shape. Use a configured `invoice` provider and `invoice: true` instead.
+- **Disputes**: Mollie has real chargebacks and this driver reports them as
+  `payment.disputed` — see [Chargebacks](#chargebacks).
+- **`authorized`**: Mollie's `authorized` payment status maps to the contract's
+  `authorized`, not `pending`. Funds are held on the instrument and nothing has been
+  captured, which is what pay-later methods and a manual-capture card look like before a
+  capture.
 
 ```ts title="app/services/checkout_service.ts"
 const session = await payments.driver('mollie').createCheckout({
@@ -85,7 +98,10 @@ propagates: the route answers `400`, and Mollie retries. Reporting an event nobo
 confirm would be worse than a retry.
 
 Event ids are `mollie:<paymentId>:<status>` — stable per *transition*, so a redelivery of
-the same status dedupes in the ledger while the next status still gets through.
+the same status dedupes in the ledger while the next status still gets through. A refund
+and a chargeback both leave Mollie's own `status` at `paid`, so those two get a suffix
+(`:refunded`, `:chargeback`); without it their event id is byte-identical to the earlier
+`payment.succeeded` one and the ledger discards the webhook that takes the money away.
 
 ### Next-gen (signed) webhooks
 
@@ -102,25 +118,94 @@ events keep their own Mollie event id, which is already stable and unique. An ev
 a resource that is not a payment (a payment link, a sales invoice) is reported from the
 envelope without a fetch, for an app handler to pick up.
 
-## What this contract cannot name
+## Payment methods
 
-Mollie's catalogue is mostly local European methods, and `PaymentMethodName` in this
-package is `pix | credit_card | debit_card | boleto | undefined` — a union grown around
-Brazilian gateways. So these real, fully supported Mollie methods **have no name here**
-and cannot be routed by `config.methods` or declared in `supportedMethods`:
+`PaymentMethodName` names **categories**, not brands — enumerating iDEAL, Bancontact, EPS,
+Przelewy24, BLIK, TWINT and a new one each quarter is a union that never closes, and a
+union that never closes cannot make a routing typo fail at the manager. So Mollie's
+catalogue maps onto six categories, and every method that used to be unroutable now has a
+home:
 
-iDEAL, Bancontact, SEPA Direct Debit, SEPA Bank Transfer, PayPal, Klarna, Apple Pay,
-Google Pay, EPS, Przelewy24, BLIK, TWINT, MB Way, Multibanco, Satispay, Riverty, in3,
-Trustly, paysafecard, gift cards and vouchers.
+| Category | Mollie method ids |
+| --- | --- |
+| `credit_card` | `creditcard` (Visa, Mastercard, Amex, Maestro, V PAY, Cartes Bancaires) |
+| `bank_transfer` — push from your bank | `ideal`, `bancontact`, `banktransfer` (SEPA Bank Transfer), `belfius`, `bizum`, `blik`, `eps`, `kbc`, `mbway`, `mobilepay`, `multibanco`, `mybank`, `paybybank`, `przelewy24`, `satispay`, `swish`, `trustly`, `twint`, `vipps`, `bancomatpay` |
+| `bank_debit` — pull from your account | `directdebit` (SEPA Direct Debit), `bacs` |
+| `wallet` | `paypal`, `applepay`, `googlepay` |
+| `bnpl` | `klarna`, `in3`, `riverty`, `billie`, `billink`, `alma` |
+| `voucher` | `voucher` (meal/eco vouchers), `giftcard`, `paysafecard` |
 
-They still work — omit `method` and Mollie's hosted page offers everything the profile has
-enabled, which is what `'undefined'` means here. What you cannot do is *ask* for iDEAL
-specifically through this driver, or route `methods: { ideal: 'mollie' }`. Widening the
-union is a package-level change, not a driver one.
+Mollie's `method` parameter takes a single id **or an array of ids**, which is exactly what
+a category is — `bank_transfer` is not one brand, it is iDEAL in the Netherlands,
+Bancontact in Belgium and Multibanco in Portugal. So routing a category sends that whole
+set and lets Mollie present the ones the buyer's country and your profile actually enable:
 
-`debit_card` is also absent by design: Mollie has no debit-only method to ask for. Debit
-cards arrive through `creditcard`, and Bancontact — a debit scheme — has no name in the
-union either.
+```ts
+// The hosted page shows only bank-push methods, whichever of them are available.
+await payments.driver('mollie').charge({
+  amount: 1990,
+  method: 'bank_transfer',
+  metadata: { redirectUrl: 'https://example.org/done' },
+})
+```
+
+To ask for **one brand**, name it in Mollie's own field — `metadata.mollieMethod` — which
+is where a brand belongs. It is validated against the category when both are given, so a
+typo or a mismatch fails here rather than at the gateway:
+
+```ts
+await payments.driver('mollie').charge({
+  amount: 1990,
+  method: 'bank_transfer',
+  metadata: { redirectUrl: 'https://example.org/done', mollieMethod: 'ideal' },
+})
+// method: 'bank_transfer' + mollieMethod: 'klarna' → throws: klarna is bnpl, not bank_transfer.
+```
+
+Omit `method` entirely (`'undefined'`) and Mollie's hosted page offers everything the
+profile has enabled, as before. On the way back, `payment.method` is the category the
+instrument belongs to — an iDEAL payment reports `bank_transfer`, a Klarna one `bnpl`.
+
+**`debit_card` is still absent, and re-checking did not change that.** Mollie has no
+debit-only method to ask for: debit cards (Maestro, V PAY) are processed through the single
+`creditcard` id, and Bancontact — a debit scheme — is a bank redirect, not a card. A
+`debit_card` route here could only be a `creditcard` charge wearing another name, so the
+driver refuses it. `pix` and `boleto` are Brazilian and Mollie has neither.
+
+## Chargebacks
+
+A chargeback is the one webhook that takes revenue **away**, and Mollie reports it in two
+places depending on which webhook you run.
+
+**On the classic webhook** — the default — a chargeback simply fires the payment's
+`webhookUrl` again with the same bare `id=tr_…`. Mollie leaves the payment's own `status`
+at `paid`; the only field that says the bank pulled the money back is `amountChargedBack`
+on the fetched payment. The driver reads it, reports `payment.disputed`, and the processor
+moves the stored row to `disputed`:
+
+```ts
+const event = await payments.driver('mollie').parseWebhook(rawBody, headers)
+// { type: 'payment.disputed',
+//   id: 'mollie:tr_5B8cwPMGnU6qLbRvo7qEZo:paid:chargeback',
+//   data: { gatewayId, amount, currency, customerId } }
+```
+
+`payment.status` is `'disputed'` from `findPayment` too, for the same reason.
+
+**On next-gen webhooks** Mollie sends `chargeback.received` and `chargeback.reversed` as
+their own events. `chargeback.received` becomes `payment.disputed`, keyed by the **payment**
+(the row whose status has to move), with the chargeback's amount and its `reason.code`.
+`chargeback.reversed` — a dispute resolved in your favour — becomes `payment.updated`: this
+package deliberately has no canonical resolution event, because every gateway reports a
+dispute won or lost differently and a type no driver emits is worse than none.
+
+<Callout type="warn">
+  Configure that webhook with the **full snapshot payload**, not the id-only one. A
+  chargeback cannot be read back on its own — `GET /v2/payments/{paymentId}/chargebacks/{id}`
+  needs the payment id, and Mollie has no lookup by chargeback id — so an id-only
+  `chargeback.received` is unresolvable and the driver throws rather than passing the money
+  event through silently. The route answers `400` and Mollie retries.
+</Callout>
 
 ## What it refuses
 
@@ -136,7 +221,9 @@ is worse than a loud missing feature:
   subscription.
 - **A charge with no redirect URL** — Mollie requires `redirectUrl` on anything a shopper
   completes. Pass `metadata.redirectUrl`, or use `createCheckout({ successUrl })`.
-- **A method Mollie has no id for** (`pix`, `boleto`).
+- **A method Mollie has no id for** (`pix`, `boleto`, `debit_card`).
+- **`metadata.mollieMethod`** naming a brand outside the category being routed.
+- **`idempotencyKey` on `updateSubscription`** — Mollie accepts the header on POST only.
 - **`listInvoices`**, as above.
 
 ## Subscription ids are customer-scoped

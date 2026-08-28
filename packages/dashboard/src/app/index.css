@@ -92,6 +92,35 @@ body {
 .s-canceled {
   color: #71717a;
 }
+.s-authorized {
+  /* Funds HELD on the card and nothing moved. Amber: it is not money yet. */
+  color: var(--warn);
+}
+.s-disputed {
+  /* A chargeback — money already pulled back. Distinct from `failed`: this one was paid once. */
+  color: #fb7185;
+}
+
+/* Subscription statuses. `paused` gets its OWN hue and never green: a paused subscriber is not
+   paying, and rendering it like `active` is how a non-paying subscriber keeps their access. */
+.s-active {
+  color: var(--good);
+}
+.s-trialing {
+  color: var(--live);
+}
+.s-past_due {
+  color: var(--bad);
+}
+.s-paused {
+  color: var(--warn);
+}
+.s-incomplete {
+  color: var(--warn);
+}
+.s-ended {
+  color: #71717a;
+}
 
 /* Webhook-ledger statuses. */
 .s-received {

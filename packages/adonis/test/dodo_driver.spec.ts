@@ -466,3 +466,183 @@ describe('DodoDriver', () => {
     }
   });
 });
+
+describe('DodoDriver — the widened contract', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    // biome-ignore lint/performance/noDelete: the driver reads the env, so it must be absent.
+    delete process.env.DODO_PAYMENTS_API_KEY;
+    // biome-ignore lint/performance/noDelete: same.
+    delete process.env.DODO_PAYMENTS_WEBHOOK_KEY;
+    // biome-ignore lint/performance/noDelete: same.
+    delete process.env.DODO_PAYMENTS_BILLING_COUNTRY;
+  });
+
+  it('reports a paused subscription as paused, not active', async () => {
+    stubFetch({ ...SUBSCRIPTION, status: 'paused' });
+
+    // A paused subscriber is not paying. Reporting `active` handed them entitlement.
+    expect((await makeDriver().findSubscription('sub_1'))?.status).toBe('paused');
+  });
+
+  it('reports an uncaptured authorization as authorized, not pending', async () => {
+    stubFetch({ ...PAYMENT, status: 'requires_capture' });
+
+    // Funds are held and nothing is captured: money has NOT moved, but `pending`
+    // understated it — there is an authorization to capture or let expire.
+    expect((await makeDriver().findPayment('pay_1'))?.status).toBe('authorized');
+  });
+
+  it('does not call a partial capture authorized — part of it has already settled', async () => {
+    stubFetch({ ...PAYMENT, status: 'partially_captured' });
+    expect((await makeDriver().findPayment('pay_1'))?.status).toBe('pending');
+  });
+
+  it('maps dispute.opened onto payment.disputed, keyed by the payment', () => {
+    // Dodo is a merchant of record and still forwards the chargeback: unlike Polar and
+    // Lemon Squeezy there IS a real event, and it used to pass through unprocessed while
+    // the payment row went on saying `paid`.
+    const body = JSON.stringify({
+      type: 'dispute.opened',
+      timestamp: '2026-08-05T10:00:00Z',
+      data: {
+        payload_type: 'Dispute',
+        dispute_id: 'dis_1',
+        payment_id: 'pay_1',
+        amount: 1990,
+        currency: 'USD',
+        dispute_stage: 'dispute',
+        dispute_status: 'dispute_opened',
+      },
+    });
+    const event = makeDriver({ webhookKey: SECRET }).parseWebhook(body, signedHeaders(body));
+
+    expect(event.type).toBe('payment.disputed');
+    expect(event.data).toMatchObject({
+      gatewayId: 'pay_1',
+      amount: 1990,
+      currency: 'usd',
+      disputeId: 'dis_1',
+    });
+  });
+
+  it('reads a dispute amount Dodo sent as a decimal string', () => {
+    const body = JSON.stringify({
+      type: 'dispute.opened',
+      data: {
+        payload_type: 'Dispute',
+        dispute_id: 'dis_1',
+        payment_id: 'pay_1',
+        amount: '1990',
+        currency: 'USD',
+      },
+    });
+    const event = makeDriver({ webhookKey: SECRET }).parseWebhook(body, signedHeaders(body));
+    expect(event.data).toMatchObject({ amount: 1990 });
+  });
+
+  it('does not report a dispute resolution as a new dispute', () => {
+    const driver = makeDriver({ webhookKey: SECRET });
+    const typeOf = (type: string) => {
+      const body = JSON.stringify({
+        type,
+        data: {
+          payload_type: 'Dispute',
+          dispute_id: 'dis_1',
+          payment_id: 'pay_1',
+          amount: 1990,
+          currency: 'USD',
+        },
+      });
+      return driver.parseWebhook(body, signedHeaders(body)).type;
+    };
+    // The package deliberately has no canonical resolution event, so won/lost/expired are
+    // plain updates rather than a second `payment.disputed`.
+    expect(typeOf('dispute.won')).toBe('payment.updated');
+    expect(typeOf('dispute.lost')).toBe('payment.updated');
+    expect(typeOf('dispute.challenged')).toBe('payment.updated');
+    expect(typeOf('dispute.expired')).toBe('payment.updated');
+  });
+
+  it('routes the method categories Dodo actually supports', async () => {
+    const allowedFor = async (method: string) => {
+      const mock = stubFetch({
+        payment_id: 'pay_1',
+        total_amount: 1990,
+        customer: { customer_id: 'cus_1', email: 'a@b.com', name: 'A' },
+      });
+      await makeDriver().charge({
+        customerId: 'cus_1',
+        amount: 1990,
+        method,
+        metadata: { productId: 'prod_1' },
+      });
+      return JSON.parse(String((mock.mock.calls[0]! as [string, RequestInit])[1].body))
+        .allowed_payment_method_types as string[];
+    };
+
+    // Each category is a SET of local methods, and the card fallbacks ride along for the
+    // reason Dodo documents: a checkout whose every listed method is unavailable fails.
+    expect(await allowedFor('upi')).toContain('upi_collect');
+    expect(await allowedFor('wallet')).toEqual(
+      expect.arrayContaining(['apple_pay', 'google_pay', 'credit', 'debit']),
+    );
+    expect(await allowedFor('bank_transfer')).toEqual(
+      expect.arrayContaining(['ideal', 'bancontact_card', 'eps']),
+    );
+    expect(await allowedFor('bank_debit')).toEqual(expect.arrayContaining(['sepa', 'ach']));
+    expect(await allowedFor('bnpl')).toEqual(
+      expect.arrayContaining(['klarna', 'afterpay_clearpay']),
+    );
+  });
+
+  it('names the payment method category Dodo collected through', async () => {
+    const withMethod = async (payment_method_type: string) => {
+      stubFetch({ ...PAYMENT, payment_method_type });
+      return (await makeDriver().findPayment('pay_1'))?.method;
+    };
+
+    // All of these used to come back `unknown` — only card, pix and boleto had names.
+    expect(await withMethod('ideal')).toBe('bank_transfer');
+    expect(await withMethod('sepa')).toBe('bank_debit');
+    expect(await withMethod('klarna')).toBe('bnpl');
+    expect(await withMethod('apple_pay')).toBe('wallet');
+    expect(await withMethod('upi_collect')).toBe('upi');
+    expect(await withMethod('visa')).toBe('card');
+  });
+
+  it('refuses an idempotency key rather than accepting one it cannot honour', async () => {
+    // Dodo documents NO request deduplication — its only idempotency guidance is the
+    // `webhook-id` header on events it sends you. Accepting the key and dropping it turns
+    // a caller's retry guarantee into a second charge.
+    const driver = makeDriver();
+    await expect(
+      driver.charge({
+        customerId: 'cus_1',
+        amount: 1990,
+        idempotencyKey: 'k1',
+        metadata: { productId: 'prod_1' },
+      }),
+    ).rejects.toThrow(/no idempotency mechanism.*charge\(\)/s);
+    await expect(driver.refund('pay_1', undefined, { idempotencyKey: 'k1' })).rejects.toThrow(
+      /no idempotency mechanism/,
+    );
+    await expect(
+      driver.createCustomer({ name: 'A', email: 'a@b.com', idempotencyKey: 'k1' }),
+    ).rejects.toThrow(/no idempotency mechanism/);
+    await expect(
+      driver.createSubscription({ customerId: 'cus_1', planId: 'prod_pro', idempotencyKey: 'k1' }),
+    ).rejects.toThrow(/no idempotency mechanism/);
+    await expect(driver.updateSubscription('sub_1', { idempotencyKey: 'k1' })).rejects.toThrow(
+      /no idempotency mechanism/,
+    );
+  });
+
+  it('refuses the key before it does anything else, so nothing reaches Dodo', async () => {
+    const fetchMock = stubFetch({});
+    await expect(
+      makeDriver().createCustomer({ name: 'A', email: 'a@b.com', idempotencyKey: 'k1' }),
+    ).rejects.toThrow(/no idempotency mechanism/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

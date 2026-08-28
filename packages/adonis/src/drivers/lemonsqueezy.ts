@@ -201,6 +201,7 @@ export class LemonSqueezyDriver implements PaymentsDriver {
   // ── Customers ────────────────────────────────────────────────────────────────────────
 
   async createCustomer(input: CreateCustomerInput): Promise<Customer> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createCustomer');
     if (input.name === undefined || input.email === undefined) {
       throw new Error('[payments] Lemon Squeezy requires both a name and an email on a customer.');
     }
@@ -296,8 +297,16 @@ export class LemonSqueezyDriver implements PaymentsDriver {
    * takes). `amount` is in cents, like everywhere else here; omit it for a full refund.
    * Renewal charges are subscription invoices with their own ids and their own refund
    * endpoint — this method does not reach them.
+   *
+   * `options.idempotencyKey` is REFUSED, not ignored: Lemon Squeezy has no deduplication
+   * mechanism, so accepting a key would turn a retry guarantee into a second refund.
    */
-  async refund(paymentGatewayId: string, amount?: Money): Promise<Refund> {
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
+    this.#refuseIdempotencyKey(options?.idempotencyKey, 'refund');
     const document = await this.#request<JsonApiDocument<LemonSqueezyOrderAttributes>>(
       `/orders/${encodeURIComponent(paymentGatewayId)}/refund`,
       {
@@ -334,6 +343,7 @@ export class LemonSqueezyDriver implements PaymentsDriver {
    * `amount` to override the variant's price (`custom_price`, in cents).
    */
   async createCheckout(input: CheckoutInput): Promise<CheckoutSession> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createCheckout');
     if (input.planId === undefined) {
       throw new Error(
         '[payments] Lemon Squeezy checkouts always sell a catalog variant. Pass the ' +
@@ -449,6 +459,7 @@ export class LemonSqueezyDriver implements PaymentsDriver {
     subscriptionGatewayId: string,
     input: UpdateSubscriptionInput,
   ): Promise<Subscription> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'updateSubscription');
     if (input.amount !== undefined) {
       throw new Error(
         '[payments] Lemon Squeezy has no editable amount on a subscription — the price ' +
@@ -624,9 +635,9 @@ export class LemonSqueezyDriver implements PaymentsDriver {
         unpaid: 'past_due',
         cancelled: 'canceled',
         expired: 'ended',
-        // `paused` has no counterpart in `SubscriptionStatus`; the subscription still
-        // exists and resumes, and the real status stays on `payload.status`.
-        paused: 'active',
+        // A paused Lemon Squeezy subscription still exists and will resume — but it is not
+        // billing now, so reporting it as `active` entitled a subscriber who is not paying.
+        paused: 'paused',
       };
     return {
       id: resource.id,
@@ -679,6 +690,15 @@ export class LemonSqueezyDriver implements PaymentsDriver {
       case 'subscription_expired':
         return 'subscription.canceled';
       default:
+        // `license_key_*`, `affiliate_activated`, `customer_updated` — passed through so an
+        // app handler can subscribe by the Lemon Squeezy name.
+        //
+        // There is deliberately no `payment.disputed` here: Lemon Squeezy has NO dispute or
+        // chargeback event at all. As merchant of record it is the seller on the buyer's
+        // statement, so the chargeback is raised against Lemon Squeezy and Lemon Squeezy
+        // absorbs it — which is a large part of why anyone picks an MoR. Forcing an
+        // unrelated event into `payment.disputed` would invent a notification that does
+        // not exist.
         return eventName;
     }
   }
@@ -781,6 +801,19 @@ export class LemonSqueezyDriver implements PaymentsDriver {
     if (typeof value === 'string') return value;
     if (typeof value === 'number') return String(value);
     return undefined;
+  }
+
+  /**
+   * Lemon Squeezy has **no request deduplication** — no `Idempotency-Key` header, no
+   * request-id field on any endpoint. So a key handed to this driver is refused rather
+   * than accepted and dropped: silently dropping it turns a caller's retry guarantee into
+   * a second refund or a second checkout.
+   */
+  #refuseIdempotencyKey(key: string | undefined, operation: string): void {
+    if (key === undefined) return;
+    throw new Error(
+      `[payments] Lemon Squeezy has no idempotency mechanism, so \`idempotencyKey\` cannot be honoured on ${operation}(). Its API deduplicates nothing, and a retried request performs the operation a second time — deduplicate on your side (persist the key and check it) before calling.`,
+    );
   }
 
   #refuseTaxId(taxId: string | undefined): void {

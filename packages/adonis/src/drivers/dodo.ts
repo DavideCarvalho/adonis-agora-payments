@@ -176,6 +176,25 @@ interface DodoSubscription {
   expires_at?: string | null;
 }
 
+/**
+ * The `dispute.*` webhook payload (`payload_type: 'Dispute'`).
+ *
+ * Dodo is a merchant of record and still tells you: unlike Polar and Lemon Squeezy it
+ * forwards the chargeback lifecycle, and you get ten days to respond to `dispute.opened`.
+ */
+interface DodoDispute {
+  dispute_id: string;
+  payment_id: string;
+  business_id?: string;
+  /** Dodo has sent this as both a number and a decimal string; normalized on the way in. */
+  amount: number | string;
+  currency: string;
+  dispute_stage?: 'pre_dispute' | 'dispute' | 'pre_arbitration' | string;
+  dispute_status?: string;
+  created_at?: string;
+  remarks?: string | null;
+}
+
 /** Every Dodo list endpoint answers `{ items }`. */
 interface DodoList<T> {
   items: T[];
@@ -206,14 +225,30 @@ interface DodoWebhookPayload {
 export class DodoDriver implements PaymentsDriver {
   readonly provider = 'dodo';
   /**
-   * Cards everywhere, plus Pix in Brazil — `allowed_payment_method_types` is the field
-   * that restricts the hosted checkout, and Dodo's supported-methods table lists `credit`,
-   * `debit` and `pix`. Boleto appears in the raw enum (a processor-level superset) but not
-   * in that table, so it is not advertised here. Note that Dodo's own wording is that
-   * naming a method never *guarantees* it: eligibility still depends on the customer's
-   * country and your merchant settings.
+   * `allowed_payment_method_types` is the field that restricts the hosted checkout, and
+   * Dodo's supported-methods table reaches well past cards: wallets (Apple/Google/Amazon
+   * Pay, Cash App, Revolut Pay, WeChat Pay), bank redirects (iDEAL, Bancontact, EPS,
+   * Multibanco, BLIK, Satispay), direct debit (SEPA, ACH), BNPL (Klarna,
+   * Afterpay/Clearpay, Billie), UPI and Pix. Every one of those now has a **category**
+   * name in the contract, so they stop being unroutable.
+   *
+   * Boleto appears in the raw processor-level enum but not in Dodo's table, so it is not
+   * advertised; `voucher` has no Dodo equivalent at all. Note Dodo's own wording: naming a
+   * method never *guarantees* it — eligibility still depends on the customer's country and
+   * your merchant settings, which is why {@link DodoDriver.#allowedMethods} keeps the card
+   * fallbacks Dodo tells you to keep.
    */
-  readonly supportedMethods = ['credit_card', 'debit_card', 'pix', 'undefined'] as const;
+  readonly supportedMethods = [
+    'credit_card',
+    'debit_card',
+    'pix',
+    'upi',
+    'wallet',
+    'bank_transfer',
+    'bank_debit',
+    'bnpl',
+    'undefined',
+  ] as const;
   readonly capabilities = { refunds: true, invoices: true, subscriptions: true };
 
   #baseUrl: string;
@@ -241,6 +276,7 @@ export class DodoDriver implements PaymentsDriver {
   // ── Customers ────────────────────────────────────────────────────────────────────────
 
   async createCustomer(input: CreateCustomerInput): Promise<Customer> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createCustomer');
     if (!input.email || !input.name) {
       throw new Error(
         '[payments] Dodo Payments requires both `email` and `name` to create a customer.',
@@ -300,6 +336,7 @@ export class DodoDriver implements PaymentsDriver {
    * still has to pay on. Settlement arrives as a `payment.succeeded` webhook.
    */
   async charge(input: ChargeInput): Promise<Payment> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'charge');
     const productId = this.#requireProductId(input.metadata);
     const body: Record<string, unknown> = {
       product_cart: [
@@ -343,8 +380,16 @@ export class DodoDriver implements PaymentsDriver {
    * (`items[].item_id` = the product or addon id, plus its own amount), which this
    * contract's single `amount` cannot address. So a full refund works and a partial one is
    * refused, rather than quietly refunding everything.
+   *
+   * `options.idempotencyKey` is REFUSED, not ignored: Dodo documents no deduplication
+   * mechanism, so accepting the key would turn a retry guarantee into a second refund.
    */
-  async refund(paymentGatewayId: string, amount?: Money): Promise<Refund> {
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
+    this.#refuseIdempotencyKey(options?.idempotencyKey, 'refund');
     if (amount !== undefined) {
       throw new Error(
         '[payments] Dodo Payments refunds a partial amount per line item, not per payment — ' +
@@ -380,6 +425,7 @@ export class DodoDriver implements PaymentsDriver {
   // ── Checkout ─────────────────────────────────────────────────────────────────────────
 
   async createCheckout(input: CheckoutInput): Promise<CheckoutSession> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createCheckout');
     const productId = input.planId ?? (input.metadata?.productId as string | undefined);
     if (!productId) {
       throw new Error(
@@ -417,6 +463,7 @@ export class DodoDriver implements PaymentsDriver {
   // ── Subscriptions ────────────────────────────────────────────────────────────────────
 
   async createSubscription(input: CreateSubscriptionInput): Promise<Subscription> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createSubscription');
     if (input.amount !== undefined) {
       throw new Error(
         '[payments] Dodo Payments takes the recurring price from the product, so `amount` cannot be set on a subscription. ' +
@@ -490,6 +537,7 @@ export class DodoDriver implements PaymentsDriver {
     subscriptionGatewayId: string,
     input: UpdateSubscriptionInput,
   ): Promise<Subscription> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'updateSubscription');
     if (input.amount !== undefined) {
       throw new Error(
         '[payments] Dodo Payments has no subscription amount to update — the price belongs to the product. ' +
@@ -671,9 +719,13 @@ export class DodoDriver implements PaymentsDriver {
       requires_merchant_action: 'pending',
       requires_payment_method: 'pending',
       requires_confirmation: 'pending',
-      requires_capture: 'pending',
-      // The API reference does not say whether a partially captured payment has settled
-      // funds; `pending` is the reading that does not claim money arrived.
+      // Funds are held on the card and NOTHING has been captured — money has not moved,
+      // but it is a great deal more than `pending`, which is what this used to say.
+      requires_capture: 'authorized',
+      // NOT `authorized`: part of the authorization HAS been captured, so claiming
+      // "nothing captured" would be as wrong as `pending` was understated. The API
+      // reference does not say how much settled, so `pending` remains the reading that
+      // does not claim a figure arrived.
       partially_captured: 'pending',
       partially_captured_and_capturable: 'pending',
     };
@@ -723,9 +775,9 @@ export class DodoDriver implements PaymentsDriver {
       active: 'active',
       // `on_hold` is a subscription whose payment did not go through.
       on_hold: 'past_due',
-      // The shared contract has no paused state; a paused subscription still exists and
-      // still belongs to the customer, which is what `active` means to the billing layer.
-      paused: 'active',
+      // A paused Dodo subscription still exists and will bill again — but it is not
+      // billing NOW, so reporting it as `active` entitled a subscriber who is not paying.
+      paused: 'paused',
       cancelled: 'canceled',
       failed: 'canceled',
       expired: 'ended',
@@ -777,8 +829,23 @@ export class DodoDriver implements PaymentsDriver {
       case 'subscription.expired':
       case 'subscription.failed':
         return 'subscription.canceled';
+      // A cardholder has opened a chargeback: the one webhook that takes revenue AWAY.
+      // Dodo is a merchant of record and still forwards the dispute lifecycle (you get ten
+      // days to respond), so unlike Polar and Lemon Squeezy there IS a real event to map.
+      case 'dispute.opened':
+        return 'payment.disputed';
+      // The rest of the lifecycle — `challenged`, `accepted`, `cancelled`, `expired`,
+      // `won`, `lost`. The package deliberately has no canonical resolution event (every
+      // gateway reports one differently), so they arrive as a plain update.
+      case 'dispute.challenged':
+      case 'dispute.accepted':
+      case 'dispute.cancelled':
+      case 'dispute.expired':
+      case 'dispute.won':
+      case 'dispute.lost':
+        return 'payment.updated';
       default:
-        // refund.failed, dispute.*, license_key.*, payout.*, credit.*, dunning.*,
+        // refund.failed, license_key.*, payout.*, credit.*, dunning.*,
         // abandoned_checkout.*, entitlement_grant.* — passed through so an app handler can
         // subscribe to them by their Dodo name.
         return event;
@@ -811,6 +878,19 @@ export class DodoDriver implements PaymentsDriver {
         amount: refund.amount ?? 0,
         currency: (refund.currency ?? this.#currency).toLowerCase(),
         customerId: refund.customer?.customer_id,
+      };
+    }
+    if (payloadType === 'Dispute') {
+      const dispute = data as unknown as DodoDispute;
+      // Keyed by the PAYMENT, not the dispute: the payment is the row whose status has to
+      // move to `disputed`, and the amount/currency are what the processor writes back.
+      return {
+        gatewayId: dispute.payment_id,
+        amount: Number(dispute.amount) || 0,
+        currency: (dispute.currency ?? this.#currency).toLowerCase(),
+        disputeId: dispute.dispute_id,
+        ...(dispute.dispute_stage !== undefined ? { disputeStage: dispute.dispute_stage } : {}),
+        ...(dispute.dispute_status !== undefined ? { disputeStatus: dispute.dispute_status } : {}),
       };
     }
     if (payloadType === 'Subscription') {
@@ -864,6 +944,19 @@ export class DodoDriver implements PaymentsDriver {
         ? { external_reference: input.externalReference }
         : {}),
     };
+  }
+
+  /**
+   * Dodo documents **no request deduplication** — no `Idempotency-Key` header, no
+   * request-id field; its only idempotency guidance is the `webhook-id` header on the
+   * receiving side. So a key handed to this driver is refused rather than accepted and
+   * dropped: silently dropping it turns a caller's retry guarantee into a second charge.
+   */
+  #refuseIdempotencyKey(key: string | undefined, operation: string): void {
+    if (key === undefined) return;
+    throw new Error(
+      `[payments] Dodo Payments has no idempotency mechanism, so \`idempotencyKey\` cannot be honoured on ${operation}(). Its API deduplicates nothing (the \`webhook-id\` header only covers events it sends you), and a retried request performs the operation a second time — deduplicate on your side before calling.`,
+    );
   }
 
   #requireProductId(metadata: Record<string, unknown> | undefined): string {
@@ -924,11 +1017,37 @@ export class DodoDriver implements PaymentsDriver {
       // Dodo rejects the payment otherwise.
       case 'pix':
         return ['pix', 'credit', 'debit'];
+      // The category methods below keep `credit`/`debit` alongside them for the reason
+      // Dodo documents: a checkout whose every listed method is unavailable in the buyer's
+      // country simply fails, and a category is a set of local methods by definition.
+      case 'upi':
+        return ['upi_collect', 'credit', 'debit'];
+      case 'wallet':
+        return [
+          'apple_pay',
+          'google_pay',
+          'amazon_pay',
+          'cashapp',
+          'revolut_pay',
+          'credit',
+          'debit',
+        ];
+      case 'bank_transfer':
+        return ['ideal', 'bancontact_card', 'eps', 'multibanco', 'blik', 'credit', 'debit'];
+      case 'bank_debit':
+        return ['sepa', 'ach', 'credit', 'debit'];
+      case 'bnpl':
+        return ['klarna', 'afterpay_clearpay', 'credit', 'debit'];
       default:
         return undefined;
     }
   }
 
+  /**
+   * The instrument Dodo reports back on a payment, onto the contract's method categories.
+   * Only `card`, `pix` and `boleto` had names before, so an iDEAL or Klarna payment came
+   * back `unknown` — every method Dodo can produce now lands in a category.
+   */
   #mapMethodToType(method: string | null | undefined): Payment['method'] {
     switch (method) {
       case 'card':
@@ -941,6 +1060,34 @@ export class DodoDriver implements PaymentsDriver {
         return 'pix';
       case 'boleto':
         return 'boleto';
+      case 'upi':
+      case 'upi_collect':
+      case 'upi_intent':
+        return 'upi';
+      case 'apple_pay':
+      case 'google_pay':
+      case 'amazon_pay':
+      case 'cashapp':
+      case 'revolut_pay':
+      case 'we_chat_pay':
+      case 'payco':
+      case 'naver_pay':
+      case 'kakao_pay':
+        return 'wallet';
+      case 'ideal':
+      case 'bancontact_card':
+      case 'eps':
+      case 'multibanco':
+      case 'blik':
+      case 'satispay':
+        return 'bank_transfer';
+      case 'sepa':
+      case 'ach':
+        return 'bank_debit';
+      case 'klarna':
+      case 'afterpay_clearpay':
+      case 'billie':
+        return 'bnpl';
       default:
         return 'unknown';
     }

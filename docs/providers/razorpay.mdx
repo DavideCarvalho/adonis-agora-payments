@@ -21,7 +21,9 @@ Basic: the key id is the username, the key secret the password.
 - **`externalReference`**: `notes.external_reference` on an order or a subscription;
   `reference_id` on a payment link. Read back out on `event.data.externalReference`.
 - **Refunds**: `POST /payments/{id}/refund`, full or partial.
-- **Subscriptions**: native, with plans (`POST /plans`) you create outside this driver.
+- **Subscriptions**: native, with plans (`POST /plans`) you create outside this driver. A
+  `paused` subscription reads as `paused` (it used to read `past_due`, which said the
+  subscriber owed money they did not); `halted` and `pending` stay `past_due`.
 - **Invoices**: `GET /invoices?customer_id=…`.
 
 <Callout type="warn" title="Not yet run against a live account">
@@ -56,35 +58,50 @@ money — it throws with the id you gave it if you pass anything else.
 create with the same receipt is rejected rather than producing a twin order. Razorpay caps
 it at 40 characters and so does this driver, before the round trip.
 
-## Why `supportedMethods` is only `undefined`
+## Why `supportedMethods` is only `undefined` — even now that `upi` exists
 
-UPI is how most Indian payers actually pay, and `PaymentMethodName` — the union this
-package routes on — has no `upi` member. Rather than borrow a name from another country's
-instant rail (`pix`), the driver declares nothing but `undefined`, "let the customer choose
-at checkout", which is exactly what a Razorpay order does.
+`PaymentMethodName` has a `upi` member now, and this driver still declares nothing but
+`undefined`. The reason was never the missing name: **`POST /v1/orders` has no `method`
+field.** An order is an amount Razorpay expects to collect, and the payer picks card, UPI,
+netbanking or a wallet inside Checkout — method restriction is a Checkout.js option in the
+browser, not something the server-side call can fix. So `charge()` cannot produce a UPI
+payment on request, and declaring `upi` would promise a rail this call does not choose.
 
 The consequence is deliberate: `methods: { credit_card: 'razorpay' }` fails at the manager.
 Nothing in the Orders API can promise a card was used, so a driver that accepted that
 routing would be lying about which rail the money arrived on. `charge({ method: … })`
 throws for the same reason.
 
-On the way back, `payment.method` on the webhook tells you what the payer really chose
-(`card`, `upi`, `netbanking`, `wallet`, `emi`). The driver maps only `card` onto
-`Payment.method` (`card` / `debit_card`); a UPI payment leaves it unset rather than
-mislabelled.
+On the way **back** it is different: the payer has chosen by then, and `payment.method`
+says what they chose. That is now mapped by category instead of only `card`:
+
+| Razorpay `method` | `Payment.method` |
+| --- | --- |
+| `upi` | `upi` |
+| `card`, `emi` (a card instalment plan) | `card` / `debit_card` |
+| `wallet` | `wallet` |
+| `netbanking` | `bank_transfer` |
+| `paylater`, `cardless_emi` | `bnpl` |
+
+A UPI payment used to leave `Payment.method` unset, because calling it `pix` would have put
+a Brazilian label on an Indian payment. It says `upi` now.
 
 ## `authorized` is not `paid`
 
 A Razorpay payment is `authorized` — funds held on the instrument — before it is
-`captured`, which is when the money moves to you. The canonical `BillingStatus` union
-(`pending | paid | failed | refunded | canceled | disputed`) has no name for that middle
-state.
+`captured`, which is when the money moves to you. This is the clearest authorize-then-capture
+split of any gateway here.
 
-**`authorized` maps to `pending`.** Of the six statuses, `pending` is the only one that
-means "not settled, not failed". Calling it `paid` would let an app ship goods against
-money it may never receive: Razorpay voids an uncaptured authorization on its own after a
-few days. For the same reason, the `payment.authorized` webhook normalizes to
-`payment.updated`, never `payment.succeeded`.
+**`authorized` maps to `authorized`.** It used to map to `pending`, and the driver said so
+on purpose: of the statuses that existed, `pending` was the only one meaning "not settled,
+not failed". It understated the case — a `pending` payment is one nobody has attempted,
+while an authorized one has the payer's money reserved and a clock running on it, because
+Razorpay voids an uncaptured authorization on its own after a few days.
+
+It is still not `paid`, and the `payment.authorized` webhook still normalizes to
+`payment.updated`, never `payment.succeeded`: there is deliberately no canonical
+`payment.authorized` event, and settling on this one would report an order the merchant has
+not been paid for.
 
 Accounts with auto-capture switched off need a way to finish the job, so the driver exposes
 one method outside the `PaymentsDriver` contract:
@@ -112,7 +129,8 @@ dedupe in the ledger.
 | `payment.captured`, `order.paid`, `payment_link.paid`, `subscription.charged` | `payment.succeeded` |
 | `payment.failed`, `payment_link.expired` | `payment.failed` |
 | `refund.processed` | `payment.refunded` |
-| `payment.authorized`, `refund.created`, `refund.failed`, `payment_link.cancelled`, `payment_link.partially_paid` | `payment.updated` |
+| `payment.dispute.created` | `payment.disputed` |
+| `payment.authorized`, `payment.dispute.won`/`.lost`/`.closed`/`.under_review`/`.action_required`, `refund.created`, `refund.failed`, `payment_link.cancelled`, `payment_link.partially_paid` | `payment.updated` |
 | `subscription.authenticated` | `subscription.created` |
 | `subscription.cancelled` | `subscription.canceled` |
 | `subscription.activated`, `.updated`, `.pending`, `.halted`, `.paused`, `.resumed`, `.completed` | `subscription.updated` |
@@ -123,6 +141,46 @@ Anything else passes through under its Razorpay name.
 notes, the payment link's `reference_id`, then the order's and the subscription's notes.
 The API reference does not state that an order's notes are copied onto the payment it
 produces, so the driver checks all of them rather than trusting one.
+
+### Disputes
+
+`payment.dispute.created` — the issuing bank has raised a dispute against a payment — moves
+the payment row to `disputed`. The rest of the family (`won`, `lost`, `closed`,
+`under_review`, `action_required`) is the resolution, which every gateway reports
+differently and which this package deliberately does not name.
+
+The event is keyed on `dispute.payment_id`, and the amount is `dispute.amount` — the
+envelope carries the payment entity too, and the two disagree: `payment.amount` is what was
+charged, `dispute.amount` what is being pulled back. `event.data` also carries `disputeId`,
+`disputeStatus` and `disputePhase` (`fraud`, `retrieval`, `chargeback`, `pre_arbitration`,
+`arbitration`); the reason code and the `respond_by` deadline stay on `event.raw`.
+
+## `idempotencyKey` — refunds only
+
+Razorpay has **no general idempotency header**. There is no `Idempotency-Key`, and no
+`X-Razorpay-Idempotency-Key`; idempotency is a per-feature header where it exists at all:
+
+| Call | Mechanism |
+| --- | --- |
+| `charge` | the order's `receipt` (account-level unique, max 40 chars) |
+| `createCheckout` | the link's `reference_id` (unique per link) |
+| `refund` | **`X-Refund-Idempotency`** header — at least 10 characters, `[A-Za-z0-9_-]` only |
+| `createCustomer`, `createSubscription`, `updateSubscription` | **none — the driver throws** |
+
+The refund key is validated before the round trip, because a key Razorpay rejects is a key
+that does not deduplicate. Razorpay also requires the retry to repeat the same body, or it
+answers `BAD_REQUEST`.
+
+The three that throw do so deliberately. `POST /v1/customers` and `POST /v1/subscriptions`
+document no idempotency at all, so accepting a key and dropping it would turn your retry
+guarantee into a second customer — or a second live subscription billing the same person
+every month:
+
+```
+[payments] Razorpay does not deduplicate subscription creation: `POST /v1/subscriptions`
+documents no idempotency key, and Razorpay has no general `Idempotency-Key` header — only
+refunds (`X-Refund-Idempotency`) and RazorpayX payouts have one. …
+```
 
 ## Subscriptions
 

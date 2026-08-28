@@ -37,6 +37,27 @@ function notification(dataId: string, type = 'payment') {
   });
 }
 
+/**
+ * A `topic_chargebacks_wh` notification: `data.id` is the chargeback CASE id (what the
+ * signature covers), and the payment it is about travels separately in `data.payment_id`.
+ */
+function chargebackNotification(caseId: string, paymentId?: string) {
+  return JSON.stringify({
+    id: 67890,
+    live_mode: true,
+    type: 'topic_chargebacks_wh',
+    date_created: '2026-03-25T10:04:58.396-04:00',
+    user_id: 44444,
+    actions: ['changed_case_status'],
+    data: {
+      id: caseId,
+      ...(paymentId !== undefined ? { payment_id: paymentId } : {}),
+      checkout: 'cho-pro',
+      site_id: 'MLB',
+    },
+  });
+}
+
 function jsonResponse(body: unknown) {
   return { ok: true, status: 200, json: async () => body };
 }
@@ -356,5 +377,210 @@ describe('MercadoPagoDriver', () => {
         }),
       ).rejects.toThrow(/ignores a subscription `start_date`/);
     });
+  });
+
+  // ── Disputes ───────────────────────────────────────────────────────────────────────
+
+  it('turns a chargeback notification into payment.disputed against the PAYMENT id', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        id: 999999999,
+        status: 'charged_back',
+        status_detail: 'in_process',
+        transaction_amount: 19.9,
+        currency_id: 'BRL',
+        payment_method_id: 'master',
+        payment_type_id: 'credit_card',
+        external_reference: 'payment_local_1',
+        payer: { id: 'cus_1' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const driver = makeDriver({ webhookSecret: SECRET });
+    const event = await driver.parseWebhook(
+      chargebackNotification('233000061680860000', '999999999'),
+      {
+        'x-signature': `ts=${TS},v1=${sign('233000061680860000')}`,
+        'x-request-id': REQUEST_ID,
+      },
+    );
+
+    // The case id (`233…`) is not a payment id; the fetch and the row both key off
+    // `data.payment_id`, or the dispute would be filed under something nothing reconciles.
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(
+      'https://api.mercadopago.com/v1/payments/999999999',
+    );
+    expect(event.type).toBe('payment.disputed');
+    expect(event.data).toMatchObject({
+      gatewayId: '999999999',
+      amount: 1990,
+      currency: 'brl',
+      externalReference: 'payment_local_1',
+    });
+  });
+
+  it('does not invent a payment when the chargeback names no payment id', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const driver = makeDriver({ webhookSecret: SECRET });
+    const event = await driver.parseWebhook(chargebackNotification('233000061680860000'), {
+      'x-signature': `ts=${TS},v1=${sign('233000061680860000')}`,
+      'x-request-id': REQUEST_ID,
+    });
+    expect(event.type).toBe('payment.updated');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reports a charged-back payment as disputed, not as a refund', async () => {
+    // It used to arrive as `payment.refunded`, which says the seller gave the money back
+    // — indistinguishable from a real refund, and the row read `refunded` either way.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: 999999999,
+          status: 'charged_back',
+          transaction_amount: 19.9,
+          currency_id: 'BRL',
+        }),
+      ),
+    );
+    const driver = makeDriver({ webhookSecret: SECRET });
+    const event = await driver.parseWebhook(notification('999999999'), {
+      'x-signature': `ts=${TS},v1=${sign('999999999')}`,
+      'x-request-id': REQUEST_ID,
+    });
+    expect(event.type).toBe('payment.disputed');
+    expect((await driver.findPayment('999999999'))?.status).toBe('disputed');
+  });
+
+  it('treats a mediation as a dispute too', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: 999999999,
+          status: 'in_mediation',
+          transaction_amount: 19.9,
+          currency_id: 'BRL',
+        }),
+      ),
+    );
+    const event = await makeDriver({ webhookSecret: SECRET }).parseWebhook(
+      notification('999999999'),
+      { 'x-signature': `ts=${TS},v1=${sign('999999999')}`, 'x-request-id': REQUEST_ID },
+    );
+    expect(event.type).toBe('payment.disputed');
+  });
+
+  // ── Authorization and pause ────────────────────────────────────────────────────────
+
+  it('reports an authorized card payment as authorized — held, not captured', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: 999999999,
+          status: 'authorized',
+          status_detail: 'pending_capture',
+          transaction_amount: 19.9,
+          currency_id: 'BRL',
+          payment_type_id: 'credit_card',
+        }),
+      ),
+    );
+    const payment = await makeDriver().findPayment('999999999');
+    // Not `pending` (understates a hold the issuer granted) and not `paid` (grants access
+    // against money that evaporates if the authorization is never captured).
+    expect(payment?.status).toBe('authorized');
+  });
+
+  it('does not report an authorization as a settled payment on the webhook', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse({ id: 999999999, status: 'authorized', transaction_amount: 19.9 }),
+        ),
+    );
+    const event = await makeDriver({ webhookSecret: SECRET }).parseWebhook(
+      notification('999999999'),
+      { 'x-signature': `ts=${TS},v1=${sign('999999999')}`, 'x-request-id': REQUEST_ID },
+    );
+    expect(event.type).toBe('payment.updated');
+  });
+
+  it('reports a paused preapproval as paused, not past_due', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: 'preapproval_1',
+          status: 'paused',
+          reason: 'Plano Pro',
+          payer_id: 12345,
+          auto_recurring: { transaction_amount: 49.9, currency_id: 'BRL' },
+        }),
+      ),
+    );
+    // Billing has stopped and the subscription is alive — it must not entitle the payer,
+    // and nothing failed, so `past_due` was the wrong word for it.
+    expect((await makeDriver().findSubscription('preapproval_1'))?.status).toBe('paused');
+  });
+
+  // ── Idempotency ────────────────────────────────────────────────────────────────────
+
+  it('sends the caller idempotencyKey on a refund instead of a generated one', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ id: 1, amount: 19.9, status: 'approved' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await makeDriver().refund('999999999', 1990, { idempotencyKey: 'idem-refund-1' });
+    const [, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
+    expect((init.headers as Record<string, string>)['X-Idempotency-Key']).toBe('idem-refund-1');
+  });
+
+  it('still generates a random refund key when the caller gives none', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ id: 1, amount: 19.9, status: 'approved' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const driver = makeDriver();
+    await driver.refund('999999999', 1990);
+    await driver.refund('999999999', 1990);
+    const keyOf = (call: number) =>
+      ((fetchMock.mock.calls[call]![1] as RequestInit).headers as Record<string, string>)[
+        'X-Idempotency-Key'
+      ];
+    // Mercado Pago requires the header, so one has to be invented — but deriving it from
+    // the payment id would collapse two deliberate partial refunds of the same amount
+    // into one and report a success for a refund never made.
+    expect(keyOf(0)).toBeDefined();
+    expect(keyOf(1)).not.toBe(keyOf(0));
+  });
+
+  it('refuses an idempotencyKey on the calls Mercado Pago documents none for', async () => {
+    const driver = makeDriver();
+    // `X-Idempotency-Key` is documented — and required — on payments and refunds only.
+    // On `/v1/customers` and `/preapproval` the reference lists `Authorization` and
+    // nothing else, so sending it would be harmless, unspecified, and a false promise.
+    await expect(driver.createCustomer({ idempotencyKey: 'k', email: 'a@b.com' })).rejects.toThrow(
+      /documents `X-Idempotency-Key` only for payments and refunds.*`createCustomer`/s,
+    );
+    await expect(
+      driver.createSubscription({ idempotencyKey: 'k', customerId: 'c', planId: 'p' }),
+    ).rejects.toThrow(/`createSubscription`/);
+    await expect(
+      driver.updateSubscription('preapproval_1', { idempotencyKey: 'k' }),
+    ).rejects.toThrow(/`updateSubscription`/);
+  });
+
+  it('refuses before it reaches the network', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(makeDriver().createCustomer({ idempotencyKey: 'k' })).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

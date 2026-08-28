@@ -5,10 +5,14 @@ const originalFetch = globalThis.fetch;
 
 function stubFetch(response: Partial<Response> & { json?: () => Promise<unknown> }): {
   calls: string[];
+  /** The `RequestInit` each call carried — how a test tells a `GET` from a `POST`. */
+  inits: Array<RequestInit | undefined>;
 } {
   const calls: string[] = [];
-  globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+  const inits: Array<RequestInit | undefined> = [];
+  globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     calls.push(String(input));
+    inits.push(init);
     return {
       ok: true,
       status: 200,
@@ -17,7 +21,7 @@ function stubFetch(response: Partial<Response> & { json?: () => Promise<unknown>
       ...response,
     } as Response;
   }) as typeof globalThis.fetch;
-  return { calls };
+  return { calls, inits };
 }
 
 afterEach(() => {
@@ -90,6 +94,69 @@ describe('paymentsClient request shapes', () => {
     const { calls } = stubFetch({ json: async () => ({ events: [] }) });
     await paymentsClient.webhookEvents({ status: 'failed' });
     expect(calls).toEqual(['/pd/api/webhook-events?status=failed']);
+  });
+
+  it('passes the provider filter through on every list endpoint', async () => {
+    const { calls } = stubFetch({ json: async () => ({}) });
+    await paymentsClient.payments({ provider: 'asaas' });
+    await paymentsClient.subscriptions({ provider: 'asaas', status: 'past_due' });
+    await paymentsClient.webhookEvents({ provider: 'asaas' });
+    expect(calls).toEqual([
+      '/pd/api/payments?provider=asaas',
+      '/pd/api/subscriptions?status=past_due&provider=asaas',
+      '/pd/api/webhook-events?provider=asaas',
+    ]);
+  });
+
+  it('requests health and providers with no query at all', async () => {
+    const { calls } = stubFetch({ json: async () => ({}) });
+    await paymentsClient.health();
+    await paymentsClient.providers();
+    expect(calls).toEqual(['/pd/api/health', '/pd/api/providers']);
+  });
+});
+
+/**
+ * The two calls that CHANGE something.
+ *
+ * `POST` is the property under test, not an implementation detail: a refund reachable by `GET` is
+ * a refund a crawler, a prefetcher or a pasted link can trigger.
+ */
+describe('actions are POSTs', () => {
+  beforeEach(() => {
+    window.__PAYMENTS_API__ = '/pd/api';
+  });
+
+  it('posts a full refund with an empty body', async () => {
+    const { calls, inits } = stubFetch({ json: async () => ({ refund: {} }) });
+    await paymentsClient.refundPayment('pi_1');
+    expect(calls).toEqual(['/pd/api/payments/pi_1/refund']);
+    expect(inits[0]?.method).toBe('POST');
+    expect(inits[0]?.body).toBe('{}');
+  });
+
+  it('posts a partial refund as integer minor units', async () => {
+    const { inits } = stubFetch({ json: async () => ({ refund: {} }) });
+    await paymentsClient.refundPayment('pi_1', 1999);
+    expect(inits[0]?.body).toBe('{"amount":1999}');
+  });
+
+  it('escapes a gateway id that would otherwise break out of the path', async () => {
+    const { calls } = stubFetch({ json: async () => ({ refund: {} }) });
+    await paymentsClient.refundPayment('pi/../../admin');
+    expect(calls).toEqual(['/pd/api/payments/pi%2F..%2F..%2Fadmin/refund']);
+  });
+
+  it('posts the webhook retry', async () => {
+    const { calls, inits } = stubFetch({ json: async () => ({ status: 'processed' }) });
+    await paymentsClient.retryWebhookEvent('evt_1');
+    expect(calls).toEqual(['/pd/api/webhook-events/evt_1/retry']);
+    expect(inits[0]?.method).toBe('POST');
+  });
+
+  it("surfaces the gateway's refusal instead of a bare 502", async () => {
+    stubFetch({ ok: false, status: 502, json: async () => ({ error: 'charge_already_refunded' }) });
+    await expect(paymentsClient.refundPayment('pi_1')).rejects.toThrow('charge_already_refunded');
   });
 });
 

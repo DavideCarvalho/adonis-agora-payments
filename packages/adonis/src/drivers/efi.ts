@@ -223,14 +223,26 @@ export class EfiDriver implements PaymentsDriver {
     }
   }
 
-  async refund(paymentGatewayId: string, amount?: Money): Promise<Refund> {
+  /**
+   * `options.idempotencyKey` becomes the **devolução id** — Efí's refund is a `PUT` to
+   * `/v2/pix/{e2eid}/devolucao/{id}`, so the id you choose *is* the deduplication: a retry
+   * with the same one returns the first refund instead of sending the money twice. Without
+   * a key the driver mints a random id, which protects a retry inside one call and nothing
+   * across process restarts, so pass one if you retry.
+   */
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
     // A Pix refund is made against the settled Pix (its endToEndId), not against the
     // charge — so a txid has to be resolved to the Pix that paid it first.
     const { endToEndId, paidValue } = await this.#resolveSettledPix(paymentGatewayId);
     const value = amount !== undefined ? toAmountString(amount) : paidValue;
     // Efí requires an id for the refund itself (max 35 chars, alphanumeric); it is also
     // the idempotency key on their side, so a retry with the same id is not a second refund.
-    const refundId = randomUUID().replace(/-/g, '');
+    const refundId =
+      idempotencyKeyAsRefundId(options?.idempotencyKey) ?? randomUUID().replace(/-/g, '');
     const data = await this.#request<EfiDevolucao>(`/v2/pix/${endToEndId}/devolucao/${refundId}`, {
       method: 'PUT',
       body: { valor: value },
@@ -315,10 +327,22 @@ export class EfiDriver implements PaymentsDriver {
 
   // ── Invoices ─────────────────────────────────────────────────────────────────────────
 
+  /**
+   * Throws, and deliberately does not return `[]`. An empty list is indistinguishable from
+   * "this customer has no invoices", which is the silent shape this package keeps removing:
+   * the caller reads zero rows and concludes the customer never bought anything.
+   * `capabilities.invoices` is `false`, so `PaymentsManager` already stops the documented
+   * path — this message is for whoever reached the driver directly.
+   */
   async listInvoices(_customerId: string): Promise<Invoice[]> {
     // Pix charges are indexed by txid and by date range, never by payer — there is no
     // per-customer list to return, and no invoice concept at all.
-    return [];
+    throw new Error(
+      "[payments] Efí's Pix API has no invoices to list — a Pix charge (`cob`) is indexed " +
+        'by txid and by date range, never by payer, and the API has no invoice resource at ' +
+        'all. Configure an `invoice` provider and pass `invoice: true` on the charge to ' +
+        'emit a nota fiscal, or list charges yourself with `GET /v2/cob` over a date range.',
+    );
   }
 
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
@@ -574,6 +598,25 @@ export class EfiDriver implements PaymentsDriver {
  */
 function toAmountString(amount: Money): string {
   return formatDecimal(amount);
+}
+
+/**
+ * The caller's idempotency key as Efí's devolução id, or a boot-loud failure.
+ *
+ * The devolução id IS the idempotency mechanism on this API — a `PUT` to the same id is
+ * the same refund — so the key is used verbatim rather than hashed, which keeps it
+ * greppable in Efí's dashboard. BACEN constrains it to 1–35 alphanumerics; a key outside
+ * that charset cannot be sent, and quietly minting a random id instead would turn the
+ * caller's retry guarantee into a second refund.
+ */
+function idempotencyKeyAsRefundId(key: string | undefined): string | undefined {
+  if (key === undefined) return undefined;
+  if (!/^[a-zA-Z0-9]{1,35}$/.test(key)) {
+    throw new Error(
+      `[payments] Efí deduplicates a refund on the devolução id, and "${key}" cannot be one: BACEN allows 1–35 alphanumeric characters (no dashes, no underscores). Pass an \`idempotencyKey\` in that charset — a UUID works with the dashes stripped.`,
+    );
+  }
+  return key;
 }
 
 /** The BACEN txid charset: 26–35 alphanumerics. */

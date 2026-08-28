@@ -70,7 +70,12 @@ return response.redirect(session.url)
 - **`trialDays` throws.** A Paddle trial lives on the price (`trial_period`), not on a
   checkout. Accepting the option would bill a customer who was promised a trial, so the
   driver refuses and points you at the price.
-- **`idempotencyKey` is ignored** — the Paddle API has no idempotency header.
+- **`idempotencyKey` throws.** The Paddle API has no idempotency mechanism at all — no
+  header, no request-id body field, nothing on a transaction or an adjustment. It used to
+  be accepted and dropped here, which turned a caller's retry guarantee into a second
+  refund; every entry point that takes a key (`createCheckout`, `refund`, `createCustomer`,
+  `updateSubscription`) now refuses it and says so. Deduplicate on your side — persist the
+  key and check it before calling.
 
 ### Money is a string of the smallest unit
 
@@ -104,13 +109,54 @@ Normalized event types:
 | `transaction.payment_failed` | `payment.failed` |
 | `transaction.created/updated/ready/billed/canceled/past_due/revised` | `payment.updated` |
 | `adjustment.created/updated` with `action: 'refund'` | `payment.refunded` |
-| `adjustment.*` with any other action (credits, chargebacks) | `payment.updated` |
+| `adjustment.created` with `action: 'chargeback'` | **`payment.disputed`** |
+| `adjustment.*` with any other action (credits, chargeback warnings and reversals) | `payment.updated` |
 | `subscription.created`, `subscription.imported` | `subscription.created` |
 | `subscription.activated/updated/trialing/past_due/paused/resumed` | `subscription.updated` |
 | `subscription.canceled` | `subscription.canceled` |
 
 `event.id` is Paddle's own `event_id`, so the idempotency ledger dedupes on a gateway id
 rather than a derived one.
+
+#### Chargebacks
+
+Paddle has no `dispute.*` event. A chargeback **is an adjustment**: when a customer
+successfully disputes a charge with their bank, Paddle creates an adjustment with
+`action: 'chargeback'` against the transaction and refunds the disputed amount itself. That
+`adjustment.created` is the only notification a Paddle seller gets that revenue was taken
+away, and it used to arrive as a bland `payment.updated`, leaving the stored payment saying
+`paid`. It is now `payment.disputed`, keyed by the **transaction** — the row whose status
+has to move — with the adjustment's total and currency.
+
+The rest of Paddle's chargeback vocabulary stays a plain update, deliberately:
+
+- `chargeback_warning` — a dispute is coming; no money has moved yet.
+- `chargeback_reverse` / `chargeback_warning_reverse` — Paddle contested it and won.
+- `adjustment.updated` on a chargeback — a later status change, not a second dispute.
+
+This package has no canonical *resolution* event: every gateway reports a dispute won or
+lost differently, and a type no driver emits is worse than none. Read
+`event.raw.data.action` when you need the detail.
+
+#### Payment methods
+
+Paddle's `payments[].method_details.type` is reported back on `payment.method` as the
+contract's **category**, so a payment collected through anything other than a card finally
+has a name:
+
+| Paddle `method_details.type` | `payment.method` |
+| --- | --- |
+| `card`, `korea_local`, `south_korea_local_card` | `card` |
+| `paypal`, `apple_pay`, `google_pay`, `samsung_pay`, `alipay`, `wechat_pay`, `kakao_pay`, `naver_pay`, `payco` | `wallet` |
+| `ideal`, `bancontact`, `blik`, `mb_way`, `wire_transfer` | `bank_transfer` |
+| `pix` | `pix` |
+| `upi` | `upi` |
+| `offline`, `unknown`, anything new | left unset |
+
+Paddle spells the same value hyphenated on some events (`apple-pay`) and underscored on
+others; both are normalized. Note this is only what Paddle *reports*: `supportedMethods`
+stays `undefined` only, because the transaction API still takes no payment-method argument
+and the driver cannot promise which one the buyer will use.
 
 ### `externalReference`
 
@@ -144,9 +190,11 @@ What does work:
   customer pays by swapping `items[].price_id` with a `proration_billing_mode`, which the
   shared input has no room for. `description` **throws** too: Paddle subscriptions have no
   such field, and dropping it would report a change the gateway never saw.
-- Paddle's `paused` status is reported as `active`, because the subscription still exists
-  and resumes and `SubscriptionStatus` has no counterpart. The real value is on
-  `subscription.payload.status`.
+- **Paddle's `paused` status is reported as `paused`.** It used to be reported as `active`,
+  which handed entitlement to a subscriber who is not paying: a paused subscription exists
+  and will bill again, but it is not billing *now*. Anything gating access on
+  `status === 'active'` will start refusing paused subscribers, which is the point. The raw
+  value is still on `subscription.payload.status`.
 
 ### Refunds
 

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createClient } from '@woovi/node-sdk';
 import type { WooviDriverConfig } from '../define_config.js';
 import { publishPaymentDiagnostics, publishSubscriptionDiagnostics } from '../diagnostics.js';
@@ -348,13 +349,61 @@ export class WooviDriver implements PaymentsDriver {
     }
     const payload = JSON.parse(rawBody) as Record<string, unknown>;
     const event = String(payload.event ?? 'unknown');
+    const type = this.#mapWebhookType(event);
     return {
-      id: String(payload.id ?? payload.globalID ?? `${event}-${Math.random()}`),
+      // A CONTENT hash, never a random id. A payload with no id used to get a fresh
+      // `Math.random()` on every delivery, so the ledger saw each redelivery as a new
+      // event and processed it again — the exact double-grant the ledger exists to stop.
+      id: String(
+        payload.id ??
+          payload.globalID ??
+          `${event}-${createHash('sha256').update(rawBody, 'utf8').digest('hex').slice(0, 32)}`,
+      ),
       provider: this.provider,
-      type: this.#mapWebhookType(event),
+      type,
       createdAt: new Date().toISOString(),
-      data: payload,
+      data: this.#mapWebhookData(payload, type),
       raw: payload,
+    };
+  }
+
+  /**
+   * The normalized shape the built-in sync needs (`gatewayId`, `amount`, `currency`).
+   *
+   * This used to hand the processor Woovi's raw body, which its shape guard rejected — so
+   * every Woovi webhook was ledgered, threw `Malformed`, and was retried forever while the
+   * billing tables never learned the payment was paid. `raw` still carries the original.
+   */
+  #mapWebhookData(payload: Record<string, unknown>, type: string): Record<string, unknown> {
+    // Woovi nests the subject under `charge`/`pix` on charge events and inlines it on
+    // subscription ones.
+    const subject = (payload.charge ?? payload.pix ?? payload) as Record<string, unknown>;
+    const gatewayId = String(subject.globalID ?? subject.id ?? payload.globalID ?? '');
+    if (gatewayId === '') return payload;
+
+    if (type.startsWith('subscription.')) {
+      const subscription = this.#mapSubscription(subject);
+      return {
+        gatewayId: subscription.gatewayId,
+        status: subscription.status,
+        planId: subscription.planId,
+        ...(subscription.customerId !== undefined ? { customerId: subscription.customerId } : {}),
+        ...(typeof subject.correlationID === 'string'
+          ? { externalReference: subject.correlationID }
+          : {}),
+      };
+    }
+
+    const payment = this.#mapPayment(subject);
+    return {
+      gatewayId: payment.gatewayId,
+      amount: payment.amount.amount,
+      currency: payment.amount.currency,
+      ...(payment.customerId !== undefined ? { customerId: payment.customerId } : {}),
+      // `correlationID` is what an app sets as its own reference on a Woovi charge.
+      ...(typeof subject.correlationID === 'string'
+        ? { externalReference: subject.correlationID }
+        : {}),
     };
   }
 

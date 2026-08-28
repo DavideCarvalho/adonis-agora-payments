@@ -397,3 +397,98 @@ describe('PolarDriver', () => {
     }
   });
 });
+
+describe('PolarDriver — the widened contract', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    // biome-ignore lint/performance/noDelete: the driver reads the env, so it must be absent.
+    delete process.env.POLAR_ACCESS_TOKEN;
+    // biome-ignore lint/performance/noDelete: same.
+    delete process.env.POLAR_WEBHOOK_SECRET;
+  });
+
+  it('reports a paused subscription as paused, not active', async () => {
+    stubFetch({ ...SUBSCRIPTION, status: 'paused' });
+
+    // A paused subscriber is not paying. Reporting `active` handed them entitlement.
+    expect((await makeDriver().findSubscription('sub_1'))?.status).toBe('paused');
+  });
+
+  it('carries `paused` through the webhook so the billing layer stores it', () => {
+    const body = JSON.stringify({
+      type: 'subscription.paused',
+      timestamp: '2026-08-02T10:00:00Z',
+      data: { ...SUBSCRIPTION, status: 'paused' },
+    });
+    const event = makeDriver({ webhookSecret: SECRET }).parseWebhook(body, signedHeaders(body));
+
+    expect(event.type).toBe('subscription.updated');
+    expect(event.data).toMatchObject({ gatewayId: 'sub_1', status: 'paused' });
+  });
+
+  it('has no dispute event to map, and does not invent one', () => {
+    // Polar is a merchant of record: the chargeback is raised against Polar, which absorbs
+    // it, so its event catalogue genuinely has no dispute or chargeback event. Forcing an
+    // unrelated event into `payment.disputed` would invent a notification.
+    const driver = makeDriver({ webhookSecret: SECRET });
+    const typeOf = (type: string, data: Record<string, unknown>) => {
+      const body = JSON.stringify({ type, data });
+      return driver.parseWebhook(body, signedHeaders(body)).type;
+    };
+    expect(typeOf('order.refunded', ORDER)).toBe('payment.refunded');
+    expect(typeOf('order.updated', ORDER)).toBe('payment.updated');
+    // A Polar event nobody has mapped stays under its own name for an app handler.
+    expect(typeOf('customer.state_changed', { id: 'cus_1' })).toBe('customer.state_changed');
+  });
+
+  it('sends the idempotency key as the header Polar deduplicates on', async () => {
+    const headerOf = (mock: ReturnType<typeof stubFetch>) =>
+      ((mock.mock.calls[0]! as [string, RequestInit])[1].headers as Record<string, string>)[
+        'Idempotency-Key'
+      ];
+
+    let mock = stubFetch({ id: 'cus_1', email: 'a@b.test' });
+    await makeDriver().createCustomer({ email: 'a@b.test', idempotencyKey: 'k-customer' });
+    expect(headerOf(mock)).toBe('k-customer');
+
+    mock = stubFetch({
+      id: 'ref_1',
+      created_at: '2026-08-01T10:00:00Z',
+      status: 'succeeded',
+      amount: 500,
+      currency: 'USD',
+      order_id: 'ord_1',
+      customer_id: 'cus_1',
+    });
+    await makeDriver().refund('ord_1', 500, { idempotencyKey: 'k-refund' });
+    expect(headerOf(mock)).toBe('k-refund');
+
+    mock = stubFetch(SUBSCRIPTION);
+    await makeDriver().createSubscription({
+      customerId: 'cus_1',
+      planId: 'prod_pro',
+      idempotencyKey: 'k-sub',
+    });
+    expect(headerOf(mock)).toBe('k-sub');
+
+    // Polar documents the header for PATCH too, so a plan swap is covered as well.
+    mock = stubFetch(SUBSCRIPTION);
+    await makeDriver().updateSubscription('sub_1', {
+      metadata: { productId: 'prod_other' },
+      idempotencyKey: 'k-update',
+    });
+    expect(headerOf(mock)).toBe('k-update');
+  });
+
+  it('leaves the header off entirely when no key was given', async () => {
+    const mock = stubFetch({ id: 'cus_1', email: 'a@b.test' });
+    await makeDriver().createCustomer({ email: 'a@b.test' });
+    const headers = (mock.mock.calls[0]! as [string, RequestInit])[1].headers as Record<
+      string,
+      string
+    >;
+    expect(headers['Idempotency-Key']).toBeUndefined();
+    // The version pin must survive the merge that added the idempotency header.
+    expect(headers['Polar-Version']).toBe('2026-04');
+  });
+});

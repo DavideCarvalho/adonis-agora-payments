@@ -77,14 +77,30 @@ describe('driver → processor contract', () => {
 
     const store = new InMemoryBillingStore();
     const processor = new WebhookProcessor({ store, driver });
-    // AbacatePay's webhook data is the raw payload (no normalized gatewayId) — the
-    // processor must reject it instead of writing a garbage row.
-    await expect(processor.process(event)).rejects.toThrow(/Malformed/);
-    const ledger = [...store.webhookEvents.values()][0]!;
-    expect(ledger.status).toBe('failed');
+    await processor.process(event);
+
+    // This used to hand the processor AbacatePay's RAW body, which the shape guard
+    // rejected — so every AbacatePay webhook was ledgered, threw `Malformed`, and was
+    // retried forever while the billing tables never learned the payment was paid.
+    const payment = await store.findPaymentByGatewayId('bill_1');
+    expect(payment?.status).toBe('paid');
+    expect([...store.webhookEvents.values()][0]?.status).toBe('processed');
   });
 
-  it('Woovi PIX_AUTOMATIC_APPROVED maps but raw payload is rejected by the shape guard', async () => {
+  it('AbacatePay derives a stable event id from the body when the payload has none', async () => {
+    const driver = new AbacateDriver({ config: () => ({}) }, { apiKey: 'test' });
+    const raw = JSON.stringify({ event: 'checkout.completed', data: { id: 'bill_2' } });
+
+    // No `id` in the payload. It used to fall back to `Math.random()`, so every
+    // redelivery looked like a NEW event to the ledger and was processed again — the
+    // exact double-grant the ledger exists to prevent.
+    const first = driver.parseWebhook(raw, {});
+    const second = driver.parseWebhook(raw, {});
+    expect(first.id).toBe(second.id);
+    expect(first.id).not.toMatch(/0\./);
+  });
+
+  it('Woovi PIX_AUTOMATIC_APPROVED syncs the subscription', async () => {
     const driver = new WooviDriver({ config: () => ({}) }, { appId: 'test' });
     const raw = JSON.stringify({
       event: 'PIX_AUTOMATIC_APPROVED',
@@ -97,9 +113,46 @@ describe('driver → processor contract', () => {
 
     const store = new InMemoryBillingStore();
     const processor = new WebhookProcessor({ store, driver });
-    await expect(processor.process(event)).rejects.toThrow(/Malformed/);
-    const ledger = [...store.webhookEvents.values()][0]!;
-    expect(ledger.status).toBe('failed');
+    await processor.process(event);
+
+    // This used to hand the processor Woovi's RAW body, which the shape guard rejected —
+    // so every Woovi webhook was ledgered, threw `Malformed`, and was retried forever
+    // while the billing tables never learned anything had happened.
+    expect(await store.findSubscriptionByGatewayId('sub_1')).not.toBeNull();
+    expect([...store.webhookEvents.values()][0]?.status).toBe('processed');
+  });
+
+  it('Woovi PIX_AUTOMATIC_COBR_COMPLETED syncs a paid payment row', async () => {
+    const driver = new WooviDriver({ config: () => ({}) }, { appId: 'test' });
+    const raw = JSON.stringify({
+      event: 'PIX_AUTOMATIC_COBR_COMPLETED',
+      charge: {
+        globalID: 'chg_1',
+        correlationID: 'order_local_1',
+        value: 1990,
+        status: 'COMPLETED',
+      },
+    });
+    const event = driver.parseWebhook(raw, {});
+
+    const store = new InMemoryBillingStore();
+    const processor = new WebhookProcessor({ store, driver });
+    await processor.process(event);
+
+    const payment = await store.findPaymentByGatewayId('chg_1');
+    expect(payment?.status).toBe('paid');
+    // Woovi's `correlationID` is what an app sets as its own reference — it has to survive
+    // onto the normalized event or the handler cannot route the payment to an order.
+    expect(event.data).toMatchObject({ externalReference: 'order_local_1' });
+  });
+
+  it('Woovi derives a stable event id from the body when the payload has none', async () => {
+    const driver = new WooviDriver({ config: () => ({}) }, { appId: 'test' });
+    const raw = JSON.stringify({ event: 'PIX_AUTOMATIC_COBR_COMPLETED', charge: { value: 10 } });
+
+    const first = driver.parseWebhook(raw, {});
+    const second = driver.parseWebhook(raw, {});
+    expect(first.id).toBe(second.id);
   });
 });
 

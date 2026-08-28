@@ -201,7 +201,11 @@ export class PagBankDriver implements PaymentsDriver {
     }
   }
 
-  async refund(paymentGatewayId: string, amount?: Money): Promise<Refund> {
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
     const charge = await this.#resolveCharge(paymentGatewayId);
     // PagBank wants the amount on every cancel, so a "full refund" is spelled out as the
     // amount actually paid rather than left to a default this driver cannot see.
@@ -209,6 +213,9 @@ export class PagBankDriver implements PaymentsDriver {
     const data = await this.#request<PagBankCharge>(`/charges/${charge.id}/cancel`, {
       method: 'POST',
       body: { amount: { value } },
+      // Same `x-idempotency-key` the charge uses: a retried cancel with the key returns
+      // the original refund instead of taking the money out a second time.
+      ...(options?.idempotencyKey !== undefined ? { idempotencyKey: options.idempotencyKey } : {}),
     });
     const refund: Refund = {
       id: data.id,
@@ -306,10 +313,16 @@ export class PagBankDriver implements PaymentsDriver {
   // ── Invoices ─────────────────────────────────────────────────────────────────────────
 
   async listInvoices(_customerId: string): Promise<Invoice[]> {
-    // The Orders API has no invoice concept and no per-customer index to list over —
-    // orders are found by their own id or by `reference_id`. Emitting a fiscal note is a
-    // separate concern here: configure an `invoice` provider and use `invoice: true`.
-    return [];
+    // `capabilities.invoices` is false, so this throws rather than returning `[]`: an
+    // empty array is indistinguishable from "this customer has no invoices", which is
+    // not something PagBank told us. The Orders API has no invoice concept and no
+    // per-customer index to list over — orders are found by their own id or by
+    // `reference_id`.
+    throw new Error(
+      '[payments] PagBank has no invoices to list. The Orders API indexes orders by their own id ' +
+        'or by `reference_id`, not by customer, and has no invoice resource. Use `findPayment`, or ' +
+        'an invoice provider with `invoice: true` for a fiscal note.',
+    );
   }
 
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
@@ -417,8 +430,13 @@ export class PagBankDriver implements PaymentsDriver {
         return 'failed';
       case 'CANCELED':
         return 'canceled';
-      // AUTHORIZED is a pre-authorization: the money is held, not captured. IN_ANALYSIS
-      // and WAITING are plainly not paid either, and an unpaid Pix order has no charge.
+      // A pre-authorization: PagBank is holding the money on the card and nothing has
+      // been captured. It used to collapse into `pending`, which understates a hold the
+      // acquirer has already granted — and `paid` would have been worse, since an
+      // authorization expires. IN_ANALYSIS and WAITING are plainly not paid either, and
+      // an unpaid Pix order has no charge at all.
+      case 'AUTHORIZED':
+        return 'authorized';
       default:
         return 'pending';
     }

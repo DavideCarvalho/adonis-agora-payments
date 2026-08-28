@@ -1,9 +1,42 @@
 import { describe, expect, it, vi } from 'vitest';
+import { WebhookProcessor } from '../src/billing/webhook_processor.js';
 import { AsaasDriver } from '../src/drivers/asaas.js';
+import { InMemoryBillingStore } from '../src/testing/in_memory_billing_store.js';
 
 function makeDriver(webhookToken?: string) {
   if (webhookToken !== undefined) process.env.ASAAS_WEBHOOK_TOKEN = webhookToken;
   return new AsaasDriver({ config: () => ({}) }, { apiKey: 'test', sandbox: true });
+}
+
+/** An Asaas payment payload in whatever status the test needs. */
+function paymentIn(status: string) {
+  return {
+    id: 'pay_cb',
+    customer: 'cus_1',
+    value: 19.9,
+    billingType: 'CREDIT_CARD',
+    status,
+    dueDate: '2026-01-10',
+    externalReference: 'order_local_1',
+  };
+}
+
+/**
+ * A driver with NO webhook token configured. `makeDriver(token)` writes the token into
+ * `process.env`, where it outlives the test that asked for it — so the webhook tests below
+ * build their own driver with the env cleared rather than inheriting a token from
+ * whichever test ran first.
+ */
+function makeOpenDriver() {
+  // biome-ignore lint/performance/noDelete: env var must be absent, not "undefined".
+  delete process.env.ASAAS_WEBHOOK_TOKEN;
+  // biome-ignore lint/performance/noDelete: env var must be absent, not "undefined".
+  delete process.env.ASAAS_WEBHOOK_ACCESS_TOKEN;
+  return new AsaasDriver({ config: () => ({}) }, { apiKey: 'test', sandbox: true });
+}
+
+function jsonResponse(body: unknown) {
+  return { ok: true, status: 200, json: async () => body };
 }
 
 describe('AsaasDriver', () => {
@@ -207,6 +240,154 @@ describe('AsaasDriver', () => {
           { walletId: 'wal_partner', fixedValue: 30 },
         ],
       });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // ── Disputes ───────────────────────────────────────────────────────────────────────
+
+  it('maps PAYMENT_CHARGEBACK_REQUESTED to payment.disputed', () => {
+    const event = makeOpenDriver().parseWebhook(
+      JSON.stringify({
+        event: 'PAYMENT_CHARGEBACK_REQUESTED',
+        payment: paymentIn('CHARGEBACK_REQUESTED'),
+      }),
+      {},
+    );
+    expect(event.type).toBe('payment.disputed');
+    // The processor needs the money and the id; `externalReference` routes it back.
+    expect(event.data).toMatchObject({
+      gatewayId: 'pay_cb',
+      amount: 1990,
+      currency: 'brl',
+      externalReference: 'order_local_1',
+    });
+  });
+
+  it('leaves the later chargeback steps as payment.updated, not as a second dispute', () => {
+    // Documents submitted, then the dispute won with the acquirer's transfer pending.
+    // Neither opens anything, and the contract has no resolution event by design.
+    for (const name of ['PAYMENT_CHARGEBACK_DISPUTE', 'PAYMENT_AWAITING_CHARGEBACK_REVERSAL']) {
+      const event = makeOpenDriver().parseWebhook(
+        JSON.stringify({ event: name, payment: paymentIn('CHARGEBACK_DISPUTE') }),
+        {},
+      );
+      expect(event.type, name).toBe('payment.updated');
+      expect((event.raw as { event: string }).event, name).toBe(name);
+    }
+  });
+
+  it('does not mistake a negativação for a dispute', () => {
+    // `PAYMENT_DUNNING_*` is Serasa-style credit-bureau registration of a defaulting
+    // payer — the opposite end of the story from money being taken back.
+    const event = makeOpenDriver().parseWebhook(
+      JSON.stringify({ event: 'PAYMENT_DUNNING_RECEIVED', payment: paymentIn('DUNNING_RECEIVED') }),
+      {},
+    );
+    expect(event.type).not.toBe('payment.disputed');
+  });
+
+  it('flips a stored paid payment to disputed through the processor', async () => {
+    const driver = makeOpenDriver();
+    const store = new InMemoryBillingStore();
+    await store.savePayment({
+      gatewayId: 'pay_cb',
+      provider: 'asaas',
+      status: 'paid',
+      amount: 1990,
+      currency: 'brl',
+      customerId: 'cus_1',
+    });
+    const event = driver.parseWebhook(
+      JSON.stringify({
+        event: 'PAYMENT_CHARGEBACK_REQUESTED',
+        payment: paymentIn('CHARGEBACK_REQUESTED'),
+      }),
+      {},
+    );
+    await new WebhookProcessor({ store, driver }).process(event);
+
+    const row = await store.findPaymentByGatewayId('pay_cb');
+    expect(row?.status).toBe('disputed');
+    // The dispute payload has no customer; the row must keep the one it had.
+    expect(row?.customerId).toBe('cus_1');
+  });
+
+  it('reports a charged-back payment as disputed rather than pending', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(paymentIn('CHARGEBACK_REQUESTED'))),
+    );
+    try {
+      expect((await makeDriver().findPayment('pay_cb'))?.status).toBe('disputed');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // ── Authorization vs capture ───────────────────────────────────────────────────────
+
+  it('reports an authorizeOnly card payment as authorized, not paid and not pending', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(paymentIn('AUTHORIZED'))));
+    try {
+      // The money is held for three days and captured through
+      // `POST /payments/{id}/captureAuthorizedPayment`. `pending` understated it; `paid`
+      // would grant access against a hold that expires.
+      expect((await makeDriver().findPayment('pay_cb'))?.status).toBe('authorized');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('maps PAYMENT_AUTHORIZED to payment.updated — there is no canonical authorization event', () => {
+    const event = makeOpenDriver().parseWebhook(
+      JSON.stringify({ event: 'PAYMENT_AUTHORIZED', payment: paymentIn('AUTHORIZED') }),
+      {},
+    );
+    expect(event.type).toBe('payment.updated');
+  });
+
+  // ── Idempotency ────────────────────────────────────────────────────────────────────
+
+  it('refuses an idempotencyKey on every operation Asaas cannot deduplicate', async () => {
+    const driver = makeDriver();
+    // Asaas documents no idempotency header or body field on any endpoint. Accepting the
+    // key and dropping it would turn a caller's retry guarantee into a second refund.
+    await expect(driver.refund('pay_1', 500, { idempotencyKey: 'k' })).rejects.toThrow(
+      /Asaas has no idempotency mechanism.*`refund`/s,
+    );
+    await expect(driver.createCustomer({ idempotencyKey: 'k', name: 'A' })).rejects.toThrow(
+      /`createCustomer`/,
+    );
+    await expect(
+      driver.createSubscription({ idempotencyKey: 'k', customerId: 'cus_1', planId: 'p' }),
+    ).rejects.toThrow(/`createSubscription`/);
+    await expect(driver.updateSubscription('sub_1', { idempotencyKey: 'k' })).rejects.toThrow(
+      /`updateSubscription`/,
+    );
+  });
+
+  it('refuses before it reaches the network', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await expect(makeDriver().refund('pay_1', 500, { idempotencyKey: 'k' })).rejects.toThrow();
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('still refunds when no key is given', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ ...paymentIn('REFUNDED'), value: 19.9 }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const refund = await makeDriver().refund('pay_cb');
+      expect(refund.status).toBe('succeeded');
+      expect(refund.amount).toEqual({ amount: 1990, currency: 'brl' });
     } finally {
       vi.unstubAllGlobals();
     }

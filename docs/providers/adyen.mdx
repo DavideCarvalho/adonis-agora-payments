@@ -152,3 +152,86 @@ await payments.driver('adyen').charge({
 `paymentMethodType`, `shopperInteraction`, `recurringProcessingModel` and `returnUrl` are
 lifted out of `metadata` onto the request; everything else in `metadata` is sent as
 Adyen's `metadata`.
+
+## Capture mode — what `Authorised` means
+
+`captureMode` is the one option that changes what a successful payment *means*, and Adyen's
+Checkout API will not tell you which mode your account is in: `captureDelay` is a
+**Management** API field (`GET /merchants/{merchantId}`) and both modes answer `/payments`
+identically. So the driver asks rather than guessing, and defaults to Adyen's own default.
+
+```ts
+providers: {
+  adyen: payments.adyen({ currency: 'eur', captureMode: 'manual' }),
+}
+```
+
+- **`'automatic'` (default)** — the capture follows the authorization on its own and Adyen
+  sends **no** CAPTURE webhook, so `resultCode: Authorised` is the last word the driver
+  gets about that money. It reads as **`paid`**, and the `AUTHORISATION` webhook is
+  `payment.succeeded`.
+- **`'manual'`** — `Authorised` is a hold that expires unless you capture it. It reads as
+  **`authorized`** (funds reserved, money not moved), `AUTHORISATION` normalizes to
+  `payment.updated`, and **`CAPTURE` is what settles it** into `payment.succeeded`.
+
+Getting this wrong in the other direction is the expensive one: on an automatic-capture
+account, downgrading `AUTHORISATION` would leave every payment unsettled forever.
+
+Capture itself is `POST /v71/payments/{pspReference}/captures`, which is not on the driver
+contract — call it directly on a manual-capture account.
+
+## Disputes
+
+Adyen's chargeback flow is a family of notifications with different meanings, and only the
+opening ones move the payment:
+
+| `eventCode` | Normalized | Why |
+| --- | --- | --- |
+| `NOTIFICATION_OF_CHARGEBACK` | `payment.disputed` | The scheme has told Adyen a chargeback is incoming; the defense period starts here. |
+| `CHARGEBACK` | `payment.disputed` | The issuer's debit itself. |
+| `CHARGEBACK_REVERSED`, `SECOND_CHARGEBACK`, `PREARBITRATION_WON`, `PREARBITRATION_LOST`, `DISPUTE_DEFENSE_PERIOD_ENDED` | `payment.updated` | The resolution — deliberately not named canonically. |
+| `REQUEST_FOR_INFORMATION`, `NOTIFICATION_OF_FRAUD` | `payment.updated` | Pre-dispute signals. **No money moves**; treating either as a chargeback would take a live payment away over a question. |
+
+**Both** opening codes map, not just the notification. For card schemes a
+`NOTIFICATION_OF_CHARGEBACK` is always followed by a `CHARGEBACK`, but an **ACH return goes
+straight to `CHARGEBACK`** with no notification and cannot be defended at all — mapping only
+the notification would miss exactly the disputes nobody can fight. The processor's write is
+idempotent, so the pair arriving in order costs one extra upsert and never a wrong status.
+
+The event is keyed on `originalReference`, the disputed payment's `pspReference` — the row
+that has to stop saying `paid`. The reason and the defense deadline stay on `event.raw`.
+
+## `idempotencyKey`
+
+Adyen deduplicates on the `Idempotency-Key` **header**, capped at 64 characters (a UUID is
+what Adyen recommends), and honours it on every POST — including
+`POST /payments/{pspReference}/refunds`. `charge`, `createCheckout` and `refund` all send
+it; a longer key throws here rather than costing a round trip and a 422.
+
+There is nothing to refuse: `createCustomer`, `createSubscription` and `updateSubscription`
+already throw on this driver, because Adyen has neither resource.
+
+## Payment methods
+
+`supportedMethods` stays `credit_card` and `undefined` — what `charge()` (a stored card
+token) and `createCheckout()` (Pay by Link, shopper picks) can promise. Adyen fronts about a
+hundred local methods, but they reach a shopper through Drop-in/Components, which this
+driver does not front.
+
+What the driver *reports back* is now a category rather than a flat `card`. It reads
+`additionalData.paymentMethod` — the instrument Adyen settled on — and falls back to the
+type the request asked for:
+
+| Adyen type/brand | `Payment.method` |
+| --- | --- |
+| `scheme`, `visa`, `mc`, `amex`, `discover`, `diners`, `jcb`, `cup`, `elo` | `card` |
+| `maestro` | `debit_card` |
+| `sepadirectdebit`, `ach`, anything `…directdebit` | `bank_debit` |
+| `ideal`, `bcmc`, `eps`, `trustly`, `multibanco`, `mbway`, `blik`, `przelewy24`, `onlineBanking…` | `bank_transfer` |
+| `paypal`, `applepay`, `googlepay`, `alipay`, `twint`, `vipps`, `wechatpay…` | `wallet` |
+| `klarna…`, `afterpay…`, `clearpay` | `bnpl` |
+| `paysafecard` | `voucher` |
+
+It used to be hardcoded to `card`, which labelled a SEPA mandate or an iDEAL transfer a card
+payment — a lie the ledger cannot tell apart from a real one. Pass a non-card type as
+`metadata: { paymentMethodType: 'sepadirectdebit' }`; the brand stays on `payment.payload`.

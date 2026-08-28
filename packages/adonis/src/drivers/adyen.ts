@@ -54,7 +54,21 @@ export interface AdyenDriverConfig {
   liveUrlPrefix?: string;
   /** Which Adyen environment to talk to. Defaults to test unless `NODE_ENV=production`. */
   environment?: 'test' | 'live';
+  /**
+   * Whether the merchant account captures automatically (Adyen's default) or waits for a
+   * capture request. Defaults to `'automatic'`, which is what a fresh Adyen account does.
+   *
+   * This has to be configuration because the Checkout API will not tell you: `captureDelay`
+   * lives on the **Management** API (`GET /merchants/{merchantId}`), which this driver does
+   * not talk to, and the `/payments` response is identical in both modes. It changes what
+   * `Authorised` means — settled money, or a hold that expires — so the driver asks rather
+   * than guessing, and the wrong guess is the expensive kind: a hold read as revenue.
+   */
+  captureMode?: 'automatic' | 'manual';
 }
+
+/** Adyen documents `Idempotency-Key` as at most this many characters, and recommends a UUID. */
+const IDEMPOTENCY_MAX_LENGTH = 64;
 
 interface AdyenAmount {
   value: number;
@@ -136,6 +150,7 @@ export class AdyenDriver implements PaymentsDriver {
   #merchantAccount: string;
   #currency: string;
   #hmacKey: string | undefined;
+  #captureMode: 'automatic' | 'manual';
   #invoiceCtx: EmitInvoiceContext;
 
   constructor(ctx: EmitInvoiceContext, config: AdyenDriverConfig) {
@@ -154,6 +169,7 @@ export class AdyenDriver implements PaymentsDriver {
     });
     this.#currency = requireCurrency('adyen', config.currency);
     this.#hmacKey = config.hmacKey ?? process.env.ADYEN_HMAC_KEY;
+    this.#captureMode = config.captureMode ?? 'automatic';
 
     const environment =
       config.environment ?? (process.env.NODE_ENV === 'production' ? 'live' : 'test');
@@ -254,7 +270,13 @@ export class AdyenDriver implements PaymentsDriver {
       ...this.#idempotency(input.idempotencyKey),
     });
 
-    const payment = this.#mapPayment(data, input.amount, input.currency, input.customerId);
+    const payment = this.#mapPayment(
+      data,
+      input.amount,
+      input.currency,
+      input.customerId,
+      extra.paymentMethodType ?? 'scheme',
+    );
     await emitInvoiceIfRequested(this.#invoiceCtx, input, payment, this);
     publishPaymentDiagnostics(payment);
     return payment;
@@ -268,7 +290,11 @@ export class AdyenDriver implements PaymentsDriver {
     );
   }
 
-  async refund(paymentGatewayId: string, amount?: Money): Promise<Refund> {
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
     if (amount === undefined) {
       // Adyen requires the amount and gives the driver no way to read the payment's own,
       // so "full refund" cannot be inferred here without inventing a number.
@@ -283,6 +309,9 @@ export class AdyenDriver implements PaymentsDriver {
         merchantAccount: this.#merchantAccount,
         amount: this.#amount(amount, undefined),
       },
+      // The refunds endpoint takes the same `Idempotency-Key` header the payments one does,
+      // and it is the only thing standing between a retried job and a second refund.
+      ...this.#idempotency(options?.idempotencyKey),
     });
     const status = data.status.toLowerCase();
     const refund: Refund = {
@@ -460,6 +489,7 @@ export class AdyenDriver implements PaymentsDriver {
     requested: Money,
     currency: string | undefined,
     customerId: string | undefined,
+    requestedMethodType: string,
   ): Payment {
     const result: Payment = {
       id: data.pspReference ?? '',
@@ -469,7 +499,11 @@ export class AdyenDriver implements PaymentsDriver {
         ? { amount: data.amount.value, currency: data.amount.currency.toLowerCase() }
         : { amount: requested, currency: (currency ?? this.#currency).toLowerCase() },
       status: this.#mapResultCode(data.resultCode),
-      method: 'card',
+      // Adyen echoes the settled instrument as `additionalData.paymentMethod` ('visa',
+      // 'ideal', 'sepadirectdebit'); when it does not, the type the request asked for is
+      // the next best truth. Hardcoding `card` here labelled a SEPA mandate or an iDEAL
+      // transfer a card payment, which the ledger cannot tell apart from a real one.
+      method: this.#mapPaymentMethodType(data.additionalData?.paymentMethod ?? requestedMethodType),
       payload: data as unknown as Record<string, unknown>,
       // Adyen's payment response has no timestamp of its own.
       createdAt: new Date().toISOString(),
@@ -479,15 +513,66 @@ export class AdyenDriver implements PaymentsDriver {
   }
 
   /**
-   * `Authorised` is read as paid because Adyen captures automatically by default. On an
-   * account configured for **manual capture** it means the funds are only held, and the
-   * money is not settled until the CAPTURE webhook — the API reference does not expose
-   * which mode an account is in, so the driver cannot tell the difference.
+   * An Adyen payment-method type or brand → the canonical {@link PaymentMethodType}.
+   *
+   * By category, not by brand. Adyen fronts something like a hundred local methods and
+   * adds more every quarter; `PaymentMethodType` is a closed union precisely so a routing
+   * typo fails at the manager, and it can only stay closed if it names categories. The
+   * brand survives verbatim on `payment.payload.additionalData.paymentMethod`.
+   */
+  #mapPaymentMethodType(type: string): NonNullable<Payment['method']> {
+    const name = type.toLowerCase();
+    // `scheme` is Adyen's word for "a card"; the brands are what `additionalData` echoes.
+    if (
+      name === 'scheme' ||
+      ['visa', 'mc', 'amex', 'discover', 'diners', 'jcb', 'maestro', 'cup', 'elo'].includes(name)
+    ) {
+      return name === 'maestro' ? 'debit_card' : 'card';
+    }
+    if (name.includes('directdebit') || name === 'ach' || name === 'sepadirectdebit') {
+      return 'bank_debit';
+    }
+    if (
+      ['ideal', 'bcmc', 'eps', 'trustly', 'multibanco', 'mbway', 'blik', 'przelewy24'].includes(
+        name,
+      ) ||
+      name.startsWith('onlinebanking') ||
+      name.startsWith('directebanking')
+    ) {
+      return 'bank_transfer';
+    }
+    if (
+      ['paypal', 'applepay', 'googlepay', 'paywithgoogle', 'alipay', 'twint', 'vipps'].includes(
+        name,
+      ) ||
+      name.startsWith('wechatpay')
+    ) {
+      return 'wallet';
+    }
+    if (name.startsWith('klarna') || name.startsWith('afterpay') || name === 'clearpay') {
+      return 'bnpl';
+    }
+    if (name === 'paysafecard' || name === 'econtext_stores') return 'voucher';
+    return 'unknown';
+  }
+
+  /**
+   * What `Authorised` means depends on the account, and the Checkout API will not say.
+   *
+   * On an automatic-capture account (Adyen's default) the capture follows the
+   * authorization on its own and no CAPTURE webhook is sent, so `Authorised` is the last
+   * word the driver will ever get about that money: it reads as `paid`. On a
+   * **manual-capture** account it is a hold that expires unless you capture it, and the
+   * CAPTURE webhook is what settles it — so it reads as `authorized`, the state that says
+   * "the funds are reserved and nothing has moved".
+   *
+   * `captureMode` is configuration for exactly that reason: `captureDelay` is a Management
+   * API field, not a Checkout one, and both modes answer `/payments` identically.
    */
   #mapResultCode(resultCode: string): Payment['status'] {
     switch (resultCode) {
       case 'Authorised':
-        return 'paid';
+        return this.#captureMode === 'manual' ? 'authorized' : 'paid';
       case 'Refused':
       case 'Error':
         return 'failed';
@@ -498,9 +583,23 @@ export class AdyenDriver implements PaymentsDriver {
     }
   }
 
+  /**
+   * An Adyen `eventCode` → the canonical event type.
+   *
+   * AUTHORISATION is the money event on an automatic-capture account: the capture happens
+   * on its own and Adyen sends **no** CAPTURE webhook, so treating the authorization as
+   * "still pending" would leave every payment on such an account unsettled forever. On a
+   * manual-capture account it is only a hold, and CAPTURE is the settlement — so which of
+   * the two means `payment.succeeded` follows `captureMode`, the same knob
+   * {@link AdyenDriver.#mapResultCode} reads.
+   */
   #mapWebhookType(eventCode: string, success: boolean): string {
     switch (eventCode) {
       case 'AUTHORISATION':
+        if (!success) return 'payment.failed';
+        // Manual capture: the funds are held, not taken. There is deliberately no
+        // `payment.authorized` event, so this is an update until CAPTURE arrives.
+        return this.#captureMode === 'manual' ? 'payment.updated' : 'payment.succeeded';
       case 'CAPTURE':
         return success ? 'payment.succeeded' : 'payment.failed';
       case 'AUTHORISATION_ADJUSTMENT':
@@ -509,15 +608,34 @@ export class AdyenDriver implements PaymentsDriver {
       case 'REFUND':
         // A failed refund left the payment where it was; only a successful one refunds it.
         return success ? 'payment.refunded' : 'payment.updated';
+      // ── The dispute family ───────────────────────────────────────────────────────────
+      // NOTIFICATION_OF_CHARGEBACK opens the defense period, and for card schemes it
+      // always precedes CHARGEBACK. It does NOT always arrive, though: an ACH return goes
+      // straight to CHARGEBACK with no notification and cannot be defended at all, so
+      // mapping only the notification would miss exactly the disputes nobody can fight.
+      // Both mark the payment disputed; the processor's write is idempotent, so the pair
+      // arriving in order costs one extra upsert and never a wrong status.
+      case 'NOTIFICATION_OF_CHARGEBACK':
+      case 'CHARGEBACK':
+        return 'payment.disputed';
       case 'REFUND_FAILED':
       case 'REFUNDED_REVERSED':
       case 'CANCELLATION':
       case 'CANCEL_OR_REFUND':
-      case 'CHARGEBACK':
+      // The rest of the dispute family is the RESOLUTION — won, lost, or the paperwork
+      // around it — which every gateway reports differently and which this package
+      // deliberately does not name. The ledger records them and `event.raw` carries the
+      // eventCode for a handler to act on.
       case 'CHARGEBACK_REVERSED':
-      case 'NOTIFICATION_OF_CHARGEBACK':
-        // Real state changes with no canonical event in this package — the ledger records
-        // them, and `event.raw` carries the eventCode for an app handler to act on.
+      case 'SECOND_CHARGEBACK':
+      case 'PREARBITRATION_WON':
+      case 'PREARBITRATION_LOST':
+      case 'DISPUTE_DEFENSE_PERIOD_ENDED':
+      // Pre-dispute signals: no money moves on either of these. A REQUEST_FOR_INFORMATION
+      // is the scheme asking a question, and NOTIFICATION_OF_FRAUD is a TC40/SAFE alert —
+      // calling either one a chargeback would take a live payment away over a warning.
+      case 'REQUEST_FOR_INFORMATION':
+      case 'NOTIFICATION_OF_FRAUD':
         return 'payment.updated';
       default:
         return eventCode.toLowerCase();
@@ -568,7 +686,15 @@ export class AdyenDriver implements PaymentsDriver {
    * reference recommends a UUID and caps it at 64 characters.
    */
   #idempotency(key: string | undefined): { headers?: Record<string, string> } {
-    return key !== undefined ? { headers: { 'Idempotency-Key': key } } : {};
+    if (key === undefined) return {};
+    if (key.length > IDEMPOTENCY_MAX_LENGTH) {
+      // Adyen rejects the request outright rather than ignoring the header, so failing here
+      // costs a round trip and names the real limit instead of a 422 about a header.
+      throw new Error(
+        `[payments] Adyen caps \`Idempotency-Key\` at ${IDEMPOTENCY_MAX_LENGTH} characters; got ${key.length}.`,
+      );
+    }
+    return { headers: { 'Idempotency-Key': key } };
   }
 
   /** Split the Adyen-specific knobs out of `metadata`; the rest is echoed as metadata. */

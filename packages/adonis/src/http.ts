@@ -1,3 +1,10 @@
+import {
+  type GatewayOutcome,
+  paymentsDiagnosticsEnabled,
+  publishGatewayRequest,
+  redactText,
+} from './diagnostics.js';
+
 export interface HttpRequestOptions {
   method?: string;
   body?: Record<string, unknown>;
@@ -24,6 +31,14 @@ export interface HttpRequestOptions {
   /** Base URL the path is resolved against. */
   baseUrl: string;
   /**
+   * The driver's provider name (`'asaas'`, `'woovi'`, …), recorded on the
+   * `gateway.request` diagnostic so a Telescope entry names the gateway it belongs to.
+   *
+   * Optional, because the host of {@link baseUrl} already identifies the gateway and no
+   * driver is obliged to pass it. Drivers that pass it get the friendlier label.
+   */
+  provider?: string;
+  /**
    * Milliseconds before the request is aborted. Defaults to 30s; pass `0` to disable.
    *
    * `fetch` has no timeout of its own, so without this a gateway that accepts the
@@ -44,6 +59,9 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  * `isNotFound` can check it uniformly.
  */
 export async function httpRequest<T>(path: string, options: HttpRequestOptions): Promise<T> {
+  // Built once, used by every publish below. Cheap: `paymentsDiagnosticsEnabled()` is a
+  // symbol lookup, and when nothing listens the whole diagnostics path costs that alone.
+  const observed = paymentsDiagnosticsEnabled();
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (options.bearerToken !== undefined) {
     headers.Authorization = `Bearer ${options.bearerToken}`;
@@ -70,6 +88,19 @@ export async function httpRequest<T>(path: string, options: HttpRequestOptions):
   if (controller !== undefined) requestInit.signal = controller.signal;
 
   const doFetch = options.fetch ?? globalThis.fetch;
+  const call = {
+    ...(options.provider !== undefined ? { provider: options.provider } : {}),
+    method: requestInit.method ?? 'GET',
+    baseUrl: options.baseUrl,
+    path,
+    startedAt: Date.now(),
+    ...(options.body !== undefined ? { requestBody: options.body } : {}),
+  };
+  /** Record the call, then let the original error through untouched. */
+  const record = (outcome: GatewayOutcome) => {
+    if (observed) publishGatewayRequest(call, outcome);
+  };
+
   let response: Response;
   try {
     response = await doFetch(`${options.baseUrl}${path}`, requestInit);
@@ -78,10 +109,19 @@ export async function httpRequest<T>(path: string, options: HttpRequestOptions):
     // A driver that reports "fetch failed" for a timeout sends whoever is debugging it
     // looking for a connectivity problem that is not there.
     if (controller?.signal.aborted) {
+      // The diagnostic's message is built here rather than reused from the thrown Error:
+      // that one names the full URL, query string included, and this entry is meant to be
+      // pasted into a bug report.
+      record({ ok: false, outcome: 'timeout', error: `timed out after ${timeoutMs}ms` });
       throw new Error(
         `[payments] HTTP request to ${options.baseUrl}${path} timed out after ${timeoutMs}ms.`,
       );
     }
+    record({
+      ok: false,
+      outcome: 'network_error',
+      error: redactText(error instanceof Error ? error.message : String(error)),
+    });
     throw error;
   } finally {
     if (timer !== undefined) clearTimeout(timer);
@@ -90,11 +130,22 @@ export async function httpRequest<T>(path: string, options: HttpRequestOptions):
   if (!response.ok) {
     const text = await response.text();
     const status = response.status;
+    // `error` stays a bare status line; the gateway's own explanation of a 422 lives in
+    // `responseBody`, which is opt-in because the echoed request is in there too.
+    record({
+      ok: false,
+      outcome: 'http_error',
+      status,
+      error: `HTTP ${status}`,
+      responseBody: text,
+    });
     throw Object.assign(new Error(`[payments] HTTP request failed (${status}): ${text}`), {
       status,
     });
   }
-  return (await response.json()) as T;
+  const parsed = (await response.json()) as T;
+  record({ ok: true, status: response.status, responseBody: parsed });
+  return parsed;
 }
 
 /** Read a header value (handles arrays, case variants and multiple spellings). */

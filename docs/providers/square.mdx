@@ -266,3 +266,87 @@ the buyer should not have been billed for the period.
   `metadata.autocomplete` and `metadata.appFeeAmount`, and nothing else is sent. Order
   metadata on a checkout is the place for arbitrary keys.
 - **No pagination on `listInvoices`.** It fetches one page of 100.
+
+## Disputes
+
+| Square event | Normalized |
+| --- | --- |
+| `dispute.created` | `payment.disputed` |
+| `dispute.state.updated`, `dispute.evidence.added`, `.created`, `.removed` | `payment.updated` |
+
+`dispute.created` is the opening — the card brand has taken the money back pending your
+evidence — and it moves the payment row to `disputed`. Everything after it is the
+resolution, which every gateway reports differently and which this library deliberately does
+not name. Square's own advice is to subscribe to `dispute.created` **and**
+`dispute.state.updated`, and both are handled here.
+
+The event is keyed on `data.object.dispute.disputed_payment.payment_id` — nested, not a
+top-level `payment_id` — because the row that has to stop saying `paid` is the payment's.
+`amount_money` is the **disputed** amount, which for a partial dispute is less than the
+payment; the reason, the state and the `due_at` deadline stay on `event.raw`.
+
+## `authorized` — `APPROVED` is not `pending`
+
+A payment created with `metadata: { autocomplete: false }` comes back `APPROVED`: Square is
+holding the funds and the authorization expires on its own if `CompletePayment` never runs.
+That is `authorized` now. It used to read `pending`, which is the status of a payment nobody
+has attempted — an `APPROVED` one has the buyer's money reserved and a clock against it.
+`PENDING` still maps to `pending`: Square has approved nothing yet.
+
+```ts
+const driver = payments.driver('square') as SquareDriver
+await driver.completePayment('pmt_…')   // APPROVED → COMPLETED
+```
+
+`completePayment` stays outside the `PaymentsDriver` contract — the contract has one verb for
+taking money — but it is public because something has to be able to finish the job.
+
+## Paused subscriptions
+
+Square's `PAUSED` mapped to `past_due`, which said the buyer owed money they did not. It is
+`paused` now: it bills nothing today, it resumes later, and it entitles nobody either way —
+which is the part that must not change.
+
+## Payment methods
+
+`supportedMethods` is `credit_card`, `debit_card`, `wallet`, `bank_debit`, `bnpl` and
+`undefined`. The Web Payments SDK mints more than card tokens, and all of them arrive at
+`POST /v2/payments` through the same `source_id`, so `charge()` genuinely produces those
+categories. `method` on the charge is still a **declaration**, not an instruction — the token
+decides — and a `method` Square cannot produce at all (`pix`, `boleto`) still throws.
+
+`Payment.method` comes back from `source_type`:
+
+| `source_type` | `Payment.method` |
+| --- | --- |
+| `CARD` | `card` / `debit_card` (from `card_details.card.card_type`) |
+| `WALLET` (Cash App, Apple Pay, Google Pay), `SQUARE_ACCOUNT` | `wallet` |
+| `BANK_ACCOUNT` (ACH) | `bank_debit` |
+| `BUY_NOW_PAY_LATER` (Afterpay/Clearpay) | `bnpl` |
+| `CASH`, `EXTERNAL` | *unset* — money taken outside Square, which no member of the union describes |
+
+Everything but `CARD` used to come back unset, which is indistinguishable from "Square did
+not say".
+
+## `idempotencyKey`
+
+Square's key is a **body field**, `idempotency_key`, not a header — and the caller's key now
+reaches it on every call that has one:
+
+| Call | Field | Cap |
+| --- | --- | --- |
+| `charge` | `idempotency_key` on `CreatePayment` | 45 |
+| `refund` | `idempotency_key` on `RefundPayment` | 45 |
+| `createCheckout` | `idempotency_key` on `CreatePaymentLink` | 45 (Square allows 192) |
+| `createCustomer` | `idempotency_key` on `CreateCustomer` | 45 |
+| `createSubscription` | `idempotency_key` on `CreateSubscription` | 45 |
+| `updateSubscription` | — | **throws** |
+
+`refund`, `createCustomer` and `createSubscription` used to generate a UUID and drop yours,
+which made Square's own retry safe and a retried **job** double-refund. A call that still
+arrives without a key gets a generated UUID, because Square requires one on payments and
+refunds.
+
+`updateSubscription` throws on an `idempotencyKey`: neither `PUT /v2/subscriptions/{id}` nor
+`POST /v2/subscriptions/{id}/swap-plan` takes one, unlike the create call, and accepting it
+would turn your retry guarantee into a second plan swap.

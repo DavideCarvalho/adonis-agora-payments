@@ -426,3 +426,86 @@ describe('LemonSqueezyDriver', () => {
     });
   });
 });
+
+describe('LemonSqueezyDriver — the widened contract', () => {
+  it('reports a paused subscription as paused, not active', async () => {
+    stubFetch({
+      data: {
+        type: 'subscriptions',
+        id: '9',
+        attributes: { customer_id: 7, variant_id: 3, status: 'paused', renews_at: null },
+      },
+    });
+
+    // A paused subscriber is not paying. Reporting `active` handed them entitlement.
+    expect((await makeDriver().findSubscription('9'))?.status).toBe('paused');
+  });
+
+  it('carries `paused` through the webhook so the billing layer stores it', () => {
+    const body = JSON.stringify({
+      meta: { event_name: 'subscription_paused' },
+      data: {
+        type: 'subscriptions',
+        id: '9',
+        attributes: { customer_id: 7, variant_id: 3, status: 'paused' },
+      },
+    });
+    const event = makeDriver().parseWebhook(body, sign(body));
+
+    expect(event.type).toBe('subscription.updated');
+    expect(event.data).toMatchObject({ gatewayId: '9', status: 'paused' });
+  });
+
+  it('has no dispute event to map, and does not invent one', () => {
+    // Lemon Squeezy is a merchant of record: the chargeback is raised against Lemon
+    // Squeezy, which absorbs it, so there is genuinely no dispute webhook. Forcing an
+    // unrelated event into `payment.disputed` would invent a notification.
+    const driver = makeDriver();
+    const typeOf = (eventName: string) => {
+      const body = JSON.stringify({
+        meta: { event_name: eventName },
+        data: {
+          type: 'orders',
+          id: '1',
+          attributes: { currency: 'USD', total: 999, status: 'paid' },
+        },
+      });
+      return driver.parseWebhook(body, sign(body)).type;
+    };
+    // Nothing Lemon Squeezy sends maps to a dispute — the closest events stay what they are.
+    expect(typeOf('order_refunded')).toBe('payment.refunded');
+    expect(typeOf('subscription_payment_failed')).toBe('payment.failed');
+    expect(typeOf('license_key_created')).toBe('license_key_created');
+  });
+
+  it('refuses an idempotency key rather than accepting one it cannot honour', async () => {
+    // Lemon Squeezy deduplicates NOTHING — no header, no request-id field. Accepting the
+    // key and dropping it turns a caller's retry guarantee into a second refund.
+    const driver = makeDriver();
+    await expect(driver.refund('1', 500, { idempotencyKey: 'k1' })).rejects.toThrow(
+      /no idempotency mechanism.*refund\(\)/s,
+    );
+    await expect(
+      driver.createCustomer({ name: 'A', email: 'a@b.test', idempotencyKey: 'k1' }),
+    ).rejects.toThrow(/no idempotency mechanism/);
+    await expect(
+      driver.createCheckout({
+        amount: 1990,
+        planId: '3',
+        successUrl: 'https://a.test',
+        idempotencyKey: 'k1',
+      }),
+    ).rejects.toThrow(/no idempotency mechanism/);
+    await expect(driver.updateSubscription('9', { idempotencyKey: 'k1' })).rejects.toThrow(
+      /no idempotency mechanism/,
+    );
+  });
+
+  it('refuses the key before it does anything else, so nothing reaches Lemon Squeezy', async () => {
+    const fetchMock = stubFetch({ data: {} });
+    await expect(
+      makeDriver().createCustomer({ name: 'A', email: 'a@b.test', idempotencyKey: 'k1' }),
+    ).rejects.toThrow(/no idempotency mechanism/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

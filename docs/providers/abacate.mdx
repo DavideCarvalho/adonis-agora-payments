@@ -12,13 +12,41 @@ import { Callout } from 'fumadocs-ui/components/callout';
   `ABACATE_PUBLIC_KEY`.
 - **Webhooks**: HMAC-SHA256 (base64) over the raw body in `x-webhook-signature`, verified
   timing-safe against `webhookSecret` (the dashboard's "public key"). Events
-  `checkout.completed`, `checkout.refunded`, `subscription.completed/renewed/cancelled`.
+  `checkout.completed`, `checkout.refunded`, `checkout.disputed`, the matching
+  `transparent.*` trio, and `subscription.completed/renewed/cancelled`.
+- **Idempotency**: AbacatePay has none — `refund`, `createCustomer`, `createSubscription`
+  and `updateSubscription` throw on an `idempotencyKey` rather than dropping it.
 - **Subscriptions**: recurring — no transparent checkout for the recurring charge yet.
 - **Transparent checkout**: `charge` uses `POST /v2/transparents/create` — PIX and Boleto
   inline, no redirect. The response carries the QR (`brCodeBase64` → `pixQrCodeImage`,
   `brCode` → `pixCode`) or the barcode (`url` → `hostedUrl`). Needs the payer's
   `name` + `taxId` — pass them via the charge's `customer` block or create the gateway
   customer with them.
+
+## Chargebacks
+
+`checkout.disputed` and `transparent.disputed` — "disputa/chargeback aberta", one per
+charge flow — normalize to **`payment.disputed`**. They used to arrive as `payment.failed`,
+which files a chargeback as a payment that never went through: the row stopped saying
+`paid`, but it said the wrong thing, and the account whose access has to be reconsidered
+was never flagged.
+
+<Callout type="warn" title="Opened is the only dispute signal AbacatePay sends">
+There is no `*.dispute_won` / `*.dispute_lost` event and no dispute value in the billing
+status enum, so the outcome of a dispute never reaches you as a webhook. Reconcile it
+yourself.
+</Callout>
+
+## Idempotency: AbacatePay has none
+
+No endpoint documents an idempotency header or field — the only request header on any of
+them is `Authorization`, and AbacatePay's own guidance mentions idempotency solely for
+consuming webhooks (dedupe on the event `id`). So `refund`, `createCustomer`,
+`createSubscription` and `updateSubscription` **throw** when handed an `idempotencyKey`:
+silently dropping it would turn a caller's retry guarantee into a second refund.
+
+`charge()` still accepts one, as it always has, but not as deduplication — it is a legacy
+fallback for `externalReference`, sent as the transparent checkout's `externalId`.
 
 ```ts title="app/services/checkout_service.ts"
 await payments.driver('pix').charge({

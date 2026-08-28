@@ -62,6 +62,9 @@ const PAYMENT_LINK_PREFIX = 'plink_';
 /** Razorpay rejects a `receipt` longer than this, so catch it before the round trip. */
 const RECEIPT_MAX_LENGTH = 40;
 
+/** `X-Refund-Idempotency` must be at least this long, or Razorpay rejects the refund. */
+const REFUND_IDEMPOTENCY_MIN_LENGTH = 10;
+
 interface RazorpayOrderResponse {
   id: string;
   entity: 'order';
@@ -172,6 +175,23 @@ interface RazorpayInvoiceResponse {
   created_at: number;
 }
 
+/** The `dispute` entity Razorpay sends on `payment.dispute.*`. */
+interface RazorpayDisputeResponse {
+  id: string;
+  entity: 'dispute';
+  payment_id: string;
+  amount: number;
+  currency: string;
+  amount_deducted?: number;
+  reason_code?: string;
+  respond_by?: number;
+  /** `open` | `under_review` | `won` | `lost` | `closed`. */
+  status?: string;
+  /** `fraud` | `retrieval` | `chargeback` | `pre_arbitration` | `arbitration`. */
+  phase?: string;
+  created_at?: number;
+}
+
 interface RazorpayWebhookPayload {
   entity?: string;
   account_id?: string;
@@ -183,6 +203,7 @@ interface RazorpayWebhookPayload {
     refund?: { entity: RazorpayRefundResponse };
     subscription?: { entity: RazorpaySubscriptionResponse };
     payment_link?: { entity: RazorpayPaymentLinkResponse };
+    dispute?: { entity: RazorpayDisputeResponse };
   };
   created_at?: number;
 }
@@ -251,6 +272,7 @@ export class RazorpayDriver implements PaymentsDriver {
   // ── Customers ────────────────────────────────────────────────────────────────────────
 
   async createCustomer(input: CreateCustomerInput): Promise<Customer> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'customer creation', 'POST /v1/customers');
     const body: Record<string, unknown> = {
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(input.email !== undefined ? { email: input.email } : {}),
@@ -362,7 +384,11 @@ export class RazorpayDriver implements PaymentsDriver {
     }
   }
 
-  async refund(paymentGatewayId: string, amount?: Money): Promise<Refund> {
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
     if (!paymentGatewayId.startsWith(PAYMENT_PREFIX)) {
       throw new Error(
         `[payments] Razorpay refunds a payment (\`pay_…\`), not "${paymentGatewayId}". An order or payment link is what the payer settles; read the resulting payment id off the \`payment.captured\` webhook (or \`GET /orders/:id/payments\`) and refund that.`,
@@ -373,7 +399,13 @@ export class RazorpayDriver implements PaymentsDriver {
     };
     const data = await this.#request<RazorpayRefundResponse>(
       `/payments/${paymentGatewayId}/refund`,
-      { method: 'POST', body },
+      {
+        method: 'POST',
+        body,
+        // Refunds are the one Razorpay operation with a documented idempotency mechanism,
+        // and it is a header of its own name — not `Idempotency-Key`.
+        ...this.#refundIdempotency(options?.idempotencyKey),
+      },
     );
     const refund: Refund = {
       id: data.id,
@@ -483,6 +515,11 @@ export class RazorpayDriver implements PaymentsDriver {
   // ── Subscriptions ────────────────────────────────────────────────────────────────────
 
   async createSubscription(input: CreateSubscriptionInput): Promise<Subscription> {
+    this.#refuseIdempotencyKey(
+      input.idempotencyKey,
+      'subscription creation',
+      'POST /v1/subscriptions',
+    );
     if (input.amount !== undefined) {
       throw new Error(
         '[payments] Razorpay prices a subscription from its plan, not from the call. Remove ' +
@@ -563,6 +600,11 @@ export class RazorpayDriver implements PaymentsDriver {
     subscriptionGatewayId: string,
     input: UpdateSubscriptionInput,
   ): Promise<Subscription> {
+    this.#refuseIdempotencyKey(
+      input.idempotencyKey,
+      'a subscription update',
+      'PATCH /v1/subscriptions/:id',
+    );
     if (input.amount !== undefined) {
       throw new Error(
         '[payments] Razorpay cannot change a subscription amount: the price lives on the plan ' +
@@ -651,7 +693,8 @@ export class RazorpayDriver implements PaymentsDriver {
       payload.payload?.payment_link?.entity ??
       payload.payload?.order?.entity ??
       payload.payload?.subscription?.entity ??
-      payload.payload?.refund?.entity;
+      payload.payload?.refund?.entity ??
+      payload.payload?.dispute?.entity;
     return {
       id: headerValue(headers, 'x-razorpay-event-id') ?? `${payload.event}-${entity?.id ?? ''}`,
       provider: this.provider,
@@ -738,14 +781,20 @@ export class RazorpayDriver implements PaymentsDriver {
   /**
    * `authorized` means the funds are held on the payer's instrument and nothing has moved
    * to the merchant yet — Razorpay voids the hold on its own if it is never captured.
-   * `BillingStatus` has no member for that, and of the six it does have, `pending` is the
-   * only one that says "not settled, not failed". Calling it `paid` would let an app ship
-   * goods against money it may never receive, so it is `pending` until `captured`.
+   *
+   * It used to answer `pending`, and the driver said so on purpose: of the statuses that
+   * existed, `pending` was the only one meaning "not settled, not failed". It understated
+   * the case, though — a `pending` payment is one nobody has attempted, while an
+   * authorized one has the payer's money reserved and a clock running on it. `authorized`
+   * is the word now, and it still is not `paid`: this is Razorpay's authorize-then-capture
+   * split, the clearest case of it in this package.
    */
   #mapPaymentStatus(status: RazorpayPaymentResponse['status']): Payment['status'] {
     switch (status) {
       case 'captured':
         return 'paid';
+      case 'authorized':
+        return 'authorized';
       case 'refunded':
         return 'refunded';
       case 'failed':
@@ -756,15 +805,34 @@ export class RazorpayDriver implements PaymentsDriver {
   }
 
   /**
-   * Razorpay's `method` is `card`, `netbanking`, `wallet`, `emi` or `upi`. Only cards have
-   * a name in `PaymentMethodType`; UPI — the method most Indian payers actually use — has
-   * none, and mapping it onto `pix` because both are instant bank rails would put a
-   * Brazilian label on an Indian payment. It stays `unknown` (omitted) until the union
-   * gains a `upi` member.
+   * Razorpay's `method` → the canonical {@link PaymentMethodType}.
+   *
+   * UPI is how most Indian payers actually pay, and it had no name here: the driver left
+   * it unset rather than borrow `pix`, which would have put a Brazilian label on an Indian
+   * payment. `upi` is a member of the union now — named outright, not as a local
+   * alternative — so it is reported as itself.
+   *
+   * The rest go by category: netbanking pushes from the payer's own bank, `paylater` and
+   * `cardless_emi` are buy-now-pay-later, and `emi` is a card instalment plan (Razorpay
+   * returns the card details with it), so it is a card.
    */
   #mapMethodToType(data: RazorpayPaymentResponse): Payment['method'] | undefined {
-    if (data.method !== 'card') return undefined;
-    return data.card?.type === 'debit' ? 'debit_card' : 'card';
+    switch (data.method) {
+      case 'card':
+      case 'emi':
+        return data.card?.type === 'debit' ? 'debit_card' : 'card';
+      case 'upi':
+        return 'upi';
+      case 'wallet':
+        return 'wallet';
+      case 'netbanking':
+        return 'bank_transfer';
+      case 'paylater':
+      case 'cardless_emi':
+        return 'bnpl';
+      default:
+        return undefined;
+    }
   }
 
   #mapSubscription(data: RazorpaySubscriptionResponse, customerId?: string): Subscription {
@@ -774,7 +842,9 @@ export class RazorpayDriver implements PaymentsDriver {
       active: 'active',
       pending: 'past_due',
       halted: 'past_due',
-      paused: 'past_due',
+      // A paused Razorpay subscription is not in arrears — it exists, bills nothing today
+      // and resumes later. `past_due` said the subscriber owed money they did not.
+      paused: 'paused',
       cancelled: 'canceled',
       completed: 'ended',
       expired: 'ended',
@@ -838,9 +908,20 @@ export class RazorpayDriver implements PaymentsDriver {
         return 'payment.failed';
       case 'refund.processed':
         return 'payment.refunded';
+      // `payment.dispute.created` is the opening — the issuing bank has raised a dispute
+      // against a payment. The rest of the family is the resolution (won, lost, closed) or
+      // the paperwork around it, which every gateway reports differently and which this
+      // package deliberately does not name.
+      case 'payment.dispute.created':
+        return 'payment.disputed';
       // `payment.authorized` is money held, not money moved — reporting it as a success
-      // would have the billing layer settle an order the merchant has not been paid for.
+      // would have the billing layer settle an order the merchant has not been paid for,
+      // and there is deliberately no `payment.authorized` event for it to become.
       case 'payment.authorized':
+      case 'payment.dispute.lost':
+      case 'payment.dispute.closed':
+      case 'payment.dispute.under_review':
+      case 'payment.dispute.action_required':
       case 'refund.created':
       case 'refund.failed':
       case 'payment_link.cancelled':
@@ -864,6 +945,26 @@ export class RazorpayDriver implements PaymentsDriver {
   }
 
   #mapWebhookData(payload: RazorpayWebhookPayload): Record<string, unknown> {
+    const disputeEntity = payload.payload?.dispute?.entity;
+    if (disputeEntity !== undefined) {
+      // A dispute envelope carries the payment entity alongside the dispute, and the two
+      // disagree about the money: `payment.amount` is what was charged, `dispute.amount`
+      // what is being pulled back. The row is keyed on the PAYMENT — that is what has to
+      // stop saying `paid` — and the amount is the disputed one, with the reason, the phase
+      // and the deadline left on `event.raw`.
+      const reference = this.#readNotes(
+        payload.payload?.payment?.entity?.notes,
+      )?.external_reference;
+      return {
+        gatewayId: disputeEntity.payment_id,
+        amount: disputeEntity.amount,
+        currency: disputeEntity.currency.toLowerCase(),
+        disputeId: disputeEntity.id,
+        ...(disputeEntity.status !== undefined ? { disputeStatus: disputeEntity.status } : {}),
+        ...(disputeEntity.phase !== undefined ? { disputePhase: disputeEntity.phase } : {}),
+        ...(reference !== undefined ? { externalReference: reference } : {}),
+      };
+    }
     const paymentEntity = payload.payload?.payment?.entity;
     const linkEntity = payload.payload?.payment_link?.entity;
     const orderEntity = payload.payload?.order?.entity;
@@ -955,6 +1056,43 @@ export class RazorpayDriver implements PaymentsDriver {
     return undefined;
   }
 
+  /**
+   * Razorpay's idempotency, such as it is: **refunds only**, under a header of their own
+   * naming (`X-Refund-Idempotency`), keyed at ten characters or more of alphanumerics,
+   * hyphens and underscores. There is no `Idempotency-Key` anywhere in the API, and the
+   * retry must repeat the same body or Razorpay rejects it as a `BAD_REQUEST`.
+   */
+  #refundIdempotency(key: string | undefined): { headers?: Record<string, string> } {
+    if (key === undefined) return {};
+    if (key.length < REFUND_IDEMPOTENCY_MIN_LENGTH) {
+      throw new Error(
+        `[payments] Razorpay requires an \`X-Refund-Idempotency\` key of at least ${REFUND_IDEMPOTENCY_MIN_LENGTH} characters; got ${key.length}. A key it rejects is a key that does not deduplicate.`,
+      );
+    }
+    if (!/^[A-Za-z0-9_-]+$/.test(key)) {
+      throw new Error(
+        '[payments] Razorpay accepts only letters, numbers, hyphens and underscores in `X-Refund-Idempotency`; the key given has something else in it.',
+      );
+    }
+    return { headers: { 'X-Refund-Idempotency': key } };
+  }
+
+  /**
+   * Refuse an `idempotencyKey` on an operation Razorpay does not deduplicate.
+   *
+   * Razorpay has no general idempotency header: refunds have `X-Refund-Idempotency`,
+   * RazorpayX payouts have `X-Payout-Idempotency`, and customers and subscriptions have
+   * nothing at all. Accepting a key on those and dropping it would turn the caller's retry
+   * guarantee into a second customer, or a second live subscription billing the same
+   * person — which is the whole reason the contract says to throw instead.
+   */
+  #refuseIdempotencyKey(key: string | undefined, operation: string, endpoint: string): void {
+    if (key === undefined) return;
+    throw new Error(
+      `[payments] Razorpay does not deduplicate ${operation}: \`${endpoint}\` documents no idempotency key, and Razorpay has no general \`Idempotency-Key\` header — only refunds (\`X-Refund-Idempotency\`) and RazorpayX payouts have one. Drop \`idempotencyKey\` and make the call safe on your side, because silently ignoring it would turn a retry into a second one.`,
+    );
+  }
+
   /** Razorpay timestamps are Unix seconds. */
   #toIso(value: number | null | undefined): string | null {
     if (value === null || value === undefined || value === 0) return null;
@@ -965,12 +1103,17 @@ export class RazorpayDriver implements PaymentsDriver {
 
   async #request<T>(
     path: string,
-    options: { method?: string; body?: Record<string, unknown> } = {},
+    options: {
+      method?: string;
+      body?: Record<string, unknown>;
+      headers?: Record<string, string>;
+    } = {},
   ): Promise<T> {
     return httpRequest<T>(path, {
       baseUrl: this.#baseUrl,
       ...(options.method !== undefined ? { method: options.method } : {}),
       ...(options.body !== undefined ? { body: options.body } : {}),
+      ...(options.headers !== undefined ? { headers: options.headers } : {}),
       authHeader: this.#authHeader,
     });
   }

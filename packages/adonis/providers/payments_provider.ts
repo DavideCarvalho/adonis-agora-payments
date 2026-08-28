@@ -14,6 +14,13 @@ import type { WebhookDispatchMode } from '../src/billing/webhook_dispatcher.js';
 import { WebhookProcessor } from '../src/billing/webhook_processor.js';
 import type { WebhookHandler } from '../src/billing/webhook_processor.js';
 import type { BillingHandlers, PaymentsConfig } from '../src/define_config.js';
+import {
+  type PaymentsTraceFrame,
+  newPaymentsTraceId,
+  publishWebhookVerification,
+  runWithPaymentsTrace,
+  webhookVerificationOutcome,
+} from '../src/diagnostics.js';
 import { InvoiceManager, resolveInvoiceProviders } from '../src/invoice/invoice_manager.js';
 import { PaymentsManager, resolveDrivers } from '../src/payments_manager.js';
 import { setBillingStore, setPayments } from '../src/services/main.js';
@@ -183,24 +190,54 @@ export default class PaymentsProvider {
       .post('/payments/webhook/:provider', async (ctx: HttpContext) => {
         const manager = await this.app.container.make(PaymentsManager);
         const provider = String(ctx.params.provider);
-        try {
-          const driver = manager.driver(provider);
-          const rawBody = ctx.request.raw() ?? '';
-          // Awaited: `parseWebhook` may be async. A gateway whose callback carries only an
-          // id (Mollie) has to fetch the payment to know what happened, and that fetch is
-          // also the only thing authenticating the call.
-          //
-          // Dropping this `await` is a compile error, not a silent bug — the contract
-          // returns `WebhookEvent | Promise<WebhookEvent>` and `dispatch` takes the former.
-          const event = await driver.parseWebhook(rawBody, ctx.request.headers());
-          if (this.#webhook) {
-            await this.#webhook.dispatch(event);
+        // One trace per delivery ATTEMPT (a redelivery gets its own id, which is what you
+        // want when the question is "why did the retry behave differently"). Everything
+        // the delivery reaches while inside this frame — the verification report, the
+        // webhook lifecycle events, the business events, any gateway call a handler
+        // makes — is stamped with it, with nothing threaded through by hand.
+        const frame: PaymentsTraceFrame = { traceId: newPaymentsTraceId(), provider };
+        return runWithPaymentsTrace(frame, async () => {
+          const startedAt = Date.now();
+          // The catch below also sees failures from `dispatch`, which happen long after
+          // the delivery was authenticated — one delivery must not report two outcomes.
+          let verificationPublished = false;
+          try {
+            const driver = manager.driver(provider);
+            const rawBody = ctx.request.raw() ?? '';
+            // Awaited: `parseWebhook` may be async. A gateway whose callback carries only an
+            // id (Mollie) has to fetch the payment to know what happened, and that fetch is
+            // also the only thing authenticating the call.
+            //
+            // Dropping this `await` is a compile error, not a silent bug — the contract
+            // returns `WebhookEvent | Promise<WebhookEvent>` and `dispatch` takes the former.
+            const event = await driver.parseWebhook(rawBody, ctx.request.headers());
+            // Reported by the shared `webhook_security` helpers during parseWebhook. No
+            // report means nothing verified through them: the driver used its own SDK, or
+            // it has no webhook credential configured and skipped the check entirely.
+            publishWebhookVerification({
+              provider,
+              ...webhookVerificationOutcome(frame),
+              durationMs: Date.now() - startedAt,
+            });
+            verificationPublished = true;
+            if (this.#webhook) {
+              await this.#webhook.dispatch(event);
+            }
+            return ctx.response.status(200).json({ received: true });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'invalid webhook';
+            // A throw before dispatch is a rejected delivery, and the reason is the single
+            // most-wanted fact when a gateway reports failing callbacks.
+            if (!verificationPublished) {
+              publishWebhookVerification({
+                provider,
+                ...webhookVerificationOutcome(frame, message),
+                durationMs: Date.now() - startedAt,
+              });
+            }
+            return ctx.response.status(400).json({ error: message });
           }
-          return ctx.response.status(200).json({ received: true });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'invalid webhook';
-          return ctx.response.status(400).json({ error: message });
-        }
+        });
       })
       .as('payments.webhook');
   }

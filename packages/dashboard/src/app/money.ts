@@ -1,58 +1,100 @@
 /**
- * Money formatting — the ONLY place in this console that divides by 100.
+ * Money formatting — the ONLY place in this console that shifts a decimal point.
  *
- * Everything upstream (the store, `billingOverview`, the JSON API) speaks integer cents, because
- * that is the unit the gateways settle in and the unit that survives arithmetic. Dividing early is
- * how a rounding error gets into a revenue figure and stays there, so the division happens here,
- * at render, once, against a value nothing will compute with afterwards.
+ * Everything upstream (the store, `billingOverview`, the JSON API) speaks integer MINOR UNITS,
+ * because that is the unit the gateways settle in and the unit that survives arithmetic. Dividing
+ * early is how a rounding error gets into a revenue figure and stays there, so the shift happens
+ * here, at render, once, against a value nothing will compute with afterwards.
+ *
+ * The exponent table below MIRRORS `packages/adonis/src/money.ts`'s `currencyExponent`, which is
+ * what the drivers use to put an amount on the wire. The two disagreeing is not a cosmetic bug: if
+ * the server sends ¥1990 as `1990` and this file renders it as `19,90`, the console under-reports
+ * revenue by 100×, and for a three-decimal currency (KWD, BHD, JOD…) it over-reports it by 10×.
+ * Change one, change both.
  */
 
-/** ISO 4217 codes whose minor unit is NOT 1/100. Formatting these as cents would be wrong by 100x. */
-const ZERO_DECIMAL_CURRENCIES = new Set([
-  'BIF',
-  'CLP',
-  'DJF',
-  'GNF',
-  'JPY',
-  'KMF',
-  'KRW',
-  'MGA',
-  'PYG',
-  'RWF',
-  'UGX',
-  'VND',
-  'VUV',
-  'XAF',
-  'XOF',
-  'XPF',
-]);
+/** ISO 4217 codes whose minor unit is NOT 1/100 — keyed exactly as `src/money.ts`'s `MINOR_UNITS`. */
+const MINOR_UNITS: Record<string, number> = {
+  // Zero-decimal — the amount IS the integer; there is nothing to shift.
+  BIF: 0,
+  CLP: 0,
+  DJF: 0,
+  GNF: 0,
+  ISK: 0,
+  JPY: 0,
+  KMF: 0,
+  KRW: 0,
+  PYG: 0,
+  RWF: 0,
+  UGX: 0,
+  VND: 0,
+  VUV: 0,
+  XAF: 0,
+  XOF: 0,
+  XPF: 0,
+  // Three-decimal.
+  BHD: 3,
+  IQD: 3,
+  JOD: 3,
+  KWD: 3,
+  LYD: 3,
+  OMR: 3,
+  TND: 3,
+};
 
-/** The minor units per major unit for a currency (100 for BRL/USD/EUR, 1 for JPY/KRW/...). */
+/** How many decimal places a currency has. 2 for everything not listed — BRL, USD, EUR included. */
+export function currencyExponent(currency: string): number {
+  return MINOR_UNITS[currency.toUpperCase()] ?? 2;
+}
+
+/** The minor units per major unit (100 for BRL/USD/EUR, 1 for JPY/KRW, 1000 for KWD/BHD). */
 export function minorUnitsPer(currency: string): number {
-  return ZERO_DECIMAL_CURRENCIES.has(currency.toUpperCase()) ? 1 : 100;
+  return 10 ** currencyExponent(currency);
 }
 
 /**
- * Render integer minor units (cents) as a localized currency string — `123456` + `'BRL'` becomes
- * `R$ 1.234,56`.
+ * Render integer minor units as a localized currency string — `123456` + `'BRL'` becomes
+ * `R$ 1.234,56`, `1990` + `'JPY'` becomes `¥ 1.990`, `1990` + `'KWD'` becomes `KD 1,990`.
  *
  * Falls back to a plain `<code> <amount>` string when the runtime rejects the currency code, so an
  * app configured with something `Intl` does not know still shows a number instead of crashing the
  * whole panel.
  */
 export function formatCents(cents: number, currency: string, locale = 'pt-BR'): string {
-  const divisor = minorUnitsPer(currency);
-  const value = cents / divisor;
+  const exponent = currencyExponent(currency);
+  const value = cents / 10 ** exponent;
   try {
     return new Intl.NumberFormat(locale, {
       style: 'currency',
       currency,
-      minimumFractionDigits: divisor === 1 ? 0 : 2,
-      maximumFractionDigits: divisor === 1 ? 0 : 2,
+      minimumFractionDigits: exponent,
+      maximumFractionDigits: exponent,
     }).format(value);
   } catch {
-    return `${currency.toUpperCase()} ${value.toFixed(divisor === 1 ? 0 : 2)}`;
+    return `${currency.toUpperCase()} ${value.toFixed(exponent)}`;
   }
+}
+
+/**
+ * Parse what an operator typed into a partial-refund box (`19,90`, `19.90`, `1990` for JPY) into
+ * integer minor units. `null` for anything unusable.
+ *
+ * Digit-shifting, never `Math.round(value * 100)`: a partial refund typed as `8.35` goes through a
+ * binary float on that path and comes out as `834`, and the customer is short a cent for a reason
+ * nobody can find later. The fraction is padded/rejected against the currency's own exponent, so
+ * `1.5` is 150 in BRL, 1500 in KWD, and refused outright in JPY — which has no fractional part to
+ * refund.
+ */
+export function parseMajorToMinor(input: string, currency: string): number | null {
+  const trimmed = input.trim().replace(',', '.');
+  if (trimmed === '') return null;
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) return null;
+  const exponent = currencyExponent(currency);
+  const [whole = '', fraction = ''] = trimmed.split('.');
+  if (fraction.length > exponent) return null;
+  const minor = Number(`${whole}${fraction.padEnd(exponent, '0')}`);
+  if (!Number.isSafeInteger(minor) || minor <= 0) return null;
+  return minor;
 }
 
 /** Render a plain (non-money) integer with thousands separators — usage quantities, counts. */
@@ -69,4 +111,40 @@ export function formatWhen(iso: string | null, locale = 'pt-BR'): string {
     dateStyle: 'short',
     timeStyle: 'medium',
   }).format(date);
+}
+
+/**
+ * A date with no clock — a trial end, a period end. Those are DAYS, and a second-precision
+ * timestamp next to them reads as more certainty than the gateway actually gave.
+ *
+ * `relative` says how far away it is, which is the part an operator acts on: "ends in 2 days" is a
+ * reason to email someone, `28/08/2026` is a date they have to subtract in their head.
+ */
+export function formatDay(iso: string | null, locale = 'pt-BR'): string {
+  if (iso === null) return '—';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '—';
+  return new Intl.DateTimeFormat(locale, { dateStyle: 'short' }).format(date);
+}
+
+/**
+ * How many whole days from `now` until `iso` — negative when it is already past, `null` when there
+ * is no date. Pure, so the one thing worth getting right (an expiry that already happened must
+ * never read as future) is testable without a clock.
+ */
+export function daysUntil(iso: string | null, now: Date = new Date()): number | null {
+  if (iso === null) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return Math.floor((date.getTime() - now.getTime()) / 86_400_000);
+}
+
+/** `daysUntil` as the phrase an operator reads: `in 3 days`, `today`, `4 days ago`. */
+export function formatDaysUntil(iso: string | null, now: Date = new Date()): string | null {
+  const days = daysUntil(iso, now);
+  if (days === null) return null;
+  if (days === 0) return 'today';
+  if (days === 1) return 'tomorrow';
+  if (days === -1) return 'yesterday';
+  return days > 0 ? `in ${days} days` : `${-days} days ago`;
 }

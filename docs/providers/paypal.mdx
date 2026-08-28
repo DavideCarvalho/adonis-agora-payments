@@ -14,10 +14,9 @@ payer approves the payment on paypal.com, so `createCheckout` is the entry point
 `charge` only works against a payment method they already saved. And its webhook signature
 is verified by **calling PayPal**, not by an HMAC you can compute locally.
 
-- **Methods**: `undefined` only. Every flow here hands the payer to PayPal, who picks the
-  funding source (wallet, card, local method) on their own page. The driver never sends
-  card data, so declaring `credit_card` would route card charges to a driver that cannot
-  make one.
+- **Methods**: `wallet` and `undefined`, and which one depends on the call —
+  [see below](#payment-methods). `credit_card` is still absent: the driver never sends card
+  data, so routing a card charge here would reach a driver that cannot make one.
 - **Setup**: `payments.paypal({ clientId, clientSecret, currency, sandbox, webhookId })` —
   `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID`. `currency` is
   **required** (lowercase ISO 4217) and the driver refuses to boot without one. `sandbox`
@@ -147,3 +146,87 @@ This driver was written against PayPal's published API reference and is covered 
 tests, but it has never run against a real PayPal account. Put it through the sandbox with
 your own credentials before it takes real money.
 </Callout>
+
+## Payment methods
+
+`createCheckout()` hands the payer to PayPal, who picks the funding source on their own page
+— a card, a bank, a local method — so `undefined` ("let the customer choose") is the only
+promise that call can keep.
+
+`charge()` is different. It charges `payment_source.paypal.vault_id` and nothing else: a
+PayPal account the payer already vaulted, which is a stored-balance wallet by definition. So
+`supportedMethods` includes `wallet`, the resulting `Payment.method` is `wallet`, and a
+charge routed as anything else throws rather than pretending it chose the instrument:
+
+```
+[payments] PayPal charges the vaulted PayPal account behind the token and nothing else, so
+"credit_card" is a promise this call cannot keep — the funding source is whatever the payer
+has attached to that account. Drop `method`, or route the charge as `wallet`.
+```
+
+When PayPal echoes `payment_source` back on the order, the driver reads it rather than
+assuming: `paypal`/`venmo`/`apple_pay`/`google_pay` → `wallet`, `card` → `card`, and the
+European local methods (`ideal`, `bancontact`, `eps`, `giropay`, `p24`, `sofort`, `blik`,
+`trustly`, `multibanco`, `mybank`) → `bank_transfer`.
+
+## Disputes
+
+| PayPal event | Normalized |
+| --- | --- |
+| `CUSTOMER.DISPUTE.CREATED` | `payment.disputed` |
+| `RISK.DISPUTE.CREATED` (deprecated spelling) | `payment.disputed` |
+| `CUSTOMER.DISPUTE.UPDATED`, `CUSTOMER.DISPUTE.RESOLVED` | `payment.updated` |
+
+`CUSTOMER.DISPUTE.CREATED` is the opening and moves the payment row to `disputed`. Updated
+and resolved are the rest of the case — the resolution, which every gateway reports
+differently and which this library deliberately does not name.
+
+`RISK.DISPUTE.CREATED` is handled too: PayPal's reference says `CUSTOMER.DISPUTE.CREATED`
+supersedes it, and an account still subscribed to the old one should not silently miss the
+chargeback.
+
+The event is keyed on `disputed_transactions[0].seller_transaction_id` — the **capture** id
+this driver keys payments on. `buyer_transaction_id` is the buyer's view of the same money
+and would find no row here. The money is `dispute_amount`, and `event.data` also carries
+`disputeId` and `disputeReason`; a dispute covering several transactions leaves the rest on
+`event.raw`.
+
+## Authorization
+
+`charge()` and `createCheckout()` both create `intent: 'CAPTURE'` orders, so nothing here
+produces a held authorization on its own. If your account also runs `intent: 'AUTHORIZE'`
+orders, their webhooks are recognized:
+
+- `PAYMENT.AUTHORIZATION.CREATED` and `PAYMENT.AUTHORIZATION.VOIDED` → `payment.updated`,
+  with `status: 'authorized'` on `event.data`. Money is **held**, not moved: PayPal reserves
+  it for about 29 days and voids it if nobody captures. There is deliberately no canonical
+  `payment.authorized` event for it to become.
+- `CHECKOUT.ORDER.APPROVED` stays `payment.updated` too — the payer approved, and the
+  capture is a separate call.
+
+## Paused subscriptions
+
+`SUSPENDED` used to map to `past_due`, which said the subscriber owed money. It is `paused`
+now: nothing is owed, nothing bills today, `POST /v1/billing/subscriptions/{id}/activate`
+restarts it — and this driver's own `cancelSubscription` points at suspend as the way to hold
+a subscription open. Either way it entitles nobody.
+
+## `idempotencyKey`
+
+PayPal deduplicates on the `PayPal-Request-Id` header. Its guidance recommends a UUID
+"because it meets the 38 single-byte character limit", so the driver caps the key at 38 —
+the length that survives every endpoint — and throws on a longer one.
+
+| Call | `PayPal-Request-Id` |
+| --- | --- |
+| `charge` | **required** — a vaulted server-side charge without one would retry into a second charge |
+| `createCheckout` | sent when given |
+| `refund` | sent when given (`POST /v2/payments/captures/{id}/refund` documents it) |
+| `createSubscription` | sent when given; PayPal holds the key for 72 hours |
+| `createCustomer` | n/a — the call already throws, PayPal has no customer resource |
+| `updateSubscription` | **throws** |
+
+`updateSubscription` refuses a key because `PATCH /v1/billing/subscriptions/{id}` documents
+no `PayPal-Request-Id`, unlike the create call. The patch is a price replacement, so a repeat
+is harmless in itself — but accepting a key the API never sees would promise a guarantee
+nothing enforces.

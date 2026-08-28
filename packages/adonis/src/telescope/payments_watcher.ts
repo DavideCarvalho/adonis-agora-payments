@@ -23,11 +23,69 @@ interface PaymentsDiagnosticEnvelope {
 }
 
 /**
+ * The fields that lead an entry, in this order — the ones a developer scans a timeline
+ * by. Everything else in the payload follows, unreordered.
+ *
+ * `traceId` is handled separately (it can come from either the envelope or the payload)
+ * and always sits right after `event`.
+ */
+const LEAD_KEYS = [
+  'provider',
+  'gatewayId',
+  'id',
+  'type',
+  'method',
+  'host',
+  'path',
+  'query',
+  'status',
+  'outcome',
+  'scheme',
+  'amount',
+  'currency',
+  'durationMs',
+  'error',
+  'reason',
+] as const;
+
+/**
+ * Build the entry content: `event`, the correlation id, the {@link LEAD_KEYS} that are
+ * present, then the rest of the payload, then `ts`.
+ *
+ * The trace id can arrive two ways. `@adonis-agora/diagnostics` fills the ENVELOPE's
+ * `traceId` from the host's request-context accessor; payments cannot set that field
+ * (the structural emit slot is `(lib, event, payload)`) so it puts its own webhook-chain
+ * id on the PAYLOAD. The envelope's wins when both are there — it is the host's real
+ * request trace, and correlating to it reaches other libraries too.
+ */
+function shapeContent(envelope: PaymentsDiagnosticEnvelope): Record<string, unknown> {
+  const payload = envelope.payload ?? {};
+  const traceId = envelope.traceId ?? (payload.traceId as string | undefined);
+  const content: Record<string, unknown> = { event: envelope.event };
+  if (traceId !== undefined) content.traceId = traceId;
+  for (const key of LEAD_KEYS) {
+    if (payload[key] !== undefined) content[key] = payload[key];
+  }
+  for (const [key, value] of Object.entries(payload)) {
+    if (key === 'traceId' || key in content) continue;
+    content[key] = value;
+  }
+  if (envelope.ts !== undefined) content.ts = envelope.ts;
+  return content;
+}
+
+/**
  * A payments-specific Telescope watcher: records a typed `payments` entry for every
- * milestone `agora:payments:*` event the library emits (charges, refunds,
- * subscriptions, invoice emission, webhook lifecycle), flattening the event's payload
- * into structured content rather than storing the raw envelope like the generic
- * diagnostics bridge does.
+ * `agora:payments:*` event the library emits — the milestones (charges, refunds,
+ * subscriptions, invoice emission, webhook lifecycle) and the debug events
+ * (`gateway.request*`, `webhook.verification`) — flattening the event's payload into
+ * structured content rather than storing the raw envelope like the generic diagnostics
+ * bridge does.
+ *
+ * Entries are SHAPED, not spread blindly: the fields you scan a timeline by lead
+ * ({@link LEAD_KEYS} — who, which object, what happened, how long), then whatever else
+ * the payload carried, then `ts`. Same family as the other Agora watchers, which is why
+ * the `event` + flattened-payload envelope handling is identical to media's.
  *
  * Zero coupling: payments publishes via the structural `@adonis-agora/diagnostics`
  * emit slot; this subscribes to the same `node:diagnostics_channel` channels — neither
@@ -52,15 +110,7 @@ export class PaymentsWatcher {
       const onMessage = (message: unknown) => {
         const envelope = message as PaymentsDiagnosticEnvelope;
         if (envelope === null || typeof envelope !== 'object') return;
-        ctx.record({
-          type: this.type,
-          content: {
-            event: envelope.event,
-            ...(envelope.ts !== undefined ? { ts: envelope.ts } : {}),
-            ...(envelope.traceId !== undefined ? { traceId: envelope.traceId } : {}),
-            ...(envelope.payload ?? {}),
-          },
-        });
+        ctx.record({ type: this.type, content: shapeContent(envelope) });
       };
       subscribe(channel, onMessage);
       this.disposers.push(() => unsubscribe(channel, onMessage));

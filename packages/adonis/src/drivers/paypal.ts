@@ -81,6 +81,8 @@ interface PayPalOrder {
   id: string;
   status: string;
   links?: PayPalLink[];
+  /** Which funding source settled it — one populated key out of `paypal`, `card`, … */
+  payment_source?: Record<string, unknown>;
   purchase_units?: Array<{
     custom_id?: string;
     invoice_id?: string;
@@ -124,6 +126,22 @@ interface PayPalSale {
   amount?: { total?: string; currency?: string };
 }
 
+/** The `resource` of a `CUSTOMER.DISPUTE.*` event. */
+interface PayPalDispute {
+  dispute_id?: string;
+  dispute_amount?: PayPalMoney;
+  reason?: string;
+  status?: string;
+  dispute_state?: string;
+  dispute_life_cycle_stage?: string;
+  create_time?: string;
+  disputed_transactions?: Array<{
+    seller_transaction_id?: string;
+    buyer_transaction_id?: string;
+    custom?: string;
+  }>;
+}
+
 interface PayPalWebhookPayload {
   id?: string;
   event_type?: string;
@@ -143,6 +161,9 @@ const PAYPAL_UNDIVIDED_CURRENCIES = new Set(['huf', 'twd']);
 /** Refresh the OAuth token this many ms before PayPal's own expiry. */
 const TOKEN_SAFETY_MARGIN_MS = 60_000;
 
+/** What PayPal's idempotency guidance says a `PayPal-Request-Id` fits in — a UUID. */
+const REQUEST_ID_MAX_LENGTH = 38;
+
 /**
  * PayPal driver — Orders v2 for money in, Payments v2 for refunds, Subscriptions v1 for
  * recurring billing. Multi-currency, OAuth2 client credentials, plain REST (no SDK).
@@ -157,12 +178,17 @@ const TOKEN_SAFETY_MARGIN_MS = 60_000;
 export class PayPalDriver implements PaymentsDriver {
   readonly provider = 'paypal';
   /**
-   * Only `undefined`: every flow here hands the payer to PayPal, who picks the funding
-   * source (wallet, card, local method) on their own page. The driver never sends card
-   * data, so declaring `credit_card` would route card charges to a driver that cannot
-   * make one.
+   * `wallet` and `undefined`, and the split is which call is being routed.
+   *
+   * {@link PayPalDriver.createCheckout} hands the payer to PayPal, who picks the funding
+   * source on their own page — a card, a bank, a local method — so `undefined` ("let the
+   * customer choose") is the only promise that call can keep. {@link PayPalDriver.charge}
+   * is different: it charges a **vaulted PayPal account** (`payment_source.paypal.vault_id`)
+   * and nothing else, which is a stored-balance wallet by definition. `credit_card` is
+   * still absent — the driver never sends card data, so routing a card charge here would
+   * reach a driver that cannot make one.
    */
-  readonly supportedMethods = ['undefined'] as const;
+  readonly supportedMethods = ['wallet', 'undefined'] as const;
   readonly capabilities = { refunds: true, invoices: false, subscriptions: true };
 
   #baseUrl: string;
@@ -240,6 +266,11 @@ export class PayPalDriver implements PaymentsDriver {
           'token as `paymentMethodId` for a server-side charge.',
       );
     }
+    if (input.method !== undefined && input.method !== 'wallet' && input.method !== 'undefined') {
+      throw new Error(
+        `[payments] PayPal charges the vaulted PayPal account behind the token and nothing else, so "${input.method}" is a promise this call cannot keep — the funding source is whatever the payer has attached to that account. Drop \`method\`, or route the charge as \`wallet\`.`,
+      );
+    }
     // PayPal documents `PayPal-Request-Id` as mandatory for single-step create-order calls.
     // Generating one here would defeat it: a retry would mint a new key and charge twice.
     if (input.idempotencyKey === undefined) {
@@ -267,14 +298,14 @@ export class PayPalDriver implements PaymentsDriver {
     let order = await this.#request<PayPalOrder>('/v2/checkout/orders', {
       method: 'POST',
       body,
-      headers: { 'PayPal-Request-Id': input.idempotencyKey, Prefer: 'return=representation' },
+      headers: { ...this.#requestId(input.idempotencyKey), Prefer: 'return=representation' },
     });
     // A vaulted CAPTURE order usually comes back COMPLETED; when PayPal only authorized it,
     // capture explicitly rather than reporting a charge that never took the money.
     if (order.status !== 'COMPLETED') {
       order = await this.#request<PayPalOrder>(`/v2/checkout/orders/${order.id}/capture`, {
         method: 'POST',
-        headers: { 'PayPal-Request-Id': input.idempotencyKey, Prefer: 'return=representation' },
+        headers: { ...this.#requestId(input.idempotencyKey), Prefer: 'return=representation' },
       });
     }
     const capture = order.purchase_units?.[0]?.payments?.captures?.[0];
@@ -285,6 +316,9 @@ export class PayPalDriver implements PaymentsDriver {
       );
     }
     const payment = this.#mapCapture(capture, currency);
+    // The order was created with `payment_source.paypal`, so the money came out of a PayPal
+    // account. `order.payment_source` says which one when PayPal echoes it back.
+    payment.method = this.#mapPaymentSource(order.payment_source) ?? 'wallet';
     await emitInvoiceIfRequested(this.#invoiceCtx, input, payment, this);
     publishPaymentDiagnostics(payment);
     return payment;
@@ -301,7 +335,11 @@ export class PayPalDriver implements PaymentsDriver {
     }
   }
 
-  async refund(paymentGatewayId: string, amount?: Money): Promise<Refund> {
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
     const currency = this.#currency;
     // An empty body means "refund everything left"; an `amount` makes it partial.
     const body: Record<string, unknown> =
@@ -315,7 +353,16 @@ export class PayPalDriver implements PaymentsDriver {
         : {};
     const data = await this.#request<PayPalRefund>(
       `/v2/payments/captures/${paymentGatewayId}/refund`,
-      { method: 'POST', body, headers: { Prefer: 'return=representation' } },
+      {
+        method: 'POST',
+        body,
+        headers: {
+          Prefer: 'return=representation',
+          // The refund endpoint documents `PayPal-Request-Id`, the same header the charge
+          // uses. Without it a retried refund job refunds the capture twice.
+          ...this.#requestId(options?.idempotencyKey),
+        },
+      },
     );
     const refund: Refund = {
       id: data.id,
@@ -393,9 +440,7 @@ export class PayPalDriver implements PaymentsDriver {
       body,
       headers: {
         Prefer: 'return=representation',
-        ...(input.idempotencyKey !== undefined
-          ? { 'PayPal-Request-Id': input.idempotencyKey }
-          : {}),
+        ...this.#requestId(input.idempotencyKey),
       },
     });
     return {
@@ -435,6 +480,9 @@ export class PayPalDriver implements PaymentsDriver {
       planId: input.planId,
       ...(input.externalReference !== undefined ? { customId: input.externalReference } : {}),
       ...(input.startDate !== undefined ? { startTime: input.startDate } : {}),
+      // `POST /v1/billing/subscriptions` takes `PayPal-Request-Id` and holds the key for 72
+      // hours; without it a retry starts a second subscription billing the same person.
+      ...(input.idempotencyKey !== undefined ? { requestId: input.idempotencyKey } : {}),
     });
     const subscription = this.#mapSubscription(data);
     publishSubscriptionDiagnostics(subscription, 'subscription.created');
@@ -474,6 +522,11 @@ export class PayPalDriver implements PaymentsDriver {
     subscriptionGatewayId: string,
     input: UpdateSubscriptionInput,
   ): Promise<Subscription> {
+    if (input.idempotencyKey !== undefined) {
+      throw new Error(
+        '[payments] PayPal does not deduplicate a subscription update: `PATCH /v1/billing/subscriptions/{id}` documents no `PayPal-Request-Id`, unlike the create call. The patch is a price replacement, so a repeat is harmless in itself — but accepting a key the API never sees would promise a guarantee nothing enforces, so it is refused rather than dropped.',
+      );
+    }
     if (input.description !== undefined) {
       throw new Error(
         '[payments] PayPal subscriptions have no description — it belongs to the catalog ' +
@@ -599,6 +652,41 @@ export class PayPalDriver implements PaymentsDriver {
     };
   }
 
+  /**
+   * PayPal's `payment_source` → the canonical {@link PaymentMethodType}.
+   *
+   * Exactly one key of the object is populated, and it names the funding source: `paypal`
+   * and `venmo` are stored-balance wallets, `apple_pay`/`google_pay` device ones, `card`
+   * is a card, and the European local methods push from the payer's own bank. Anything
+   * unrecognized is left unset rather than guessed at.
+   */
+  #mapPaymentSource(source: Record<string, unknown> | undefined): Payment['method'] | undefined {
+    if (source === undefined) return undefined;
+    const key = Object.keys(source)[0];
+    switch (key) {
+      case 'paypal':
+      case 'venmo':
+      case 'apple_pay':
+      case 'google_pay':
+        return 'wallet';
+      case 'card':
+        return 'card';
+      case 'ideal':
+      case 'bancontact':
+      case 'eps':
+      case 'giropay':
+      case 'p24':
+      case 'sofort':
+      case 'blik':
+      case 'trustly':
+      case 'multibanco':
+      case 'mybank':
+        return 'bank_transfer';
+      default:
+        return undefined;
+    }
+  }
+
   #mapWebhookType(eventType: string): string {
     switch (eventType) {
       case 'PAYMENT.CAPTURE.COMPLETED':
@@ -607,6 +695,18 @@ export class PayPalDriver implements PaymentsDriver {
       case 'PAYMENT.CAPTURE.DECLINED':
       case 'PAYMENT.SALE.DENIED':
         return 'payment.failed';
+      // The buyer has disputed the payment with PayPal — `CUSTOMER.DISPUTE.CREATED` is the
+      // opening. `UPDATED` and `RESOLVED` are the rest of the case, which every gateway
+      // reports differently and which this package deliberately does not name.
+      // `RISK.DISPUTE.CREATED` is the deprecated spelling PayPal's own reference says
+      // `CUSTOMER.DISPUTE.CREATED` supersedes; an account still subscribed to it should not
+      // silently miss the chargeback.
+      case 'CUSTOMER.DISPUTE.CREATED':
+      case 'RISK.DISPUTE.CREATED':
+        return 'payment.disputed';
+      case 'CUSTOMER.DISPUTE.UPDATED':
+      case 'CUSTOMER.DISPUTE.RESOLVED':
+        return 'payment.updated';
       case 'PAYMENT.CAPTURE.REFUNDED':
       case 'PAYMENT.CAPTURE.REVERSED':
       case 'PAYMENT.SALE.REFUNDED':
@@ -616,6 +716,12 @@ export class PayPalDriver implements PaymentsDriver {
       case 'CHECKOUT.ORDER.COMPLETED':
       case 'PAYMENT.CAPTURE.PENDING':
       case 'PAYMENT.SALE.PENDING':
+      // An authorization is money HELD, not money moved: PayPal reserves it for about 29
+      // days and voids it if nobody captures. There is deliberately no `payment.authorized`
+      // event for it to become, so it is an update — the `status: 'authorized'` on the
+      // payload is what a handler reads to tell it apart from the others here.
+      case 'PAYMENT.AUTHORIZATION.CREATED':
+      case 'PAYMENT.AUTHORIZATION.VOIDED':
         return 'payment.updated';
       case 'BILLING.SUBSCRIPTION.CREATED':
         return 'subscription.created';
@@ -659,6 +765,39 @@ export class PayPalDriver implements PaymentsDriver {
           ? { subscriptionId: sale.billing_agreement_id }
           : {}),
         ...(sale.custom !== undefined ? { externalReference: sale.custom } : {}),
+      };
+    }
+    if (eventType.endsWith('DISPUTE.CREATED') || eventType.startsWith('CUSTOMER.DISPUTE.')) {
+      // The dispute names the money as `dispute_amount` and the payment as the SELLER's
+      // side of the disputed transaction — `seller_transaction_id` is the capture id this
+      // driver keys payments on, and `buyer_transaction_id` is the buyer's view of the same
+      // money, which would find no row here. A dispute can cover several transactions; the
+      // first is the one the row is written against and `event.raw` carries the rest.
+      const dispute = resource as unknown as PayPalDispute;
+      const currency = (dispute.dispute_amount?.currency_code ?? this.#currency).toLowerCase();
+      const transaction = dispute.disputed_transactions?.[0];
+      return {
+        gatewayId: transaction?.seller_transaction_id ?? '',
+        amount: this.#fromValue(dispute.dispute_amount?.value, currency),
+        currency,
+        ...(dispute.dispute_id !== undefined ? { disputeId: dispute.dispute_id } : {}),
+        ...(dispute.reason !== undefined ? { disputeReason: dispute.reason } : {}),
+        ...(transaction?.custom !== undefined ? { externalReference: transaction.custom } : {}),
+      };
+    }
+    if (eventType.startsWith('PAYMENT.AUTHORIZATION.')) {
+      // An Authorization is shaped like a Capture — `id`, `status`, `amount`, `custom_id` —
+      // so the same reader works; what differs is that the money is only held.
+      const authorization = resource as unknown as PayPalCapture;
+      const currency = (authorization.amount?.currency_code ?? this.#currency).toLowerCase();
+      return {
+        gatewayId: authorization.id,
+        amount: this.#fromValue(authorization.amount?.value, currency),
+        currency,
+        status: 'authorized',
+        ...(authorization.custom_id !== undefined
+          ? { externalReference: authorization.custom_id }
+          : {}),
       };
     }
     if (eventType.startsWith('CHECKOUT.ORDER.')) {
@@ -734,8 +873,12 @@ export class PayPalDriver implements PaymentsDriver {
     switch (status) {
       case 'ACTIVE':
         return 'active';
+      // Suspended is PayPal's pause: it exists, it bills nothing today, and `/activate`
+      // starts it again. `past_due` said the subscriber owed money, which a merchant-
+      // initiated suspension does not — and this driver's own `cancelSubscription` points
+      // at suspend as the way to hold a subscription open. Either way it entitles nobody.
       case 'SUSPENDED':
-        return 'past_due';
+        return 'paused';
       case 'CANCELLED':
         return 'canceled';
       case 'EXPIRED':
@@ -787,9 +930,27 @@ export class PayPalDriver implements PaymentsDriver {
       body,
       headers: {
         Prefer: 'return=representation',
-        ...(options.requestId !== undefined ? { 'PayPal-Request-Id': options.requestId } : {}),
+        ...this.#requestId(options.requestId),
       },
     });
+  }
+
+  /**
+   * PayPal's idempotency header, with the limit its own guidance names.
+   *
+   * The per-endpoint schemas allow up to 10 000 characters, but PayPal's idempotency page
+   * recommends a UUID "because it meets the 38 single-byte character limit" — so 38 is the
+   * number that survives every endpoint, and a longer key is refused here rather than
+   * accepted by one call and rejected by the next.
+   */
+  #requestId(key: string | undefined): Record<string, string> {
+    if (key === undefined) return {};
+    if (key.length > REQUEST_ID_MAX_LENGTH) {
+      throw new Error(
+        `[payments] PayPal's \`PayPal-Request-Id\` is documented at ${REQUEST_ID_MAX_LENGTH} single-byte characters (a UUID); got ${key.length}.`,
+      );
+    }
+    return { 'PayPal-Request-Id': key };
   }
 
   // ── Money ────────────────────────────────────────────────────────────────────────────

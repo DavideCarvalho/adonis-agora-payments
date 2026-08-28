@@ -18,10 +18,15 @@ and debit card, and boleto, authenticated with a Bearer token.
   R$ 19,90 is `1990` in your code and `1990` on the wire.
 - **`externalReference`**: sent as the order's `reference_id` and echoed on every webhook.
 - **Idempotency**: `idempotencyKey` becomes the `x-idempotency-key` header, which PagBank
-  honours for 48 hours — a retried charge returns the original order instead of a second one.
+  honours for 48 hours — a retried charge returns the original order instead of a second
+  one. `refund(id, amount, { idempotencyKey })` sends it too.
 - **Refunds**: `POST /charges/{id}/cancel`. Partial refunds leave the charge `PAID` with a
   non-zero `refunded` summary; a full one flips it to `CANCELED`.
-- **No subscriptions, no customers, no invoice list** — see below.
+- **Statuses**: `AUTHORIZED` maps to **`authorized`** — PagBank's own word is
+  "pré-autorizada": the money is held and nothing is captured until
+  `POST /charges/{id}/capture`. It is not `pending` (which understates a hold the acquirer
+  granted) and not `paid` (which would grant access against money that evaporates).
+- **No subscriptions, no customers, no invoice list, and no dispute event** — see below.
 
 ## One order, two ids — and which one this driver uses
 
@@ -94,12 +99,21 @@ providers: {
 }
 ```
 
-<Callout title="Post-transaction events are a different API">
-Balance-released and chargeback notifications still arrive in PagBank's legacy
-form-encoded shape (`notificationCode=…&notificationType=transaction`), with **no
-authenticity token at all** and a separate lookup to resolve them. This driver rejects
-those with a clear error instead of half-parsing them; if you need them, route them to your
-own controller.
+<Callout type="warn" title="No PagBank webhook maps to payment.disputed">
+The Orders API has **no chargeback status and no chargeback event**. A PagBank chargeback
+arrives as a legacy post-transaction notification — form-encoded
+`notificationCode=…&notificationType=transaction`, delivered to the same
+`notification_urls`, with **no authenticity token at all** — which you then resolve by
+calling the v3 XML endpoint
+(`GET ws.pagseguro.uol.com.br/v3/transactions/notifications/{code}`) with your account
+email and `token_api`. The chargeback is the legacy transaction status **9, "Retenção
+temporária"** ("o comprador abriu uma solicitação de chargeback junto à operadora"); status
+**5, "Em disputa"** is the earlier in-PagBank dispute.
+
+That is a different API, a different format and different credentials, so this driver
+rejects those bodies with a clear error rather than half-parsing them. If you take cards
+through PagBank you need a second route for them; until then a chargeback here will not
+move a payment row to `disputed`.
 </Callout>
 
 <Callout type="warn" title="Not yet run against a live account">
@@ -119,8 +133,12 @@ it in the sandbox against your own credentials before it touches real money.
   your users and their fiscal data in your own table.
 - **Hosted checkout.** `createCheckout` creates a Pix charge and gives you a BR Code with an
   empty `url`; PagBank's redirect-style checkout is the separate Checkout API.
-- **Invoice listing.** `listInvoices` returns `[]` — orders are indexed by their own id, not
-  by customer. Fiscal notes come from an [invoice provider](/docs/payments/invoices).
+- **Invoice listing.** `listInvoices` **throws**. The Orders API has no invoice resource
+  and no per-customer index — `GET /orders` accepts only `charge_id`, so you cannot recover
+  a customer's history from PagBank at all and must keep the mapping yourself. It used to
+  return `[]`, which is indistinguishable from "this customer has no invoices" — something
+  PagBank never told us. Fiscal notes come from an
+  [invoice provider](/docs/payments/invoices).
 
 ## Card and boleto
 

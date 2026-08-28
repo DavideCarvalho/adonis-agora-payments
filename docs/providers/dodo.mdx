@@ -17,16 +17,11 @@ The consequence for the driver is concrete: **there is no amount-only endpoint a
 the API**. Every payment names a product you created in Dodo, and an arbitrary amount only
 works on a product with Pay What You Want enabled.
 
-- **Methods**: credit_card, debit_card, pix, undefined. The charge's `method` becomes
-  `allowed_payment_method_types` on the payment (`credit_card` → `credit`, `debit_card` →
-  `debit`, `pix` → `['pix', 'credit', 'debit']`), which is the field that restricts what
-  the hosted checkout offers. Dodo's own caveat applies: naming a method never *guarantees*
-  the customer sees it — eligibility still depends on their country and your merchant
-  settings — and a checkout whose every listed method is unavailable simply fails, which is
-  why the Pix mapping keeps the card methods as a fallback. **Boleto is not offered.** It
-  appears in the raw `PaymentMethodTypes` enum, but that enum is a processor-level superset
-  used for filtering; boleto is absent from Dodo's supported-methods documentation, so the
-  driver does not advertise it.
+- **Methods**: `credit_card`, `debit_card`, `pix`, `upi`, `wallet`, `bank_transfer`,
+  `bank_debit`, `bnpl`, `undefined` — **categories, not brands**. The charge's `method`
+  becomes `allowed_payment_method_types`, the field that restricts what the hosted checkout
+  offers; the mapping is in [Payment methods](#payment-methods). **Boleto is not offered**
+  and `voucher` has no Dodo equivalent.
 - **Pix has three requirements**, all Dodo's: `billing_currency` must be `BRL`, `pix` must
   be in `allowed_payment_method_types`, and the customer's billing country must be Brazil.
   Dodo does not support Pix for subscriptions. The payer gets the QR on Dodo's hosted page
@@ -94,6 +89,37 @@ that returns a payment id up front, which is what `charge()` has to hand back �
 what it uses. `createCheckout()` already uses the newer `POST /checkouts`.
 </Callout>
 
+## Payment methods
+
+`PaymentMethodName` names **categories**, not brands, and each one maps onto the
+`allowed_payment_method_types` entries that restrict Dodo's hosted checkout:
+
+| Category | `allowed_payment_method_types` |
+| --- | --- |
+| `credit_card` | `credit` |
+| `debit_card` | `debit` |
+| `pix` | `pix`, `credit`, `debit` |
+| `upi` | `upi_collect`, `credit`, `debit` |
+| `wallet` | `apple_pay`, `google_pay`, `amazon_pay`, `cashapp`, `revolut_pay`, `credit`, `debit` |
+| `bank_transfer` | `ideal`, `bancontact_card`, `eps`, `multibanco`, `blik`, `credit`, `debit` |
+| `bank_debit` | `sepa`, `ach`, `credit`, `debit` |
+| `bnpl` | `klarna`, `afterpay_clearpay`, `credit`, `debit` |
+
+Dodo's own caveat applies: naming a method never *guarantees* the customer sees it —
+eligibility still depends on their country and your merchant settings — and a checkout
+whose every listed method is unavailable simply **fails**. That is why every category keeps
+`credit`/`debit` alongside it, exactly as Dodo advises: a category is a set of local methods
+by definition, and the card fallback is what stops an out-of-region buyer from hitting a
+dead checkout.
+
+**Boleto is not offered.** It appears in the raw `PaymentMethodTypes` enum, but that enum is
+a processor-level superset used for filtering, and boleto is absent from Dodo's
+supported-methods documentation. `voucher` has no Dodo equivalent at all.
+
+On the way back, `payment.method` reports the category the instrument belongs to: an iDEAL
+payment is `bank_transfer`, a SEPA one `bank_debit`, Klarna `bnpl`, Apple Pay `wallet`, UPI
+`upi`. All of those used to come back `unknown`.
+
 ## Money
 
 All Dodo amounts are integers in the currency's smallest unit — its own field docs say
@@ -125,6 +151,23 @@ made.
 - **`updateCustomer({ taxId })`** — a Dodo customer has no tax id. A tax id belongs to an
   individual B2B purchase (`tax_id` on the payment), not to the customer record, so
   accepting it here would drop it silently.
+- **`idempotencyKey`, everywhere.** Dodo documents no request deduplication at all — no
+  `Idempotency-Key` header, no request-id field; its only idempotency guidance is the
+  `webhook-id` header on events it *sends* you. Accepting a key and dropping it would turn
+  a caller's retry guarantee into a second charge, so `charge`, `createCheckout`, `refund`,
+  `createCustomer`, `createSubscription` and `updateSubscription` all refuse one. Persist
+  the key and check it on your side before calling.
+
+## Payment status: `authorized` is not `paid`
+
+Dodo's `requires_capture` maps to `BillingStatus === 'authorized'`: funds are held on the
+card and **nothing has been captured**, so no money has moved — but `pending`, which is
+what it used to report, understated it. There is an authorization there to capture or let
+expire.
+
+`partially_captured` and `partially_captured_and_capturable` deliberately stay `pending`.
+Part of the authorization has already settled, so `authorized` ("nothing captured") would
+be as wrong as `paid`, and the API reference does not say how much arrived.
 
 ## Switching plans
 
@@ -172,9 +215,33 @@ Mapped onto the canonical types:
 | `subscription.updated`, `.renewed`, `.plan_changed`, `.on_hold`, `.paused`, `.unpaused`, `.update_payment_method` | `subscription.updated` |
 | `subscription.cancelled`, `.expired`, `.failed` | `subscription.canceled` |
 
-Everything else (`refund.failed`, `dispute.*`, `license_key.*`, `payout.*`, `credit.*`,
-`dunning.*`, `abandoned_checkout.*`, `entitlement_grant.*`) passes through under its Dodo
-name, so an app handler can subscribe to it directly.
+| `dispute.opened` | **`payment.disputed`** |
+| `dispute.challenged`, `.accepted`, `.cancelled`, `.expired`, `.won`, `.lost` | `payment.updated` |
+
+Everything else (`refund.failed`, `license_key.*`, `payout.*`, `credit.*`, `dunning.*`,
+`abandoned_checkout.*`, `entitlement_grant.*`) passes through under its Dodo name, so an
+app handler can subscribe to it directly.
+
+**Paused subscriptions are `paused`, not `active`.** `subscription.paused` and a `paused`
+status from `findSubscription` report `Subscription.status === 'paused'`. It used to report
+`active`, which handed entitlement to a subscriber who is not paying; anything gating access
+on `status === 'active'` will start refusing them, which is the point.
+
+### Disputes: Dodo forwards them, unlike most merchants of record
+
+Dodo bears the chargeback liability, and it still tells you. That is worth knowing when you
+compare it with Polar and Lemon Squeezy, whose event catalogues have no dispute event at
+all: on Dodo you get the full lifecycle and **ten days** to respond to `dispute.opened`.
+
+`dispute.opened` normalizes to `payment.disputed`, keyed by the **payment** — the row whose
+status has to move to `disputed` — with the disputed amount and currency, plus `disputeId`,
+`disputeStage` and `disputeStatus` on `event.data`. Dodo has sent `amount` as both a number
+and a decimal string; both are read as integer cents.
+
+The rest of the lifecycle is a plain `payment.updated`, deliberately. This package has no
+canonical *resolution* event: every gateway reports a dispute won or lost differently, and
+a type no driver emits is worse than none. Read `event.raw.type` (`dispute.won`,
+`dispute.lost`, …) when you need the detail.
 
 **Dodo has no `subscription.created` event.** `subscription.active` is the first one a
 subscription gets, fired once its first payment clears, so that is what maps to the

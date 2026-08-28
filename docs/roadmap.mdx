@@ -70,16 +70,18 @@ What exists today and what does not:
   `DisputeEvidence`, `capabilities.disputes` and the optional `findDispute` /
   `submitDisputeEvidence`. `Dispute` carries `evidenceDueBy` and `canSubmitEvidence`, which are the
   two fields an operator actually acts on.
+  `payment.dispute_warning` and `payment.dispute_closed` are mapped on **Stripe and Adyen**, the two
+  gateways whose dispute vocabulary is documented in enough detail to map without guessing. Both now
+  separate the pre-dispute alert (where no money has moved and a refund still prevents the
+  chargeback) from the chargeback itself, and both carry the response deadline through as
+  `actionableUntil`.
 - **Not landed.** Nothing persists a dispute yet — there is no `billing_disputes` table, so the
-  deadline lives only in the gateway's dashboard. `payment.dispute_warning` and
-  `payment.dispute_closed` are declared but not yet mapped by any driver, so the two moments around a
-  chargeback are both lost. The warning: Adyen's `NOTIFICATION_OF_FRAUD` flattens to
-  `payment.updated` and reads as an ordinary update, and Stripe's
-  `radar.early_fraud_warning.created` is not mapped at all — it lands in the ledger as an unknown
-  type, which is at least visible. Both are the moment when refunding is still cheaper than losing.
-  The close: Stripe's `charge.dispute.closed` also collapses into `payment.updated`, so the outcome —
-  won or lost — is in the payload and nowhere else. The dashboard has no dispute panel and
-  `payments:health` does not check a window about to expire.
+  deadline arrives on an event and then lives only in the gateway's dashboard. The remaining sixteen
+  drivers have not been through the same pass: their dispute events are still either
+  `payment.disputed` or `payment.updated`, which is safe but coarse, and each one needs its own read
+  of the gateway's reference before it is widened. No driver implements `findDispute` or
+  `submitDisputeEvidence` yet, so `capabilities.disputes` is false everywhere. The dashboard has no
+  dispute panel and `payments:health` does not check a window about to expire.
 - **Not planned.** Deciding **for** you. The library will carry evidence to the gateway and tell you
   the window is closing; whether a given dispute is worth fighting or cheaper to refund is a business
   rule that depends on margin, customer value and fraud history, and a library that guesses it is a

@@ -75,10 +75,12 @@ saying `paid` while the money was already being pulled back — the app found ou
 statement. The processor now moves the row to `disputed`. Which gateway event maps onto it is on
 each [provider page](/docs/payments/providers); a gateway with no dispute notification says so.
 
-Two more are declared and being wired driver by driver: `payment.dispute_warning`, which arrives
-**before** a chargeback exists (Stripe's early fraud warning, Adyen's fraud notification) while
-refunding is still cheaper than losing, and `payment.dispute_closed`, which carries the outcome. See
-[Roadmap](/docs/payments/roadmap).
+Two more are being wired driver by driver, and are live on **Stripe and Adyen** today:
+`payment.dispute_warning`, which arrives **before** a chargeback exists — a Stripe inquiry, an early
+fraud warning, Adyen's notification of chargeback — while refunding is still cheaper than losing, and
+`payment.dispute_closed`, which carries `outcome`. A warning carries `actionableUntil`, the deadline
+after which the money is lost by default rather than on the merits. On the other sixteen gateways a
+dispute is still the single `payment.disputed`; see [Roadmap](/docs/payments/roadmap).
 
 An event type the processor does not recognize passes through: it is ledgered, no built-in sync runs,
 and a handler runs if one is registered. Unknown does not mean dropped.

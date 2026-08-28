@@ -463,10 +463,11 @@ export class AdyenDriver implements PaymentsDriver {
     // names the payment in `originalReference` — the payment is what the ledger routes on.
     const paymentReference = item.originalReference ?? item.pspReference ?? '';
     const success = item.success === 'true';
+    const type = this.#mapWebhookType(item.eventCode, success, item.additionalData);
     return {
       id: `adyen:${item.eventCode}:${item.pspReference ?? paymentReference}`,
       provider: this.provider,
-      type: this.#mapWebhookType(item.eventCode, success),
+      type,
       ...(item.eventDate !== undefined ? { createdAt: item.eventDate } : {}),
       data: {
         gatewayId: paymentReference,
@@ -477,6 +478,7 @@ export class AdyenDriver implements PaymentsDriver {
           ? { externalReference: item.merchantReference }
           : {}),
         ...(item.reason !== undefined && item.reason !== '' ? { reason: item.reason } : {}),
+        ...this.#disputeExtras(item, type),
       },
       raw: payload as unknown as Record<string, unknown>,
     };
@@ -593,7 +595,11 @@ export class AdyenDriver implements PaymentsDriver {
    * the two means `payment.succeeded` follows `captureMode`, the same knob
    * {@link AdyenDriver.#mapResultCode} reads.
    */
-  #mapWebhookType(eventCode: string, success: boolean): string {
+  #mapWebhookType(
+    eventCode: string,
+    success: boolean,
+    additional: Record<string, string> | undefined,
+  ): string {
     switch (eventCode) {
       case 'AUTHORISATION':
         if (!success) return 'payment.failed';
@@ -609,36 +615,116 @@ export class AdyenDriver implements PaymentsDriver {
         // A failed refund left the payment where it was; only a successful one refunds it.
         return success ? 'payment.refunded' : 'payment.updated';
       // ── The dispute family ───────────────────────────────────────────────────────────
-      // NOTIFICATION_OF_CHARGEBACK opens the defense period, and for card schemes it
-      // always precedes CHARGEBACK. It does NOT always arrive, though: an ACH return goes
-      // straight to CHARGEBACK with no notification and cannot be defended at all, so
-      // mapping only the notification would miss exactly the disputes nobody can fight.
-      // Both mark the payment disputed; the processor's write is idempotent, so the pair
-      // arriving in order costs one extra upsert and never a wrong status.
+      // Three notifications where Adyen has withdrawn NOTHING yet. A NOTIFICATION_OF_FRAUD
+      // is the issuer's TC40/SAFE alert, a REQUEST_FOR_INFORMATION is the scheme asking a
+      // question, and a NOTIFICATION_OF_CHARGEBACK is a chargeback announced but not yet
+      // taken — Adyen's own table lists "funds withdrawn: no" for all three. Calling any of
+      // them `payment.disputed` moves a paid row over money that is still in the account.
+      //
+      // NOTIFICATION_OF_CHARGEBACK is also where `defensePeriodEndsAt` arrives, and that
+      // deadline is the only thing that makes a dispute actionable: flattening it into an
+      // event with no room for a deadline threw away the field the operator needs.
+      case 'NOTIFICATION_OF_FRAUD':
+      case 'REQUEST_FOR_INFORMATION':
       case 'NOTIFICATION_OF_CHARGEBACK':
+        return 'payment.dispute_warning';
+      // The money is gone. NOTIFICATION_OF_CHARGEBACK does not always precede it — an ACH
+      // return goes straight here with no notification and cannot be defended at all — so
+      // this stands alone rather than assuming a warning arrived first.
       case 'CHARGEBACK':
         return 'payment.disputed';
+      // Defended and the amount returned. Adyen does not call this final, because
+      // pre-arbitration can still follow with a second close carrying the opposite
+      // outcome — but the alternative is emitting nothing for the outcome operators care
+      // about most.
+      case 'CHARGEBACK_REVERSED':
+      case 'PREARBITRATION_WON':
+        return 'payment.dispute_closed';
+      // The issuing bank declined the material submitted during defense, and pre-arbitration
+      // declined. Both are final and both leave the money with the cardholder.
+      case 'SECOND_CHARGEBACK':
+      case 'PREARBITRATION_LOST':
+        return 'payment.dispute_closed';
+      // "Defense period expired or liability accepted" — the outcome is in `disputeStatus`,
+      // not in the event code. Without a status this driver will not guess which, so it
+      // stays an update rather than reporting a loss that might be a win.
+      case 'DISPUTE_DEFENSE_PERIOD_ENDED':
+        return this.#disputeOutcome(additional) === undefined
+          ? 'payment.updated'
+          : 'payment.dispute_closed';
       case 'REFUND_FAILED':
       case 'REFUNDED_REVERSED':
       case 'CANCELLATION':
       case 'CANCEL_OR_REFUND':
-      // The rest of the dispute family is the RESOLUTION — won, lost, or the paperwork
-      // around it — which every gateway reports differently and which this package
-      // deliberately does not name. The ledger records them and `event.raw` carries the
-      // eventCode for a handler to act on.
-      case 'CHARGEBACK_REVERSED':
-      case 'SECOND_CHARGEBACK':
-      case 'PREARBITRATION_WON':
-      case 'PREARBITRATION_LOST':
-      case 'DISPUTE_DEFENSE_PERIOD_ENDED':
-      // Pre-dispute signals: no money moves on either of these. A REQUEST_FOR_INFORMATION
-      // is the scheme asking a question, and NOTIFICATION_OF_FRAUD is a TC40/SAFE alert —
-      // calling either one a chargeback would take a live payment away over a warning.
-      case 'REQUEST_FOR_INFORMATION':
-      case 'NOTIFICATION_OF_FRAUD':
+      // Defense documents uploaded, or Adyen auto-defended. Movement inside an open
+      // dispute, not a resolution of it.
+      case 'INFORMATION_SUPPLIED':
         return 'payment.updated';
       default:
         return eventCode.toLowerCase();
+    }
+  }
+
+  /**
+   * Adyen reports the result of a dispute in `additionalData.disputeStatus`, not in the
+   * event code, for the one event that can mean either — `DISPUTE_DEFENSE_PERIOD_ENDED` is
+   * "expired or liability accepted". `Accepted` and `Undefended` are losses: you did not
+   * defend, so the cardholder keeps the money. Anything unrecognized returns `undefined`
+   * and the caller stays on `payment.updated` rather than reporting a result.
+   */
+  #disputeOutcome(
+    additional: Record<string, string> | undefined,
+  ): 'won' | 'lost' | 'expired' | undefined {
+    switch (additional?.disputeStatus) {
+      case 'Won':
+        return 'won';
+      case 'Lost':
+      case 'Accepted':
+      case 'Undefended':
+        return 'lost';
+      case 'Expired':
+        return 'expired';
+      default:
+        return undefined;
+    }
+  }
+
+  /**
+   * The fields that make a dispute event actionable, added only to the two types that have
+   * room for them. On a dispute notification Adyen's `pspReference` is the DISPUTE's
+   * reference and `originalReference` is the payment's — which is why `gatewayId` above
+   * reads the latter and the dispute id reads the former.
+   */
+  #disputeExtras(item: AdyenNotificationRequestItem, type: string): Record<string, unknown> {
+    if (type === 'payment.dispute_warning') {
+      const endsAt = item.additionalData?.defensePeriodEndsAt;
+      return {
+        ...(item.pspReference !== undefined ? { disputeId: item.pspReference } : {}),
+        // The whole value of the alert. Adyen sends it as ISO 8601 with an offset.
+        ...(endsAt !== undefined ? { actionableUntil: endsAt } : {}),
+      };
+    }
+    if (type === 'payment.dispute_closed') {
+      const outcome = this.#closedOutcome(item);
+      return {
+        ...(item.pspReference !== undefined ? { disputeId: item.pspReference } : {}),
+        ...(outcome !== undefined ? { outcome } : {}),
+      };
+    }
+    return {};
+  }
+
+  /** The event code names the outcome, except for the one that does not. */
+  #closedOutcome(item: AdyenNotificationRequestItem): 'won' | 'lost' | 'expired' | undefined {
+    switch (item.eventCode) {
+      case 'CHARGEBACK_REVERSED':
+      case 'PREARBITRATION_WON':
+        return 'won';
+      case 'SECOND_CHARGEBACK':
+      case 'PREARBITRATION_LOST':
+        return 'lost';
+      default:
+        return this.#disputeOutcome(item.additionalData);
     }
   }
 

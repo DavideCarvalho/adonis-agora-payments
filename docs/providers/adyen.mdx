@@ -76,10 +76,10 @@ throws. Leave it unset and verification is skipped, so local development works w
 Customer Area setup.
 
 Event mapping: `AUTHORISATION`/`CAPTURE` → `payment.succeeded` (or `payment.failed` when
-`success` is `"false"`), `REFUND` → `payment.refunded`, and `CANCELLATION`,
-`CHARGEBACK`, `REFUND_FAILED`, `REFUNDED_REVERSED` and friends → `payment.updated`, since
-this package has no canonical event for them; `event.raw` still carries the `eventCode`
-for an app handler. A modification carries its own `pspReference` and names the payment in
+`success` is `"false"`), `REFUND` → `payment.refunded`, and `CANCELLATION`, `REFUND_FAILED`,
+`REFUNDED_REVERSED` and friends → `payment.updated`, since this package has no canonical
+event for them; `event.raw` still carries the `eventCode` for an app handler. The dispute
+family gets its own treatment — see [Disputes](#disputes). A modification carries its own `pspReference` and names the payment in
 `originalReference`, so `event.data.gatewayId` is the **original** payment — that is the
 row the ledger should move.
 
@@ -182,24 +182,49 @@ contract — call it directly on a manual-capture account.
 
 ## Disputes
 
-Adyen's chargeback flow is a family of notifications with different meanings, and only the
-opening ones move the payment:
+Adyen's chargeback flow is a family of notifications with different meanings, and the line
+that matters runs through the middle of it: **has Adyen taken the money yet.** Adyen's own
+webhook reference answers that per event, and the mapping follows it exactly.
 
-| `eventCode` | Normalized | Why |
+| `eventCode` | Normalized | Funds |
 | --- | --- | --- |
-| `NOTIFICATION_OF_CHARGEBACK` | `payment.disputed` | The scheme has told Adyen a chargeback is incoming; the defense period starts here. |
-| `CHARGEBACK` | `payment.disputed` | The issuer's debit itself. |
-| `CHARGEBACK_REVERSED`, `SECOND_CHARGEBACK`, `PREARBITRATION_WON`, `PREARBITRATION_LOST`, `DISPUTE_DEFENSE_PERIOD_ENDED` | `payment.updated` | The resolution — deliberately not named canonically. |
-| `REQUEST_FOR_INFORMATION`, `NOTIFICATION_OF_FRAUD` | `payment.updated` | Pre-dispute signals. **No money moves**; treating either as a chargeback would take a live payment away over a question. |
+| `NOTIFICATION_OF_FRAUD` | `payment.dispute_warning` | untouched — a TC40/SAFE alert from the issuer |
+| `REQUEST_FOR_INFORMATION` | `payment.dispute_warning` | untouched — the scheme asking a question |
+| `NOTIFICATION_OF_CHARGEBACK` | `payment.dispute_warning` | untouched — a chargeback announced, not yet taken |
+| `CHARGEBACK` | **`payment.disputed`** | withdrawn |
+| `CHARGEBACK_REVERSED`, `PREARBITRATION_WON` | `payment.dispute_closed` (`won`) | returned |
+| `SECOND_CHARGEBACK`, `PREARBITRATION_LOST` | `payment.dispute_closed` (`lost`) | gone |
+| `DISPUTE_DEFENSE_PERIOD_ENDED` | `payment.dispute_closed`, outcome from `disputeStatus` | depends |
+| `INFORMATION_SUPPLIED` | `payment.updated` | untouched — defense documents uploaded |
 
-**Both** opening codes map, not just the notification. For card schemes a
-`NOTIFICATION_OF_CHARGEBACK` is always followed by a `CHARGEBACK`, but an **ACH return goes
-straight to `CHARGEBACK`** with no notification and cannot be defended at all — mapping only
-the notification would miss exactly the disputes nobody can fight. The processor's write is
-idempotent, so the pair arriving in order costs one extra upsert and never a wrong status.
+**`NOTIFICATION_OF_CHARGEBACK` is a warning, not a chargeback.** It used to map to
+`payment.disputed`, which moved a paid row over money still sitting in the account — Adyen
+lists "funds withdrawn: no" for it. It is also the **only** event that carries
+`additionalData.defensePeriodEndsAt`, which the driver surfaces as `actionableUntil` on the
+normalized event. That deadline is what makes a dispute actionable at all, and flattening the
+event into one with no room for it threw the field away.
 
-The event is keyed on `originalReference`, the disputed payment's `pspReference` — the row
-that has to stop saying `paid`. The reason and the defense deadline stay on `event.raw`.
+**`CHARGEBACK` stands alone rather than assuming a warning came first.** For card schemes a
+`NOTIFICATION_OF_CHARGEBACK` does precede it, but an **ACH return goes straight to
+`CHARGEBACK`** with no notification and cannot be defended at all — mapping only the
+notification would miss exactly the disputes nobody can fight.
+
+**`DISPUTE_DEFENSE_PERIOD_ENDED` means "expired or liability accepted"**, and the event code
+alone does not say which. The driver reads `additionalData.disputeStatus`: `Won` → `won`,
+`Lost` / `Accepted` / `Undefended` → `lost` (you did not defend, so the cardholder keeps the
+money), `Expired` → `expired`. With no recognizable status it stays a `payment.updated` —
+reporting a loss that might be a win is worse than reporting nothing.
+
+<Callout title="A close is not always the last word">
+Adyen does not treat `CHARGEBACK_REVERSED` as final: pre-arbitration can follow and send a
+second `payment.dispute_closed` carrying the opposite outcome. The alternative was emitting
+nothing at all for a successful defense, which is the outcome operators most want to hear
+about — so it is reported, and a later close overrides it.
+</Callout>
+
+Every one of these is keyed on `originalReference`, the disputed payment's `pspReference` —
+the row that has to stop saying `paid`. The dispute's own `pspReference` comes through as
+`disputeId`.
 
 ## `idempotencyKey`
 

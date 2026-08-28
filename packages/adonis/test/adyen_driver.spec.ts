@@ -492,7 +492,7 @@ describe('AdyenDriver — webhooks', () => {
 
 describe('AdyenDriver — disputes', () => {
   /** A chargeback notification item; Adyen names the disputed payment in originalReference. */
-  const chargebackItem = (eventCode: string) => ({
+  const chargebackItem = (eventCode: string, additionalData?: Record<string, string>) => ({
     pspReference: '9916158720123456',
     originalReference: '8836158720123456',
     merchantAccountCode: 'TestMerchant',
@@ -500,13 +500,14 @@ describe('AdyenDriver — disputes', () => {
     amount: { currency: 'EUR', value: 1990 },
     eventCode,
     success: 'true',
+    ...(additionalData !== undefined ? { additionalData } : {}),
   });
 
-  it('maps NOTIFICATION_OF_CHARGEBACK onto payment.disputed', () => {
-    const event = makeDriver().parseWebhook(
-      notification(chargebackItem('NOTIFICATION_OF_CHARGEBACK')),
-      {},
-    );
+  it('maps a bare CHARGEBACK onto payment.disputed — the money is gone', () => {
+    // An ACH return goes straight to CHARGEBACK with no notification of chargeback and
+    // cannot be defended at all, so this stands alone rather than assuming a warning came
+    // first.
+    const event = makeDriver().parseWebhook(notification(chargebackItem('CHARGEBACK')), {});
     expect(event.type).toBe('payment.disputed');
     // The row that has to stop saying `paid` is the PAYMENT's, not the notification's.
     expect(event.data).toMatchObject({
@@ -517,29 +518,82 @@ describe('AdyenDriver — disputes', () => {
     });
   });
 
-  it('maps a bare CHARGEBACK onto payment.disputed too', () => {
-    // An ACH return goes straight to CHARGEBACK with no notification of chargeback and
-    // cannot be defended at all — mapping only the notification would miss exactly the
-    // disputes nobody can fight.
-    const event = makeDriver().parseWebhook(notification(chargebackItem('CHARGEBACK')), {});
-    expect(event.type).toBe('payment.disputed');
+  /**
+   * Adyen's own table lists "funds withdrawn: no" for all three. Calling any of them
+   * `payment.disputed` moved a paid row over money still sitting in the account.
+   */
+  it.each(['NOTIFICATION_OF_FRAUD', 'REQUEST_FOR_INFORMATION', 'NOTIFICATION_OF_CHARGEBACK'])(
+    'calls %s a warning, not a dispute',
+    (eventCode) => {
+      const event = makeDriver().parseWebhook(notification(chargebackItem(eventCode)), {});
+      expect(event.type).toBe('payment.dispute_warning');
+    },
+  );
+
+  it('carries the defense deadline off a notification of chargeback', () => {
+    // `defensePeriodEndsAt` arrives here and nowhere else. Flattening this event into one
+    // with no room for a deadline threw away the only field that makes a dispute
+    // actionable.
+    const event = makeDriver().parseWebhook(
+      notification(
+        chargebackItem('NOTIFICATION_OF_CHARGEBACK', {
+          defensePeriodEndsAt: '2026-09-18T10:15:30+01:00',
+        }),
+      ),
+      {},
+    );
+    expect(event.data).toMatchObject({
+      gatewayId: '8836158720123456',
+      // The dispute's own reference, not the payment's.
+      disputeId: '9916158720123456',
+      actionableUntil: '2026-09-18T10:15:30+01:00',
+    });
   });
 
-  it('leaves the resolution and the pre-dispute warnings as payment.updated', () => {
-    for (const eventCode of [
-      'CHARGEBACK_REVERSED',
-      'SECOND_CHARGEBACK',
-      'PREARBITRATION_WON',
-      'PREARBITRATION_LOST',
-      'DISPUTE_DEFENSE_PERIOD_ENDED',
-      // No money moves on either of these; calling them a chargeback would take a live
-      // payment away over a question.
-      'REQUEST_FOR_INFORMATION',
-      'NOTIFICATION_OF_FRAUD',
-    ]) {
-      const event = makeDriver().parseWebhook(notification(chargebackItem(eventCode)), {});
-      expect(event.type, eventCode).toBe('payment.updated');
-    }
+  it.each([
+    ['CHARGEBACK_REVERSED', 'won'],
+    ['PREARBITRATION_WON', 'won'],
+    ['SECOND_CHARGEBACK', 'lost'],
+    ['PREARBITRATION_LOST', 'lost'],
+  ])('closes %s with outcome %s', (eventCode, outcome) => {
+    const event = makeDriver().parseWebhook(notification(chargebackItem(eventCode)), {});
+    expect(event.type).toBe('payment.dispute_closed');
+    expect(event.data).toMatchObject({ outcome });
+  });
+
+  it.each([
+    ['Won', 'won'],
+    ['Lost', 'lost'],
+    // You did not defend, so the cardholder keeps the money. Both are losses.
+    ['Accepted', 'lost'],
+    ['Undefended', 'lost'],
+    ['Expired', 'expired'],
+  ])('reads %s off disputeStatus when the defense period ends', (disputeStatus, outcome) => {
+    const event = makeDriver().parseWebhook(
+      notification(chargebackItem('DISPUTE_DEFENSE_PERIOD_ENDED', { disputeStatus })),
+      {},
+    );
+    expect(event.type).toBe('payment.dispute_closed');
+    expect(event.data).toMatchObject({ outcome });
+  });
+
+  it('will not guess an outcome when the defense period ends with no status', () => {
+    // "Expired or liability accepted" — the event code alone does not say which, and
+    // reporting a loss that might be a win is worse than reporting nothing.
+    const event = makeDriver().parseWebhook(
+      notification(chargebackItem('DISPUTE_DEFENSE_PERIOD_ENDED')),
+      {},
+    );
+    expect(event.type).toBe('payment.updated');
+  });
+
+  it('leaves movement inside an open dispute as payment.updated', () => {
+    // Defense documents uploaded, or Adyen auto-defended. Not a resolution.
+    const event = makeDriver().parseWebhook(
+      notification(chargebackItem('INFORMATION_SUPPLIED')),
+      {},
+    );
+    expect(event.type).toBe('payment.updated');
   });
 });
 

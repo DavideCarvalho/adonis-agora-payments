@@ -97,7 +97,9 @@ Once validated, an event flows through the processor in a strict order:
    the `externalReference` it carried.
 3. **Your business logic runs** — the handler for that event type (see below).
 4. **Marked processed** — only after the handler returns. A throwing handler marks the
-   event `failed` (with the error) and the dispatcher retries it.
+   event `failed` (with the error), the dispatcher retries it, and the route answers `500`
+   so the gateway redelivers too — the in-process retry dies with the process, the gateway's
+   does not. A `failed` row is claimable again, which is what lets either retry re-run it.
 5. **Published** — the normalized business event goes out on the `@adonis-agora/diagnostics`
    bus (`agora:payments:payment.succeeded`, …) and the lifecycle events
    (`webhook.received`/`processed`/`failed`) are emitted.
@@ -105,6 +107,72 @@ Once validated, an event flows through the processor in a strict order:
 Because step 1 happens before step 3, the "already processed" guard is the *outer* defense
 and your own idempotency checks are the *inner* one — a redelivery never even reaches your
 handler.
+
+## One delivery, several events
+
+Most gateways POST one event per request. Two do not: Adyen's envelope is a
+`notificationItems` **array** and Efí's Pix notification is a `pix` **array**. So
+`parseWebhook` may return `WebhookEvent[]` as well as a single `WebhookEvent`, and the
+mounted route loops.
+
+Nothing about the lifecycle above changes — it just runs once **per event**:
+
+- **A ledger row each.** Idempotency is keyed on the gateway event id, so four events in one
+  delivery are four rows. A redelivery of that batch where three were already processed runs
+  only the fourth; the other three short-circuit on the ledger before reaching a handler.
+- **A `webhook.received`/`processed`/`failed` triple each.** A delivery carrying four events
+  never looks like one event on the diagnostics bus.
+- **One `traceId` for the whole delivery.** The trace answers *"what happened to this HTTP
+  request"* — the body that arrived, the signature check over it, the response the gateway
+  got — and those are request-scoped facts. Every event in the batch shares it, and each
+  lifecycle event still carries its own `id`, so you can see both that these four arrived
+  together and what became of each one.
+
+### When one event in a batch fails
+
+Two things have to be true at once, and only one of them is obvious:
+
+1. **The siblings are still attempted.** Event 2 throwing says nothing about events 3 and 4 —
+   they are different payments, and refusing them because a neighbour failed loses money for
+   a reason unrelated to them. The route processes every event and collects the failures.
+2. **The gateway is told to retry.** A `2xx` is a promise that it never has to send this
+   again; answering it over an event that failed is how a payment is lost for good. So a
+   delivery with **any** failed event answers `500`:
+
+```json
+{ "received": true, "processed": 3, "failed": ["evt_2"], "error": "..." }
+```
+
+The redelivery is cheap and safe: the three that succeeded are `processed` in the ledger and
+skip, and only the failed one — whose row is `failed`, which is claimable again — actually
+re-runs. Adyen queues a non-2xx for up to 30 days of retries; Efí makes up to 9 attempts.
+
+<Callout type="warn" title="A rejected delivery is still a 400, not a 500">
+A throw out of `parseWebhook` — a bad signature, an unparsable body, an unknown provider — is
+a **rejected** delivery and keeps answering `400`. It would fail identically on every retry,
+and a forged payload must not be answered with an invitation to send it again. `500` is
+reserved for a delivery that was authentic and failed to *process*.
+</Callout>
+
+### Signatures in a batch
+
+Where a gateway signs **per event**, every event is verified before any of them is mapped.
+Adyen is the case that matters: the HMAC lives inside each item's own
+`additionalData.hmacSignature` and nothing signs the envelope, so verifying the first item
+and trusting the rest would let an attacker append anything beside one genuine notification.
+One bad signature rejects the whole delivery.
+
+Efí signs nothing at all — its authenticity comes from mutual TLS or an `hmac` query
+parameter, both [enforced outside the driver](/docs/payments/providers/efi#webhooks-are-not-authenticated-by-this-driver) —
+so a batch there is exactly as trusted as the transport that carried it, and no more.
+
+<Callout title="Writing a driver? One event is still the normal answer">
+The contract is `WebhookEvent | WebhookEvent[]`, a widening rather than a migration. If your
+gateway sends one event per request, keep returning one — an array of length one adds nothing
+and reads as if batching were possible. If it can send several, give each returned event an
+**id of its own**: reusing one id across the batch makes the second event look like a
+redelivery of the first, and it is silently skipped.
+</Callout>
 
 ## Running your business logic — four options
 

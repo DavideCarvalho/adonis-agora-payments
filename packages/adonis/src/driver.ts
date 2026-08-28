@@ -126,8 +126,9 @@ export interface PaymentsDriver {
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * Verify the webhook signature and normalize the raw payload into a {@link WebhookEvent}.
-   * Throws when the signature is invalid.
+   * Verify the webhook signature and normalize the raw payload into a {@link WebhookEvent},
+   * or into an ARRAY of them when the delivery carries more than one. Throws when the
+   * signature is invalid.
    *
    * May return a promise. Most gateways sign a self-describing payload, so this is a pure
    * function of the body and headers — but not all: Mollie's webhook is a bare payment id
@@ -135,11 +136,36 @@ export interface PaymentsDriver {
    * call is genuine, is an authenticated fetch of that payment. A synchronous signature
    * forced such a driver to report `payment.updated` and nothing else, so the mounted route
    * ledgered the event and never marked the payment paid. The mounted route awaits this.
+   *
+   * **Why the array half exists.** Two gateways put a LIST in the delivery envelope: Adyen's
+   * `notificationItems` and Efí's `pix`. Adyen documents that JSON/HTTP POST webhooks carry a
+   * single item (only the legacy SOAP transport batches, up to six), and Efí sends one Pix in
+   * practice — but "sends one in practice" is a fact about traffic, not about the contract,
+   * and the shape that arrives is a list either way. Returning only the first entry drops
+   * captures, refunds and settled Pix silently, with the money already moved; refusing the
+   * whole delivery loses the entries that were fine. So the contract carries what the
+   * envelope carries, and the mounted route loops.
+   *
+   * **A single event is still the normal answer.** Every other driver returns one
+   * `WebhookEvent` and the union lets it: this is a widening, not a migration. A driver
+   * whose gateway sends one event per request should keep returning one — an array of length
+   * one adds nothing and reads as if batching were possible.
+   *
+   * **Each returned event is independent.** The ledger keys on `WebhookEvent.id`, so every
+   * event in a batch needs an id of its own (Adyen's per-item `pspReference`, Efí's
+   * `endToEndId`) — reusing one id across the batch would make the second event look like a
+   * redelivery of the first and skip it. Idempotency, handlers and retries are all per event,
+   * never per delivery.
+   *
+   * **Verification is per event where the gateway signs per event.** Adyen's HMAC lives in
+   * each item's own `additionalData.hmacSignature`, so a driver that verifies the first item
+   * and trusts the rest is a forgery hole: an attacker replays one genuine item and appends
+   * whatever they like. A driver returning N events must have authenticated all N.
    */
   parseWebhook(
     rawBody: string,
     headers: Record<string, string | string[] | undefined>,
-  ): WebhookEvent | Promise<WebhookEvent>;
+  ): WebhookEvent | WebhookEvent[] | Promise<WebhookEvent | WebhookEvent[]>;
 }
 
 // ── Input types ─────────────────────────────────────────────────────────────────────────

@@ -189,56 +189,107 @@ export default class PaymentsProvider {
     router
       .post('/payments/webhook/:provider', async (ctx: HttpContext) => {
         const manager = await this.app.container.make(PaymentsManager);
-        const provider = String(ctx.params.provider);
-        // One trace per delivery ATTEMPT (a redelivery gets its own id, which is what you
-        // want when the question is "why did the retry behave differently"). Everything
-        // the delivery reaches while inside this frame — the verification report, the
-        // webhook lifecycle events, the business events, any gateway call a handler
-        // makes — is stamped with it, with nothing threaded through by hand.
-        const frame: PaymentsTraceFrame = { traceId: newPaymentsTraceId(), provider };
-        return runWithPaymentsTrace(frame, async () => {
-          const startedAt = Date.now();
-          // The catch below also sees failures from `dispatch`, which happen long after
-          // the delivery was authenticated — one delivery must not report two outcomes.
-          let verificationPublished = false;
-          try {
-            const driver = manager.driver(provider);
-            const rawBody = ctx.request.raw() ?? '';
-            // Awaited: `parseWebhook` may be async. A gateway whose callback carries only an
-            // id (Mollie) has to fetch the payment to know what happened, and that fetch is
-            // also the only thing authenticating the call.
-            //
-            // Dropping this `await` is a compile error, not a silent bug — the contract
-            // returns `WebhookEvent | Promise<WebhookEvent>` and `dispatch` takes the former.
-            const event = await driver.parseWebhook(rawBody, ctx.request.headers());
-            // Reported by the shared `webhook_security` helpers during parseWebhook. No
-            // report means nothing verified through them: the driver used its own SDK, or
-            // it has no webhook credential configured and skipped the check entirely.
-            publishWebhookVerification({
-              provider,
-              ...webhookVerificationOutcome(frame),
-              durationMs: Date.now() - startedAt,
-            });
-            verificationPublished = true;
-            if (this.#webhook) {
-              await this.#webhook.dispatch(event);
-            }
-            return ctx.response.status(200).json({ received: true });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : 'invalid webhook';
-            // A throw before dispatch is a rejected delivery, and the reason is the single
-            // most-wanted fact when a gateway reports failing callbacks.
-            if (!verificationPublished) {
-              publishWebhookVerification({
-                provider,
-                ...webhookVerificationOutcome(frame, message),
-                durationMs: Date.now() - startedAt,
-              });
-            }
-            return ctx.response.status(400).json({ error: message });
-          }
-        });
+        return handleWebhookDelivery(ctx, { manager, dispatcher: this.#webhook });
       })
       .as('payments.webhook');
   }
+}
+
+/**
+ * One webhook delivery, from raw body to HTTP status — the body of the mounted
+ * `POST /payments/webhook/:provider` route.
+ *
+ * Exported so the delivery can be tested for what it actually promises the gateway (the
+ * status code IS the retry instruction) without standing up an application, a router and a
+ * container around it.
+ */
+export async function handleWebhookDelivery(
+  ctx: HttpContext,
+  deps: { manager: PaymentsManager; dispatcher?: WebhookDispatcher | undefined },
+): Promise<unknown> {
+  const provider = String(ctx.params.provider);
+  // ONE trace per delivery ATTEMPT, shared by every event the delivery carries — not one
+  // trace per event.
+  //
+  // The trace answers "what happened to this HTTP request", and the facts it correlates are
+  // request-scoped: the body that arrived, the signature check over it, the response the
+  // gateway got. Minting a trace per event would leave the single `webhook.verification`
+  // report attached to one arbitrary event and orphan the rest, and it would erase the one
+  // thing a batch makes worth knowing — that these four events arrived together, so a
+  // failure that hit all four is one delivery's problem and not four payments' problem.
+  //
+  // Per-event identity is not lost by sharing: `webhook.received`/`processed`/`failed` each
+  // carry the event's own `id` and `type`, and the processor publishes them once per event.
+  // So a delivery of four events is four lifecycle triples under one traceId, which is
+  // exactly what happened — never one event's worth of noise.
+  //
+  // (A redelivery gets its own id, which is what you want when the question is "why did the
+  // retry behave differently".)
+  const frame: PaymentsTraceFrame = { traceId: newPaymentsTraceId(), provider };
+  return runWithPaymentsTrace(frame, async () => {
+    const startedAt = Date.now();
+    // The catch below also sees failures from parsing, which happen before the delivery was
+    // authenticated — one delivery must not report two outcomes.
+    let verificationPublished = false;
+    try {
+      const driver = deps.manager.driver(provider);
+      const rawBody = ctx.request.raw() ?? '';
+      // Awaited: `parseWebhook` may be async. A gateway whose callback carries only an
+      // id (Mollie) has to fetch the payment to know what happened, and that fetch is
+      // also the only thing authenticating the call.
+      //
+      // May be ONE event or SEVERAL: Adyen's `notificationItems` and Efí's `pix` are both
+      // lists. `dispatchAll` takes either, so no driver is forced to wrap its single event
+      // in an array.
+      const parsed = await driver.parseWebhook(rawBody, ctx.request.headers());
+      // Reported by the shared `webhook_security` helpers during parseWebhook. No
+      // report means nothing verified through them: the driver used its own SDK, or
+      // it has no webhook credential configured and skipped the check entirely.
+      publishWebhookVerification({
+        provider,
+        ...webhookVerificationOutcome(frame),
+        durationMs: Date.now() - startedAt,
+      });
+      verificationPublished = true;
+      if (deps.dispatcher) {
+        const result = await deps.dispatcher.dispatchAll(parsed);
+        if (result.failures.length > 0) {
+          // A 2xx tells the gateway "done, never send this again". Answering it over an
+          // event that failed is how a payment is lost for good — Adyen queues a failed
+          // delivery for up to 30 days of retries and Efí makes 9 attempts, and both of
+          // those only ever start if the response is not a 2xx. So a delivery with ANY
+          // failed event is a failed delivery.
+          //
+          // The events that DID succeed are not re-run by that redelivery: their ledger
+          // rows are `processed`, so the claim answers `null` and they skip. The gateway
+          // resending all four costs one redelivery and re-runs exactly the one that failed.
+          const failed = result.failures.map((failure) => failure.event.id);
+          return ctx.response.status(500).json({
+            received: true,
+            // What the delivery actually did, rather than a bare error — an operator reading
+            // the gateway's failed-delivery log needs to know the other three landed.
+            processed: result.dispatched,
+            failed,
+            error: result.failures[0]?.error.message ?? 'webhook processing failed',
+          });
+        }
+      }
+      return ctx.response.status(200).json({ received: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'invalid webhook';
+      // A throw out of `parseWebhook` is a REJECTED delivery — a bad signature, an
+      // unparsable body, an unknown provider — and the reason is the single most-wanted
+      // fact when a gateway reports failing callbacks. It stays a 400: unlike a processing
+      // failure, redelivering it would fail identically, and a forged batch must not be
+      // answered with an invitation to send it again.
+      if (!verificationPublished) {
+        publishWebhookVerification({
+          provider,
+          ...webhookVerificationOutcome(frame, message),
+          durationMs: Date.now() - startedAt,
+        });
+      }
+      return ctx.response.status(400).json({ error: message });
+    }
+  });
 }

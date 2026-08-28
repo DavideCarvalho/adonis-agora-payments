@@ -394,15 +394,29 @@ export class EfiDriver implements PaymentsDriver {
     });
   }
 
+  /**
+   * Normalize an Efí Pix notification into one event per Pix in the delivery.
+   *
+   * **Batches.** The body's `pix` key is an array. Efí's reference shows one entry in every
+   * example and never states a maximum, and in practice one notification carries one Pix —
+   * but the shape is a list, so this reads all of it and returns one {@link WebhookEvent}
+   * per entry. A single entry still returns a single event, not an array of one. Efí retries
+   * a non-2xx up to 9 times on a progressive backoff, which is what makes the route's
+   * "any failure means a non-2xx" answer actually redeliver a Pix that failed to process.
+   */
   parseWebhook(
     rawBody: string,
     _headers: Record<string, string | string[] | undefined>,
-  ): WebhookEvent {
+  ): WebhookEvent | WebhookEvent[] {
     // NOTHING IS VERIFIED HERE, and that is not an oversight. Efí's Pix notification
     // carries no signature header: authenticity is meant to come from the mutual TLS
     // handshake at your edge, or from an `hmac` query parameter — and a query parameter is
     // part of the URL, which this method never sees (the route hands it the body and the
     // headers only). See the Efí provider docs for where to enforce it instead.
+    //
+    // Note what this means for a batch: with nothing signing the body, there is no per-entry
+    // signature to check either, so unlike Adyen there is no per-item verification to get
+    // right — the whole delivery is as trusted as the transport that carried it, and no more.
     let payload: { pix?: unknown; evento?: unknown };
     try {
       payload = JSON.parse(rawBody) as { pix?: unknown; evento?: unknown };
@@ -429,16 +443,26 @@ export class EfiDriver implements PaymentsDriver {
     if (!Array.isArray(list) || list.length === 0) {
       throw new Error('[payments] Efí webhook has an empty `pix` array — nothing to process.');
     }
-    if (list.length > 1) {
-      // A `WebhookEvent` is one event. Reporting only the first Pix of a batch would drop
-      // the rest silently, with the money already received — so this fails loudly instead.
-      const txids = (list as EfiPixNotification[]).map((pix) => pix.txid ?? pix.endToEndId);
-      throw new Error(
-        `[payments] Efí sent ${list.length} Pix in one notification (${txids.join(', ')}), and a webhook event carries one payment. None were processed — reconcile them with \`GET /v2/pix\` before retrying.`,
-      );
-    }
 
-    const pix = list[0] as EfiPixNotification;
+    // One event per Pix, each keyed on its own endToEndId, so the ledger gives each one its
+    // own row: a redelivery of the batch re-runs only the entries that have not been
+    // processed, and a batch where one entry fails does not re-grant the ones that did not.
+    const events = (list as EfiPixNotification[]).map((pix) =>
+      this.#mapPixNotification(pix, payload),
+    );
+    return events.length === 1 ? events[0]! : events;
+  }
+
+  /** One entry of the `pix` array → one normalized event. */
+  #mapPixNotification(
+    pix: EfiPixNotification,
+    payload: { pix?: unknown; evento?: unknown },
+  ): WebhookEvent {
+    // The envelope narrowed to THIS Pix rather than the whole delivery: the ledger stores
+    // `raw` per event, and a row holding the whole batch could not say which entry it is
+    // about. Still a valid Efí notification body, and identical to the delivery for a
+    // single entry.
+    const raw = { ...payload, pix: [pix] } as Record<string, unknown>;
     const devolucoes = pix.devolucoes ?? [];
     // A Pix cannot be charged back — but it CAN be taken back. The Banco Central's MED
     // returns money to a payer who reported fraud or an operational failure, and it reaches
@@ -482,7 +506,7 @@ export class EfiDriver implements PaymentsDriver {
           // No `actionableUntil`: the API Pix devolução carries no deadline field, and by
           // the time a MED reaches the receiver as a devolução the analysis is over.
         },
-        raw: payload as Record<string, unknown>,
+        raw,
       };
     }
 
@@ -493,7 +517,7 @@ export class EfiDriver implements PaymentsDriver {
       type: refunded ? 'payment.refunded' : 'payment.succeeded',
       createdAt: pix.horario ?? new Date().toISOString(),
       data,
-      raw: payload as Record<string, unknown>,
+      raw,
     };
   }
 

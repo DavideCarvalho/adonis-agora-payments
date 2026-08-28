@@ -30,12 +30,6 @@ per-gateway matrix.
   to be that object, the mapping is mechanical — `chargeId` → `gatewayId`, `responseDeadline` →
   `actionableUntil`, the terminal statuses → `payment.dispute_closed`. One logged payload from a
   live account closes this, and the deadline is close.
-- **Batched webhook notifications.** `parseWebhook` returns a single event, while Adyen's
-  `notificationItems` and Efí's Pix array can both carry several. Both drivers refuse a batch
-  loudly rather than processing the first and dropping the rest, which is the safe half of the
-  answer. The real fix is `WebhookEvent | WebhookEvent[]` on the contract with the dispatcher
-  looping — Adyen documents one item per JSON webhook and Efí sends one in practice, so this has
-  never fired, but "has never fired" is not "cannot".
 
 - **Subscription amounts on Stripe.** `updateSubscription` takes an amount, a description and
   metadata. Asaas and AbacatePay apply the amount and the description; Stripe applies the

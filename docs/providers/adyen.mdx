@@ -85,16 +85,26 @@ row the ledger should move.
 
 ### Two things to know about the mounted route
 
-- **Batches.** Adyen's notification envelope is a `notificationItems` array, and
-  `parseWebhook` returns a single `WebhookEvent`. JSON/HTTP POST webhooks send one item
-  per request in practice, so this normally never comes up — but if more than one arrives,
-  the driver **throws** rather than processing the first and silently dropping a capture
-  or a refund.
+- **Batches, and the per-item HMAC.** Adyen's notification envelope is a
+  `notificationItems` array and **each item carries its own `additionalData.hmacSignature`** —
+  nothing signs the envelope. So the driver verifies *every* item before mapping *any* of
+  them, and returns one `WebhookEvent` per item; the mounted route loops, giving each event
+  its own ledger row. Adyen documents that JSON and HTTP POST webhooks carry a single item
+  (only the legacy SOAP transport batches, up to six when events land in rapid succession),
+  so in practice you get one event — but the array is read in full, not truncated to its
+  first entry.
+
+  A forged item is not partially accepted. One bad signature anywhere in the array rejects
+  the whole delivery with `400` and nothing is processed, because verifying the first item
+  and trusting the rest is a replay hole: an attacker appends whatever they like beside one
+  genuine notification.
 - **`[accepted]`.** Adyen's webhook docs ask for a `200` whose body is `[accepted]`; the
   package's mounted `/payments/webhook/:provider` route answers `200 {"received": true}`.
   Current Adyen documentation says a `2xx` is what it needs, so this should be fine — but
   if your account is configured to require the literal body, mount your own route for
-  Adyen.
+  Adyen. A delivery whose processing **failed** answers `500` instead, which is what puts it
+  in Adyen's retry queue — three attempts at 9/18/27 seconds, then up to 30 days of
+  increasing intervals.
 
 ## What it refuses
 

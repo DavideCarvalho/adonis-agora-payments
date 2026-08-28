@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EfiDriver } from '../src/drivers/efi.js';
+import type { WebhookEvent } from '../src/types.js';
 
 interface Call {
   url: string;
@@ -575,14 +576,32 @@ describe('EfiDriver webhooks', () => {
     expect(event.id).toBe('E1:devolvido');
   });
 
-  it('refuses a batched notification loudly rather than dropping the rest', () => {
+  it('returns one event per Pix in a batched notification', () => {
+    // Efí sends one entry in practice, but `pix` is an array in the schema — and a Pix that
+    // arrived is money that arrived, so none of them may be dropped.
     const raw = JSON.stringify({
       pix: [
         { endToEndId: 'E1', txid: 'tx1', valor: '1.00' },
         { endToEndId: 'E2', txid: 'tx2', valor: '2.00' },
       ],
     });
-    expect(() => makeDriver(fn).parseWebhook(raw, {})).toThrow(/tx1, tx2/);
+    const events = makeDriver(fn).parseWebhook(raw, {}) as WebhookEvent[];
+    expect(Array.isArray(events)).toBe(true);
+    expect(events.map((event) => event.id)).toEqual(['E1', 'E2']);
+    expect(events.map((event) => event.type)).toEqual(['payment.succeeded', 'payment.succeeded']);
+    expect(events.map((event) => (event.data as { gatewayId: string }).gatewayId)).toEqual([
+      'tx1',
+      'tx2',
+    ]);
+    // Each event's `raw` is the envelope narrowed to its own Pix.
+    expect(events.map((event) => (event.raw as { pix: unknown[] }).pix.length)).toEqual([1, 1]);
+  });
+
+  it('still returns a single event, not an array of one, for a one-Pix notification', () => {
+    const raw = JSON.stringify({ pix: [{ endToEndId: 'E1', txid: 'tx1', valor: '1.00' }] });
+    const event = makeDriver(fn).parseWebhook(raw, {});
+    expect(Array.isArray(event)).toBe(false);
+    expect((event as WebhookEvent).id).toBe('E1');
   });
 
   it('answers the registration probe with an inert event instead of throwing', () => {

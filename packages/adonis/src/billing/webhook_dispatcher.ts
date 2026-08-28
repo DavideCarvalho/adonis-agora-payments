@@ -55,6 +55,28 @@ export interface DurableWorkflowLike {
   dispatch(input: { event: WebhookEvent }): Promise<{ runId: string }>;
 }
 
+/** One event of a delivery that did not get through, and why. */
+export interface WebhookDeliveryFailure {
+  event: WebhookEvent;
+  error: Error;
+}
+
+/**
+ * What became of one webhook DELIVERY — which may carry several events (Adyen's
+ * `notificationItems`, Efí's `pix` array).
+ *
+ * The route turns this into the HTTP status: any failure at all means a non-2xx, because
+ * a 2xx is a promise to the gateway that it never has to send this again.
+ */
+export interface WebhookDeliveryResult {
+  /** How many events the delivery carried. */
+  total: number;
+  /** How many were processed (in-process) or accepted by durable/queue. */
+  dispatched: number;
+  /** The ones that threw, in delivery order. Empty on a clean delivery. */
+  failures: WebhookDeliveryFailure[];
+}
+
 /**
  * Runs webhook events through the {@link WebhookProcessor}. In `auto` mode (the default)
  * it tries to import `@adonis-agora/durable` lazily — only when the app has it installed
@@ -85,6 +107,53 @@ export class WebhookDispatcher {
    * or fully processed (in-process).
    */
   async dispatch(event: WebhookEvent): Promise<{ runId?: string }> {
+    const { runId } = await this.#dispatchOne(event);
+    return runId !== undefined ? { runId } : {};
+  }
+
+  /**
+   * Dispatch a whole DELIVERY: one event, or the several a batched envelope carried.
+   *
+   * **The loop lives here, not in the route.** Everything it has to get right — the ledger
+   * claim, the retry policy, which backend runs the work — is already this class's job; the
+   * route's job is to turn the outcome into a status code. It also makes the batch testable
+   * without standing up an HTTP context.
+   *
+   * **Sequential, deliberately.** Two events in one envelope routinely touch the same row
+   * (an Adyen AUTHORISATION and its CAPTURE; a Pix and its devolução), and running them
+   * concurrently would race the ledger claim and the payment upsert against each other,
+   * which is how you get a `paid` row overwritten by the `pending` that preceded it. The
+   * gateway's order is the order the money moved in, so it is the order they run in.
+   *
+   * **One failure does not cancel its siblings.** Event 2 of 4 throwing says nothing about
+   * events 3 and 4 — they are different payments, and refusing to process them because a
+   * neighbour failed loses money for a reason unrelated to them. So every event is attempted
+   * and the failures are COLLECTED. The caller is then responsible for the other half:
+   * reporting a non-2xx so the gateway redelivers, since a 200 tells it the failed one is
+   * done and it is never sent again. The redelivery re-runs only the failed event — the
+   * ledger claims a `failed` row again, while the ones that succeeded answer `null` and skip.
+   */
+  async dispatchAll(events: WebhookEvent | WebhookEvent[]): Promise<WebhookDeliveryResult> {
+    const list = Array.isArray(events) ? events : [events];
+    const failures: WebhookDeliveryFailure[] = [];
+    let dispatched = 0;
+    for (const event of list) {
+      try {
+        const { error } = await this.#dispatchOne(event);
+        if (error !== undefined) failures.push({ event, error });
+        else dispatched += 1;
+      } catch (thrown) {
+        // The durable/queue path throws rather than reporting (an unreachable engine, a
+        // workflow that will not build). Caught here for the same reason as above: the
+        // remaining events still deserve their attempt.
+        failures.push({ event, error: asError(thrown) });
+      }
+    }
+    return { total: list.length, dispatched, failures };
+  }
+
+  /** One event through the active backend. Durable/queue may throw; in-process reports. */
+  async #dispatchOne(event: WebhookEvent): Promise<{ runId?: string; error?: Error }> {
     if (await this.#useDurable()) {
       const workflow = await this.#resolveDurable();
       const { runId } = await workflow.dispatch({ event });
@@ -156,8 +225,14 @@ export class WebhookDispatcher {
    * In-process fallback: run through the processor, retrying with exponential backoff on
    * failure (up to `#maxAttempts`). Retries run in the background — the first attempt is
    * awaited so the webhook endpoint can respond.
+   *
+   * The failure is REPORTED as well as retried. The background retry lives and dies with
+   * this process, so a crash between the failure and the retry loses the event outright;
+   * the gateway's own redelivery is the only durable retry there is, and it only happens if
+   * the route answers non-2xx. Both run, and the ledger keeps that safe: whichever attempt
+   * claims the `failed` row first does the work, and the other short-circuits on the claim.
    */
-  async #processWithRetry(event: WebhookEvent): Promise<{ runId?: string }> {
+  async #processWithRetry(event: WebhookEvent): Promise<{ runId?: string; error?: Error }> {
     try {
       await this.#processor.process(event);
       return {};
@@ -165,7 +240,7 @@ export class WebhookDispatcher {
       // Retry in the background (don't block the webhook response). The processor itself
       // publishes `webhook.failed` on the diagnostics channel.
       void this.#retry(event, 2);
-      return {};
+      return { error: asError(error) };
     }
   }
 
@@ -183,4 +258,9 @@ export class WebhookDispatcher {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** A thrown value as an `Error` — a handler may throw a string, and the message is the point. */
+function asError(thrown: unknown): Error {
+  return thrown instanceof Error ? thrown : new Error(String(thrown));
 }

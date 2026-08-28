@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AdyenDriverConfig } from '../src/drivers/adyen.js';
 import { AdyenDriver } from '../src/drivers/adyen.js';
+import type { WebhookEvent } from '../src/types.js';
 
 /**
  * The HMAC key and the REPORT_AVAILABLE signature below are Adyen's own published test
@@ -471,16 +472,81 @@ describe('AdyenDriver — webhooks', () => {
     expect((event.data as { externalReference: string }).externalReference).toBe('order:local:1');
   });
 
-  it('refuses a batched notification instead of processing one item and dropping the rest', () => {
-    const driver = makeDriver();
+  it('returns one event per notification item, each verified under its own signature', () => {
+    // Adyen documents one item per JSON webhook, but the envelope is an array and each item
+    // carries its OWN hmacSignature. Both signatures below are the pinned vectors for their
+    // own item, so this is what a genuine two-item delivery looks like.
+    const driver = makeDriver({ hmacKey: HMAC_KEY });
     const raw = JSON.stringify({
       live: 'false',
       notificationItems: [
-        { NotificationRequestItem: authorisationItem },
-        { NotificationRequestItem: { ...authorisationItem, eventCode: 'CAPTURE' } },
+        {
+          NotificationRequestItem: {
+            ...authorisationItem,
+            additionalData: { hmacSignature: AUTHORISATION_SIGNATURE },
+          },
+        },
+        {
+          NotificationRequestItem: {
+            pspReference: '9916158720123456',
+            originalReference: '8836158720123456',
+            merchantAccountCode: 'TestMerchant',
+            merchantReference: 'order_local_1',
+            amount: { currency: 'EUR', value: 1990 },
+            eventCode: 'REFUND',
+            success: 'true',
+            additionalData: { hmacSignature: REFUND_SIGNATURE },
+          },
+        },
       ],
     });
-    expect(() => driver.parseWebhook(raw, {})).toThrow(/2 notification items/);
+    const events = driver.parseWebhook(raw, {}) as WebhookEvent[];
+    expect(Array.isArray(events)).toBe(true);
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => event.type)).toEqual(['payment.succeeded', 'payment.refunded']);
+    // Distinct ids, or the ledger would take the second for a redelivery of the first and
+    // skip the refund entirely.
+    expect(new Set(events.map((event) => event.id)).size).toBe(2);
+    // Each event's `raw` is the envelope narrowed to its own item — the ledger row has to
+    // say which notification it is about.
+    for (const event of events) {
+      expect((event.raw as { notificationItems: unknown[] }).notificationItems).toHaveLength(1);
+    }
+  });
+
+  it('rejects the whole delivery when the SECOND item carries a forged signature', () => {
+    // The replay a per-request check would wave through: item 1 is genuine, and item 2 is
+    // whatever the attacker likes, wearing item 1's real signature. Verifying only the first
+    // item accepts both.
+    const driver = makeDriver({ hmacKey: HMAC_KEY });
+    const raw = JSON.stringify({
+      live: 'false',
+      notificationItems: [
+        {
+          NotificationRequestItem: {
+            ...authorisationItem,
+            additionalData: { hmacSignature: AUTHORISATION_SIGNATURE },
+          },
+        },
+        {
+          NotificationRequestItem: {
+            ...authorisationItem,
+            pspReference: '0000000000000000',
+            merchantReference: 'order_forged',
+            amount: { currency: 'EUR', value: 999_999 },
+            additionalData: { hmacSignature: AUTHORISATION_SIGNATURE },
+          },
+        },
+      ],
+    });
+    expect(() => driver.parseWebhook(raw, {})).toThrow(/Invalid Adyen webhook HMAC signature/);
+  });
+
+  it('still returns a single event, not an array of one, for a one-item delivery', () => {
+    const driver = makeDriver();
+    const event = driver.parseWebhook(notification(authorisationItem), {});
+    expect(Array.isArray(event)).toBe(false);
+    expect((event as WebhookEvent).type).toBe('payment.succeeded');
   });
 
   it('skips verification when no HMAC key is configured, so local development works', () => {

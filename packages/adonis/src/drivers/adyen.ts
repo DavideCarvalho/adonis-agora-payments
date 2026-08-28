@@ -503,7 +503,7 @@ export class AdyenDriver implements PaymentsDriver {
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * Verify Adyen's HMAC and normalize one notification.
+   * Verify Adyen's HMAC and normalize the delivery into one event per notification item.
    *
    * The signature covers eight fields of the notification item, colon-joined in a fixed
    * order with empty strings for the absent ones, HMAC-SHA256 under the **hex-decoded**
@@ -512,29 +512,52 @@ export class AdyenDriver implements PaymentsDriver {
    * escaping — the `\` → `\\`, `:` → `\:` rule belongs to the classic HPP/dictionary
    * signature, not to this one — so this does the same, and a merchant reference
    * containing a colon signs identically here and at Adyen.
+   *
+   * **The signature is PER ITEM, not per request.** Adyen's reference is explicit that for
+   * standard webhooks the signature is provided inside each notification's `additionalData`
+   * (only some other webhook families sign the request as a whole, in a header), and its own
+   * PHP sample loops the array calling `isValidNotificationHMAC` on every item. Nothing
+   * signs the envelope, so an attacker holding one genuine item can append any items they
+   * like beside it — verifying the first and trusting the rest would accept every one of
+   * them. Every item is verified, before any of them is mapped, and one bad signature
+   * rejects the whole delivery: mapping is pointless work once the body is known to be
+   * partly forged, and a 400 is the honest answer to a request that was tampered with.
+   *
+   * **Batches.** Adyen documents that JSON and HTTP POST webhooks carry a single
+   * notification item, and that only the legacy SOAP transport may batch (up to six items
+   * when events land in rapid succession). This driver speaks JSON, so the array is one item
+   * in practice — but it is an array in the schema, so the driver reads all of it and
+   * returns one {@link WebhookEvent} per item. A single item still returns a single event,
+   * not an array of one.
    */
   parseWebhook(
     rawBody: string,
     _headers: Record<string, string | string[] | undefined>,
-  ): WebhookEvent {
+  ): WebhookEvent | WebhookEvent[] {
     const payload = JSON.parse(rawBody) as AdyenNotification;
     const items = payload.notificationItems ?? [];
     if (items.length === 0) {
       throw new Error('[payments] Adyen webhook carried no notificationItems.');
     }
-    if (items.length > 1) {
-      // Adyen batches; `parseWebhook` returns one event. Dropping the rest would lose
-      // captures and refunds silently, so this refuses instead.
-      throw new Error(
-        `[payments] Adyen sent ${items.length} notification items in one request and the driver contract normalizes one event per request. Configure the webhook to send JSON/HTTP POST notifications (one item per request) rather than batched SOAP.`,
-      );
-    }
-    const item = items[0]!.NotificationRequestItem;
 
+    // Pass one: authenticate everything. Kept separate from the mapping below so that no
+    // future edit can reorder its way into building events out of unverified items.
     if (this.#hmacKey !== undefined) {
-      this.#verifyHmac(item, this.#hmacKey);
+      for (const entry of items) {
+        this.#verifyHmac(entry.NotificationRequestItem, this.#hmacKey);
+      }
     }
 
+    // Pass two: normalize. Each item becomes an event with its own id, so the ledger gives
+    // each one its own row and a redelivery re-runs only what has not been processed.
+    const events = items.map((entry) =>
+      this.#mapNotification(entry.NotificationRequestItem, payload),
+    );
+    return events.length === 1 ? events[0]! : events;
+  }
+
+  /** One `NotificationRequestItem` → one normalized event. Assumes it has been verified. */
+  #mapNotification(item: AdyenNotificationRequestItem, payload: AdyenNotification): WebhookEvent {
     // A modification (CAPTURE, REFUND, CANCELLATION) carries its own pspReference and
     // names the payment in `originalReference` — the payment is what the ledger routes on.
     const paymentReference = item.originalReference ?? item.pspReference ?? '';
@@ -556,7 +579,14 @@ export class AdyenDriver implements PaymentsDriver {
         ...(item.reason !== undefined && item.reason !== '' ? { reason: item.reason } : {}),
         ...this.#disputeExtras(item, type),
       },
-      raw: payload as unknown as Record<string, unknown>,
+      // The envelope narrowed to THIS item, rather than the whole delivery. The ledger
+      // stores `raw` per event, and a row holding all four notifications could not say
+      // which one it is about — while this shape is still a valid Adyen payload, so the
+      // dashboard can replay the row. Identical to the delivery body for a single item.
+      raw: {
+        ...payload,
+        notificationItems: [{ NotificationRequestItem: item }],
+      } as unknown as Record<string, unknown>,
     };
   }
 

@@ -149,11 +149,18 @@ trailing parameter is why the URL above looks the way it does. Registration also
 URL with a body that has no `pix` array; the driver answers it with an inert event so the
 registration succeeds instead of erroring.
 
-<Callout type="warn" title="A batched notification is refused, loudly">
-The payload is a `pix` **array**. Efí sends one entry in practice, but a `WebhookEvent`
-carries one payment, so a notification with several would mean quietly dropping money that
-has already arrived. The driver throws instead, naming every txid in the batch, and nothing
-is processed — reconcile them with `GET /v2/pix` before retrying.
+<Callout title="The `pix` array is read in full">
+The payload's `pix` key is an **array**. Efí's reference shows one entry in every example
+and never states a maximum, and one notification carries one Pix in practice — but the shape
+is a list, so the driver returns one `WebhookEvent` per entry, each keyed on its own
+`endToEndId`. The mounted route dispatches them one at a time, so every Pix gets its own
+ledger row: a redelivery re-runs only the entries that have not been processed, and one entry
+failing does not re-grant the ones that succeeded.
+
+If an entry does fail, the route answers `500` rather than `200` — Efí retries a non-2xx up
+to 9 times on a progressive backoff (immediate, then 5 minutes, out to 160), and that
+redelivery is the only thing that gets the failed Pix processed. A `200` would tell Efí it is
+done.
 </Callout>
 
 <Callout type="warn" title="Not yet run against a live account">

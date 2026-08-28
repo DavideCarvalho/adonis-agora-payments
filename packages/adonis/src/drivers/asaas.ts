@@ -56,7 +56,17 @@ interface AsaasPaymentResponse {
     /** The three chargeback states of a payment, in the order Asaas moves through them. */
     | 'CHARGEBACK_REQUESTED'
     | 'CHARGEBACK_DISPUTE'
-    | 'AWAITING_CHARGEBACK_REVERSAL';
+    | 'AWAITING_CHARGEBACK_REVERSAL'
+    /** Confirmed by hand in the Asaas UI: the customer paid the merchant in cash. */
+    | 'RECEIVED_IN_CASH'
+    /** A refund asked for, and a refund scheduled. Neither has settled. */
+    | 'REFUND_REQUESTED'
+    | 'REFUND_IN_PROGRESS'
+    /** Negativação: the debt went to a credit bureau, and was then paid through it. */
+    | 'DUNNING_REQUESTED'
+    | 'DUNNING_RECEIVED'
+    /** A card charge held for Asaas' manual risk review. */
+    | 'AWAITING_RISK_ANALYSIS';
   dueDate: string;
   description?: string;
   invoiceUrl?: string;
@@ -459,6 +469,26 @@ export class AsaasDriver implements PaymentsDriver {
       CHARGEBACK_REQUESTED: 'disputed',
       CHARGEBACK_DISPUTE: 'disputed',
       AWAITING_CHARGEBACK_REVERSAL: 'disputed',
+      // The two ways an Asaas charge is paid without Asaas moving the money. Both fell
+      // through to the `pending` default, so a customer who had paid — in cash at the
+      // counter, or through the credit bureau after being negativado — read as never
+      // having paid, and stayed locked out of what they bought. `RECEIVED_IN_CASH`
+      // deliberately generates no balance in the Asaas account; that is a reconciliation
+      // question, not an entitlement one.
+      RECEIVED_IN_CASH: 'paid',
+      DUNNING_RECEIVED: 'paid',
+      // A refund that has been asked for or scheduled, and has settled in neither case.
+      // `pending` claimed the charge was never paid, and `refunded` would write off money
+      // that is still in the account — Asaas can deny a refund (`PAYMENT_REFUND_DENIED`).
+      // It stays `paid` until `REFUNDED` says otherwise.
+      REFUND_REQUESTED: 'paid',
+      REFUND_IN_PROGRESS: 'paid',
+      // Overdue and escalated to a credit bureau. Still unpaid, same as OVERDUE.
+      DUNNING_REQUESTED: 'failed',
+      // Held for manual risk review: nothing is captured, and Asaas' own docs say to wait
+      // before releasing the product. `pending` is right — it is spelled out because the
+      // default silently agreed by accident.
+      AWAITING_RISK_ANALYSIS: 'pending',
     };
     const method = this.#mapMethodToType(data.billingType);
     const result: Payment = {
@@ -524,7 +554,16 @@ export class AsaasDriver implements PaymentsDriver {
       case 'PAYMENT_RECEIVED':
       case 'PAYMENT_CONFIRMED':
         return 'payment.succeeded';
+      // Negativação paid: the customer settled through the credit bureau. Money arrived,
+      // and this fell through to the unknown branch — so the one event announcing that a
+      // written-off debt came back ran no sync at all.
+      case 'PAYMENT_DUNNING_RECEIVED':
+        return 'payment.succeeded';
       case 'PAYMENT_OVERDUE':
+      // The card was refused at capture, and the manual risk review rejected it. Both are
+      // the charge failing, and both used to arrive as an unrecognized type.
+      case 'PAYMENT_CREDIT_CARD_CAPTURE_REFUSED':
+      case 'PAYMENT_REPROVED_BY_RISK_ANALYSIS':
         return 'payment.failed';
       case 'PAYMENT_REFUNDED':
         return 'payment.refunded';
@@ -544,6 +583,29 @@ export class AsaasDriver implements PaymentsDriver {
       // "dispute lost" webhook at all: that shows up as `chargeback.status` on the payment.
       case 'PAYMENT_CHARGEBACK_DISPUTE':
       case 'PAYMENT_AWAITING_CHARGEBACK_REVERSAL':
+      // A partial refund is deliberately NOT `payment.refunded`. That handler overwrites
+      // the row's status with `refunded` and its amount with the refunded amount, so a
+      // R$10 refund on a R$100 charge would erase R$90 of revenue. Until the tables carry
+      // a refunded amount this stays an update and the arithmetic stays right — see the
+      // roadmap.
+      case 'PAYMENT_PARTIALLY_REFUNDED':
+      // Asked for, scheduled, denied. No money has moved back on any of the three; only
+      // `PAYMENT_REFUNDED` means it did.
+      case 'PAYMENT_REFUND_IN_PROGRESS':
+      case 'PAYMENT_REFUND_DENIED':
+      // Manual risk review, start to finish. Approval is not receipt — the charge still
+      // has to be confirmed — so neither end of it grants anything.
+      case 'PAYMENT_AWAITING_RISK_ANALYSIS':
+      case 'PAYMENT_APPROVED_BY_RISK_ANALYSIS':
+      // The debt was sent to a credit bureau. Nothing was paid; the charge is still overdue.
+      case 'PAYMENT_DUNNING_REQUESTED':
+      // A cash receipt confirmed by hand and then taken back. The payment reverts to
+      // unpaid, and the synced row follows the payload's own status — which is why this is
+      // an update rather than a refund: Asaas never held the money.
+      case 'PAYMENT_RECEIVED_IN_CASH_UNDONE':
+      // Deleted and restored are the charge existing or not, not money moving.
+      case 'PAYMENT_DELETED':
+      case 'PAYMENT_RESTORED':
         return 'payment.updated';
       case 'SUBSCRIPTION_CREATED':
         return 'subscription.created';

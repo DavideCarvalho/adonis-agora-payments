@@ -75,8 +75,36 @@ it rather than waiting for a webhook that never comes.
 
 `PAYMENT_DUNNING_REQUESTED` and `PAYMENT_DUNNING_RECEIVED` are **not** disputes — that is
 *negativação*, registering a defaulting payer with a credit bureau, which is the opposite
-end of the story from money being pulled back. They are left unmapped rather than filed
-as one.
+end of the story from money being pulled back.
+
+## Statuses that mean the money arrived
+
+Two Asaas statuses are a paid charge without Asaas ever moving the money, and both used to
+read as unpaid:
+
+| Status | Maps to | Why |
+| --- | --- | --- |
+| `RECEIVED_IN_CASH` | **`paid`** | Confirmed by hand in the Asaas UI — the customer paid you in cash. It generates no balance in the Asaas account, which is a reconciliation question, not an entitlement one: they paid. |
+| `DUNNING_RECEIVED` | **`paid`** | The debt was settled through the credit bureau. `PAYMENT_DUNNING_RECEIVED` normalizes to `payment.succeeded`, so the row syncs and your handler runs. |
+
+And the ones that look like money moving and are not:
+
+| Status | Maps to | Why |
+| --- | --- | --- |
+| `REFUND_REQUESTED`, `REFUND_IN_PROGRESS` | `paid` | Asked for and scheduled. Neither has settled, and Asaas can still deny a refund (`PAYMENT_REFUND_DENIED`). Only `REFUNDED` means the money went back. |
+| `DUNNING_REQUESTED` | `failed` | Overdue and escalated to a credit bureau. Nothing was paid. |
+| `AWAITING_RISK_ANALYSIS` | `pending` | Held for Asaas' manual card review. Their own guidance is to wait before releasing the product. |
+
+`PAYMENT_PARTIALLY_REFUNDED` normalizes to **`payment.updated`**, deliberately not
+`payment.refunded`: the refund handler overwrites the row's status with `refunded` and its
+amount with the refunded amount, so a R$10 refund on a R$100 charge would drop R$90 of
+revenue rather than subtract R$10. Until the billing tables carry a refunded amount, an
+update is the arithmetic-safe half — the partial amount is in `payload`.
+
+`PAYMENT_CREDIT_CARD_CAPTURE_REFUSED` and `PAYMENT_REPROVED_BY_RISK_ANALYSIS` both
+normalize to `payment.failed`. `PAYMENT_RECEIVED_IN_CASH_UNDONE` — a cash confirmation
+taken back — is a `payment.updated` rather than a refund: Asaas never held the money, so
+there is nothing to refund. The synced row follows the payload's own status.
 
 ## Pre-authorized cards
 

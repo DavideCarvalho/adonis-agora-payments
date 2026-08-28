@@ -348,6 +348,75 @@ describe('AsaasDriver', () => {
     expect(event.type).toBe('payment.updated');
   });
 
+  // ── Statuses Asaas has and the driver did not ──────────────────────────────────────
+
+  /**
+   * Every one of these fell through to the `pending` default. Two of them are money that
+   * ARRIVED, which is the expensive direction: a customer who paid in cash at the counter,
+   * or who settled through the credit bureau after being negativado, read as never having
+   * paid — and stayed locked out of what they had bought.
+   */
+  it.each([
+    ['RECEIVED_IN_CASH', 'paid'],
+    ['DUNNING_RECEIVED', 'paid'],
+    ['REFUND_REQUESTED', 'paid'],
+    ['REFUND_IN_PROGRESS', 'paid'],
+    ['DUNNING_REQUESTED', 'failed'],
+    ['AWAITING_RISK_ANALYSIS', 'pending'],
+  ])('reports an Asaas %s payment as %s', async (asaasStatus, expected) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(paymentIn(asaasStatus))));
+    try {
+      expect((await makeDriver().findPayment('pay_cb'))?.status).toBe(expected);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('syncs a negativação payment through to paid, not just to a known event name', async () => {
+    const driver = makeOpenDriver();
+    const store = new InMemoryBillingStore();
+    await store.savePayment({
+      gatewayId: 'pay_cb',
+      provider: 'asaas',
+      status: 'pending',
+      amount: 1990,
+      currency: 'brl',
+      customerId: 'cus_1',
+    });
+
+    const event = driver.parseWebhook(
+      JSON.stringify({
+        event: 'PAYMENT_DUNNING_RECEIVED',
+        payment: paymentIn('DUNNING_RECEIVED'),
+      }),
+      {},
+    );
+    await new WebhookProcessor({ store, driver }).process(event);
+
+    expect((await store.findPaymentByGatewayId('pay_cb'))?.status).toBe('paid');
+  });
+
+  it.each([
+    ['PAYMENT_CREDIT_CARD_CAPTURE_REFUSED', 'FAILED'],
+    ['PAYMENT_REPROVED_BY_RISK_ANALYSIS', 'FAILED'],
+  ])('maps %s to payment.failed', (event, status) => {
+    expect(
+      makeOpenDriver().parseWebhook(JSON.stringify({ event, payment: paymentIn(status) }), {}).type,
+    ).toBe('payment.failed');
+  });
+
+  it('does not report a partial refund as a refund', () => {
+    // `payment.refunded` overwrites the stored row's status with `refunded` AND its amount
+    // with the refunded amount, and `revenue()` sums rows that are `paid` — so routing a
+    // R$10 refund on a R$100 charge here would drop R$90 of revenue rather than subtract
+    // R$10. Until the tables carry a refunded amount, an update is the arithmetic-safe half.
+    const event = makeOpenDriver().parseWebhook(
+      JSON.stringify({ event: 'PAYMENT_PARTIALLY_REFUNDED', payment: paymentIn('RECEIVED') }),
+      {},
+    );
+    expect(event.type).toBe('payment.updated');
+  });
+
   // ── Idempotency ────────────────────────────────────────────────────────────────────
 
   it('refuses an idempotencyKey on every operation Asaas cannot deduplicate', async () => {

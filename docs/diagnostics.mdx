@@ -20,9 +20,10 @@ The catalog spans three layers, and the distinction matters for how you react:
   a charge is created, `charge.refunded`, `subscription.created`/`canceled`,
   `invoice.emitted`. They describe what the app *did*.
 - **Business** events fire when a *webhook confirms a state change* — `payment.succeeded`,
-  `payment.failed`, `payment.refunded`, `payment.updated`, `subscription.updated`. They
-  describe what the gateway *says happened*. These are the ones webhook handlers and
-  notification flows react to.
+  `payment.failed`, `payment.refunded`, `payment.disputed`, `payment.dispute_warning`,
+  `payment.dispute_closed`, `payment.updated`, `subscription.updated`. They describe what the
+  gateway *says happened*. These are the ones webhook handlers and notification flows react
+  to.
 - **Debug** events exist for the developer holding one broken payment, not for a
   dashboard — `gateway.request`/`gateway.request.failed` (what was actually sent to the
   gateway, what came back, how long it took) and `webhook.verification` (whether the
@@ -39,6 +40,9 @@ The catalog spans three layers, and the distinction matters for how you react:
 | `payment.succeeded` | business | a webhook confirmed a payment | gatewayId, provider, amount, currency, externalReference |
 | `payment.failed` | business | a webhook confirmed a failed payment | gatewayId, provider, amount, currency, reason, externalReference |
 | `payment.refunded` | business | a webhook confirmed a refund | gatewayId, provider, amount, currency |
+| `payment.disputed` | business | a chargeback was filed — the money is going back | gatewayId, provider, amount, currency |
+| `payment.dispute_warning` | business | a pre-dispute alert; **no money has moved yet** | gatewayId, provider, reason, actionableUntil |
+| `payment.dispute_closed` | business | a dispute reached its outcome | gatewayId, provider, disputeId, outcome, amount, currency |
 | `payment.updated` | business | a webhook reported a payment update | gatewayId, provider, status |
 | `invoice.emitted` | gateway-action | an invoice was emitted | gatewayId, provider, number, url |
 | `webhook.received` | lifecycle | a gateway webhook arrived | id, provider, type |

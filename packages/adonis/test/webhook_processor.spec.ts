@@ -15,6 +15,113 @@ function makeEvent(overrides: Partial<WebhookEvent> = {}): WebhookEvent {
   };
 }
 
+/** A payment already sitting at `disputed`, which is where a chargeback leaves it. */
+async function storeWithDisputedPayment() {
+  const store = new InMemoryBillingStore();
+  await store.savePayment({
+    gatewayId: 'pi_1',
+    provider: 'stripe',
+    status: 'disputed',
+    amount: 1000,
+    currency: 'brl',
+    customerId: 'cus_1',
+  });
+  return store;
+}
+
+describe('WebhookProcessor disputes', () => {
+  /**
+   * A won dispute returns the money, and the row has been at `disputed` since the chargeback
+   * arrived. `revenue()` sums rows that are `paid`, so leaving it there writes off money that
+   * came back.
+   */
+  it('puts a won dispute back to paid', async () => {
+    const store = await storeWithDisputedPayment();
+    await new WebhookProcessor({ store, driver: new FakePaymentsDriver() }).process(
+      makeEvent({
+        id: 'evt_won',
+        type: 'payment.dispute_closed',
+        data: { gatewayId: 'pi_1', disputeId: 'dp_1', outcome: 'won' },
+      }),
+    );
+    const row = await store.findPaymentByGatewayId('pi_1');
+    expect(row?.status).toBe('paid');
+    // The row keeps what it had; a dispute payload names no customer.
+    expect(row?.customerId).toBe('cus_1');
+    expect(row?.amount).toBe(1000);
+  });
+
+  it.each(['lost', 'expired', 'canceled'])(
+    'leaves a %s dispute where the chargeback left it',
+    async (outcome) => {
+      // `canceled` is the cardholder withdrawing, and on Stripe a withdrawn dispute still has
+      // to be closed in your favour with evidence — counting it as settled would book revenue
+      // the acquirer has not returned.
+      const store = await storeWithDisputedPayment();
+      await new WebhookProcessor({ store, driver: new FakePaymentsDriver() }).process(
+        makeEvent({
+          id: `evt_${outcome}`,
+          type: 'payment.dispute_closed',
+          data: { gatewayId: 'pi_1', outcome },
+        }),
+      );
+      expect((await store.findPaymentByGatewayId('pi_1'))?.status).toBe('disputed');
+    },
+  );
+
+  it('refuses a close that carries no outcome', async () => {
+    // A driver that cannot read the outcome is supposed to emit `payment.updated`. Defaulting
+    // here would report a result the gateway never sent.
+    const store = await storeWithDisputedPayment();
+    await expect(
+      new WebhookProcessor({ store, driver: new FakePaymentsDriver() }).process(
+        makeEvent({
+          id: 'evt_nooutcome',
+          type: 'payment.dispute_closed',
+          data: { gatewayId: 'pi_1' },
+        }),
+      ),
+    ).rejects.toThrow(/carries no outcome/);
+    expect((await store.findPaymentByGatewayId('pi_1'))?.status).toBe('disputed');
+  });
+
+  it('writes nothing for a warning — no money has moved', async () => {
+    const store = new InMemoryBillingStore();
+    await store.savePayment({
+      gatewayId: 'pi_1',
+      provider: 'stripe',
+      status: 'paid',
+      amount: 1000,
+      currency: 'brl',
+    });
+    const processed = await new WebhookProcessor({
+      store,
+      driver: new FakePaymentsDriver(),
+    }).process(
+      makeEvent({
+        id: 'evt_warn',
+        type: 'payment.dispute_warning',
+        data: { gatewayId: 'pi_1', reason: 'fraudulent', actionableUntil: '2026-09-18T00:00:00Z' },
+      }),
+    );
+    expect(processed).toBe(true);
+    // A payment that says `paid` while an inquiry is open is telling the truth.
+    expect((await store.findPaymentByGatewayId('pi_1'))?.status).toBe('paid');
+  });
+
+  it('does not resurrect a won dispute on a payment that was never stored', async () => {
+    const store = new InMemoryBillingStore();
+    await new WebhookProcessor({ store, driver: new FakePaymentsDriver() }).process(
+      makeEvent({
+        id: 'evt_won_unknown',
+        type: 'payment.dispute_closed',
+        data: { gatewayId: 'pi_unknown', outcome: 'won' },
+      }),
+    );
+    expect(await store.findPaymentByGatewayId('pi_unknown')).toBeNull();
+  });
+});
+
 describe('WebhookProcessor', () => {
   it('persists a succeeded payment', async () => {
     const store = new InMemoryBillingStore();

@@ -40,3 +40,30 @@ describe('api-reference domain unions', () => {
     ).toEqual(inCode);
   });
 });
+
+/**
+ * The diagnostics page is a table of every event on the bus, and it is the only place an
+ * app author learns one exists. `payment.disputed` was published by the processor for weeks
+ * without ever appearing there — an event nobody can subscribe to because nobody knows its
+ * name is the same as an event that does not exist.
+ */
+describe('diagnostics documentation', () => {
+  it('documents every event on the bus', async () => {
+    const [source, docs] = await Promise.all([
+      readFile(fileURLToPath(new URL('../src/diagnostics.ts', import.meta.url)), 'utf-8'),
+      readFile(fileURLToPath(new URL('../../../docs/diagnostics.mdx', import.meta.url)), 'utf-8'),
+    ]);
+
+    const block = source.split('PAYMENTS_DIAGNOSTIC_EVENTS = [')[1]?.split(']')[0] ?? '';
+    const published = [...block.matchAll(/'([a-z]+\.[a-z_.]+)'/g)].map((m) => m[1] as string);
+    expect(published.length, 'no events parsed — did the constant move?').toBeGreaterThan(1);
+
+    // The table's first cell, so a passing mention in prose does not count as documented.
+    const rows = [...docs.matchAll(/^\| `([a-z]+\.[a-z_.]+)` \|/gm)].map((m) => m[1] as string);
+    const missing = published.filter((event) => !rows.includes(event));
+    expect(
+      missing,
+      `published on the bus but absent from the table in docs/diagnostics.mdx: ${missing.join(', ')}`,
+    ).toEqual([]);
+  });
+});

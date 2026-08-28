@@ -2,7 +2,11 @@ import { publishPayments } from '../diagnostics.js';
 import type { PaymentsDriver } from '../driver.js';
 import type { WebhookEvent } from '../types.js';
 import type { BillingStore } from './billing_store.js';
-import { isPaymentWebhookData, isSubscriptionWebhookData } from './webhook_events.js';
+import {
+  isDisputeWebhookData,
+  isPaymentWebhookData,
+  isSubscriptionWebhookData,
+} from './webhook_events.js';
 
 /**
  * A handler for a gateway webhook event type (e.g. `'invoice.payment_succeeded'`).
@@ -103,6 +107,10 @@ export class WebhookProcessor {
         return this.#onPaymentRefunded(event);
       case 'payment.disputed':
         return this.#onPaymentDisputed(event);
+      case 'payment.dispute_warning':
+        return this.#onDisputeWarning(event);
+      case 'payment.dispute_closed':
+        return this.#onDisputeClosed(event);
 
       case 'subscription.created':
       case 'subscription.updated':
@@ -241,6 +249,82 @@ export class WebhookProcessor {
       provider: event.provider,
       amount,
       currency,
+    });
+  }
+
+  /**
+   * A pre-dispute alert: a Stripe inquiry or early fraud warning, an Adyen notification of
+   * chargeback or fraud. **Nothing is written.** No money has moved, so a payment that says
+   * `paid` is telling the truth, and the one useful thing to do with the alert is put it in
+   * front of somebody while a refund still prevents the chargeback.
+   *
+   * That is what the diagnostics publish is for — and until this method existed, the event
+   * was declared on the bus with a payload type and published by nothing at all.
+   */
+  async #onDisputeWarning(event: WebhookEvent): Promise<void> {
+    if (!isDisputeWebhookData(event.data)) {
+      throw new Error(
+        `[payments] Malformed payment.dispute_warning payload for event ${event.id}.`,
+      );
+    }
+    const { gatewayId, reason, actionableUntil } = event.data;
+    publishPayments('payment.dispute_warning', {
+      gatewayId,
+      provider: event.provider,
+      ...(reason !== undefined ? { reason } : {}),
+      ...(actionableUntil !== undefined ? { actionableUntil } : {}),
+    });
+  }
+
+  /**
+   * A dispute reaching its outcome. A WON dispute returns the money, and the row has been
+   * sitting at `disputed` since the chargeback arrived — `revenue()` sums rows that are
+   * `paid`, so leaving it there writes off money that came back.
+   *
+   * Only `won` moves it. `lost` and `expired` are money that is gone, and `canceled` — the
+   * cardholder withdrawing — is deliberately NOT treated as a win: on Stripe a withdrawn
+   * dispute still has to be closed in your favour with evidence, so calling it settled would
+   * count revenue the acquirer has not returned. Understating is the safe direction here.
+   */
+  async #onDisputeClosed(event: WebhookEvent): Promise<void> {
+    if (!isDisputeWebhookData(event.data)) {
+      throw new Error(`[payments] Malformed payment.dispute_closed payload for event ${event.id}.`);
+    }
+    const { gatewayId, disputeId, outcome, amount, currency } = event.data;
+    // A close with no outcome is not a close. Defaulting it — to `lost`, to anything —
+    // would report a result the gateway never sent, which is the failure this whole event
+    // exists to avoid: a driver that cannot read the outcome is supposed to emit
+    // `payment.updated` instead.
+    if (outcome === undefined) {
+      throw new Error(
+        `[payments] payment.dispute_closed for event ${event.id} carries no outcome. A driver that cannot read one must emit payment.updated instead.`,
+      );
+    }
+    const existing = await this.#store.findPaymentByGatewayId(gatewayId);
+
+    if (outcome === 'won' && existing !== null && existing.status === 'disputed') {
+      await this.#store.savePayment({
+        gatewayId,
+        provider: event.provider,
+        status: 'paid',
+        // The dispute's amount can differ from the charge's — a partial dispute, or a
+        // currency conversion between the charge and the chargeback. The ROW keeps the
+        // amount it was charged for; the dispute's own figure stays on the payload.
+        amount: existing.amount,
+        currency: existing.currency,
+        ...(existing.customerId !== null ? { customerId: existing.customerId } : {}),
+        ...(existing.subscriptionId !== null ? { subscriptionId: existing.subscriptionId } : {}),
+        payload: event.raw,
+      });
+    }
+
+    publishPayments('payment.dispute_closed', {
+      gatewayId,
+      provider: event.provider,
+      disputeId: disputeId ?? gatewayId,
+      outcome,
+      ...(amount !== undefined ? { amount } : {}),
+      ...(currency !== undefined ? { currency } : {}),
     });
   }
 

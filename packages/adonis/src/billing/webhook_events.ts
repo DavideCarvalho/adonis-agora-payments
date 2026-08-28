@@ -69,6 +69,30 @@ export function isPaymentWebhookData(data: unknown): data is PaymentWebhookData 
   );
 }
 
+/**
+ * A dispute event's `data`. Deliberately looser than {@link PaymentWebhookData}: a dispute
+ * alert does not always carry an amount. Stripe's early fraud warning object has no amount
+ * or currency at all — it names a charge and a fraud type — and refusing it for that would
+ * throw away the earliest warning the library gets.
+ */
+export interface DisputeWebhookData {
+  /** The PAYMENT's gateway id, not the dispute's — the row this is about. */
+  gatewayId: string;
+  disputeId?: string;
+  reason?: string;
+  /** When the window to respond closes. The whole value of a warning. */
+  actionableUntil?: string;
+  outcome?: 'won' | 'lost' | 'canceled' | 'expired';
+  amount?: number;
+  currency?: string;
+}
+
+/** Guard: is this event's `data` shaped like a dispute event? */
+export function isDisputeWebhookData(data: unknown): data is DisputeWebhookData {
+  if (typeof data !== 'object' || data === null) return false;
+  return typeof (data as Record<string, unknown>).gatewayId === 'string';
+}
+
 /** Guard: is this event's `data` shaped like a subscription event? */
 export function isSubscriptionWebhookData(data: unknown): data is SubscriptionWebhookData {
   if (typeof data !== 'object' || data === null) return false;

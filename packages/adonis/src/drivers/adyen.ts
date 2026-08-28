@@ -15,6 +15,8 @@ import type { EmitInvoiceContext } from '../invoice/emit_invoice.js';
 import type {
   CheckoutSession,
   Customer,
+  Dispute,
+  DisputeEvidence,
   Invoice,
   Money,
   Payment,
@@ -142,8 +144,22 @@ export class AdyenDriver implements PaymentsDriver {
    * does not front, and the `PaymentMethodName` union has no name for them anyway.
    */
   readonly supportedMethods = ['credit_card', 'undefined'] as const;
-  /** No invoice resource in the Checkout API, and no subscription resource anywhere. */
-  readonly capabilities = { refunds: true, invoices: false, subscriptions: false };
+  /**
+   * No invoice resource in the Checkout API, and no subscription resource anywhere.
+   *
+   * `disputes: false` is deliberate and is NOT "Adyen has no dispute API" — it has one,
+   * Defend Disputes v30, and this driver cannot honestly drive it through the shared
+   * contract: v30 has no endpoint that reads a dispute back, and a defense is a
+   * scheme-specific `defenseReasonCode` plus base64 documents, none of which
+   * `DisputeEvidence` can carry. `findDispute` and `submitDisputeEvidence` below say so
+   * in full rather than leaving a caller with a missing method.
+   */
+  readonly capabilities = {
+    disputes: false,
+    refunds: true,
+    invoices: false,
+    subscriptions: false,
+  };
 
   #baseUrl: string;
   #apiKey: string;
@@ -421,6 +437,66 @@ export class AdyenDriver implements PaymentsDriver {
     throw new Error(
       '[payments] Adyen Checkout has no invoice resource. Configure an `invoice` provider ' +
         'and pass `invoice: true` on the charge if you need a fiscal document.',
+    );
+  }
+
+  // ── Disputes ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Adyen has no endpoint that reads a dispute back, so this refuses instead of inventing
+   * one.
+   *
+   * Defend Disputes v30 is five POSTs — `retrieveApplicableDefenseReasons`,
+   * `supplyDefenseDocument`, `defendDispute`, `acceptDispute`,
+   * `deleteDisputeDefenseDocument` — and every one of them is an action. None returns the
+   * dispute's status, amount, reason or deadline, which means a `Dispute` built here would
+   * have those fields invented.
+   */
+  async findDispute(_disputeGatewayId: string): Promise<Dispute | null> {
+    throw new Error(
+      '[payments] Adyen has no endpoint that reads a dispute back. Defend Disputes v30 ' +
+        'exposes only actions (retrieveApplicableDefenseReasons, supplyDefenseDocument, ' +
+        'defendDispute, acceptDispute, deleteDisputeDefenseDocument) — none of them ' +
+        'returns the dispute — so its status, amount and deadline would be invented here. ' +
+        'The dispute you have is the webhook: NOTIFICATION_OF_CHARGEBACK carries the ' +
+        'reason, the amount and `additionalData.defensePeriodEndsAt`, which this driver ' +
+        'already surfaces as `payment.dispute_warning` with `actionableUntil`. Store that ' +
+        'row; the Customer Area dispute report is the only other source.',
+    );
+  }
+
+  /**
+   * A defense at Adyen cannot be expressed as a {@link DisputeEvidence}, so this refuses
+   * and says what to call instead.
+   *
+   * Adyen's flow is `retrieveApplicableDefenseReasons` → `supplyDefenseDocument` (once per
+   * document) → `defendDispute`, and it turns on a **`defenseReasonCode`** the scheme
+   * defines per reason code — there is no free-text evidence object anywhere in it. The
+   * shared shape has no field for that code, no way to carry a document's bytes
+   * (`documentIds` are ids Adyen never issues; v30 takes base64 `content` plus
+   * `contentType` and `defenseDocumentTypeCode` inline), and no home at all for
+   * `explanation`, `receiptUrl` or the customer fields. Mapping it anyway would drop the
+   * defense reason, which is the entire defense.
+   *
+   * Two more things a mapping would have to paper over, both real: the API lives on a
+   * different host from Checkout v71 (`ca-{test,live}.adyen.com/ca/services/DisputeService
+   * /v30`, which this driver's `#request` does not reach), and it needs an API credential
+   * with the "API dispute management" role, which the Checkout key usually is not.
+   */
+  async submitDisputeEvidence(
+    _disputeGatewayId: string,
+    _evidence: DisputeEvidence,
+  ): Promise<Dispute> {
+    throw new Error(
+      '[payments] Adyen cannot be sent a `DisputeEvidence`. Defending a dispute there is ' +
+        'three POSTs to https://ca-test.adyen.com/ca/services/DisputeService/v30 ' +
+        '(`ca-live` in production): retrieveApplicableDefenseReasons, then ' +
+        'supplyDefenseDocument for each required document, then defendDispute. It requires ' +
+        'a scheme-specific `defenseReasonCode` and documents as base64 `content` + ' +
+        '`contentType` + `defenseDocumentTypeCode`, and it has no free-text evidence field ' +
+        'at all — so any mapping from `DisputeEvidence` would drop the defense reason and ' +
+        'submit a defense the scheme rejects. Call the Disputes API directly, with an API ' +
+        'credential holding the "API dispute management" role.',
     );
   }
 

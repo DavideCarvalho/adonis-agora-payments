@@ -1,18 +1,22 @@
 import type { NormalizeConstructor } from '@adonisjs/core/types/helpers';
 import { DateTime } from 'luxon';
-import type {
-  BillingCountQuery,
-  BillingListQuery,
-  BillingStore,
-  CustomerListItem,
-  PaymentListItem,
-  SubscriptionListItem,
-  WebhookEventBreakdownLine,
-  WebhookEventListItem,
+import {
+  type BillingCountQuery,
+  type BillingListQuery,
+  type BillingStore,
+  type CustomerListItem,
+  type DisputeDeadlineQuery,
+  type DisputeListItem,
+  OPEN_DISPUTE_STATUSES,
+  type PaymentListItem,
+  type SubscriptionListItem,
+  type WebhookEventBreakdownLine,
+  type WebhookEventListItem,
 } from './billing_store.js';
 import { clampLimit, clampOffset } from './list_query.js';
 import {
   BillingCustomer as DefaultCustomer,
+  BillingDispute as DefaultDispute,
   BillingPayment as DefaultPayment,
   BillingSubscription as DefaultSubscription,
   BillingUsageEvent as DefaultUsageEvent,
@@ -29,6 +33,7 @@ export interface BillingModels {
   paymentModel?: NormalizeConstructor<typeof DefaultPayment>;
   webhookEventModel?: NormalizeConstructor<typeof DefaultWebhookEvent>;
   usageEventModel?: NormalizeConstructor<typeof DefaultUsageEvent>;
+  disputeModel?: NormalizeConstructor<typeof DefaultDispute>;
 }
 
 /** Lucid hands back Luxon `DateTime`s; the read SPI speaks plain `Date`. */
@@ -53,6 +58,52 @@ function toCount(rows: unknown): number {
 }
 
 /**
+ * The instant a deadline query looks up to: `now + withinHours`.
+ *
+ * There is no lower bound on purpose. A deadline that has already PASSED is still open and
+ * still unanswered, and excluding it would make the alert go quiet at exactly the moment it
+ * became true.
+ */
+function deadlineCutoff(query: { withinHours: number; now?: Date }): Date {
+  const now = query.now ?? new Date();
+  return new Date(now.getTime() + query.withinHours * 3_600_000);
+}
+
+/** One dispute row, normalized for reading. `amount` stays integer minor units. */
+function disputeItem(row: {
+  id: string;
+  gatewayId: string;
+  paymentGatewayId: string;
+  provider: string;
+  status: string;
+  reason: string | null;
+  amount: number | null;
+  currency: string | null;
+  evidenceDueBy: DateTime | null;
+  outcome: string | null;
+  openedAt: DateTime | null;
+  closedAt: DateTime | null;
+  createdAt: DateTime;
+}): DisputeListItem {
+  return {
+    id: String(row.id),
+    gatewayId: row.gatewayId,
+    paymentGatewayId: row.paymentGatewayId,
+    provider: row.provider,
+    status: row.status,
+    reason: row.reason ?? null,
+    // `bigint` comes back as a STRING on Postgres, like every other amount in this store.
+    amount: row.amount === null || row.amount === undefined ? null : Number(row.amount),
+    currency: row.currency ?? null,
+    evidenceDueBy: toDate(row.evidenceDueBy),
+    outcome: row.outcome ?? null,
+    openedAt: toDate(row.openedAt),
+    closedAt: toDate(row.closedAt),
+    createdAt: toDate(row.createdAt),
+  };
+}
+
+/**
  * The normalized event, as a jsonb-storable value.
  *
  * Drivers normalize onto object shapes (`PaymentWebhookData`, `SubscriptionWebhookData`), but
@@ -71,6 +122,7 @@ type SubscriptionInstance = InstanceType<typeof DefaultSubscription>;
 type PaymentInstance = InstanceType<typeof DefaultPayment>;
 type WebhookEventInstance = InstanceType<typeof DefaultWebhookEvent>;
 type UsageEventInstance = InstanceType<typeof DefaultUsageEvent>;
+type DisputeInstance = InstanceType<typeof DefaultDispute>;
 
 /**
  * Lucid implementation of {@link BillingStore}. Resolves the models passed in (defaulting
@@ -84,7 +136,8 @@ export class LucidBillingStore
       PaymentInstance,
       WebhookEventInstance,
       UsageEventInstance,
-      CustomerInstance
+      CustomerInstance,
+      DisputeInstance
     >
 {
   /**
@@ -108,6 +161,7 @@ export class LucidBillingStore
   #paymentModel: typeof DefaultPayment;
   #webhookEventModel: typeof DefaultWebhookEvent;
   #usageEventModel: typeof DefaultUsageEvent;
+  #disputeModel: typeof DefaultDispute;
 
   constructor(models: BillingModels = {}) {
     this.#customerModel = (models.customerModel ?? DefaultCustomer) as typeof DefaultCustomer;
@@ -118,9 +172,13 @@ export class LucidBillingStore
       DefaultWebhookEvent) as typeof DefaultWebhookEvent;
     this.#usageEventModel = (models.usageEventModel ??
       DefaultUsageEvent) as typeof DefaultUsageEvent;
+    this.#disputeModel = (models.disputeModel ?? DefaultDispute) as typeof DefaultDispute;
   }
 
-  async #hasColumn(model: typeof DefaultPayment | typeof DefaultWebhookEvent, column: string) {
+  async #hasColumn(
+    model: typeof DefaultPayment | typeof DefaultWebhookEvent | typeof DefaultDispute,
+    column: string,
+  ) {
     const key = `${model.table}.${column}`;
     let answer = this.#columnCache.get(key);
     if (answer === undefined) {
@@ -128,6 +186,35 @@ export class LucidBillingStore
         .query()
         .client.columnsInfo(model.table)
         .then((columns) => Object.hasOwn(columns as Record<string, unknown>, column))
+        .catch(() => true);
+      this.#columnCache.set(key, answer);
+    }
+    return answer;
+  }
+
+  /**
+   * Does this install have the `billing_disputes` table at all?
+   *
+   * Same question as {@link LucidBillingStore.hasColumn}, one level up, and for the same
+   * reason: `billing_disputes` arrives in a THIRD migration (`add_billing_disputes`), so an
+   * app that upgrades the package before running it has a processor that wants to write
+   * disputes and no table to write them to. The dispute row is ADDITIONAL — the payment row
+   * still moves, the diagnostics still publish — so a missing table skips the write and
+   * every dispute read answers empty, rather than failing every gateway delivery with
+   * `relation "billing_disputes" does not exist` until someone notices.
+   *
+   * Reuses the column cache and the column probe: `columnsInfo` on a table that does not
+   * exist yields no columns at all. A probe that itself fails answers "present", so the real
+   * query then says exactly what is wrong.
+   */
+  async #hasDisputesTable(): Promise<boolean> {
+    const key = `${this.#disputeModel.table}.*`;
+    let answer = this.#columnCache.get(key);
+    if (answer === undefined) {
+      answer = this.#disputeModel
+        .query()
+        .client.columnsInfo(this.#disputeModel.table)
+        .then((columns) => Object.keys(columns as Record<string, unknown>).length > 0)
         .catch(() => true);
       this.#columnCache.set(key, answer);
     }
@@ -340,6 +427,133 @@ export class LucidBillingStore
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
     if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
+    return toCount(await builder);
+  }
+
+  async saveDispute(dispute: {
+    gatewayId: string;
+    paymentGatewayId: string;
+    provider: string;
+    status: string;
+    reason?: string | null;
+    amount?: number | null;
+    currency?: string | null;
+    evidenceDueBy?: Date | null;
+    outcome?: string | null;
+    openedAt?: Date | null;
+    closedAt?: Date | null;
+    payload?: Record<string, unknown>;
+  }): Promise<DisputeInstance | null> {
+    if (!(await this.#hasDisputesTable())) return null;
+    const existing = await this.findDisputeByGatewayId(dispute.gatewayId);
+    const row = (existing ?? new this.#disputeModel()) as DisputeInstance;
+    row.gatewayId = dispute.gatewayId;
+    row.paymentGatewayId = dispute.paymentGatewayId;
+    row.provider = dispute.provider;
+    row.status = dispute.status;
+    // A new row starts with every optional column explicitly `null` rather than absent, so a
+    // reader never has to tell "the gateway sent nothing" apart from "the column was omitted".
+    if (existing === null) {
+      row.reason = null;
+      row.amount = null;
+      row.currency = null;
+      row.evidenceDueBy = null;
+      row.outcome = null;
+      row.closedAt = null;
+      row.payload = {};
+    }
+    // Absent does NOT erase: the event that OPENS a dispute carries the deadline and the
+    // reason, and the one that CLOSES it carries neither. Blanking them on the close would
+    // destroy the only record of the window that was answered. `null` still clears.
+    if (dispute.reason !== undefined) row.reason = dispute.reason;
+    if (dispute.amount !== undefined) row.amount = dispute.amount;
+    if (dispute.currency !== undefined) row.currency = dispute.currency;
+    if (dispute.evidenceDueBy !== undefined) {
+      row.evidenceDueBy = dispute.evidenceDueBy ? DateTime.fromJSDate(dispute.evidenceDueBy) : null;
+    }
+    if (dispute.outcome !== undefined) row.outcome = dispute.outcome;
+    if (dispute.closedAt !== undefined) {
+      row.closedAt = dispute.closedAt ? DateTime.fromJSDate(dispute.closedAt) : null;
+    }
+    // `openedAt` is when the dispute FIRST reached us and is never moved afterwards: a later
+    // event re-stamping it would make every dispute look brand new and destroy the only
+    // measure of how long one has been open.
+    if (existing === null || existing.openedAt === null) {
+      row.openedAt = dispute.openedAt ? DateTime.fromJSDate(dispute.openedAt) : DateTime.now();
+    }
+    if (dispute.payload !== undefined) row.payload = dispute.payload;
+    await row.save();
+    return row;
+  }
+
+  async findDisputeByGatewayId(gatewayId: string): Promise<DisputeInstance | null> {
+    if (!(await this.#hasDisputesTable())) return null;
+    return (await this.#disputeModel.findBy('gateway_id', gatewayId)) as DisputeInstance | null;
+  }
+
+  async findOpenDisputeByPayment(paymentGatewayId: string): Promise<DisputeInstance | null> {
+    if (!(await this.#hasDisputesTable())) return null;
+    const row = await this.#disputeModel
+      .query()
+      .where('payment_gateway_id', paymentGatewayId)
+      .whereIn('status', [...OPEN_DISPUTE_STATUSES])
+      .orderBy('created_at', 'desc')
+      .first();
+    return row as DisputeInstance | null;
+  }
+
+  async listDisputes(query: BillingListQuery): Promise<DisputeListItem[]> {
+    if (!(await this.#hasDisputesTable())) return [];
+    const builder = this.#disputeModel.query().orderBy('created_at', 'desc');
+    if (query.status !== undefined) builder.where('status', query.status);
+    if (query.provider !== undefined) builder.where('provider', query.provider);
+    const rows = (await builder
+      .limit(clampLimit(query.limit))
+      .offset(clampOffset(query.offset))) as DisputeInstance[];
+    return rows.map(disputeItem);
+  }
+
+  async countDisputes(query: BillingCountQuery): Promise<number> {
+    if (!(await this.#hasDisputesTable())) return 0;
+    const builder = this.#disputeModel.query().count('* as total').pojo();
+    if (query.status !== undefined) builder.where('status', query.status);
+    if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
+    if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
+    return toCount(await builder);
+  }
+
+  async listDisputesDueWithin(query: DisputeDeadlineQuery): Promise<DisputeListItem[]> {
+    if (!(await this.#hasDisputesTable())) return [];
+    const builder = this.#disputeModel
+      .query()
+      .whereIn('status', [...OPEN_DISPUTE_STATUSES])
+      // Explicit, though `<=` would already exclude NULLs: a gateway that sent no deadline
+      // gives nothing to be late for, and the reader should not have to know SQL's NULL rules
+      // to be sure of that.
+      .whereNotNull('evidence_due_by')
+      .where('evidence_due_by', '<=', deadlineCutoff(query))
+      // Soonest first — the priority order, not the arrival order. The only list in this store
+      // that is not newest-first.
+      .orderBy('evidence_due_by', 'asc');
+    if (query.provider !== undefined) builder.where('provider', query.provider);
+    const rows = (await builder
+      .limit(clampLimit(query.limit))
+      .offset(clampOffset(query.offset))) as DisputeInstance[];
+    return rows.map(disputeItem);
+  }
+
+  async countDisputesDueWithin(
+    query: Omit<DisputeDeadlineQuery, 'limit' | 'offset'>,
+  ): Promise<number> {
+    if (!(await this.#hasDisputesTable())) return 0;
+    const builder = this.#disputeModel
+      .query()
+      .whereIn('status', [...OPEN_DISPUTE_STATUSES])
+      .whereNotNull('evidence_due_by')
+      .where('evidence_due_by', '<=', deadlineCutoff(query))
+      .count('* as total')
+      .pojo();
+    if (query.provider !== undefined) builder.where('provider', query.provider);
     return toCount(await builder);
   }
 

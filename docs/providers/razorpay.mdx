@@ -129,8 +129,9 @@ dedupe in the ledger.
 | `payment.captured`, `order.paid`, `payment_link.paid`, `subscription.charged` | `payment.succeeded` |
 | `payment.failed`, `payment_link.expired` | `payment.failed` |
 | `refund.processed` | `payment.refunded` |
-| `payment.dispute.created` | `payment.disputed` |
-| `payment.authorized`, `payment.dispute.won`/`.lost`/`.closed`/`.under_review`/`.action_required`, `refund.created`, `refund.failed`, `payment_link.cancelled`, `payment_link.partially_paid` | `payment.updated` |
+| `payment.dispute.created` | `payment.disputed` / `payment.dispute_warning` — see [Disputes](#disputes) |
+| `payment.dispute.won`/`.lost`/`.closed` | `payment.dispute_closed` |
+| `payment.authorized`, `payment.dispute.under_review`/`.action_required`, `refund.created`, `refund.failed`, `payment_link.cancelled`, `payment_link.partially_paid` | `payment.updated` |
 | `subscription.authenticated` | `subscription.created` |
 | `subscription.cancelled` | `subscription.canceled` |
 | `subscription.activated`, `.updated`, `.pending`, `.halted`, `.paused`, `.resumed`, `.completed` | `subscription.updated` |
@@ -144,16 +145,55 @@ produces, so the driver checks all of them rather than trusting one.
 
 ### Disputes
 
-`payment.dispute.created` — the issuing bank has raised a dispute against a payment — moves
-the payment row to `disputed`. The rest of the family (`won`, `lost`, `closed`,
-`under_review`, `action_required`) is the resolution, which every gateway reports
-differently and which this package deliberately does not name.
+Razorpay's six dispute events map cleanly onto all three canonical types, but the split is
+not in the event name — `payment.dispute.created` fires for all five **phases**, and the
+first two are not a chargeback.
 
-The event is keyed on `dispute.payment_id`, and the amount is `dispute.amount` — the
+| Razorpay event | Phase | Normalized |
+| --- | --- | --- |
+| `payment.dispute.created` | `fraud`, `retrieval` | `payment.dispute_warning` |
+| `payment.dispute.created` | `chargeback`, `pre_arbitration`, `arbitration`, or no phase | `payment.disputed` |
+| `payment.dispute.won` | | `payment.dispute_closed` (`won`) |
+| `payment.dispute.lost` | | `payment.dispute_closed` (`lost`) |
+| `payment.dispute.closed` | | `payment.dispute_closed` (`canceled`) |
+| `payment.dispute.under_review`, `.action_required` | | `payment.updated` |
+
+**`fraud` and `retrieval` are pre-dispute.** Razorpay's own definitions: `fraud` is "a dispute
+raised by the bank when it suspects a transaction to be fraudulent based on the risk
+analysis" — the issuer's TC40/SAFE alert — and `retrieval` is "a request initiated by the
+customer with their issuer bank for additional information about a transaction", which
+Razorpay's guide calls "essentially a *soft* chargeback". Nothing has been pulled back in
+either, and Razorpay's own advice is to "take remedial action during the retrievals and
+chargeback phases to avoid complications". Calling them `payment.disputed` moved a paid row
+over money still in the account.
+
+**`respond_by` is the deadline**, a Unix timestamp — "the Unix timestamp by which a response
+should be sent to the customer" — and it comes through as `actionableUntil` in ISO 8601 on
+every dispute event that carries one. It used to sit unread on `event.raw`.
+
+**`payment.dispute.closed` is `canceled`, not `won`.** Razorpay's definition of the `closed`
+status is "a fraudulent transaction is closed after you provide details of the transaction or
+make a refund to the customer. This is seen in fraudulent transactions only" — no verdict was
+reached and no chargeback amount was ever deducted, so nothing was decided in your favour.
+
+A `won`/`lost`/`closed` event that arrives with no `dispute` entity in the envelope degrades
+to `payment.updated`: there is no dispute id, no amount and nothing to close.
+
+<Callout title="Razorpay does not provisionally debit">
+`amount_deducted` is "the amount, in currency subunits, deducted from your Razorpay current
+balance **when the dispute is lost**. This amount will be 0 unless the status of dispute is
+updated to `lost`." Taken literally that is true of the chargeback phase too — Razorpay's
+process flow only ever says "if you lose the dispute, the amount would be deducted from your
+account". So `payment.disputed` here means *a chargeback has been filed against you and the
+bank has opened its official inquiry*, which is what the canonical event names, rather than a
+debit that has already cleared. `event.data.amountDeducted` carries Razorpay's own figure so
+a handler never has to infer it.
+</Callout>
+
+Every one of these is keyed on `dispute.payment_id`, and the amount is `dispute.amount` — the
 envelope carries the payment entity too, and the two disagree: `payment.amount` is what was
-charged, `dispute.amount` what is being pulled back. `event.data` also carries `disputeId`,
-`disputeStatus` and `disputePhase` (`fraud`, `retrieval`, `chargeback`, `pre_arbitration`,
-`arbitration`); the reason code and the `respond_by` deadline stay on `event.raw`.
+charged, `dispute.amount` what is being claimed back. `event.data` also carries `disputeId`,
+`reason` (the reason code), `disputeStatus` and `disputePhase`.
 
 ## `idempotencyKey` — refunds only
 

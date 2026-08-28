@@ -496,7 +496,7 @@ describe('RazorpayDriver payment method mapping', () => {
 
 describe('RazorpayDriver disputes', () => {
   /** Razorpay's dispute envelope: the dispute entity, alongside the payment it is against. */
-  const disputeEvent = (event: string) => ({
+  const disputeEvent = (event: string, dispute: Record<string, unknown> = {}) => ({
     entity: 'event',
     event,
     contains: ['payment', 'dispute'],
@@ -526,15 +526,20 @@ describe('RazorpayDriver disputes', () => {
           status: 'open',
           phase: 'chargeback',
           created_at: 1767225600,
+          ...dispute,
         },
       },
     },
     created_at: 1767225600,
   });
 
-  it('maps payment.dispute.created onto payment.disputed, keyed on the payment', () => {
-    const raw = JSON.stringify(disputeEvent('payment.dispute.created'));
-    const event = makeDriver().parseWebhook(raw, { 'x-razorpay-signature': signature(raw) });
+  const parse = (event: string, dispute: Record<string, unknown> = {}) => {
+    const raw = JSON.stringify(disputeEvent(event, dispute));
+    return makeDriver().parseWebhook(raw, { 'x-razorpay-signature': signature(raw) });
+  };
+
+  it('maps a chargeback-phase payment.dispute.created onto payment.disputed', () => {
+    const event = parse('payment.dispute.created');
     expect(event.type).toBe('payment.disputed');
     expect(event.data).toMatchObject({
       // The row that has to stop saying `paid` is the payment's, and the amount is the
@@ -543,22 +548,74 @@ describe('RazorpayDriver disputes', () => {
       amount: 100000,
       currency: 'inr',
       disputeId: 'disp_1',
+      reason: 'chargeback',
+      // `respond_by` is Unix seconds; the canonical field is ISO 8601.
+      actionableUntil: '2026-01-08T00:00:00.000Z',
       externalReference: 'order_local_1',
     });
   });
 
-  it('leaves the rest of the dispute family as payment.updated', () => {
-    for (const name of [
-      'payment.dispute.won',
-      'payment.dispute.lost',
-      'payment.dispute.closed',
-      'payment.dispute.under_review',
-      'payment.dispute.action_required',
-    ]) {
-      const raw = JSON.stringify(disputeEvent(name));
-      const event = makeDriver().parseWebhook(raw, { 'x-razorpay-signature': signature(raw) });
-      expect(event.type, name).toBe('payment.updated');
+  it('calls the fraud and retrieval phases a warning, not a chargeback', () => {
+    // Razorpay's own words: `fraud` is the bank's risk-analysis alert and `retrieval` is
+    // "essentially a soft chargeback". Neither has taken any money — `amount_deducted` is
+    // 0 until the dispute is LOST — and Razorpay's advice is to act in exactly these
+    // phases, while a refund still stops the chargeback being filed.
+    for (const phase of ['fraud', 'retrieval']) {
+      const event = parse('payment.dispute.created', { phase });
+      expect(event.type, phase).toBe('payment.dispute_warning');
+      expect(event.type, phase).not.toBe('payment.disputed');
+      expect(event.data, phase).toMatchObject({
+        gatewayId: 'pay_1',
+        disputeId: 'disp_1',
+        disputePhase: phase,
+        actionableUntil: '2026-01-08T00:00:00.000Z',
+      });
     }
+  });
+
+  it('keeps payment.disputed for the appeal phases and for a dispute with no phase', () => {
+    for (const phase of ['pre_arbitration', 'arbitration']) {
+      expect(parse('payment.dispute.created', { phase }).type, phase).toBe('payment.disputed');
+    }
+    // Unreadable phase: keep the mapping it has always had rather than downgrading it.
+    expect(parse('payment.dispute.created', { phase: undefined }).type).toBe('payment.disputed');
+  });
+
+  it('closes the dispute with the outcome the event names', () => {
+    const cases: Array<[string, string]> = [
+      ['payment.dispute.won', 'won'],
+      ['payment.dispute.lost', 'lost'],
+      // `closed` is "a fraudulent transaction closed after you provide details of the
+      // transaction or make a refund" — no verdict, and nothing was ever deducted.
+      ['payment.dispute.closed', 'canceled'],
+    ];
+    for (const [name, outcome] of cases) {
+      const event = parse(name);
+      expect(event.type, name).toBe('payment.dispute_closed');
+      expect(event.data, name).toMatchObject({ gatewayId: 'pay_1', disputeId: 'disp_1', outcome });
+    }
+  });
+
+  it('leaves the paperwork inside an open dispute as payment.updated', () => {
+    for (const name of ['payment.dispute.under_review', 'payment.dispute.action_required']) {
+      expect(parse(name).type, name).toBe('payment.updated');
+    }
+  });
+
+  it('degrades a resolution with no dispute entity to payment.updated', () => {
+    // Without the entity there is no dispute id, no amount and nothing to close — and the
+    // processor throws on a `payment.dispute_closed` it cannot read an outcome for.
+    const raw = JSON.stringify({
+      entity: 'event',
+      event: 'payment.dispute.won',
+      contains: ['payment'],
+      payload: {
+        payment: { entity: { id: 'pay_1', entity: 'payment', amount: 199000, currency: 'INR' } },
+      },
+      created_at: 1767225600,
+    });
+    const event = makeDriver().parseWebhook(raw, { 'x-razorpay-signature': signature(raw) });
+    expect(event.type).toBe('payment.updated');
   });
 });
 

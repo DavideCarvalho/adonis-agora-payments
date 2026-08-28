@@ -364,6 +364,203 @@ describe('LucidBillingStore (integration)', () => {
     });
   });
 
+  describe('disputes', () => {
+    /** The deadline read is the reason the table exists, so every row here carries a window. */
+    const dueIn = (hours: number) => new Date(now.getTime() + hours * hour);
+
+    it('upserts on the dispute gateway id and keeps what a later event omits', async () => {
+      await store.saveDispute({
+        gatewayId: 'dp_upsert',
+        paymentGatewayId: 'pay_upsert',
+        provider: 'stripe',
+        status: 'open',
+        reason: 'fraudulent',
+        amount: 4990,
+        currency: 'brl',
+        evidenceDueBy: dueIn(48),
+        payload: { object: 'dispute' },
+      });
+      await store.saveDispute({
+        gatewayId: 'dp_upsert',
+        paymentGatewayId: 'pay_upsert',
+        provider: 'stripe',
+        status: 'lost',
+        outcome: 'lost',
+        closedAt: now,
+      });
+
+      const row = await store.findDisputeByGatewayId('dp_upsert');
+      expect(await store.countDisputes({})).toBe(1);
+      expect(row?.status).toBe('lost');
+      expect(row?.outcome).toBe('lost');
+      // The closing event carries no deadline and no reason. Postgres would happily have
+      // nulled both; the store must not.
+      expect(row?.reason).toBe('fraudulent');
+      expect(row?.evidenceDueBy?.toJSDate()).toEqual(dueIn(48));
+      // `bigint` comes back as a string from pg — the normalized read is where that is fixed.
+      expect((await store.listDisputes({ status: 'lost' }))[0]?.amount).toBe(4990);
+    });
+
+    it('lists the open windows closing inside the horizon, soonest first', async () => {
+      await store.saveDispute({
+        gatewayId: 'dp_far',
+        paymentGatewayId: 'pay_far',
+        provider: 'stripe',
+        status: 'open',
+        evidenceDueBy: dueIn(200),
+      });
+      await store.saveDispute({
+        gatewayId: 'dp_soon',
+        paymentGatewayId: 'pay_soon',
+        provider: 'stripe',
+        status: 'warning',
+        evidenceDueBy: dueIn(6),
+      });
+      await store.saveDispute({
+        gatewayId: 'dp_mid',
+        paymentGatewayId: 'pay_mid',
+        provider: 'adyen',
+        status: 'under_review',
+        evidenceDueBy: dueIn(20),
+      });
+      // No deadline at all, and a closed one inside the horizon: neither may appear.
+      await store.saveDispute({
+        gatewayId: 'dp_silent',
+        paymentGatewayId: 'pay_silent',
+        provider: 'stripe',
+        status: 'open',
+      });
+      await store.saveDispute({
+        gatewayId: 'dp_done',
+        paymentGatewayId: 'pay_done',
+        provider: 'stripe',
+        status: 'won',
+        evidenceDueBy: dueIn(2),
+      });
+
+      const due = await store.listDisputesDueWithin({ withinHours: 24, now });
+      expect(due.map((row) => row.gatewayId)).toEqual(['dp_soon', 'dp_mid']);
+      expect(await store.countDisputesDueWithin({ withinHours: 24, now })).toBe(2);
+      // The count is what the exit code is decided on: it must not be capped by a page.
+      expect((await store.listDisputesDueWithin({ withinHours: 24, now, limit: 1 })).length).toBe(
+        1,
+      );
+      expect(await store.countDisputesDueWithin({ withinHours: 24, now, provider: 'adyen' })).toBe(
+        1,
+      );
+    });
+
+    it('keeps counting a window that has already closed', async () => {
+      await store.saveDispute({
+        gatewayId: 'dp_overdue',
+        paymentGatewayId: 'pay_overdue',
+        provider: 'mollie',
+        status: 'open',
+        evidenceDueBy: new Date(now.getTime() - 30 * hour),
+      });
+      // SQL's `<=` alone would keep it; the point is that nothing added a lower bound. Going
+      // quiet the moment the deadline passes reads as resolved, at exactly the wrong moment.
+      const due = await store.listDisputesDueWithin({ withinHours: 1, now, provider: 'mollie' });
+      expect(due.map((row) => row.gatewayId)).toEqual(['dp_overdue']);
+    });
+
+    it('finds the unresolved dispute against a payment, and skips the resolved one', async () => {
+      await store.saveDispute({
+        gatewayId: 'dp_open_for_pay',
+        paymentGatewayId: 'pay_two_disputes',
+        provider: 'stripe',
+        status: 'lost',
+      });
+      expect(await store.findOpenDisputeByPayment('pay_two_disputes')).toBeNull();
+
+      await store.saveDispute({
+        gatewayId: 'dp_second_for_pay',
+        paymentGatewayId: 'pay_two_disputes',
+        provider: 'stripe',
+        status: 'open',
+      });
+      expect((await store.findOpenDisputeByPayment('pay_two_disputes'))?.gatewayId).toBe(
+        'dp_second_for_pay',
+      );
+    });
+
+    it('rejects a second row under the same dispute id', async () => {
+      await store.saveDispute({
+        gatewayId: 'dp_unique',
+        paymentGatewayId: 'pay_unique',
+        provider: 'stripe',
+        status: 'open',
+      });
+      // The unique constraint IS the idempotency guarantee — a redelivered dispute webhook
+      // must update one row, never accumulate them. Only a real database can say so.
+      await expect(
+        database.db.table('billing_disputes').insert({
+          id: '00000000-0000-4000-8000-000000000001',
+          gateway_id: 'dp_unique',
+          payment_gateway_id: 'pay_unique',
+          provider: 'stripe',
+          status: 'open',
+          created_at: now,
+          updated_at: now,
+        }),
+      ).rejects.toThrow();
+    });
+  });
+
+  describe('an install that has not run the add_billing_disputes migration', () => {
+    // `billing_disputes` arrives in a THIRD migration, so an app that upgrades the package
+    // before running it has a processor that wants to write disputes and no table to write
+    // them to. The dispute row is ADDITIONAL — the payment still moves, the diagnostics still
+    // publish — so the write is skipped and the reads answer empty, rather than failing every
+    // gateway delivery with `relation "billing_disputes" does not exist`.
+    let legacy: LucidBillingStore;
+
+    beforeAll(async () => {
+      await database.db.rawQuery('ALTER TABLE billing_disputes RENAME TO billing_disputes_kept');
+      legacy = new LucidBillingStore();
+    });
+
+    afterAll(async () => {
+      await database.db.rawQuery('ALTER TABLE billing_disputes_kept RENAME TO billing_disputes');
+    });
+
+    it('skips the write and says so by answering null', async () => {
+      expect(
+        await legacy.saveDispute({
+          gatewayId: 'dp_legacy',
+          paymentGatewayId: 'pay_legacy_dispute',
+          provider: 'stripe',
+          status: 'open',
+          evidenceDueBy: new Date(now.getTime() + hour),
+        }),
+      ).toBeNull();
+    });
+
+    it('answers empty for every dispute read instead of raising', async () => {
+      expect(await legacy.findDisputeByGatewayId('dp_legacy')).toBeNull();
+      expect(await legacy.findOpenDisputeByPayment('pay_legacy_dispute')).toBeNull();
+      expect(await legacy.listDisputes({})).toEqual([]);
+      expect(await legacy.countDisputes({})).toBe(0);
+      expect(await legacy.listDisputesDueWithin({ withinHours: 72, now })).toEqual([]);
+      expect(await legacy.countDisputesDueWithin({ withinHours: 72, now })).toBe(0);
+    });
+
+    it('still takes a payment webhook', async () => {
+      // The whole point: a missing dispute table must not stop money being recorded.
+      await legacy.savePayment({
+        gatewayId: 'pay_during_legacy_disputes',
+        provider: 'stripe',
+        status: 'paid',
+        amount: 500,
+        currency: 'BRL',
+        paidAt: now,
+      });
+      expect((await legacy.findPaymentByGatewayId('pay_during_legacy_disputes'))?.status).toBe(
+        'paid',
+      );
+    });
+  });
+
   describe('an install that has not run the add_billing_external_reference migration', () => {
     // Both columns are nullable and both writes are guarded, so an app that upgrades the package
     // before running the migration keeps taking webhooks: it records a payment WITHOUT a stored

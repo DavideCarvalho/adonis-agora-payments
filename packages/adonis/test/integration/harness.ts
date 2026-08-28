@@ -11,13 +11,17 @@ import type { BaseSchema } from '@adonisjs/lucid/schema';
 /**
  * Every published migration, in the order `configure.ts` publishes them.
  *
- * Both, not just the first: `add_billing_external_reference` is what existing installs get,
+ * All of them, not just the first: `add_billing_external_reference` is what existing installs get,
  * and running only the create stub here would leave the suite testing a schema no upgraded
- * app has. It is also the only place the second migration's `hasColumn` guards are ever
- * executed — on a fresh database the create stub already declares those columns, so this run
+ * app has. It is also the only place the later migrations' `hasColumn`/`hasTable` guards are
+ * ever executed — on a fresh database the create stub already declares those columns, so this run
  * proves the guarded migration is a no-op instead of a failure.
  */
-const STUBS = ['create_billing_tables', 'add_billing_external_reference'].map((name) => ({
+const STUBS = [
+  'create_billing_tables',
+  'add_billing_external_reference',
+  'add_billing_disputes',
+].map((name) => ({
   name,
   path: fileURLToPath(new URL(`../../stubs/database/migrations/${name}.stub`, import.meta.url)),
 }));

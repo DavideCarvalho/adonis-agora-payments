@@ -117,17 +117,21 @@ export type {
   BillingCountQuery,
   BillingListQuery,
   CustomerListItem,
+  DisputeListItem,
+  DisputeDeadlineQuery,
   PaymentListItem,
   SubscriptionListItem,
   WebhookEventListItem,
   WebhookEventBreakdownLine,
 } from './billing/billing_store.js';
+export { OPEN_DISPUTE_STATUSES } from './billing/billing_store.js';
 export {
   BILLING_LIST_DEFAULT_LIMIT,
   BILLING_LIST_MAX_LIMIT,
 } from './billing/list_query.js';
 export { BillingUsageEvent } from './billing/mixins/with_usage_event.js';
 export { BillingCustomer } from './billing/mixins/with_customer.js';
+export { BillingDispute } from './billing/mixins/with_dispute.js';
 export { billingOverview } from './billing/billing_overview.js';
 export type { BillingOverview, BillingOverviewMetric } from './billing/billing_overview.js';
 export { billingHealth } from './billing/billing_health.js';
@@ -154,4 +158,10 @@ export type {
   Invoice,
   InvoiceOptions,
   WebhookEvent,
+  Dispute,
+  DisputeStatus,
+  DisputeEvidence,
+  DisputeDocument,
+  DisputeDocumentKind,
+  PriorUndisputedPayment,
 } from './types.js';

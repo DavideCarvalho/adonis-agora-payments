@@ -193,11 +193,40 @@ const event = await payments.driver('mollie').parseWebhook(rawBody, headers)
 `payment.status` is `'disputed'` from `findPayment` too, for the same reason.
 
 **On next-gen webhooks** Mollie sends `chargeback.received` and `chargeback.reversed` as
-their own events. `chargeback.received` becomes `payment.disputed`, keyed by the **payment**
-(the row whose status has to move), with the chargeback's amount and its `reason.code`.
-`chargeback.reversed` — a dispute resolved in your favour — becomes `payment.updated`: this
-package deliberately has no canonical resolution event, because every gateway reports a
-dispute won or lost differently and a type no driver emits is worse than none.
+their own events:
+
+| Mollie event | Normalized | Funds |
+| --- | --- | --- |
+| `chargeback.received` | `payment.disputed` | withdrawn — "the money will be reclaimed and deducted from your Mollie balance" |
+| `chargeback.reversed` | `payment.dispute_closed` (`won`) | returned |
+
+Both are keyed by the **payment** (the row whose status has to move), and carry the
+chargeback's amount, its id as `disputeId`, and `reason.code` — which Mollie only ever fills
+in for SEPA Direct Debit; the card schemes send it no reason at all.
+
+The reversal is read from `reversedAt` as well as from the event name. The payload is a
+snapshot of the entity, so a `chargeback.received` redelivered after the reversal carries the
+timestamp too, and taking the money off the row a second time would be worse than reading the
+outcome from either place.
+
+<Callout type="warn" title="Mollie sends no pre-dispute warning, and no deadline">
+Mollie has **no** fraud alert, retrieval request or inquiry — its whole dispute vocabulary is
+those two events — so this driver never emits `payment.dispute_warning`. The first you hear
+about a chargeback is the chargeback, with the money already gone.
+
+There is no response deadline either. The chargeback object's complete field list is `id`,
+`amount`, `settlementAmount`, `reason`, `paymentId`, `settlementId`, `createdAt` and
+`reversedAt`; nothing in it is a due date, so no `actionableUntil` is emitted rather than one
+being invented. Mollie's own line is that "depending on the nature of the chargeback, there
+will be an opportunity to respond to this notification" — but the API does not say when that
+opportunity closes.
+
+The **classic** webhook is worse still: its documented triggers are a status change, a
+refund, and "a chargeback is received on the payment". A *reversal* is not among them, so on
+the classic webhook the driver can only ever report `payment.disputed`, never the close.
+Mollie also does not say whether `amountChargedBack` drops back to zero once a chargeback is
+reversed. Run the next-gen `chargeback.*` webhooks if you want to hear about a win.
+</Callout>
 
 <Callout type="warn">
   Configure that webhook with the **full snapshot payload**, not the id-only one. A

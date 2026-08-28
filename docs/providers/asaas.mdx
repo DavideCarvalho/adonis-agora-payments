@@ -54,23 +54,60 @@ await payments.driver('credit_card').createSubscription({
 
 Asaas moves a disputed payment through three states, and sends one event for each:
 
-| Asaas event | Normalized | What it means |
+| Asaas event | Asaas' own words | Normalized |
 | --- | --- | --- |
-| `PAYMENT_CHARGEBACK_REQUESTED` | **`payment.disputed`** | The chargeback was filed and the money is gone. The payment row moves to `disputed`. |
-| `PAYMENT_CHARGEBACK_DISPUTE` | `payment.updated` | You contested it and submitted documents. |
-| `PAYMENT_AWAITING_CHARGEBACK_REVERSAL` | `payment.updated` | Dispute won; the acquirer's transfer is still pending. |
+| `PAYMENT_CHARGEBACK_REQUESTED` | "Chargeback recebido" | **`payment.disputed`** — the row moves to `disputed` |
+| `PAYMENT_CHARGEBACK_DISPUTE` | "Chargeback em disputa após apresentação de documentos" | `payment.updated` |
+| `PAYMENT_AWAITING_CHARGEBACK_REVERSAL` | "Dispute won, awaiting acquirer settlement" | **`payment.dispute_closed`** (`won`) |
 
-Only the first one opens anything, so only the first one is a `payment.disputed`. The
-other two are the story afterwards, and the contract deliberately has no resolution
-event — every gateway reports a dispute won or lost differently, and a canonical type no
-driver emits is worse than none. `event.raw.event` still names which one arrived, so a
-handler that cares can switch on it.
+The first one opens the dispute; the middle one is movement inside it — documents
+submitted, nothing decided — and the last is Asaas naming an outcome, which is why it
+closes the dispute as `won` instead of being flattened into an update. A won close puts
+the row back to `paid`: `revenue()` sums rows that are `paid`, so leaving it at `disputed`
+writes off money that is coming back. `event.raw.event` still names which event arrived.
+
+**There is no warning.** Asaas' payment event list has no fraud alert, no retrieval
+request and no "a chargeback is incoming" notification — nothing between a paid charge and
+`PAYMENT_CHARGEBACK_REQUESTED`. The first you hear of a chargeback is the chargeback, so
+this driver emits no `payment.dispute_warning` at all.
+
+### The deadline
+
+When Asaas includes the payment's `chargeback` object on the notification, the driver
+carries three of its fields onto the dispute event:
+
+| Asaas field | Normalized | |
+| --- | --- | --- |
+| `chargeback.deadlineToSendDisputeDocuments` | `actionableUntil` | the only response deadline Asaas publishes anywhere |
+| `chargeback.id` | `disputeId` | the chargeback's own id, for `POST /chargebacks/{id}/dispute` |
+| `chargeback.reason` | `reason` | one of Asaas' 33 reason enums (`FRAUD`, `COMMERCIAL_DISAGREEMENT`, …) |
+
+`amount` stays the **payment's**, not `chargeback.value`: a partial chargeback's value is
+smaller, and the processor writes `amount` onto the row. The disputed figure is on
+`event.raw`.
+
+Asaas' webhook reference sends "the object of the related entity" and points at the
+`GET /payments/{id}` schema for its fields — which is where `chargeback` lives — but no
+published example shows it on a notification. So the driver reads it defensively: if it is
+absent, the event is still a correct `payment.disputed`, just without a deadline. Fetch the
+payment if you need one and it did not arrive.
+
+<Callout type="warn" title="Asaas does not publish when the money leaves">
+Its developer reference documents `chargeback.status` and says **nothing** about the
+balance; its help centre says the balance is debited when the dispute is *lost*, while also
+describing a won one as the value *returning* to the balance. The two do not agree, so this
+driver does not guess: `CHARGEBACK_REQUESTED` stays `payment.disputed` — the chargeback has
+been filed, and a row that stops counting as revenue while the outcome is open is the safe
+reading either way. Do not read `payment.disputed` here as proof that Asaas has already
+debited you.
+</Callout>
 
 <Callout type="warn" title="Asaas sends no dispute-lost webhook">
 A dispute won ends with the payment returning to `PAYMENT_CONFIRMED`/`PAYMENT_RECEIVED`.
-A dispute **lost** has no event at all — it only shows up as `chargeback.status:
-"DISPUTE_LOST"` on the payment, which you have to fetch. Budget a reconciliation job for
-it rather than waiting for a webhook that never comes.
+A dispute **lost** has no event at all — there is no `PAYMENT_CHARGEBACK_LOST` in the event
+list, and it only shows up as `chargeback.status: "DISPUTE_LOST"` on the payment, which you
+have to fetch. Budget a reconciliation job for it rather than waiting for a webhook that
+never comes.
 </Callout>
 
 `PAYMENT_DUNNING_REQUESTED` and `PAYMENT_DUNNING_RECEIVED` are **not** disputes — that is
@@ -86,11 +123,13 @@ read as unpaid:
 | --- | --- | --- |
 | `RECEIVED_IN_CASH` | **`paid`** | Confirmed by hand in the Asaas UI — the customer paid you in cash. It generates no balance in the Asaas account, which is a reconciliation question, not an entitlement one: they paid. |
 | `DUNNING_RECEIVED` | **`paid`** | The debt was settled through the credit bureau. `PAYMENT_DUNNING_RECEIVED` normalizes to `payment.succeeded`, so the row syncs and your handler runs. |
+| `AWAITING_CHARGEBACK_REVERSAL` | **`paid`** | "Dispute won, awaiting acquirer settlement" — the dispute is over and you won it. Its webhook closes the dispute as `won`, which puts the row back to `paid`, and reading the payment back has to agree with it. The acquirer's transfer landing is a reconciliation question, same as the row above. |
 
 And the ones that look like money moving and are not:
 
 | Status | Maps to | Why |
 | --- | --- | --- |
+| `CHARGEBACK_REQUESTED`, `CHARGEBACK_DISPUTE` | `disputed` | The chargeback is open, contested or not — see [Chargebacks](#chargebacks). |
 | `REFUND_REQUESTED`, `REFUND_IN_PROGRESS` | `paid` | Asked for and scheduled. Neither has settled, and Asaas can still deny a refund (`PAYMENT_REFUND_DENIED`). Only `REFUNDED` means the money went back. |
 | `DUNNING_REQUESTED` | `failed` | Overdue and escalated to a credit bureau. Nothing was paid. |
 | `AWAITING_RISK_ANALYSIS` | `pending` | Held for Asaas' manual card review. Their own guidance is to wait before releasing the product. |

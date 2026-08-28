@@ -6,6 +6,7 @@ import type { RefundAction, ReplayAction } from '../../src/dashboard/actions.js'
 import type { PaymentsDashboardConfig } from '../../src/dashboard/define_config.js';
 import type { ApiRequest, Deps } from '../../src/dashboard/handlers.js';
 import {
+  disputes,
   health,
   overview,
   payments,
@@ -299,6 +300,92 @@ describe('payments dashboard API (integration)', () => {
       expect(body.events.map((e) => e.gatewayEventId)).toEqual(['evt_inflight']);
     });
   });
+  describe('GET /api/disputes', () => {
+    // Seeded in this block rather than in the shared `beforeAll`, so the rows belong to the
+    // tests that assert on them and no other block has to know they exist.
+    beforeAll(async () => {
+      await store.saveDispute({
+        gatewayId: 'dp_open',
+        paymentGatewayId: 'pi_recent',
+        provider: 'stripe',
+        status: 'open',
+        reason: 'fraudulent',
+        amount: 123456,
+        currency: 'BRL',
+        evidenceDueBy: new Date(NOW.getTime() + 10 * HOUR),
+      });
+      await store.saveDispute({
+        gatewayId: 'dp_warning',
+        paymentGatewayId: 'pi_cent',
+        provider: 'asaas',
+        status: 'warning',
+        evidenceDueBy: new Date(NOW.getTime() + 3 * HOUR),
+      });
+      await store.saveDispute({
+        gatewayId: 'dp_won',
+        paymentGatewayId: 'pi_ancient',
+        provider: 'stripe',
+        status: 'won',
+        outcome: 'won',
+        evidenceDueBy: new Date(NOW.getTime() + HOUR),
+      });
+    });
+
+    it('lists real rows with the amount in integer cents and ISO timestamps', async () => {
+      const res = await disputes(deps(), req({ status: 'open' }));
+      expect(res.status).toBe(200);
+      const body = res.body as {
+        disputes: Array<{
+          gatewayId: string;
+          paymentGatewayId: string;
+          amount: number | null;
+          evidenceDueBy: string | null;
+          reason: string | null;
+        }>;
+      };
+      // `bigint` arrives from pg as a STRING; a panel that renders "123456" as a string is a
+      // panel that cannot format money.
+      expect(body.disputes).toEqual([
+        expect.objectContaining({
+          gatewayId: 'dp_open',
+          paymentGatewayId: 'pi_recent',
+          amount: 123456,
+          reason: 'fraudulent',
+          evidenceDueBy: new Date(NOW.getTime() + 10 * HOUR).toISOString(),
+        }),
+      ]);
+    });
+
+    it('answers the work list through a real ORDER BY, soonest window first', async () => {
+      const res = await disputes(deps(), req({ dueWithin: '24' }));
+      const body = res.body as {
+        disputes: Array<{ gatewayId: string }>;
+        dueWithin: { hours: number; total: number };
+      };
+      // The won dispute is due in an hour and must not appear: nobody has to answer it.
+      expect(body.disputes.map((row) => row.gatewayId)).toEqual(['dp_warning', 'dp_open']);
+      expect(body.dueWithin.total).toBe(2);
+    });
+
+    it('reports the full total even when the page holds one row', async () => {
+      const res = await disputes(deps(), req({ dueWithin: '24', limit: '1' }));
+      const body = res.body as {
+        disputes: unknown[];
+        dueWithin: { total: number };
+      };
+      // The count is a separate `count(*)`, and a Lucid aggregate that lands in `$extras`
+      // rather than on the row is exactly how this reads a silent zero.
+      expect(body.disputes).toHaveLength(1);
+      expect(body.dueWithin.total).toBe(2);
+    });
+
+    it('narrows to one gateway through real SQL', async () => {
+      const res = await disputes(deps(), req({ provider: 'asaas' }));
+      const body = res.body as { disputes: Array<{ gatewayId: string }> };
+      expect(body.disputes.map((row) => row.gatewayId)).toEqual(['dp_warning']);
+    });
+  });
+
   describe('GET /api/health', () => {
     it('names the three silent failures against real rows', async () => {
       const res = await health(deps(), req());
@@ -590,7 +677,7 @@ describe('payments dashboard API (integration)', () => {
         request: {
           qs: () => ({}),
           body: () => ({}),
-          url: () => '/payments-dashboard',
+          url: () => '/payments',
           plainCookie: () => undefined,
           secure: () => false,
           headers: () => ({}),
@@ -598,8 +685,8 @@ describe('payments dashboard API (integration)', () => {
       };
     }
 
-    const REFUND = '/payments-dashboard/api/payments/:gatewayId/refund';
-    const RETRY = '/payments-dashboard/api/webhook-events/:gatewayEventId/retry';
+    const REFUND = '/payments/api/payments/:gatewayId/refund';
+    const RETRY = '/payments/api/webhook-events/:gatewayEventId/retry';
 
     it('mounts the refund and the retry as POST and NEVER as GET', async () => {
       const routes = await boot({});
@@ -629,7 +716,7 @@ describe('payments dashboard API (integration)', () => {
 
     it('refuses an unauthorized READ too — the guard is not action-only', async () => {
       const routes = await boot({ authorize: () => false });
-      const route = routes.find((r) => r.pattern === '/payments-dashboard/api/health');
+      const route = routes.find((r) => r.pattern === '/payments/api/health');
       const recorded: Recorded = {};
       await route?.handler?.(fakeCtx(recorded));
       expect(recorded.status).toBe(403);
@@ -638,7 +725,7 @@ describe('payments dashboard API (integration)', () => {
     it('serves an AUTHORIZED read off the real store once past the guard', async () => {
       // Proves the guard is what stopped the requests above, not a missing store.
       const routes = await boot({ authorize: () => true });
-      const route = routes.find((r) => r.pattern === '/payments-dashboard/api/health');
+      const route = routes.find((r) => r.pattern === '/payments/api/health');
       const recorded: Recorded = {};
       await route?.handler?.(fakeCtx(recorded));
       expect(recorded.status).toBe(200);

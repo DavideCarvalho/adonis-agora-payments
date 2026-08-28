@@ -132,10 +132,10 @@ interface PaddleSubscriptionResponse {
 }
 
 /**
- * Paddle expresses a refund, a credit **and a chargeback** as the same resource. `action`
- * is what separates them: `chargeback` is created by Paddle itself the moment a customer
- * successfully disputes a charge, and `adjustment.created` carrying it is the only
- * notification a Paddle seller gets that revenue was taken away.
+ * Paddle expresses a refund, a credit **and the entire dispute lifecycle** as the same
+ * resource. `action` is what separates them, and `adjustment.created` is the only
+ * notification a Paddle seller gets about a chargeback at all — Paddle Billing has no
+ * `dispute.*` event.
  */
 interface PaddleAdjustmentResponse {
   id: string;
@@ -147,6 +147,8 @@ interface PaddleAdjustmentResponse {
   action: string;
   transaction_id: string;
   status: 'pending_approval' | 'approved' | 'rejected' | 'reversed';
+  /** Why the adjustment was created. Paddle fills it in on the ones it creates itself. */
+  reason?: string | null;
   totals?: { total?: string; currency_code?: string };
   created_at?: string;
 }
@@ -184,7 +186,14 @@ export class PaddleDriver implements PaymentsDriver {
    * cannot promise the charge will be a card.
    */
   readonly supportedMethods = ['undefined'] as const;
-  readonly capabilities = { refunds: true, invoices: true, subscriptions: true };
+  /**
+   * `disputes: false`, and on Paddle that is not a gap — it is the product. "The Paddle
+   * team contests chargebacks for you", and Paddle's own risk-prevention page says the
+   * defense "is fully automated, and additional evidence submitted by sellers is not
+   * required or accepted". There is nothing for `submitDisputeEvidence` to submit and no
+   * dispute resource to read: Paddle exposes chargebacks only as adjustments.
+   */
+  readonly capabilities = { refunds: true, invoices: true, subscriptions: true, disputes: false };
 
   #baseUrl: string;
   #apiKey: string;
@@ -547,12 +556,15 @@ export class PaddleDriver implements PaymentsDriver {
     }
 
     const payload = JSON.parse(rawBody) as PaddleWebhookPayload;
+    // Mapped once and passed down: the normalized type decides which dispute fields the
+    // payload carries, so deriving it twice invites the two halves to disagree.
+    const type = this.#mapWebhookType(payload.event_type, payload.data);
     return {
       id: payload.event_id,
       provider: this.provider,
-      type: this.#mapWebhookType(payload.event_type, payload.data),
+      type,
       ...(payload.occurred_at !== undefined ? { createdAt: payload.occurred_at } : {}),
-      data: this.#mapWebhookData(payload),
+      data: this.#mapWebhookData(payload, type),
       raw: payload as unknown as Record<string, unknown>,
     };
   }
@@ -666,20 +678,20 @@ export class PaddleDriver implements PaymentsDriver {
         return 'payment.updated';
       case 'adjustment.created':
       case 'adjustment.updated': {
-        // Paddle has no `dispute.*` event. A chargeback IS an adjustment: Paddle creates
-        // one itself the moment a customer successfully disputes a charge, so
-        // `adjustment.created` with `action: 'chargeback'` is the only notification a
-        // seller gets that revenue was taken away — and it used to arrive as a bland
-        // `payment.updated`, leaving the payment row saying `paid`.
+        // Paddle has no `dispute.*` event — checked against the current event-type
+        // reference, not from memory. A chargeback IS an adjustment, and `action` is the
+        // whole dispute vocabulary. (`developer.paddle.com/webhook-reference/
+        // risk-dispute-alerts/*` is Paddle CLASSIC; this driver is Paddle Billing.)
         if (data.action === 'refund') return 'payment.refunded';
-        if (data.action === 'chargeback' && eventType === 'adjustment.created') {
-          return 'payment.disputed';
+        // Only the CREATED event is a dispute moment. `adjustment.updated` fires for the
+        // approval lifecycle of an adjustment that already exists, and a second
+        // `payment.disputed` for the same chargeback is noise.
+        if (eventType === 'adjustment.created') {
+          const type = this.#disputeType(data.action);
+          if (type !== undefined) return type;
         }
-        // `chargeback_warning` (a dispute is coming, no money moved yet),
-        // `chargeback_reverse` / `chargeback_warning_reverse` (Paddle contested it and
-        // won), `credit`, `credit_reverse`, and every later status change on a chargeback
-        // adjustment. The package deliberately has no canonical resolution event, so a
-        // dispute won or lost lands here.
+        // `credit`, `credit_reverse`, and every later status change on a chargeback
+        // adjustment.
         return 'payment.updated';
       }
       case 'subscription.created':
@@ -699,7 +711,60 @@ export class PaddleDriver implements PaymentsDriver {
     }
   }
 
-  #mapWebhookData(payload: PaddleWebhookPayload): Record<string, unknown> {
+  /**
+   * An adjustment `action` → the canonical dispute type, or `undefined` when the action
+   * is not part of the dispute family.
+   *
+   * **`chargeback_warning` is not a funds-untouched warning.** That is the whole finding
+   * here, and it runs the opposite way to Stripe's inquiry and Adyen's
+   * `NOTIFICATION_OF_CHARGEBACK`, both of which leave the money in the account. Paddle is
+   * the merchant of record, so it does not tell you a chargeback is coming and wait for
+   * you to act — it acts. Paddle's own words: "If an early-stage dispute is detected, a
+   * `chargeback_warning` adjustment is created. The disputed amount is refunded, and a
+   * service fee is applied", and an adjustment is a money movement by definition —
+   * `chargeback_reverse` exists to "return the amount **held**".
+   *
+   * So both `chargeback` and `chargeback_warning` are `payment.disputed`: the revenue is
+   * gone in both, and mapping the warning to `payment.dispute_warning` — which writes
+   * nothing — would leave a row saying `paid` over money Paddle has already refunded to
+   * the buyer. Paddle sends no funds-untouched pre-dispute notification at all, and this
+   * driver does not invent one.
+   *
+   * The `*_reverse` pair is the money coming back. Paddle spells it out for
+   * `chargeback_reverse` ("Where a chargeback is contested successfully, Paddle creates an
+   * adjustment with the type `chargeback_reverse` to return the amount held"); for
+   * `chargeback_warning_reverse` the reference says only "Reversal of a chargeback
+   * warning", so `won` is read from the reversal symmetry Paddle's own naming sets up —
+   * every `*_reverse` action undoes its counterpart. Both are `won` because both put the
+   * amount back, and leaving the row at `disputed` would write off money that returned.
+   */
+  #disputeType(action: unknown): string | undefined {
+    if (action === 'chargeback' || action === 'chargeback_warning') return 'payment.disputed';
+    if (action === 'chargeback_reverse' || action === 'chargeback_warning_reverse') {
+      return 'payment.dispute_closed';
+    }
+    return undefined;
+  }
+
+  /**
+   * The fields that make a dispute event actionable, added only to the dispute types.
+   *
+   * There is deliberately no `actionableUntil`: Paddle accepts no evidence from sellers,
+   * so there is no response window that belongs to you, and no adjustment field carries
+   * one. The deadline on a Paddle chargeback is Paddle's, and the honest normalized event
+   * is one that does not pretend otherwise.
+   */
+  #disputeExtras(adjustment: PaddleAdjustmentResponse, type: string): Record<string, unknown> {
+    if (type !== 'payment.disputed' && type !== 'payment.dispute_closed') return {};
+    return {
+      // The adjustment IS the dispute here; Paddle has no separate dispute resource.
+      disputeId: adjustment.id,
+      ...(adjustment.reason ? { reason: adjustment.reason } : {}),
+      ...(type === 'payment.dispute_closed' ? { outcome: 'won' as const } : {}),
+    };
+  }
+
+  #mapWebhookData(payload: PaddleWebhookPayload, type: string): Record<string, unknown> {
     const data = payload.data;
     const externalReference = this.#readExternalReference(
       data.custom_data as Record<string, unknown> | null | undefined,
@@ -723,6 +788,7 @@ export class PaddleDriver implements PaymentsDriver {
         amount: this.#toCents(adjustment.totals?.total) ?? 0,
         currency: (adjustment.totals?.currency_code ?? this.#currency).toLowerCase(),
         ...(externalReference !== undefined ? { externalReference } : {}),
+        ...this.#disputeExtras(adjustment, type),
       };
     }
     const payment = this.#mapPayment(data as unknown as PaddleTransactionResponse);

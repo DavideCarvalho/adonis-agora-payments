@@ -435,16 +435,78 @@ describe('PaddleDriver — the widened contract', () => {
         action: 'chargeback',
         transaction_id: 'txn_1',
         status: 'pending_approval',
+        reason: 'fraudulent',
         totals: { total: '1990', currency_code: 'USD' },
       },
     });
     const event = makeDriver().parseWebhook(body, sign(body));
 
     expect(event.type).toBe('payment.disputed');
-    expect(event.data).toMatchObject({ gatewayId: 'txn_1', amount: 1990, currency: 'usd' });
+    expect(event.data).toMatchObject({
+      gatewayId: 'txn_1',
+      amount: 1990,
+      currency: 'usd',
+      // The adjustment IS the dispute: Paddle has no separate dispute resource.
+      disputeId: 'adj_cb_1',
+      reason: 'fraudulent',
+    });
   });
 
-  it('does not call a refund, a credit or a chargeback warning a dispute', () => {
+  it('treats a chargeback WARNING as money already gone, because on Paddle it is', () => {
+    // The one place Paddle runs opposite to Stripe and Adyen. Their pre-dispute alerts
+    // leave the money in the account; Paddle's does not — as merchant of record Paddle
+    // acts on the alert instead of forwarding it: "If an early-stage dispute is detected, a
+    // `chargeback_warning` adjustment is created. The disputed amount is refunded, and a
+    // service fee is applied." Calling that `payment.dispute_warning` writes nothing and
+    // would leave the row saying `paid` over money Paddle has already returned to the buyer.
+    const body = JSON.stringify({
+      event_id: 'evt_cbw',
+      event_type: 'adjustment.created',
+      data: {
+        id: 'adj_cbw_1',
+        action: 'chargeback_warning',
+        transaction_id: 'txn_1',
+        status: 'approved',
+        totals: { total: '1990', currency_code: 'USD' },
+      },
+    });
+    const event = makeDriver().parseWebhook(body, sign(body));
+
+    expect(event.type).toBe('payment.disputed');
+    expect(event.type).not.toBe('payment.dispute_warning');
+    expect(event.data).toMatchObject({ gatewayId: 'txn_1', disputeId: 'adj_cbw_1' });
+  });
+
+  it('closes a dispute as won on either reversal, and carries the outcome', () => {
+    // `chargeback_reverse` is Paddle's documented "return the amount held" after it
+    // contests successfully; `chargeback_warning_reverse` undoes the warning the same way.
+    // Both put the amount back, so both have to move the row off `disputed` — the processor
+    // only does that for `won`, and it THROWS on a close carrying no outcome at all.
+    const reversal = (action: string) =>
+      JSON.stringify({
+        event_id: `evt_${action}`,
+        event_type: 'adjustment.created',
+        data: {
+          id: `adj_${action}`,
+          action,
+          transaction_id: 'txn_1',
+          status: 'approved',
+          totals: { total: '1990', currency_code: 'USD' },
+        },
+      });
+
+    for (const action of ['chargeback_reverse', 'chargeback_warning_reverse']) {
+      const event = makeDriver().parseWebhook(reversal(action), sign(reversal(action)));
+      expect(event.type, action).toBe('payment.dispute_closed');
+      expect(event.data, action).toMatchObject({
+        gatewayId: 'txn_1',
+        disputeId: `adj_${action}`,
+        outcome: 'won',
+      });
+    }
+  });
+
+  it('does not call a refund, a credit or a later status change a dispute', () => {
     const adjustment = (action: string, eventType = 'adjustment.created') =>
       JSON.stringify({
         event_id: `evt_${action}`,
@@ -460,13 +522,27 @@ describe('PaddleDriver — the widened contract', () => {
     const typeOf = (raw: string) => makeDriver().parseWebhook(raw, sign(raw)).type;
 
     expect(typeOf(adjustment('refund'))).toBe('payment.refunded');
-    // No money has moved yet on a warning, and a reversal is a dispute RESOLVED — the
-    // package deliberately has no canonical resolution event, so both are plain updates.
-    expect(typeOf(adjustment('chargeback_warning'))).toBe('payment.updated');
-    expect(typeOf(adjustment('chargeback_reverse'))).toBe('payment.updated');
     expect(typeOf(adjustment('credit'))).toBe('payment.updated');
-    // A later status change on the same chargeback is not a second dispute opening.
+    expect(typeOf(adjustment('credit_reverse'))).toBe('payment.updated');
+    // A later status change on the same adjustment is not a second dispute moment.
     expect(typeOf(adjustment('chargeback', 'adjustment.updated'))).toBe('payment.updated');
+    expect(typeOf(adjustment('chargeback_reverse', 'adjustment.updated'))).toBe('payment.updated');
+    // An action Paddle adds later must not become a dispute by accident.
+    expect(typeOf(adjustment('some_future_action'))).toBe('payment.updated');
+    // No adjustment carries a response deadline, because none is yours: Paddle contests
+    // chargebacks itself and accepts no seller evidence.
+    expect(
+      makeDriver().parseWebhook(adjustment('chargeback'), sign(adjustment('chargeback'))).data,
+    ).not.toHaveProperty('actionableUntil');
+  });
+
+  it('never claims a dispute API it does not have', () => {
+    // Paddle's defense "is fully automated, and additional evidence submitted by sellers is
+    // not required or accepted" — there is nothing to submit and no dispute resource to read.
+    const driver = makeDriver();
+    expect(driver.capabilities.disputes).toBe(false);
+    expect(driver.submitDisputeEvidence).toBeUndefined();
+    expect(driver.findDispute).toBeUndefined();
   });
 
   it('names the payment method category Paddle collected through', async () => {

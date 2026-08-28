@@ -543,7 +543,7 @@ describe('DodoDriver — the widened contract', () => {
 
   it('does not report a dispute resolution as a new dispute', () => {
     const driver = makeDriver({ webhookKey: SECRET });
-    const typeOf = (type: string) => {
+    const eventFor = (type: string) => {
       const body = JSON.stringify({
         type,
         data: {
@@ -554,14 +554,87 @@ describe('DodoDriver — the widened contract', () => {
           currency: 'USD',
         },
       });
-      return driver.parseWebhook(body, signedHeaders(body)).type;
+      return driver.parseWebhook(body, signedHeaders(body));
     };
-    // The package deliberately has no canonical resolution event, so won/lost/expired are
-    // plain updates rather than a second `payment.disputed`.
-    expect(typeOf('dispute.won')).toBe('payment.updated');
-    expect(typeOf('dispute.lost')).toBe('payment.updated');
-    expect(typeOf('dispute.challenged')).toBe('payment.updated');
-    expect(typeOf('dispute.expired')).toBe('payment.updated');
+
+    // Each closing event carries the outcome Dodo's own reference names for it. The
+    // processor THROWS on a `payment.dispute_closed` with no outcome, so the type and the
+    // outcome have to arrive together or not at all.
+    const closes: Array<[string, string]> = [
+      ['dispute.won', 'won'],
+      ['dispute.lost', 'lost'],
+      // "Dispute accepted without contest; funds returned" — you did not defend, so the
+      // cardholder keeps the money. A loss, not a cancellation.
+      ['dispute.accepted', 'lost'],
+      // "Response window closed without resolution" — nothing was decided.
+      ['dispute.expired', 'expired'],
+      ['dispute.cancelled', 'canceled'],
+    ];
+    for (const [type, outcome] of closes) {
+      const event = eventFor(type);
+      expect(event.type, type).toBe('payment.dispute_closed');
+      expect(event.type, type).not.toBe('payment.disputed');
+      expect(event.data, type).toMatchObject({ gatewayId: 'pay_1', disputeId: 'dis_1', outcome });
+    }
+
+    // Evidence submitted, network still reviewing: movement inside an open dispute, not a
+    // resolution of it.
+    expect(eventFor('dispute.challenged').type).toBe('payment.updated');
+  });
+
+  it('keeps a pre_dispute open a chargeback, because Dodo says the funds are held', () => {
+    // The stage ladder is `pre_dispute` → `dispute` → `pre_arbitration`, and it is tempting
+    // to read `pre_dispute` as a Stripe-style inquiry with the money untouched. Dodo's
+    // reference does not support that: it states "Cardholder initiates dispute; funds are
+    // held" for `dispute.opened` without qualifying it by stage. Downgrading this to
+    // `payment.dispute_warning` writes nothing, and would leave the row saying `paid` over
+    // money Dodo says it has already held.
+    const body = JSON.stringify({
+      type: 'dispute.opened',
+      data: {
+        payload_type: 'Dispute',
+        dispute_id: 'dis_1',
+        payment_id: 'pay_1',
+        amount: 1990,
+        currency: 'USD',
+        dispute_stage: 'pre_dispute',
+        dispute_status: 'dispute_opened',
+        remarks: 'product_not_received',
+      },
+    });
+    const event = makeDriver({ webhookKey: SECRET }).parseWebhook(body, signedHeaders(body));
+
+    expect(event.type).toBe('payment.disputed');
+    expect(event.type).not.toBe('payment.dispute_warning');
+    expect(event.data).toMatchObject({
+      disputeStage: 'pre_dispute',
+      reason: 'product_not_received',
+    });
+    // Dodo's ten-day clock is yours, but Dodo sends no deadline field — so the driver
+    // carries none rather than deriving a date it would have invented.
+    expect(event.data).not.toHaveProperty('actionableUntil');
+  });
+
+  it('will not close a dispute it cannot read an outcome from', () => {
+    // A `dispute.*` event whose body is not a Dispute cannot supply an outcome, and a
+    // `payment.dispute_closed` without one makes the processor throw on purpose. It stays
+    // an update instead.
+    const body = JSON.stringify({
+      type: 'dispute.won',
+      data: { payload_type: 'Payment', payment_id: 'pay_1', total_amount: 1990, currency: 'USD' },
+    });
+    const event = makeDriver({ webhookKey: SECRET }).parseWebhook(body, signedHeaders(body));
+
+    expect(event.type).toBe('payment.updated');
+    expect(event.data).not.toHaveProperty('outcome');
+  });
+
+  it('never claims a dispute API it does not have', () => {
+    // Dodo forwards the whole lifecycle and the ten-day clock is yours — but the evidence
+    // goes through the Dodo DASHBOARD. There is no representment endpoint to call.
+    const driver = makeDriver();
+    expect(driver.capabilities.disputes).toBe(false);
+    expect(driver.submitDisputeEvidence).toBeUndefined();
   });
 
   it('routes the method categories Dodo actually supports', async () => {

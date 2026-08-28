@@ -269,21 +269,65 @@ the buyer should not have been billed for the period.
 
 ## Disputes
 
-| Square event | Normalized |
-| --- | --- |
-| `dispute.created` | `payment.disputed` |
-| `dispute.state.updated`, `dispute.evidence.added`, `.created`, `.removed` | `payment.updated` |
+Square puts everything in the Dispute object's `state`, not in the event name, so
+`dispute.created` and `dispute.state.updated` are read the same way. Square's own advice is
+to subscribe to both, and both are handled here.
 
-`dispute.created` is the opening — the card brand has taken the money back pending your
-evidence — and it moves the payment row to `disputed`. Everything after it is the
-resolution, which every gateway reports differently and which this library deliberately does
-not name. Square's own advice is to subscribe to `dispute.created` **and**
-`dispute.state.updated`, and both are handled here.
+| `state` | Normalized | Funds |
+| --- | --- | --- |
+| `INQUIRY_EVIDENCE_REQUIRED`, `INQUIRY_PROCESSING` | `payment.dispute_warning` | see the callout |
+| `EVIDENCE_REQUIRED`, `PROCESSING` | `payment.disputed` | withheld |
+| `WON` | `payment.dispute_closed` (`won`) | released |
+| `LOST`, `ACCEPTED` | `payment.dispute_closed` (`lost`) | gone |
+| `INQUIRY_CLOSED` | `payment.updated` | — |
+| missing | `payment.disputed` on `dispute.created`, `payment.updated` on a state change | — |
 
-The event is keyed on `data.object.dispute.disputed_payment.payment_id` — nested, not a
-top-level `payment_id` — because the row that has to stop saying `paid` is the payment's.
+`dispute.evidence.created`/`.deleted` — and the deprecated `.added`/`.removed` spellings
+Square still publishes — are paperwork inside an open dispute, not a resolution, and stay
+`payment.updated`. `dispute.state.changed` is the deprecated spelling of
+`dispute.state.updated` and is handled identically, so an app still subscribed to it does not
+silently miss the resolution.
+
+**A chargeback withdraws the money before you hear about it.** Square's reference is blunt:
+"Square withholds the disputed funds from the seller's Square account balance until the bank
+issues a final resolution on the case. If there are insufficient funds in the Square account
+balance, the funds are removed (debited) from the seller's most recently linked bank account."
+
+**`ACCEPTED` is a loss.** `AcceptDispute` is documented as "Square returns the disputed amount
+to the cardholder and updates the dispute state to `ACCEPTED`. The dispute is now closed." The
+seller accepted liability, so the money is gone — the same call this library makes on Adyen's
+`Accepted` disputeStatus.
+
+**`INQUIRY_CLOSED` names no winner.** Square's description is "the inquiry is complete", and
+nothing in it says who kept the money, so it stays a `payment.updated` rather than inventing
+a result. The processor throws on a `payment.dispute_closed` carrying no outcome for exactly
+this reason.
+
+**`due_at` is the deadline** — "the deadline by which the seller must respond to the dispute",
+already RFC 3339 — and it comes through as `actionableUntil`. Note that letting it pass is not
+the same as accepting: "if the `due_at` deadline passes with no action from the seller, Square
+automatically challenges the dispute on the seller's behalf."
+
+<Callout type="warn" title="Square does not say whether an inquiry withholds funds">
+`INQUIRY_EVIDENCE_REQUIRED` and `INQUIRY_PROCESSING` are mapped to `payment.dispute_warning`,
+but that is a judgement call and worth knowing about. Square's enum descriptions call these
+states "an inquiry" and keep them out of the four dispute states; its withholding sentence is
+written about a cardholder "requesting a charge reversal"; and its support article on
+information requests says nothing about money at all. Nowhere does the reference say, in
+words, that an inquiry leaves the balance alone.
+
+The mapping follows the distinction Square's own vocabulary draws — the same one Stripe draws
+with its `warning_*` statuses and the card networks draw between a retrieval request and a
+chargeback — and it fails in the safe direction: a warning writes nothing to the ledger, while
+`payment.disputed` would move a paid row. `event.data.disputeState` and `event.raw` carry the
+raw state if your reconciliation needs it.
+</Callout>
+
+Every one of these is keyed on `data.object.dispute.disputed_payment.payment_id` — nested, not
+a top-level `payment_id` — because the row that has to stop saying `paid` is the payment's.
 `amount_money` is the **disputed** amount, which for a partial dispute is less than the
-payment; the reason, the state and the `due_at` deadline stay on `event.raw`.
+payment. `event.data` also carries `disputeId`, `reason`, `disputeState` and, on a close, the
+`outcome`.
 
 ## `authorized` — `APPROVED` is not `pending`
 

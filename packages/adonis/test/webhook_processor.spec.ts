@@ -51,6 +51,61 @@ describe('WebhookProcessor disputes', () => {
     expect(row?.amount).toBe(1000);
   });
 
+  /**
+   * A lost close must move the row even when no `payment.disputed` ever arrived, and on
+   * several gateways it never does: Razorpay documents that it does not debit provisionally
+   * at all, PayPal opens at an inquiry that takes nothing, Woovi only blocks the balance. On
+   * those the sequence is warning -> closed(lost), so a payment whose money is definitively
+   * gone would sit at `paid` forever.
+   */
+  it('takes a paid payment to disputed when the dispute is lost', async () => {
+    const store = new InMemoryBillingStore();
+    await store.savePayment({
+      gatewayId: 'pi_1',
+      provider: 'razorpay',
+      status: 'paid',
+      amount: 1000,
+      currency: 'brl',
+      customerId: 'cus_1',
+    });
+    await new WebhookProcessor({ store, driver: new FakePaymentsDriver() }).process(
+      makeEvent({
+        id: 'evt_lost_no_open',
+        provider: 'razorpay',
+        type: 'payment.dispute_closed',
+        data: { gatewayId: 'pi_1', outcome: 'lost' },
+      }),
+    );
+    const row = await store.findPaymentByGatewayId('pi_1');
+    expect(row?.status).toBe('disputed');
+    expect(row?.customerId).toBe('cus_1');
+  });
+
+  it.each(['expired', 'canceled'])(
+    'moves nothing when a %s close says nothing about the money',
+    async (outcome) => {
+      // Expired means the window closed with no verdict published; canceled means the
+      // cardholder withdrew, and on Stripe a withdrawn dispute still has to be closed in
+      // your favour with evidence. Neither states where the money ended up.
+      const store = new InMemoryBillingStore();
+      await store.savePayment({
+        gatewayId: 'pi_1',
+        provider: 'stripe',
+        status: 'paid',
+        amount: 1000,
+        currency: 'brl',
+      });
+      await new WebhookProcessor({ store, driver: new FakePaymentsDriver() }).process(
+        makeEvent({
+          id: `evt_${outcome}_paid`,
+          type: 'payment.dispute_closed',
+          data: { gatewayId: 'pi_1', outcome },
+        }),
+      );
+      expect((await store.findPaymentByGatewayId('pi_1'))?.status).toBe('paid');
+    },
+  );
+
   it.each(['lost', 'expired', 'canceled'])(
     'leaves a %s dispute where the chargeback left it',
     async (outcome) => {

@@ -1,14 +1,41 @@
-import type {
-  BillingCountQuery,
-  BillingListQuery,
-  BillingStore,
-  CustomerListItem,
-  PaymentListItem,
-  SubscriptionListItem,
-  WebhookEventBreakdownLine,
-  WebhookEventListItem,
+import {
+  type BillingCountQuery,
+  type BillingListQuery,
+  type BillingStore,
+  type CustomerListItem,
+  type DisputeDeadlineQuery,
+  type DisputeListItem,
+  OPEN_DISPUTE_STATUSES,
+  type PaymentListItem,
+  type SubscriptionListItem,
+  type WebhookEventBreakdownLine,
+  type WebhookEventListItem,
 } from '../billing/billing_store.js';
 import { clampLimit, clampOffset } from '../billing/list_query.js';
+
+/** Is this status one that still needs an answer? Shares the constant with the Lucid store. */
+function isOpenDispute(status: string): boolean {
+  return (OPEN_DISPUTE_STATUSES as readonly string[]).includes(status);
+}
+
+/** One dispute row, normalized for reading — the same shape the Lucid store returns. */
+function disputeItem(row: InMemoryDisputeRow): DisputeListItem {
+  return {
+    id: row.id,
+    gatewayId: row.gatewayId,
+    paymentGatewayId: row.paymentGatewayId,
+    provider: row.provider,
+    status: row.status,
+    reason: row.reason,
+    amount: row.amount,
+    currency: row.currency,
+    evidenceDueBy: row.evidenceDueBy,
+    outcome: row.outcome,
+    openedAt: row.openedAt,
+    closedAt: row.closedAt,
+    createdAt: row.createdAt,
+  };
+}
 
 /** A plain in-memory customer-mapping row (mirrors the Lucid model's columns). */
 export interface InMemoryCustomerRow {
@@ -73,6 +100,27 @@ export interface InMemoryWebhookEventRow {
   updatedAt: Date;
 }
 
+/** A plain in-memory dispute row (mirrors the Lucid model's columns). */
+export interface InMemoryDisputeRow {
+  id: string;
+  /** The DISPUTE's own gateway id — or the synthesized one, for a gateway that sends none. */
+  gatewayId: string;
+  /** The disputed payment's gateway id — the join back to the payments map. */
+  paymentGatewayId: string;
+  provider: string;
+  status: string;
+  reason: string | null;
+  amount: number | null;
+  currency: string | null;
+  evidenceDueBy: Date | null;
+  outcome: string | null;
+  openedAt: Date | null;
+  closedAt: Date | null;
+  payload: Record<string, unknown>;
+  /** Insertion timestamp — the Lucid row has one, and the list query orders by it. */
+  createdAt: Date;
+}
+
 /** A plain in-memory metered-usage row (mirrors the Lucid model's columns). */
 export interface InMemoryUsageEventRow {
   id: string;
@@ -95,7 +143,8 @@ export class InMemoryBillingStore
       InMemoryPaymentRow,
       InMemoryWebhookEventRow,
       InMemoryUsageEventRow,
-      InMemoryCustomerRow
+      InMemoryCustomerRow,
+      InMemoryDisputeRow
     >
 {
   customers: Map<string, InMemoryCustomerRow> = new Map();
@@ -103,6 +152,8 @@ export class InMemoryBillingStore
   payments: Map<string, InMemoryPaymentRow> = new Map();
   webhookEvents: Map<string, InMemoryWebhookEventRow> = new Map();
   usageEvents: Map<string, InMemoryUsageEventRow> = new Map();
+  /** Keyed by the DISPUTE's gateway id, mirroring the table's unique column. */
+  disputes: Map<string, InMemoryDisputeRow> = new Map();
 
   #nextId = 1;
 
@@ -355,6 +406,125 @@ export class InMemoryBillingStore
       if (this.#matchesCount(row, query)) count += 1;
     }
     return count;
+  }
+
+  async saveDispute(dispute: {
+    gatewayId: string;
+    paymentGatewayId: string;
+    provider: string;
+    status: string;
+    reason?: string | null;
+    amount?: number | null;
+    currency?: string | null;
+    evidenceDueBy?: Date | null;
+    outcome?: string | null;
+    openedAt?: Date | null;
+    closedAt?: Date | null;
+    payload?: Record<string, unknown>;
+  }): Promise<InMemoryDisputeRow> {
+    const existing = this.disputes.get(dispute.gatewayId);
+    const row: InMemoryDisputeRow = existing ?? {
+      id: `dis_${this.#nextId++}`,
+      gatewayId: dispute.gatewayId,
+      paymentGatewayId: dispute.paymentGatewayId,
+      provider: dispute.provider,
+      status: dispute.status,
+      reason: null,
+      amount: null,
+      currency: null,
+      evidenceDueBy: null,
+      outcome: null,
+      // Stamped once, on insert, and never moved afterwards — mirrors the Lucid store, where
+      // re-stamping it on a later event would make every dispute look brand new.
+      openedAt: dispute.openedAt ?? this.#now(),
+      closedAt: null,
+      payload: {},
+      createdAt: this.#now(),
+    };
+    row.paymentGatewayId = dispute.paymentGatewayId;
+    row.provider = dispute.provider;
+    row.status = dispute.status;
+    // Absent does NOT erase — mirrors the Lucid store: the event that opens a dispute carries
+    // the deadline and the reason, and the one that closes it carries neither.
+    if (dispute.reason !== undefined) row.reason = dispute.reason;
+    if (dispute.amount !== undefined) row.amount = dispute.amount;
+    if (dispute.currency !== undefined) row.currency = dispute.currency;
+    if (dispute.evidenceDueBy !== undefined) row.evidenceDueBy = dispute.evidenceDueBy;
+    if (dispute.outcome !== undefined) row.outcome = dispute.outcome;
+    if (dispute.closedAt !== undefined) row.closedAt = dispute.closedAt;
+    if (existing !== undefined && existing.openedAt === null) {
+      row.openedAt = dispute.openedAt ?? this.#now();
+    }
+    if (dispute.payload !== undefined) row.payload = dispute.payload;
+    this.disputes.set(dispute.gatewayId, row);
+    return row;
+  }
+
+  async findDisputeByGatewayId(gatewayId: string): Promise<InMemoryDisputeRow | null> {
+    return this.disputes.get(gatewayId) ?? null;
+  }
+
+  async findOpenDisputeByPayment(paymentGatewayId: string): Promise<InMemoryDisputeRow | null> {
+    // Newest first, like the Lucid store's `order by created_at desc`; insertion order breaks
+    // ties, because several rows inside one millisecond is the normal case in a test.
+    let found: InMemoryDisputeRow | null = null;
+    for (const row of this.disputes.values()) {
+      if (row.paymentGatewayId !== paymentGatewayId) continue;
+      if (!isOpenDispute(row.status)) continue;
+      if (found === null || row.createdAt >= found.createdAt) found = row;
+    }
+    return found;
+  }
+
+  async listDisputes(query: BillingListQuery): Promise<DisputeListItem[]> {
+    const matching = [...this.disputes.values()].filter(
+      (row) =>
+        (query.status === undefined || row.status === query.status) &&
+        (query.provider === undefined || row.provider === query.provider),
+    );
+    return this.#page(matching, query).map(disputeItem);
+  }
+
+  async countDisputes(query: BillingCountQuery): Promise<number> {
+    let count = 0;
+    for (const row of this.disputes.values()) {
+      if (this.#matchesCount(row, query)) count += 1;
+    }
+    return count;
+  }
+
+  async listDisputesDueWithin(query: DisputeDeadlineQuery): Promise<DisputeListItem[]> {
+    const matching = this.#dueWithin(query)
+      // Soonest first — the priority order, not the arrival order. The only list here that
+      // is not newest-first, and it mirrors the Lucid store's `order by evidence_due_by asc`.
+      .sort((a, b) => (a.evidenceDueBy?.getTime() ?? 0) - (b.evidenceDueBy?.getTime() ?? 0));
+    const offset = clampOffset(query.offset);
+    return matching.slice(offset, offset + clampLimit(query.limit)).map(disputeItem);
+  }
+
+  async countDisputesDueWithin(
+    query: Omit<DisputeDeadlineQuery, 'limit' | 'offset'>,
+  ): Promise<number> {
+    return this.#dueWithin(query).length;
+  }
+
+  /**
+   * The open disputes whose window closes by `now + withinHours`.
+   *
+   * No lower bound: a deadline that has already passed is still open and still unanswered,
+   * and dropping it the moment it expires would make the alert go quiet exactly when it
+   * became true. Rows with no deadline are excluded — nothing to be late for.
+   */
+  #dueWithin(query: Omit<DisputeDeadlineQuery, 'limit' | 'offset'>): InMemoryDisputeRow[] {
+    const now = query.now ?? this.#now();
+    const cutoff = now.getTime() + query.withinHours * 3_600_000;
+    return [...this.disputes.values()].filter(
+      (row) =>
+        isOpenDispute(row.status) &&
+        row.evidenceDueBy !== null &&
+        row.evidenceDueBy.getTime() <= cutoff &&
+        (query.provider === undefined || row.provider === query.provider),
+    );
   }
 
   async recordWebhookEvent(event: {

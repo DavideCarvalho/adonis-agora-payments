@@ -817,8 +817,25 @@ export class PagarmeDriver implements PaymentsDriver {
       // becomes `chargedback` too, and only the charge's — Pagar.me leaves the order's
       // status alone. Note the spelling: `chargedback`, with the `d` in the middle, which
       // Pagar.me's own docs call out because everyone gets it wrong.
+      //
+      // The charge payload carries no defense deadline. Pagar.me's response window lives
+      // only on the Disputes API (`responseDeadline` on `GET /v1/disputes/{id}`), which is
+      // not on the driver contract — so this event has no `actionableUntil` to carry, and
+      // inventing one would be worse than the operator going to look.
       case 'charge.chargedback':
         return 'payment.disputed';
+      // `chargeback.received` REPLACES `charge.chargedback` — Pagar.me's own event list
+      // marks the latter "será descontinuado", migration due **30/09/2026**. As of this
+      // reading (August 2026) the event exists in that list with a one-line description
+      // and nothing else: **no payload is documented anywhere**, and no example is
+      // published. The neighbouring Disputes API documents a dispute as
+      // `{ disputeId, chargeId, responseDeadline, chargebackAmount, status, … }`, which
+      // would map cleanly if that is what arrives — but "would map cleanly if" is not a
+      // reference. Filing `payment.disputed` against an id that turns out to be the
+      // dispute's rather than the charge's writes a `disputed` row nothing reconciles,
+      // so this keeps its own name until one real payload is seen.
+      case 'chargeback.received':
+        return type;
       // A cancel is not a dispute. The contract has no cancel event either, and inventing
       // one would route straight to the processor's no-op branch under a name nothing
       // reads — these land as `payment.updated` with `event.raw.type` intact.
@@ -838,6 +855,12 @@ export class PagarmeDriver implements PaymentsDriver {
 
   #mapWebhookData(type: string, data: PagarmeWebhookPayload['data']): Record<string, unknown> {
     if (data === undefined) return {};
+    // An undocumented payload passes through UNTOUCHED. Running `chargeback.received`
+    // through the charge mapper below fabricated a `{ gatewayId, amount, currency }` out of
+    // fields a dispute object does not have — an empty id and a zero — and handed it to any
+    // app handler registered for the event. What Pagar.me sent is the only honest answer
+    // until its shape is documented, and it is also what you need to report the shape.
+    if (type === 'chargeback.received') return data as unknown as Record<string, unknown>;
     if (type.startsWith('subscription.')) {
       const subscription = this.#mapSubscription(data);
       return {

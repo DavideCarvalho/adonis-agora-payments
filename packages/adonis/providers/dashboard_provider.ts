@@ -24,6 +24,7 @@ import {
   type ApiResponse,
   type DashboardActions,
   type Deps,
+  disputes,
   health,
   overview,
   payments,
@@ -77,6 +78,8 @@ function spaDirectory(): string {
  * - `GET  /api/health`           -> `billingHealth()` — what needs attention today
  * - `GET  /api/overview`         -> `billingOverview()` metrics for a period
  * - `GET  /api/payments`         -> a page of `billing_payments` (status/provider filters)
+ * - `GET  /api/disputes`         -> a page of `billing_disputes`; `?dueWithin=<hours>` for the
+ *                                   open windows closing soonest (READ-ONLY, no actions)
  * - `GET  /api/subscriptions`    -> a page of `billing_subscriptions` (status/provider filters)
  * - `GET  /api/webhook-events`   -> a page of `billing_webhook_events` (status/provider filters)
  * - `GET  /api/providers`        -> the gateways this install actually has data for
@@ -159,6 +162,10 @@ export default class PaymentsDashboardProvider {
     router.get(`${apiBase}/health`, json(health)).as('payments_dashboard.health');
     router.get(`${apiBase}/overview`, json(overview)).as('payments_dashboard.overview');
     router.get(`${apiBase}/payments`, json(payments)).as('payments_dashboard.payments');
+    // Read-only, and only a `GET`: there is no "fight" or "accept" route, on purpose. Whether
+    // to submit evidence or refund is a business rule that stays in the app's code; this exists
+    // so nobody misses the window.
+    router.get(`${apiBase}/disputes`, json(disputes)).as('payments_dashboard.disputes');
     router
       .get(`${apiBase}/subscriptions`, json(subscriptions))
       .as('payments_dashboard.subscriptions');

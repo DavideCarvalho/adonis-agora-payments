@@ -12,6 +12,7 @@ export {
   overview,
   health,
   payments,
+  disputes,
   subscriptions,
   webhookEvents,
   providers,
@@ -24,6 +25,8 @@ export {
   SUBSCRIPTION_STATUSES,
   SUBSCRIPTION_DEFAULT_STATUS,
   WEBHOOK_EVENT_STATUSES,
+  DISPUTE_STATUSES,
+  DISPUTE_DEFAULT_DUE_WITHIN_HOURS,
   PROVIDER_SCAN_CAP,
 } from './handlers.js';
 export type { ApiRequest, ApiResponse, DashboardActions, Deps } from './handlers.js';

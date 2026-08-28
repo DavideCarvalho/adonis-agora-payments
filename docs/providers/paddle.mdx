@@ -109,8 +109,9 @@ Normalized event types:
 | `transaction.payment_failed` | `payment.failed` |
 | `transaction.created/updated/ready/billed/canceled/past_due/revised` | `payment.updated` |
 | `adjustment.created/updated` with `action: 'refund'` | `payment.refunded` |
-| `adjustment.created` with `action: 'chargeback'` | **`payment.disputed`** |
-| `adjustment.*` with any other action (credits, chargeback warnings and reversals) | `payment.updated` |
+| `adjustment.created` with `action: 'chargeback'` or `'chargeback_warning'` | **`payment.disputed`** |
+| `adjustment.created` with `action: 'chargeback_reverse'` or `'chargeback_warning_reverse'` | `payment.dispute_closed` (`won`) |
+| `adjustment.*` with any other action (credits), and `adjustment.updated` on a chargeback | `payment.updated` |
 | `subscription.created`, `subscription.imported` | `subscription.created` |
 | `subscription.activated/updated/trialing/past_due/paused/resumed` | `subscription.updated` |
 | `subscription.canceled` | `subscription.canceled` |
@@ -120,23 +121,73 @@ rather than a derived one.
 
 #### Chargebacks
 
-Paddle has no `dispute.*` event. A chargeback **is an adjustment**: when a customer
-successfully disputes a charge with their bank, Paddle creates an adjustment with
-`action: 'chargeback'` against the transaction and refunds the disputed amount itself. That
-`adjustment.created` is the only notification a Paddle seller gets that revenue was taken
-away, and it used to arrive as a bland `payment.updated`, leaving the stored payment saying
-`paid`. It is now `payment.disputed`, keyed by the **transaction** — the row whose status
-has to move — with the adjustment's total and currency.
+**Paddle does not fight your disputes. Paddle fights its own.** As merchant of record
+Paddle is the seller on the cardholder's statement, so the chargeback is legally Paddle's,
+and Paddle's risk-prevention page is unusually blunt about what that means for you: "The
+Paddle team contests chargebacks for you", and the defense "is fully automated, and
+additional evidence submitted by sellers is **not required or accepted**."
 
-The rest of Paddle's chargeback vocabulary stays a plain update, deliberately:
+That answers both questions this section exists to answer:
 
-- `chargeback_warning` — a dispute is coming; no money has moved yet.
-- `chargeback_reverse` / `chargeback_warning_reverse` — Paddle contested it and won.
-- `adjustment.updated` on a chargeback — a later status change, not a second dispute.
+- **Who fights it?** Paddle, alone. `capabilities.disputes` is `false` and there is no
+  `submitDisputeEvidence` — not because the driver is incomplete, but because there is no
+  endpoint and no evidence Paddle would take.
+- **Is the deadline yours?** No. The normalized events carry **no `actionableUntil`**,
+  because no adjustment field holds one and no response window belongs to you. Every other
+  gateway page in these docs tells you where the clock is; this one tells you there isn't
+  one you can act on.
 
-This package has no canonical *resolution* event: every gateway reports a dispute won or
-lost differently, and a type no driver emits is worse than none. Read
-`event.raw.data.action` when you need the detail.
+What still matters is the *money*, and Paddle reports that as an **adjustment**. There is no
+`dispute.*` event in Paddle Billing — the entire dispute vocabulary is the `action` field on
+an adjustment. (`developer.paddle.com/webhook-reference/risk-dispute-alerts/*` is
+Paddle **Classic**; this driver is Paddle Billing.)
+
+| `action` | Normalized | Funds |
+| --- | --- | --- |
+| `chargeback` | **`payment.disputed`** | withdrawn — the amount and the fee come off your balance |
+| `chargeback_warning` | **`payment.disputed`** | withdrawn — see below |
+| `chargeback_reverse` | `payment.dispute_closed` (`won`) | returned |
+| `chargeback_warning_reverse` | `payment.dispute_closed` (`won`) | returned |
+| `credit`, `credit_reverse` | `payment.updated` | not a dispute |
+
+<Callout title="`chargeback_warning` is not a warning in the sense the other pages mean">
+This is the one place Paddle runs **opposite** to Stripe and Adyen. Their pre-dispute
+alerts — an inquiry, a `NOTIFICATION_OF_CHARGEBACK` — leave the money in the account, which
+is exactly why they normalize to `payment.dispute_warning` and write nothing.
+
+Paddle's does not, because Paddle is the merchant of record and acts on the alert instead of
+forwarding it to you: "If an early-stage dispute is detected, a `chargeback_warning`
+adjustment is created. **The disputed amount is refunded**, and a service fee is applied,
+preventing the dispute from affecting your chargeback rate." An adjustment *is* a money
+movement — Paddle describes `chargeback_reverse` as returning "the amount **held**".
+
+So this driver maps it to `payment.disputed`. Calling it `payment.dispute_warning` writes
+nothing to the payment row, which would leave a stored payment saying `paid` over money
+Paddle has already handed back to the buyer.
+
+The consequence is worth stating plainly: **Paddle sends no funds-untouched pre-dispute
+notification at all**, so there is nothing here to refund before a chargeback is filed — by
+the time you hear about it, Paddle has already done that for you. This driver does not
+invent a warning to fill the gap.
+</Callout>
+
+Both reversals close the dispute as **`won`**, carrying `outcome: 'won'` on `event.data`, and
+the processor moves the row back from `disputed` to `paid`. Paddle spells the funds
+direction out for `chargeback_reverse` ("Where a chargeback is contested successfully,
+Paddle creates an adjustment with the type `chargeback_reverse` to return the amount held");
+for `chargeback_warning_reverse` the reference says only "Reversal of a chargeback warning",
+so `won` is read from the reversal symmetry Paddle's own naming sets up — every `*_reverse`
+action undoes its counterpart. Both put the amount back, and leaving the row at `disputed`
+would write off money that returned.
+
+Only `adjustment.created` is a dispute moment. `adjustment.updated` fires for the approval
+lifecycle of an adjustment that already exists, so it stays `payment.updated` — a second
+`payment.disputed` for the same chargeback is noise.
+
+Every dispute event is keyed by the **transaction** (`transaction_id`) — the row whose status
+has to move — and carries the adjustment id as `disputeId`, plus the adjustment's `reason`
+when Paddle sets one. Paddle has no separate dispute resource; the adjustment *is* the
+dispute.
 
 #### Payment methods
 

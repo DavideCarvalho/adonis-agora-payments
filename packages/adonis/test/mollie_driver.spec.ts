@@ -652,25 +652,61 @@ describe('MollieDriver — the widened contract', () => {
       gatewayId: 'tr_1',
       amount: 1990,
       currency: 'eur',
-      chargebackId: 'chb_1',
+      disputeId: 'chb_1',
       reason: 'AC01',
     });
+    // Mollie has no pre-dispute vocabulary at all: the first event IS the withdrawal, and
+    // the chargeback object carries no deadline for the driver to surface.
+    expect(event.type).not.toBe('payment.dispute_warning');
+    expect(event.data).not.toHaveProperty('actionableUntil');
     // The snapshot carried everything; there is nothing to fetch.
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('calls a reversed chargeback an update, not a second dispute', async () => {
+  it('closes the dispute as won when the chargeback is reversed', async () => {
     const body = JSON.stringify({
       resource: 'event',
       id: 'event_chb_rev',
       type: 'chargeback.reversed',
       entityId: 'chb_1',
       _embedded: {
-        entity: { id: 'chb_1', paymentId: 'tr_1', amount: { currency: 'EUR', value: '19.90' } },
+        entity: {
+          id: 'chb_1',
+          paymentId: 'tr_1',
+          amount: { currency: 'EUR', value: '19.90' },
+          reversedAt: '2026-08-28T09:13:37+00:00',
+        },
       },
     });
-    // The package deliberately has no canonical resolution event.
-    expect((await makeDriver().parseWebhook(body, {})).type).toBe('payment.updated');
+
+    const event = await makeDriver().parseWebhook(body, {});
+
+    // The money came back. Reporting this as a plain update left the row stuck at
+    // `disputed` and the revenue written off.
+    expect(event.type).toBe('payment.dispute_closed');
+    expect(event.data).toMatchObject({ gatewayId: 'tr_1', disputeId: 'chb_1', outcome: 'won' });
+  });
+
+  it('reads the reversal off reversedAt, not only off the event name', async () => {
+    // The payload is a snapshot of the entity, so a `chargeback.received` redelivered after
+    // the reversal carries the timestamp — taking the money off the row twice is worse.
+    const body = JSON.stringify({
+      resource: 'event',
+      id: 'event_chb',
+      type: 'chargeback.received',
+      entityId: 'chb_1',
+      _embedded: {
+        entity: {
+          id: 'chb_1',
+          paymentId: 'tr_1',
+          amount: { currency: 'EUR', value: '19.90' },
+          reversedAt: '2026-08-28T09:13:37+00:00',
+        },
+      },
+    });
+    const event = await makeDriver().parseWebhook(body, {});
+    expect(event.type).toBe('payment.dispute_closed');
+    expect(event.data).toMatchObject({ outcome: 'won' });
   });
 
   it('refuses an id-only chargeback event instead of dropping it silently', async () => {

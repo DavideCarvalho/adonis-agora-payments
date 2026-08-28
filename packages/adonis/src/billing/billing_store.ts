@@ -1,5 +1,6 @@
 import type {
   BillingCustomer,
+  BillingDispute,
   BillingPayment,
   BillingSubscription,
   BillingUsageEvent,
@@ -77,6 +78,62 @@ export interface WebhookEventListItem {
   updatedAt: Date | null;
 }
 
+/** One `billing_disputes` row, normalized for reading. See {@link PaymentListItem}. */
+export interface DisputeListItem {
+  id: string;
+  /** The DISPUTE's own gateway id — or the synthesized one, for a gateway that sends none. */
+  gatewayId: string;
+  /** The disputed payment's gateway id — the join back to `billing_payments`. */
+  paymentGatewayId: string;
+  provider: string;
+  /** A {@link import('../types.js').DisputeStatus} value. */
+  status: string;
+  reason: string | null;
+  /** Integer minor units, or `null` — an early fraud warning names no money. NEVER divide here. */
+  amount: number | null;
+  currency: string | null;
+  /**
+   * The deadline to respond, or `null` when the gateway sent none.
+   *
+   * `null` means "this gateway told us nothing", never "no hurry": a reader must not treat
+   * it as a distant deadline, and {@link BillingStore.listDisputesDueWithin} does not
+   * return rows that carry one.
+   */
+  evidenceDueBy: Date | null;
+  outcome: string | null;
+  openedAt: Date | null;
+  closedAt: Date | null;
+  createdAt: Date | null;
+}
+
+/**
+ * The dispute statuses that still need an answer — everything that is not a resolution.
+ *
+ * Shared, and exported, because the deadline read is only meaningful against the same set
+ * in both store implementations: one of them counting `expired` rows as open would make an
+ * alert that never goes quiet, and one of them omitting `warning` would drop the alert that
+ * arrives while a refund still prevents the chargeback.
+ */
+export const OPEN_DISPUTE_STATUSES = ['warning', 'open', 'under_review'] as const;
+
+/**
+ * "Which windows close soon?" — the one question this table was added to answer.
+ *
+ * Deliberately not expressible through {@link BillingListQuery}: it filters on a deadline,
+ * not on a creation time, and it is the read an alert is built on, so a store that quietly
+ * ignored the window would report a healthy zero.
+ */
+export interface DisputeDeadlineQuery {
+  /** How far ahead to look, in HOURS. `72` = "everything due in the next three days". */
+  withinHours: number;
+  /** Overridable clock — the tests pass a fixed instant. Defaults to now. */
+  now?: Date;
+  /** Exact provider match. Omit for every provider. */
+  provider?: string;
+  limit?: number;
+  offset?: number;
+}
+
 /**
  * One line of {@link BillingStore.webhookEventBreakdown} — how many ledger rows matched,
  * grouped by the two fields that identify WHAT is failing: which gateway, and which event.
@@ -134,6 +191,7 @@ export interface BillingStore<
   WebhookEventRow = BillingWebhookEvent,
   UsageEventRow = BillingUsageEvent,
   CustomerRow = BillingCustomer,
+  DisputeRow = BillingDispute,
 > {
   // ── Customers ────────────────────────────────────────────────────────────────────
 
@@ -265,6 +323,90 @@ export interface BillingStore<
    * being reachable produces exactly that and nothing else in the system errors.
    */
   countPayments(query: BillingCountQuery): Promise<number>;
+
+  // ── Disputes ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Upsert a dispute keyed by `gatewayId` — the DISPUTE's own id, not the payment's.
+   *
+   * Absent fields do NOT erase what is already recorded, the same rule (and for a sharper
+   * reason) as `savePayment`'s `externalReference`: the event that opens a dispute carries
+   * the deadline and the reason, and the event that CLOSES it carries neither. Blanking
+   * them on the close would destroy the only record of the window that was answered — and
+   * the deadline is the entire reason this table exists. Pass `null` explicitly to clear.
+   *
+   * Returns `null` — and writes nothing — when the install has no `billing_disputes` table
+   * yet, i.e. it upgraded the package before running `add_billing_disputes`. The dispute row
+   * is ADDITIONAL (the payment row still moves, the diagnostics still publish), so the write
+   * is skipped rather than failing every gateway delivery until someone runs the migration.
+   */
+  saveDispute(dispute: {
+    /** The dispute's own gateway id. See {@link DisputeListItem.gatewayId}. */
+    gatewayId: string;
+    /** The disputed payment's gateway id. */
+    paymentGatewayId: string;
+    provider: string;
+    /** A {@link import('../types.js').DisputeStatus} value. */
+    status: string;
+    reason?: string | null;
+    /** Integer minor units. */
+    amount?: number | null;
+    currency?: string | null;
+    evidenceDueBy?: Date | null;
+    outcome?: string | null;
+    /** Defaults to the insert instant, and is never moved by a later update. */
+    openedAt?: Date | null;
+    closedAt?: Date | null;
+    payload?: Record<string, unknown>;
+  }): Promise<DisputeRow | null>;
+
+  /** The dispute with this gateway id, or `null`. The idempotency lookup behind the upsert. */
+  findDisputeByGatewayId(gatewayId: string): Promise<DisputeRow | null>;
+
+  /**
+   * The most recent UNRESOLVED dispute against one payment, or `null`.
+   *
+   * The processor's answer to an event that carries no dispute id: several gateways send
+   * the id when the dispute opens and omit it when it closes, and without this the close
+   * would open a second row instead of finishing the first. Resolved disputes are skipped
+   * so a fresh chargeback on a previously-lost payment starts its own row.
+   */
+  findOpenDisputeByPayment(paymentGatewayId: string): Promise<DisputeRow | null>;
+
+  /**
+   * Page through recorded disputes, newest first, `status`/`provider` filters — the same
+   * shape as {@link listPayments}, and normalized for the same reason.
+   */
+  listDisputes(query: BillingListQuery): Promise<DisputeListItem[]>;
+
+  /** How many disputes match a status and/or a creation window. */
+  countDisputes(query: BillingCountQuery): Promise<number>;
+
+  /**
+   * The open disputes whose response window closes within `withinHours` — ordered by the
+   * deadline, soonest FIRST.
+   *
+   * The one read that earns the table, and the only list here that is not newest-first: the
+   * ordering is the priority order, because a window that closes tomorrow outranks a dispute
+   * that arrived today.
+   *
+   * A deadline that is already PAST is included, not filtered out. It is still open, nothing
+   * has answered it, and dropping it the moment it expires would make the alert go quiet at
+   * exactly the moment it became true — the operator would read that as resolved.
+   *
+   * Rows with no `evidenceDueBy` are excluded: a gateway that sent no deadline gives nothing
+   * to be late for, and putting them in the list would bury the rows that do have one.
+   */
+  listDisputesDueWithin(query: DisputeDeadlineQuery): Promise<DisputeListItem[]>;
+
+  /**
+   * The count behind {@link listDisputesDueWithin}, unbounded by any page.
+   *
+   * Separate from the list on purpose: the health check alerts on this number, and a count
+   * derived from a capped page saturates at the cap — which reads as "200 disputes" forever
+   * and, worse, would report a healthy zero if the page limit were ever misapplied.
+   */
+  countDisputesDueWithin(query: Omit<DisputeDeadlineQuery, 'limit' | 'offset'>): Promise<number>;
 
   // ── Webhook idempotency ledger ───────────────────────────────────────────────────
 

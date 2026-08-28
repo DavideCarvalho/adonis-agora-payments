@@ -413,6 +413,30 @@ describe('PagarmeDriver', () => {
     expect(event.data).toMatchObject({ gatewayId: 'ch_1', amount: 1990, currency: 'brl' });
   });
 
+  it("leaves chargeback.received unmapped, and passes Pagar.me's payload through untouched", () => {
+    // `charge.chargedback` is deprecated with a 30/09/2026 migration deadline, and its
+    // replacement's payload is documented NOWHERE — the event list gives it one sentence
+    // and no example. Mapping it to `payment.disputed` on the guess that its `data` is the
+    // documented dispute object would move a paid row over an id that may be the
+    // DISPUTE's, not the charge's. So it keeps its own name and its own body: unknown in
+    // the ledger is visible, a row filed under the wrong id is not.
+    const disputeShaped = {
+      disputeId: '12345',
+      chargeId: 'ch_1',
+      responseDeadline: '2026-09-20T23:59:59Z',
+      status: 'WAITING_MERCHANT_EVIDENCES',
+    };
+    const event = makeDriver().parseWebhook(
+      JSON.stringify({ id: 'hook_9', type: 'chargeback.received', data: disputeShaped }),
+      {},
+    );
+    expect(event.type).toBe('chargeback.received');
+    expect(event.type).not.toBe('payment.disputed');
+    // Untouched: no fabricated `gatewayId`/`amount` from the charge mapper, which cannot
+    // read a dispute and used to answer with an empty id and a zero.
+    expect(event.data).toEqual(disputeShaped);
+  });
+
   it('does not mistake a cancel for a dispute', () => {
     // `order.canceled` is an order that never went through, not money taken back. The
     // contract has no cancel event, so it stays `payment.updated` with `raw.type` intact.

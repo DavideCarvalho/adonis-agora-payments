@@ -182,8 +182,17 @@ interface RazorpayDisputeResponse {
   payment_id: string;
   amount: number;
   currency: string;
+  /**
+   * "The amount, in currency subunits, deducted from your Razorpay current balance **when
+   * the dispute is lost**. This amount will be 0 unless the status of dispute is updated to
+   * `lost`." Razorpay does not provisionally debit, in any phase — so this field is 0 on
+   * every event except the loss, and it is the gateway's own answer to "has the money
+   * moved yet".
+   */
   amount_deducted?: number;
   reason_code?: string;
+  reason_description?: string;
+  /** "Unix timestamp by which a response should be sent to the customer." */
   respond_by?: number;
   /** `open` | `under_review` | `won` | `lost` | `closed`. */
   status?: string;
@@ -698,7 +707,7 @@ export class RazorpayDriver implements PaymentsDriver {
     return {
       id: headerValue(headers, 'x-razorpay-event-id') ?? `${payload.event}-${entity?.id ?? ''}`,
       provider: this.provider,
-      type: this.#mapWebhookType(payload.event),
+      type: this.#mapWebhookType(payload),
       createdAt: this.#toIso(payload.created_at) ?? new Date().toISOString(),
       data: this.#mapWebhookData(payload),
       raw: payload as unknown as Record<string, unknown>,
@@ -896,8 +905,9 @@ export class RazorpayDriver implements PaymentsDriver {
     };
   }
 
-  #mapWebhookType(event: string): string {
-    switch (event) {
+  #mapWebhookType(payload: RazorpayWebhookPayload): string {
+    const dispute = payload.payload?.dispute?.entity;
+    switch (payload.event) {
       case 'payment.captured':
       case 'order.paid':
       case 'payment_link.paid':
@@ -908,19 +918,39 @@ export class RazorpayDriver implements PaymentsDriver {
         return 'payment.failed';
       case 'refund.processed':
         return 'payment.refunded';
-      // `payment.dispute.created` is the opening — the issuing bank has raised a dispute
-      // against a payment. The rest of the family is the resolution (won, lost, closed) or
-      // the paperwork around it, which every gateway reports differently and which this
-      // package deliberately does not name.
+      // ── The dispute family ───────────────────────────────────────────────────────────
+      // `payment.dispute.created` fires for all five of Razorpay's dispute **phases**, and
+      // the first two are not a chargeback. `fraud` is "a dispute raised by the bank when
+      // it suspects a transaction to be fraudulent based on the risk analysis" — the
+      // issuer's TC40/SAFE alert — and `retrieval` is "a request initiated by the customer
+      // with their issuer bank for additional information about a transaction", which
+      // Razorpay's own guide calls "essentially a *soft* chargeback". Neither has taken any
+      // money, and Razorpay's advice is to act during exactly these phases; calling them
+      // `payment.disputed` moves a paid row over money still in the account.
+      //
+      // `chargeback` and the two appeal phases are the refund claim with the bank's
+      // official inquiry open, which is what `payment.disputed` names. With no phase on the
+      // entity this keeps the mapping it has always had rather than downgrading a dispute
+      // the driver could not read.
       case 'payment.dispute.created':
-        return 'payment.disputed';
+        return dispute?.phase === 'fraud' || dispute?.phase === 'retrieval'
+          ? 'payment.dispute_warning'
+          : 'payment.disputed';
+      // The three outcomes. Each names its own result, so the outcome is readable from the
+      // event alone — but only if the envelope carried the dispute it is about; without one
+      // there is no `disputeId`, no amount and nothing to close, so it degrades to an
+      // update rather than emitting a close the processor would reject.
+      case 'payment.dispute.won':
+      case 'payment.dispute.lost':
+      case 'payment.dispute.closed':
+        return dispute === undefined ? 'payment.updated' : 'payment.dispute_closed';
       // `payment.authorized` is money held, not money moved — reporting it as a success
       // would have the billing layer settle an order the merchant has not been paid for,
       // and there is deliberately no `payment.authorized` event for it to become.
       case 'payment.authorized':
-      case 'payment.dispute.won':
-      case 'payment.dispute.lost':
-      case 'payment.dispute.closed':
+      // Movement inside an open dispute, not a resolution: `under_review` is the bank
+      // reviewing the evidence you submitted, `action_required` is Razorpay saying that
+      // evidence was insufficient or unreadable and has to be resubmitted.
       case 'payment.dispute.under_review':
       case 'payment.dispute.action_required':
       case 'refund.created':
@@ -941,7 +971,32 @@ export class RazorpayDriver implements PaymentsDriver {
       case 'subscription.completed':
         return 'subscription.updated';
       default:
-        return event;
+        return payload.event;
+    }
+  }
+
+  /**
+   * The dispute event name → the canonical outcome, or `undefined` for everything that is
+   * not a resolution.
+   *
+   * Razorpay names the result in the event itself, and its status descriptions say the same
+   * thing: `won` is "the bank has accepted the remedial documents", `lost` is "the bank did
+   * not accept" them. `closed` is the odd one — "a fraudulent transaction is closed after
+   * you provide details of the transaction or make a refund to the customer. This is seen
+   * in fraudulent transactions only" — so no verdict was reached and no chargeback amount
+   * was ever deducted. That is `canceled`, not `won`: nothing was decided in your favour,
+   * the case simply stopped existing.
+   */
+  #disputeOutcome(event: string): 'won' | 'lost' | 'canceled' | undefined {
+    switch (event) {
+      case 'payment.dispute.won':
+        return 'won';
+      case 'payment.dispute.lost':
+        return 'lost';
+      case 'payment.dispute.closed':
+        return 'canceled';
+      default:
+        return undefined;
     }
   }
 
@@ -956,13 +1011,27 @@ export class RazorpayDriver implements PaymentsDriver {
       const reference = this.#readNotes(
         payload.payload?.payment?.entity?.notes,
       )?.external_reference;
+      const respondBy = this.#toIso(disputeEntity.respond_by);
+      const outcome = this.#disputeOutcome(payload.event);
       return {
         gatewayId: disputeEntity.payment_id,
         amount: disputeEntity.amount,
         currency: disputeEntity.currency.toLowerCase(),
         disputeId: disputeEntity.id,
+        // `respond_by` is "the Unix timestamp by which a response should be sent" — the one
+        // field that makes a fraud alert or a retrieval request actionable, and the reason
+        // acting during those phases avoids the chargeback entirely.
+        ...(respondBy !== null ? { actionableUntil: respondBy } : {}),
+        ...(disputeEntity.reason_code !== undefined ? { reason: disputeEntity.reason_code } : {}),
         ...(disputeEntity.status !== undefined ? { disputeStatus: disputeEntity.status } : {}),
         ...(disputeEntity.phase !== undefined ? { disputePhase: disputeEntity.phase } : {}),
+        // `amount_deducted` is Razorpay's own record of what actually left the balance, and
+        // it stays 0 until the dispute is lost. Passed through so a handler never has to
+        // infer the money movement from the event name.
+        ...(disputeEntity.amount_deducted !== undefined
+          ? { amountDeducted: disputeEntity.amount_deducted }
+          : {}),
+        ...(outcome !== undefined ? { outcome } : {}),
         ...(reference !== undefined ? { externalReference: reference } : {}),
       };
     }

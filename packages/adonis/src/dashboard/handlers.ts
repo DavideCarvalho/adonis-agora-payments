@@ -1,6 +1,6 @@
 import { billingHealth } from '../billing/billing_health.js';
 import { billingOverview } from '../billing/billing_overview.js';
-import type { BillingStore } from '../billing/billing_store.js';
+import type { BillingStore, DisputeListItem } from '../billing/billing_store.js';
 import {
   BILLING_LIST_DEFAULT_LIMIT,
   BILLING_LIST_MAX_LIMIT,
@@ -100,6 +100,23 @@ export const PAYMENT_STATUSES = [
   'disputed',
   'canceled',
 ] as const;
+
+/** The statuses the disputes filter offers — `DisputeStatus`, ordered the way an operator reads
+ *  them: what still needs an answer first. `warning` leads because it is the only one where a
+ *  refund still stops the chargeback from ever being filed. */
+export const DISPUTE_STATUSES = [
+  'warning',
+  'open',
+  'under_review',
+  'lost',
+  'expired',
+  'canceled',
+  'won',
+] as const;
+
+/** How far ahead `?dueWithin=` looks when the caller asks for closing windows but names no
+ *  horizon. Matches `billingHealth`'s default, so the panel and the cron agree about "soon". */
+export const DISPUTE_DEFAULT_DUE_WITHIN_HOURS = 72;
 
 /** The ledger's three statuses. `failed` is the one that means "a handler threw and the dispatcher
  *  gave up" — i.e. the event's effect never happened. */
@@ -282,6 +299,98 @@ export async function health(deps: Deps): Promise<ApiResponse> {
     checkedAt: report.checkedAt.toISOString(),
     checks: report.checks,
     failures: report.failures,
+    // WHICH windows are closing, not just how many — a count names no gateway dashboard to
+    // open. Dates cross the wire as ISO strings, like everywhere else here.
+    deadlines: report.deadlines.map(disputeJson),
+  });
+}
+
+/** One dispute row as JSON. `amount` stays integer minor units — the SPA formats. */
+function disputeJson(row: DisputeListItem) {
+  return {
+    id: row.id,
+    gatewayId: row.gatewayId,
+    paymentGatewayId: row.paymentGatewayId,
+    provider: row.provider,
+    status: row.status,
+    reason: row.reason,
+    amount: row.amount,
+    currency: row.currency,
+    /** `null` means the gateway sent no deadline — never "no hurry". The SPA must say so. */
+    evidenceDueBy: iso(row.evidenceDueBy),
+    outcome: row.outcome,
+    openedAt: iso(row.openedAt),
+    closedAt: iso(row.closedAt),
+    createdAt: iso(row.createdAt),
+  };
+}
+
+/**
+ * `GET <api>/disputes` — a page of `billing_disputes`.
+ *
+ * Two modes, because a dispute list has two questions:
+ *
+ * - default: newest first, `status`/`provider` filters — the log.
+ * - `?dueWithin=<hours>`: only OPEN disputes carrying a deadline, soonest window first — the
+ *   work. Rows already past their deadline stay in it: they are still open and still
+ *   unanswered, and dropping them the moment they expire would make the panel go quiet at
+ *   exactly the moment it became urgent.
+ *
+ * READ-ONLY, deliberately. There is no "accept" and no "fight" button: whether to submit
+ * evidence or refund is a business rule (it turns on the fee, the evidence you actually have,
+ * and the chargeback ratio that puts a merchant into a card network's monitoring programme),
+ * and it stays in the app's code. This panel exists so nobody misses the window.
+ */
+export async function disputes(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
+  const status = filterQuery(req.query.status);
+  const provider = filterQuery(req.query.provider);
+  const page = pageOf(req);
+  // `firstQuery`, not `filterQuery`: a bare `?dueWithin` (no value) is a request for the work
+  // list at the DEFAULT horizon, not an absent filter. A value that is present and unreadable
+  // is a `400` — silently falling back to the default would answer a different question than
+  // the one asked, and the caller could not tell.
+  const dueWithinRaw = firstQuery(req.query.dueWithin);
+
+  if (dueWithinRaw !== undefined) {
+    const parsed =
+      dueWithinRaw === '' ? DISPUTE_DEFAULT_DUE_WITHIN_HOURS : Number.parseInt(dueWithinRaw, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return badRequest('dueWithin must be a number of hours, and not negative');
+    }
+    const withinHours = parsed;
+    const now = deps.now?.();
+    const rows = await deps.store.listDisputesDueWithin({
+      withinHours,
+      ...(now !== undefined ? { now } : {}),
+      ...(provider !== undefined ? { provider } : {}),
+      limit: page.limit,
+      offset: page.offset,
+    });
+    // The full count, not `rows.length`: a page that fills says nothing about how many more
+    // windows are closing, and that number is the one an operator plans their day around.
+    const total = await deps.store.countDisputesDueWithin({
+      withinHours,
+      ...(now !== undefined ? { now } : {}),
+      ...(provider !== undefined ? { provider } : {}),
+    });
+    return ok({
+      disputes: rows.map(disputeJson),
+      dueWithin: { hours: withinHours, total },
+      page: { limit: page.limit, offset: page.offset, count: rows.length },
+      statuses: DISPUTE_STATUSES,
+    });
+  }
+
+  const rows = await deps.store.listDisputes({
+    ...(status !== undefined ? { status } : {}),
+    ...(provider !== undefined ? { provider } : {}),
+    limit: page.limit,
+    offset: page.offset,
+  });
+  return ok({
+    disputes: rows.map(disputeJson),
+    page: { limit: page.limit, offset: page.offset, count: rows.length },
+    statuses: DISPUTE_STATUSES,
   });
 }
 

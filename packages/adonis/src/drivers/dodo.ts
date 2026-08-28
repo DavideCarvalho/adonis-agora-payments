@@ -249,7 +249,14 @@ export class DodoDriver implements PaymentsDriver {
     'bnpl',
     'undefined',
   ] as const;
-  readonly capabilities = { refunds: true, invoices: true, subscriptions: true };
+  /**
+   * `disputes: false` even though Dodo forwards the whole chargeback lifecycle over
+   * webhooks. The capability gates the *API* half — `findDispute` and
+   * `submitDisputeEvidence` — and Dodo's own dispute reference says evidence "must occur
+   * within this window **through the Dodo dashboard**". There is no representment endpoint
+   * to call, so a driver that claimed one would be lying about the only part that matters.
+   */
+  readonly capabilities = { refunds: true, invoices: true, subscriptions: true, disputes: false };
 
   #baseUrl: string;
   #bearerToken: string;
@@ -639,9 +646,9 @@ export class DodoDriver implements PaymentsDriver {
     return {
       id,
       provider: this.provider,
-      type: this.#mapWebhookType(payload.type),
+      type: this.#mapWebhookType(payload.type, payload.data ?? {}),
       createdAt: payload.timestamp ?? new Date().toISOString(),
-      data: this.#mapWebhookData(payload.data ?? {}),
+      data: this.#mapWebhookData(payload.type, payload.data ?? {}),
       raw: payload as unknown as Record<string, unknown>,
     };
   }
@@ -802,7 +809,14 @@ export class DodoDriver implements PaymentsDriver {
     };
   }
 
-  #mapWebhookType(event: string): string {
+  #mapWebhookType(event: string, data: Record<string, unknown>): string {
+    // The dispute family is normalized off the `Dispute` payload, and a `dispute.*` event
+    // whose body is not one cannot supply an outcome — `payment.dispute_closed` without an
+    // outcome makes the processor throw, on purpose. So an unrecognizable body degrades to
+    // `payment.updated` rather than producing an event the processor will reject.
+    if (event.startsWith('dispute.')) {
+      return data.payload_type === 'Dispute' ? this.#disputeType(event) : 'payment.updated';
+    }
     switch (event) {
       case 'payment.succeeded':
         return 'payment.succeeded';
@@ -829,21 +843,6 @@ export class DodoDriver implements PaymentsDriver {
       case 'subscription.expired':
       case 'subscription.failed':
         return 'subscription.canceled';
-      // A cardholder has opened a chargeback: the one webhook that takes revenue AWAY.
-      // Dodo is a merchant of record and still forwards the dispute lifecycle (you get ten
-      // days to respond), so unlike Polar and Lemon Squeezy there IS a real event to map.
-      case 'dispute.opened':
-        return 'payment.disputed';
-      // The rest of the lifecycle — `challenged`, `accepted`, `cancelled`, `expired`,
-      // `won`, `lost`. The package deliberately has no canonical resolution event (every
-      // gateway reports one differently), so they arrive as a plain update.
-      case 'dispute.challenged':
-      case 'dispute.accepted':
-      case 'dispute.cancelled':
-      case 'dispute.expired':
-      case 'dispute.won':
-      case 'dispute.lost':
-        return 'payment.updated';
       default:
         // refund.failed, license_key.*, payout.*, credit.*, dunning.*,
         // abandoned_checkout.*, entitlement_grant.* — passed through so an app handler can
@@ -853,11 +852,67 @@ export class DodoDriver implements PaymentsDriver {
   }
 
   /**
+   * The dispute lifecycle → the canonical dispute types.
+   *
+   * Dodo is a merchant of record, which usually means the chargeback is the MoR's to
+   * fight and you hear about it as a balance line. Dodo is the exception, and its own
+   * dispute reference is explicit about both halves: **"Cardholder initiates dispute;
+   * funds are held"** on `dispute.opened`, and **"You have 10 days to respond after a
+   * dispute opens"**, with the evidence submitted by you.
+   *
+   * So `dispute.opened` is a real `payment.disputed` — the money is already gone — and
+   * there is no funds-untouched warning to map. Dodo carries a `dispute_stage`
+   * (`pre_dispute` → `dispute` → `pre_arbitration`), but its reference states the funds
+   * hold for `dispute.opened` without qualifying it by stage, so the driver does NOT
+   * downgrade a `pre_dispute` open to `payment.dispute_warning`. Guessing that Dodo's
+   * `pre_dispute` behaves like a Stripe inquiry would leave a row saying `paid` over
+   * money Dodo says it has already held.
+   */
+  #disputeType(event: string): string {
+    if (event === 'dispute.opened') return 'payment.disputed';
+    // Evidence submitted, network reviewing. Movement inside an open dispute, not a
+    // resolution of it.
+    if (event === 'dispute.challenged') return 'payment.updated';
+    return this.#disputeOutcome(event) === undefined ? 'payment.updated' : 'payment.dispute_closed';
+  }
+
+  /**
+   * The outcome each closing event reports, in Dodo's own words.
+   *
+   * - `dispute.won` — "Resolved in your favor; funds retained".
+   * - `dispute.lost` — "Resolved for cardholder; funds returned". Visa RDR auto-refunds
+   *   arrive here too, flagged `is_resolved_by_rdr: true` on the payload.
+   * - `dispute.accepted` — "Dispute accepted without contest; funds returned". You chose
+   *   not to defend, so the cardholder keeps the money: a loss, not a cancellation.
+   * - `dispute.expired` — "Response window closed without resolution", which Dodo's own
+   *   table glosses as "typically resolves against you". `expired` rather than `lost`,
+   *   because nothing was decided — the clock ran out.
+   * - `dispute.cancelled` — "Dispute withdrawn; no action needed". `canceled` does not
+   *   return the row to `paid` on its own, which is deliberate: a withdrawn dispute is
+   *   not an acquirer returning funds.
+   */
+  #disputeOutcome(event: string): 'won' | 'lost' | 'canceled' | 'expired' | undefined {
+    switch (event) {
+      case 'dispute.won':
+        return 'won';
+      case 'dispute.lost':
+      case 'dispute.accepted':
+        return 'lost';
+      case 'dispute.expired':
+        return 'expired';
+      case 'dispute.cancelled':
+        return 'canceled';
+      default:
+        return undefined;
+    }
+  }
+
+  /**
    * Normalize the event body onto the shapes the billing layer's built-in sync expects,
    * using the `payload_type` discriminator Dodo puts on every `data` object.
    * `externalReference` comes back out of `metadata.external_reference`.
    */
-  #mapWebhookData(data: Record<string, unknown>): Record<string, unknown> {
+  #mapWebhookData(event: string, data: Record<string, unknown>): Record<string, unknown> {
     const payloadType = data.payload_type;
     if (payloadType === 'Payment') {
       const payment = data as unknown as DodoPayment;
@@ -882,13 +937,24 @@ export class DodoDriver implements PaymentsDriver {
     }
     if (payloadType === 'Dispute') {
       const dispute = data as unknown as DodoDispute;
+      const outcome = this.#disputeOutcome(event);
       // Keyed by the PAYMENT, not the dispute: the payment is the row whose status has to
       // move to `disputed`, and the amount/currency are what the processor writes back.
+      //
+      // No `actionableUntil`. Dodo's ten-day clock is real and it is YOURS — but Dodo
+      // sends no deadline field: the dispute object is `dispute_id`, `payment_id`,
+      // `business_id`, `amount`, `currency`, `dispute_status`, `dispute_stage`,
+      // `created_at`, `remarks`, `payment_provider`, `is_resolved_by_rdr` and nothing
+      // else. Deriving `created_at + 10 days` would put a date this driver invented into
+      // the one field an operator is meant to trust, so the deadline stays documented
+      // rather than fabricated.
       return {
         gatewayId: dispute.payment_id,
         amount: Number(dispute.amount) || 0,
         currency: (dispute.currency ?? this.#currency).toLowerCase(),
         disputeId: dispute.dispute_id,
+        ...(dispute.remarks ? { reason: dispute.remarks } : {}),
+        ...(outcome !== undefined ? { outcome } : {}),
         ...(dispute.dispute_stage !== undefined ? { disputeStage: dispute.dispute_stage } : {}),
         ...(dispute.dispute_status !== undefined ? { disputeStatus: dispute.dispute_status } : {}),
       };

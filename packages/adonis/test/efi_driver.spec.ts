@@ -355,6 +355,33 @@ describe('EfiDriver charges', () => {
     expect(payment?.status).toBe('paid');
     expect(payment?.paidAt).toBe('2026-08-01T10:05:00.000Z');
   });
+
+  it('reads a MED-returned charge back as disputed, the way its webhook reports it', async () => {
+    const { fn } = fakeFetch([
+      [/oauth\/token/, () => ({ body: TOKEN_BODY })],
+      [
+        /v2\/cob/,
+        () => ({
+          body: {
+            ...COB,
+            status: 'CONCLUIDA',
+            pix: [
+              {
+                endToEndId: 'E1',
+                valor: '19.90',
+                devolucoes: [
+                  { id: 'd1', valor: '19.90', natureza: 'MED_FRAUDE', status: 'DEVOLVIDO' },
+                ],
+              },
+            ],
+          },
+        }),
+      ],
+    ]);
+    // `refunded` would say the merchant gave the money back. The webhook calls the same
+    // state `payment.disputed`; reading the charge has to agree with it.
+    expect((await makeDriver(fn).findPayment(COB.txid))?.status).toBe('disputed');
+  });
 });
 
 describe('EfiDriver refunds', () => {
@@ -444,6 +471,102 @@ describe('EfiDriver webhooks', () => {
           txid: COB.txid,
           valor: '19.90',
           devolucoes: [{ id: 'r1', valor: '19.90', status: 'DEVOLVIDO' }],
+        },
+      ],
+    });
+    const event = makeDriver(fn).parseWebhook(raw, {});
+    expect(event.type).toBe('payment.refunded');
+    expect(event.id).toBe('E1:devolvido');
+  });
+
+  it('maps a MED return to payment.disputed, not to payment.refunded', () => {
+    // A Pix cannot be charged back, but it can be taken back: BACEN's MED returns money to
+    // a payer who reported fraud, and it arrives as an ordinary `devolução` marked
+    // `natureza: MED_FRAUDE`. Calling it a refund said the merchant chose to give the money
+    // back — the one thing that did not happen.
+    const raw = JSON.stringify({
+      pix: [
+        {
+          endToEndId: 'E1',
+          txid: COB.txid,
+          valor: '19.90',
+          devolucoes: [{ id: 'd1', valor: '19.90', natureza: 'MED_FRAUDE', status: 'DEVOLVIDO' }],
+        },
+      ],
+    });
+    const event = makeDriver(fn).parseWebhook(raw, {});
+    expect(event.type).toBe('payment.disputed');
+    expect(event.id).toBe('E1:med:d1:DEVOLVIDO');
+    expect(event.data).toMatchObject({
+      gatewayId: COB.txid,
+      amount: 1990,
+      currency: 'brl',
+      disputeId: 'd1',
+      reason: 'MED_FRAUDE',
+    });
+  });
+
+  it('warns on a MED return that is still executing, and never calls it a chargeback', () => {
+    // `EM_PROCESSAMENTO` is the return being executed: nothing has left the account yet, so
+    // the payment row is still telling the truth when it says `paid`. It gets its own event
+    // id so the `DEVOLVIDO` that follows is not skipped as a redelivery.
+    const raw = JSON.stringify({
+      pix: [
+        {
+          endToEndId: 'E1',
+          txid: COB.txid,
+          valor: '19.90',
+          devolucoes: [
+            { id: 'd1', valor: '19.90', natureza: 'MED_OPERACIONAL', status: 'EM_PROCESSAMENTO' },
+          ],
+        },
+      ],
+    });
+    const event = makeDriver(fn).parseWebhook(raw, {});
+    expect(event.type).toBe('payment.dispute_warning');
+    expect(event.type).not.toBe('payment.disputed');
+    expect(event.id).toBe('E1:med:d1:EM_PROCESSAMENTO');
+    // Efí's Pix notification has no deadline field anywhere, and inventing one would be
+    // worse than the absence.
+    expect(event.data).not.toHaveProperty('actionableUntil');
+  });
+
+  it('does not treat a MED that was never executed as money leaving', () => {
+    // `NAO_REALIZADO` is Efí's own example of a return that did not happen (insufficient
+    // balance). Nothing was taken, so nothing is disputed.
+    const raw = JSON.stringify({
+      pix: [
+        {
+          endToEndId: 'E1',
+          txid: COB.txid,
+          valor: '19.90',
+          devolucoes: [
+            {
+              id: 'd1',
+              valor: '19.90',
+              natureza: 'MED_FRAUDE',
+              status: 'NAO_REALIZADO',
+              motivo: 'Saldo insuficiente para realizar a devolução.',
+            },
+          ],
+        },
+      ],
+    });
+    const event = makeDriver(fn).parseWebhook(raw, {});
+    expect(event.type).not.toBe('payment.disputed');
+    expect(event.type).not.toBe('payment.dispute_warning');
+  });
+
+  it('still calls a merchant-initiated devolução a refund', () => {
+    // `ORIGINAL` (and an absent `natureza`, which the API Pix spec says means `ORIGINAL`)
+    // is the refund the merchant asked for. Nothing about that changed.
+    const raw = JSON.stringify({
+      pix: [
+        {
+          endToEndId: 'E1',
+          txid: COB.txid,
+          valor: '19.90',
+          devolucoes: [{ id: 'r1', valor: '19.90', natureza: 'ORIGINAL', status: 'DEVOLVIDO' }],
         },
       ],
     });

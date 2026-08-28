@@ -87,7 +87,7 @@ describe('resolveConfig', () => {
     const config = resolveConfig();
     expect(config.enabled).toBe(true);
     // NOT `/payments` — that prefix already carries the gateway webhook route.
-    expect(config.path).toBe('/payments-dashboard');
+    expect(config.path).toBe('/payments');
     expect(config.currency).toBe('BRL');
     expect(config.authorize).toBe(defaultAuthorize);
     expect(config.dashboardAuth).toBeNull();

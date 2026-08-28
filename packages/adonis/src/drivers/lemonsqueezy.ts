@@ -176,7 +176,12 @@ export class LemonSqueezyDriver implements PaymentsDriver {
    * promise the payment will be a card rather than PayPal.
    */
   readonly supportedMethods = ['undefined'] as const;
-  readonly capabilities = { refunds: true, invoices: true, subscriptions: true };
+  /**
+   * `disputes: false`. Lemon Squeezy has no dispute API and no dispute webhook — see
+   * `#mapWebhookType`. As merchant of record it "typically manages these disputes on
+   * behalf of the seller", so there is nothing here to read and nothing to submit.
+   */
+  readonly capabilities = { refunds: true, invoices: true, subscriptions: true, disputes: false };
 
   #baseUrl = 'https://api.lemonsqueezy.com/v1';
   #apiKey: string;
@@ -693,12 +698,20 @@ export class LemonSqueezyDriver implements PaymentsDriver {
         // `license_key_*`, `affiliate_activated`, `customer_updated` — passed through so an
         // app handler can subscribe by the Lemon Squeezy name.
         //
-        // There is deliberately no `payment.disputed` here: Lemon Squeezy has NO dispute or
-        // chargeback event at all. As merchant of record it is the seller on the buyer's
-        // statement, so the chargeback is raised against Lemon Squeezy and Lemon Squeezy
-        // absorbs it — which is a large part of why anyone picks an MoR. Forcing an
-        // unrelated event into `payment.disputed` would invent a notification that does
-        // not exist.
+        // There is deliberately no dispute type here: **Lemon Squeezy has NO dispute or
+        // chargeback event at all** — no warning, no chargeback, no resolution. The whole
+        // catalogue is `order_created`, `order_refunded`, the `subscription_*` family and
+        // `license_key_created` / `license_key_updated`; there is not even an
+        // `order_updated`, so an order that Lemon Squeezy later marks `fraudulent` (its
+        // status for a charged-back order) reaches this driver through no event whatsoever.
+        //
+        // That is the merchant-of-record bargain rather than an oversight: Lemon Squeezy is
+        // the seller on the buyer's statement, the chargeback is raised against Lemon
+        // Squeezy, and Lemon Squeezy "typically manages these disputes on behalf of the
+        // seller", deducting the amount plus a $15 dispute fee from the next payout. There
+        // is no deadline that belongs to you and no evidence you can file. Forcing an
+        // unrelated event into `payment.disputed` would invent a notification that does not
+        // exist; the honest answer is that the first you hear of a chargeback is the payout.
         return eventName;
     }
   }

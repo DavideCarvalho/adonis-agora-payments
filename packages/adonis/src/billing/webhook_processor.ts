@@ -3,6 +3,7 @@ import type { PaymentsDriver } from '../driver.js';
 import type { WebhookEvent } from '../types.js';
 import type { BillingStore } from './billing_store.js';
 import {
+  type DisputeWebhookData,
   isDisputeWebhookData,
   isPaymentWebhookData,
   isSubscriptionWebhookData,
@@ -24,6 +25,20 @@ export interface WebhookProcessorOptions {
   driver?: PaymentsDriver;
   /** Map of gateway event type → handler. Apps register their business logic here. */
   handlers?: Record<string, WebhookHandler>;
+}
+
+/**
+ * `actionableUntil` as a `Date`, or `null` when there is nothing usable to store.
+ *
+ * An unparseable deadline is dropped rather than written: `new Date('soon')` is an Invalid
+ * Date, which Postgres rejects — so a driver with one bad field would fail the whole webhook
+ * and, through the ledger, every redelivery of it. Dropping one field loses the alert's
+ * urgency; throwing here loses the chargeback itself.
+ */
+function parseDeadline(value: string | undefined): Date | null {
+  if (value === undefined) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 /**
@@ -244,6 +259,12 @@ export class WebhookProcessor {
         payload: event.raw,
       });
     }
+    // The dispute row is written whether or not the payment is one we recorded: a chargeback
+    // against a charge this install never saw is exactly the one somebody has to be told
+    // about, and its deadline is the only thing that makes it actionable.
+    if (isDisputeWebhookData(event.data)) {
+      await this.#persistDispute(event, event.data, { status: 'open' });
+    }
     publishPayments('payment.disputed', {
       gatewayId,
       provider: event.provider,
@@ -268,6 +289,12 @@ export class WebhookProcessor {
       );
     }
     const { gatewayId, reason, actionableUntil } = event.data;
+    // Still NOTHING is written to the payment — no money has moved, and a row that says
+    // `paid` is telling the truth. The DISPUTE row is new, and is the point: this is the
+    // moment the clock starts, and the alert is only actionable while it has somewhere to
+    // live. `warning` is a dispute status of its own, so nothing here can be mistaken for a
+    // chargeback that took money.
+    await this.#persistDispute(event, event.data, { status: 'warning' });
     publishPayments('payment.dispute_warning', {
       gatewayId,
       provider: event.provider,
@@ -302,11 +329,33 @@ export class WebhookProcessor {
     }
     const existing = await this.#store.findPaymentByGatewayId(gatewayId);
 
-    if (outcome === 'won' && existing !== null && existing.status === 'disputed') {
+    // A close moves the payment row in BOTH directions, and the second one is easy to miss.
+    //
+    // `won` returns money that a chargeback took, so a row sitting at `disputed` goes back
+    // to `paid` — `revenue()` sums `paid`, and leaving it writes off money that came back.
+    //
+    // `lost` is the mirror, and it does not assume a `payment.disputed` ever arrived. Plenty
+    // of gateways never send one: Razorpay documents that it does not debit provisionally at
+    // all, PayPal opens at an inquiry that takes nothing, and Woovi only blocks the balance.
+    // On those the sequence is warning → closed(lost), with nothing in between to move the
+    // row — so a payment whose money is definitively gone would still read `paid`.
+    //
+    // `expired` and `canceled` deliberately move nothing. Expired means the window closed
+    // with no verdict published, and canceled means the cardholder withdrew — on Stripe a
+    // withdrawn dispute still has to be closed in your favour with evidence. Neither is a
+    // statement about where the money ended up.
+    const target =
+      outcome === 'won' && existing?.status === 'disputed'
+        ? 'paid'
+        : outcome === 'lost' && existing !== null && existing.status !== 'disputed'
+          ? 'disputed'
+          : undefined;
+
+    if (target !== undefined && existing !== null) {
       await this.#store.savePayment({
         gatewayId,
         provider: event.provider,
-        status: 'paid',
+        status: target,
         // The dispute's amount can differ from the charge's — a partial dispute, or a
         // currency conversion between the charge and the chargeback. The ROW keeps the
         // amount it was charged for; the dispute's own figure stays on the payload.
@@ -318,6 +367,11 @@ export class WebhookProcessor {
       });
     }
 
+    // The outcome IS the status: `won`/`lost`/`canceled`/`expired` are all `DisputeStatus`
+    // members, so a closed dispute stops matching the open-window read the moment it closes —
+    // which is what stops the deadline check alerting on a window nobody has to answer.
+    await this.#persistDispute(event, event.data, { status: outcome, closedAt: new Date() });
+
     publishPayments('payment.dispute_closed', {
       gatewayId,
       provider: event.provider,
@@ -325,6 +379,67 @@ export class WebhookProcessor {
       outcome,
       ...(amount !== undefined ? { amount } : {}),
       ...(currency !== undefined ? { currency } : {}),
+    });
+  }
+
+  /**
+   * The key a dispute row is upserted on — the DISPUTE's own gateway id where the event
+   * carries one, and a reconcilable stand-in where it does not.
+   *
+   * Several gateways send no dispute id at all, and several more send one when the dispute
+   * opens and omit it when it closes. Both have to land on the SAME row, or the close opens a
+   * second dispute and the deadline check keeps alerting on a window that was already
+   * answered. So, in order:
+   *
+   * 1. `disputeId`, when the event carries one. That is the gateway's own identity.
+   * 2. Otherwise the payment's newest UNRESOLVED dispute, if there is one — this is the close
+   *    (or the chargeback after a warning) rejoining the row its own opening event created.
+   * 3. Otherwise `dispute:<provider>:<payment gateway id>`, synthesized.
+   *
+   * The `dispute:` prefix is what makes step 3 safe to store in the same unique column as a
+   * real gateway id: no gateway issues an id in that shape, so a synthesized key can never
+   * collide with a real one, and it stays reconcilable by hand because the payment it names
+   * is right there in it. What it costs: a payment disputed TWICE by a gateway that sends no
+   * dispute id collapses into one row, because such a gateway gives us nothing to tell the
+   * two apart. Overwriting one row is the lesser error — a second row keyed on nothing could
+   * never be closed, and would alert on its deadline forever.
+   */
+  async #disputeKey(provider: string, data: DisputeWebhookData): Promise<string> {
+    if (data.disputeId !== undefined && data.disputeId !== '') return data.disputeId;
+    const open = await this.#store.findOpenDisputeByPayment(data.gatewayId);
+    if (open !== null) return open.gatewayId;
+    return `dispute:${provider}:${data.gatewayId}`;
+  }
+
+  /**
+   * Write the dispute row that goes with a dispute event.
+   *
+   * ADDITIONAL to what each handler already does, never a replacement: the warning still
+   * moves no money, the chargeback still moves the payment to `disputed`, and a won close
+   * still puts it back to `paid`. What this adds is the one thing none of them kept — the
+   * response deadline, which arrived on the event, was published once, and was then gone.
+   */
+  async #persistDispute(
+    event: WebhookEvent,
+    data: DisputeWebhookData,
+    fields: { status: string; closedAt?: Date },
+  ): Promise<void> {
+    const deadline = parseDeadline(data.actionableUntil);
+    await this.#store.saveDispute({
+      gatewayId: await this.#disputeKey(event.provider, data),
+      paymentGatewayId: data.gatewayId,
+      provider: event.provider,
+      status: fields.status,
+      // Spread away when absent, never passed as `null`: the store keeps what it already has
+      // for an `undefined` field, and the closing event — which carries no reason, no amount
+      // and no deadline — must not blank what the opening event recorded.
+      ...(data.reason !== undefined ? { reason: data.reason } : {}),
+      ...(data.amount !== undefined ? { amount: data.amount } : {}),
+      ...(data.currency !== undefined ? { currency: data.currency } : {}),
+      ...(deadline !== null ? { evidenceDueBy: deadline } : {}),
+      ...(data.outcome !== undefined ? { outcome: data.outcome } : {}),
+      ...(fields.closedAt !== undefined ? { closedAt: fields.closedAt } : {}),
+      payload: event.raw,
     });
   }
 

@@ -167,6 +167,7 @@ this:
 | `charge.refunded`, `charge.partial_canceled` | `payment.refunded` |
 | `charge.created/pending/processing/updated/underpaid/overpaid`, `order.created/updated/closed` | `payment.updated` |
 | `charge.chargedback` | **`payment.disputed`** |
+| `chargeback.received` | *unmapped* — passed through under its own name ([why](#chargebacks)) |
 | `order.canceled`, `invoice.canceled` | `payment.updated` |
 | `subscription.created` / `.updated` / `.canceled` | `subscription.created` / `.updated` / `.canceled` |
 
@@ -184,19 +185,41 @@ payments on the charge.
 `order.canceled` is not a dispute — an order that never went through is not money taken
 back — so it stays `payment.updated`.
 
-Pagar.me's dispute *lifecycle* (evidence submitted, won, lost) is not on the webhook at
-all: it lives in a separate Stone-hosted Disputes API (`GET
-https://api.stone.com.br/v1/disputes`, its own static key), which this driver does not
-speak. The contract has no resolution event either, by design.
+**There is no pre-dispute alert and no response deadline on the webhook.** Pagar.me
+publishes no fraud-alert or inquiry event, so the first thing an integration hears is the
+chargeback itself, and the charge payload carries no defense window. The deadline exists —
+it is `responseDeadline` on the **Disputes API** — but that is a separate resource this
+driver does not read; `charge.chargedback` therefore carries no `actionableUntil`, and the
+driver does not invent one. (`charge.antifraud_reproved` and its siblings are antifraud
+decisions taken *before* the money moves, not dispute warnings, and stay unmapped.)
+
+The dispute *lifecycle* lives entirely in that Disputes API — `GET /v1/disputes`,
+`GET /v1/disputes/{id}`, `POST /v1/disputes/{id}/evidences`, now documented on Pagar.me's
+own reference — which is not on the driver contract. A dispute there is
+`{ disputeId, transactionId, chargeId, responseDeadline, chargebackAmount, status, reason,
+stage, network }` with `status` one of `WAITING_MERCHANT_EVIDENCES`,
+`WAITING_ACQUIRER_ANALYSIS`, `WAITING_ISSUER`, `MERCHANT_EVIDENCE_DEADLINE_EXPIRED`,
+`DEADLINE_EXPIRED`, `WON`, `LOST`, `REVERSED`. **None of it arrives as a webhook today**, so
+this driver emits no `payment.dispute_warning` and no `payment.dispute_closed` for Pagar.me:
+a won dispute has to be reconciled from that API or the dashboard.
 
 <Callout type="warn" title="charge.chargedback is deprecated — migrate by 2026-09-30">
-Pagar.me's event list marks `charge.chargedback` as being replaced by **`chargeback.received`**,
-with a migration deadline of 30/09/2026. The driver does **not** map `chargeback.received`
-yet: its payload shape is undocumented, and `data.id` there may well be a chargeback id
-rather than a charge id — filing a dispute under the wrong id would write a row nothing
-reconciles, which is worse than the event landing in the webhook ledger as an unknown type.
-Verify the real payload against your account before that date, and watch the ledger for
-`chargeback.received` in the meantime.
+Pagar.me's event list marks `charge.chargedback` "será descontinuado", to be replaced by
+**`chargeback.received`**, with a migration deadline of **30/09/2026**.
+
+Re-checked in August 2026: `chargeback.received` now exists in that list, described as *"o
+evento enviado quando um chargeback é criado"* — and that one sentence is the **entire**
+public specification. No payload, no example, no field list, on any Pagar.me page. So the
+driver still does **not** map it. Its `data` may well be a dispute object keyed on
+`disputeId`, and filing `payment.disputed` against the dispute's id rather than the charge's
+would move a paid row over an id nothing reconciles — worse than the event landing in the
+webhook ledger as an unknown type, where it is at least visible.
+
+What the driver does do is pass it through **untouched**: `event.type` stays
+`chargeback.received` and `event.data` is exactly the body Pagar.me sent, not a
+`{ gatewayId, amount, currency }` fabricated by a charge mapper that cannot read a dispute.
+Register a handler for it, log one real payload, and the mapping can be closed in an
+afternoon. Until then, keep `charge.chargedback` subscribed.
 </Callout>
 
 ### Authorized, not captured

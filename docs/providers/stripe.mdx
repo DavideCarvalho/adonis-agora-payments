@@ -135,6 +135,125 @@ returns and every other event here uses. `payment_intent` is nullable on both th
 and the Early Fraud Warning — a legacy Charges-API charge has none — so the charge id is the
 fallback rather than an assumption.
 
+## Answering a dispute
+
+Stripe is one of the two drivers with `capabilities.disputes: true`, so `findDispute()` and
+`submitDisputeEvidence()` are real here: `GET /v1/disputes/{id}` and
+`POST /v1/disputes/{id}` with the `evidence` hash, on API version `2025-08-27.basil`.
+
+```ts
+// `findDispute` and `submitDisputeEvidence` are optional on the contract, so a driver
+// without them is a type error rather than a runtime surprise — check the capability.
+const stripe = payments.driver('stripe')
+const dispute = await stripe.findDispute?.('du_1NGiUn2eZvKYlo2C')
+
+if (dispute?.canSubmitEvidence) {
+  console.log('respond by', dispute.evidenceDueBy)
+}
+```
+
+`Dispute` leads with the two fields an operator acts on, and both are read from Stripe's
+own `evidence_details` rather than inferred from the status:
+
+- **`evidenceDueBy`** ← `evidence_details.due_by` (a Unix timestamp, surfaced as ISO 8601).
+- **`canSubmitEvidence`** ← the status **and** `evidence_details.past_due`. Past the
+  deadline the dispute is lost by default even while the status still says
+  `needs_response`, so the status alone would say yes to something the API rejects.
+
+| Stripe `status` | `Dispute.status` | `canSubmitEvidence` |
+| --- | --- | --- |
+| `needs_response` | `open` | ✅ (unless `past_due`) |
+| `warning_needs_response` | `warning` | ✅ (unless `past_due`) |
+| `under_review` | `under_review` | — one submission, already spent |
+| `warning_under_review` | `warning` | — |
+| `won` | `won` | — |
+| `lost` | `lost` | — |
+| `warning_closed` | `expired` | — |
+| `prevented` | `canceled` | — |
+
+The `warning_*` statuses stay on the warning side of the money line — an inquiry withdraws
+nothing — which is the same split the webhook mapping makes. `warning_closed` is `expired`
+rather than `won` because an inquiry that lapses is not a decision in your favour, and
+`prevented` — a dispute stopped before it became a formal chargeback — is `canceled`
+because the money never left. **A dispute can arrive already closed**: Stripe closes some
+as `lost` immediately, and the networks forbid contesting some reasons outright. Those read
+`canSubmitEvidence: false`, which is the point — you find out before building the case, not
+at the API error.
+
+The whole Dispute object is on `payload`, including **`is_charge_refundable`**: while it is
+true a refund can still end the matter, and once the charge is fully refunded Stripe
+withdraws nothing further.
+
+<Callout type="warn" title="Submitting is final, and it happens once">
+Stripe forwards your response to the issuing bank immediately. You cannot edit it, add to
+it, or send a second one. `submitDisputeEvidence` therefore re-reads the dispute and
+refuses when Stripe will not accept evidence, refuses an empty hash rather than spending
+the submission on nothing, and refuses any field it cannot carry — see below. It never
+decides *whether* to fight: that depends on margin, customer value and fraud history, and
+it stays in your code.
+</Callout>
+
+### What `DisputeEvidence` maps to
+
+| `DisputeEvidence` | Stripe `evidence` field |
+| --- | --- |
+| `explanation` | `uncategorized_text` |
+| `customerName` | `customer_name` |
+| `customerEmail` | `customer_email_address` |
+| `customerIpAddress` | `customer_purchase_ip` |
+| `shippingCarrier` | `shipping_carrier` |
+| `shippingTrackingNumber` | `shipping_tracking_number` |
+| `shippingDate` | `shipping_date` |
+| `serviceDate` | `service_date` |
+| `documentIds` (exactly one) | `uncategorized_file` |
+| `metadata` | Stripe's own field names, verbatim |
+
+```ts
+await stripe.submitDisputeEvidence?.('du_1NGiUn2eZvKYlo2C', {
+  explanation: 'Delivered and signed for; the customer used the account for six weeks after.',
+  customerEmail: 'jane@example.com',
+  shippingCarrier: 'UPS',
+  shippingTrackingNumber: '1Z999AA10123456784',
+  // Stripe's own field names for everything the shared shape has no name for.
+  metadata: {
+    product_description: 'Widget ABC, red',
+    receipt: 'file_1Mr4LDLkdIwHu7ix1Ur',   // a File upload, purpose `dispute_evidence`
+  },
+})
+```
+
+`metadata` is the escape hatch, and it is checked: a key that is not one of Stripe's 27
+evidence field names throws here rather than failing the whole submission at the API, and a
+field that takes a **File upload id** (`receipt`, `customer_communication`,
+`service_documentation`, `shipping_documentation`, `cancellation_policy`, `refund_policy`,
+`customer_signature`, `duplicate_charge_documentation`, `uncategorized_file`) rejects
+anything that is not a `file_…` id. Setting the same field twice — once through the typed
+shape and once through `metadata` — throws too; the driver will not pick a winner.
+
+Two `metadata` keys are not evidence fields:
+
+- **`submit`** — the update's own parameter. Defaults to `true`, because the method is
+  called submit; `submit: false` stages a draft that stays visible in the API and the
+  Dashboard until someone sends it.
+- **`enhanced_evidence`** — forwarded verbatim, for Visa CE 3.0 and the Visa/Mastercard
+  compliance programs.
+
+### What it refuses, and why
+
+| You pass | It throws, because |
+| --- | --- |
+| `receiptUrl` | Stripe's `receipt` is a **File upload id**, not a URL, and reviewing banks follow no links. Upload with purpose `dispute_evidence`, pass the id as `metadata.receipt`. |
+| `invoiceUrl` | No invoice-URL field exists. Same route: upload it, or describe it in `explanation`. |
+| `termsUrl`, `termsAcceptedAt` | No terms field. The nearest homes are `metadata.refund_policy` / `metadata.cancellation_policy` (files) with their `*_disclosure` text fields. |
+| `priorUndisputedPayments` | Visa CE 3.0 wants exactly **two prior charge ids**, each with the account id, device fingerprint and IP — not a count — and only on a dispute Stripe marked eligible. Build `metadata.enhanced_evidence` yourself. |
+| `documentIds` with more than one id | Stripe files evidence **by type**, one id per field, and an array says nothing about which is which. Name each in `metadata`. |
+| nothing at all | An empty submission is still the one submission. |
+
+None of these costs a round trip: the evidence is mapped before the dispute is read, so a
+field the driver cannot carry fails immediately. The alternative — dropping it — would let
+you believe a receipt was submitted and find out at the outcome, which is the one bug this
+file must not have.
+
 ## `authorized` — `requires_capture`
 
 With `capture_method: 'manual'` a confirmed PaymentIntent sits at `requires_capture`: the

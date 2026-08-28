@@ -37,6 +37,30 @@ interface AsaasCustomerResponse {
   externalReference?: string;
 }
 
+/**
+ * The `chargeback` object Asaas nests on a payment resource once one is filed. Asaas'
+ * webhook reference sends the payment "object of the related entity" and points at the
+ * `GET /payments/{id}` 200 response for its fields, so this is the same object — but no
+ * published webhook example shows it, which is why every field here is optional and read
+ * defensively rather than assumed.
+ *
+ * `deadlineToSendDisputeDocuments` is the only response deadline Asaas publishes anywhere:
+ * a dispute answered after it is a dispute lost by default.
+ */
+interface AsaasChargebackResponse {
+  id?: string;
+  status?: 'REQUESTED' | 'IN_DISPUTE' | 'DISPUTE_LOST' | 'REVERSED' | 'DONE';
+  /** One of Asaas' 33 reason enums (`FRAUD`, `COMMERCIAL_DISAGREEMENT`, …). */
+  reason?: string;
+  /** Chargeback opening date. */
+  disputeStartDate?: string;
+  /** Deadline to send dispute documents (`YYYY-MM-DD`). */
+  deadlineToSendDisputeDocuments?: string;
+  /** The CHARGEBACK's value, which a partial chargeback makes smaller than the payment's. */
+  value?: number;
+  disputeStatus?: 'REQUESTED' | 'ACCEPTED' | 'REJECTED';
+}
+
 interface AsaasPaymentResponse {
   id: string;
   customer: string;
@@ -75,6 +99,7 @@ interface AsaasPaymentResponse {
   subscription?: string;
   paymentDate?: string;
   externalReference?: string;
+  chargeback?: AsaasChargebackResponse;
 }
 
 interface AsaasSubscriptionResponse {
@@ -428,12 +453,13 @@ export class AsaasDriver implements PaymentsDriver {
     }
     const payload = JSON.parse(rawBody) as AsaasWebhookPayload;
     const id = `${payload.event}-${payload.payment?.id ?? payload.subscription?.id ?? Math.random()}`;
+    const type = this.#mapWebhookType(payload.event);
     return {
       id,
       provider: this.provider,
-      type: this.#mapWebhookType(payload.event),
+      type,
       createdAt: new Date().toISOString(),
-      data: this.#mapWebhookData(payload),
+      data: this.#mapWebhookData(payload, type),
       raw: payload as unknown as Record<string, unknown>,
     };
   }
@@ -464,11 +490,22 @@ export class AsaasDriver implements PaymentsDriver {
       // `pending` understated it and `paid` would grant access against a hold that
       // expires — Asaas reserves it for three days by default.
       AUTHORIZED: 'authorized',
-      // All three chargeback states are the payment being disputed. Asaas has taken the
-      // money back in every one of them; only the outcome is still open.
+      // The chargeback was filed and is still open — contested or not. Whether Asaas has
+      // already debited the balance at this point is NOT stated anywhere in its reference:
+      // the developer docs describe `chargeback.status` and nothing about the money, and
+      // the help centre says the balance is debited when the dispute is LOST while also
+      // describing a won one as the value "returning" to the balance. `disputed` is the
+      // safe reading either way — it stops counting as revenue while the outcome is open.
       CHARGEBACK_REQUESTED: 'disputed',
       CHARGEBACK_DISPUTE: 'disputed',
-      AWAITING_CHARGEBACK_REVERSAL: 'disputed',
+      // "Disputa vencida, aguardando repasse da adquirente" — Asaas' own English docs say
+      // "Dispute won, awaiting acquirer settlement". The dispute is over and it was won, so
+      // this is `paid`, matching the `payment.dispute_closed` (`won`) the matching webhook
+      // emits — a driver that reported the same gateway state two different ways depending
+      // on whether you read it or were told it is worse than either answer. The acquirer's
+      // transfer has not landed yet, which is a reconciliation question, not an entitlement
+      // one — the same reasoning as `RECEIVED_IN_CASH` below.
+      AWAITING_CHARGEBACK_REVERSAL: 'paid',
       // The two ways an Asaas charge is paid without Asaas moving the money. Both fell
       // through to the `pending` default, so a customer who had paid — in cash at the
       // counter, or through the credit bureau after being negativado — read as never
@@ -567,22 +604,31 @@ export class AsaasDriver implements PaymentsDriver {
         return 'payment.failed';
       case 'PAYMENT_REFUNDED':
         return 'payment.refunded';
-      // The chargeback is filed and the money is gone — the one webhook that takes
-      // revenue away, and the only Asaas event that opens a dispute.
+      // "Chargeback recebido" — the chargeback has been FILED (unlike Adyen's
+      // `NOTIFICATION_OF_CHARGEBACK`, which only announces one), and it is the only Asaas
+      // event that opens a dispute. Asaas does not publish whether the balance is debited
+      // here or only when the dispute is lost — its reference documents `chargeback.status`
+      // and says nothing about the money — so this stays where it was rather than being
+      // demoted to a warning on a guess. See the provider docs page.
       case 'PAYMENT_CHARGEBACK_REQUESTED':
         return 'payment.disputed';
+      // "Disputa vencida, aguardando repasse da adquirente" / "Dispute won, awaiting
+      // acquirer settlement". That is an outcome, in Asaas' own words, so it closes the
+      // dispute as `won` instead of being flattened into an update the way it used to be.
+      // Asaas sends no counterpart for a LOSS — there is no `PAYMENT_CHARGEBACK_LOST` in
+      // its event list — so a lost dispute still reaches you only as `chargeback.status`
+      // on the payment; the driver does not invent an event for it.
+      case 'PAYMENT_AWAITING_CHARGEBACK_REVERSAL':
+        return 'payment.dispute_closed';
       case 'PAYMENT_CREATED':
       case 'PAYMENT_UPDATED':
       // Card authorized, awaiting capture (`authorizeOnly: true`). There is no canonical
       // authorization event, and the payment's own status already says `authorized`.
       case 'PAYMENT_AUTHORIZED':
-      // What happens AFTER a dispute is opened: documents submitted, and the dispute won
-      // with the acquirer's transfer still pending. The contract deliberately has no
-      // resolution event — every gateway reports one differently — so these stay
-      // `payment.updated`; `event.raw.event` still names which one it was. Asaas sends no
-      // "dispute lost" webhook at all: that shows up as `chargeback.status` on the payment.
+      // "Chargeback em disputa após apresentação de documentos para contestação": you
+      // contested it and the documents are in. Movement inside an open dispute, not a
+      // resolution and not a second chargeback — `event.raw.event` still names it.
       case 'PAYMENT_CHARGEBACK_DISPUTE':
-      case 'PAYMENT_AWAITING_CHARGEBACK_REVERSAL':
       // A partial refund is deliberately NOT `payment.refunded`. That handler overwrites
       // the row's status with `refunded` and its amount with the refunded amount, so a
       // R$10 refund on a R$100 charge would erase R$90 of revenue. Until the tables carry
@@ -618,7 +664,7 @@ export class AsaasDriver implements PaymentsDriver {
     }
   }
 
-  #mapWebhookData(payload: AsaasWebhookPayload): Record<string, unknown> {
+  #mapWebhookData(payload: AsaasWebhookPayload, type: string): Record<string, unknown> {
     if (payload.payment) {
       const payment = this.#mapPayment(payload.payment);
       return {
@@ -630,6 +676,7 @@ export class AsaasDriver implements PaymentsDriver {
         ...(payload.payment.externalReference !== undefined
           ? { externalReference: payload.payment.externalReference }
           : {}),
+        ...this.#disputeExtras(payload.payment, type),
       };
     }
     if (payload.subscription) {
@@ -643,6 +690,38 @@ export class AsaasDriver implements PaymentsDriver {
       };
     }
     return {};
+  }
+
+  /**
+   * The dispute fields, added to the payment payload on the two chargeback events that
+   * carry a dispute — and to nothing else, so an ordinary `payment.updated` does not start
+   * announcing a deadline.
+   *
+   * `gatewayId` stays the PAYMENT's id (the row the chargeback is about); the chargeback's
+   * own id travels as `disputeId`. The amount deliberately stays the payment's too: a
+   * PARTIAL chargeback's `chargeback.value` is smaller, and the processor writes `amount`
+   * onto the row — the disputed figure is on `event.raw`.
+   *
+   * Every field is optional because no published Asaas webhook example shows the
+   * `chargeback` object at all. The webhook reference sends the payment resource and points
+   * at `GET /payments/{id}` for its schema, where `chargeback` lives; if Asaas omits it on
+   * the notification, the event is still correct, just without the deadline.
+   */
+  #disputeExtras(payment: AsaasPaymentResponse, type: string): Record<string, unknown> {
+    if (type !== 'payment.disputed' && type !== 'payment.dispute_closed') return {};
+    const chargeback = payment.chargeback;
+    const deadline = this.#toIso(chargeback?.deadlineToSendDisputeDocuments);
+    return {
+      // Asaas' only documented outcome event is the won one; `#mapWebhookType` sends
+      // nothing else here, and the processor throws on a close with no outcome.
+      ...(type === 'payment.dispute_closed' ? { outcome: 'won' } : {}),
+      ...(chargeback?.id !== undefined ? { disputeId: chargeback.id } : {}),
+      ...(chargeback?.reason !== undefined ? { reason: chargeback.reason } : {}),
+      // The one deadline Asaas publishes: `deadlineToSendDisputeDocuments`. A dispute
+      // answered after it is a dispute lost by default, which is the whole reason the
+      // normalized event has a field for it.
+      ...(deadline !== null ? { actionableUntil: deadline } : {}),
+    };
   }
 
   #mapMethod(method?: string): string {

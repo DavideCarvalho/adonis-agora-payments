@@ -23,7 +23,8 @@ Pix charges (`cob`), the Pix that settle them, and their refunds (`devolução`)
 - **Refunds**: yes, `PUT /v2/pix/{e2eid}/devolucao/{id}`.
 - **`idempotencyKey`**: real, and it is the resource id, not a header — see
   [Idempotency is an id, not a header](#idempotency-is-an-id-not-a-header).
-- **No subscriptions, no customers, no invoice list, no disputes.**
+- **No subscriptions, no customers, no invoice list.** A Pix has no chargeback either —
+  but it can still be taken back, see [MED](#med-the-pix-version-of-a-chargeback).
 
 <Callout type="warn" title="Efí is several APIs, and this driver speaks one of them">
 The **Pix API** (this driver) and the **Cobranças API** (`cobrancas.api.efipay.com.br`) are
@@ -86,8 +87,9 @@ all afternoon and starts failing an hour into the deploy that stayed up.
 ## Routing a webhook back to your record
 
 Efí's Pix notification contains `endToEndId`, `txid`, `chave`, `valor`, `horario` and
-`infoPagador`. That is the whole list — **the txid is the only reference of yours it can
-carry**.
+`infoPagador` (plus a `devolucoes` array once money has gone back — see
+[MED](#med-the-pix-version-of-a-chargeback)). That is the whole list — **the txid is the
+only reference of yours it can carry**.
 
 So the driver uses it: an `externalReference` that fits the txid charset (26–35
 alphanumerics, no punctuation) is sent as the txid, and comes back on the webhook as
@@ -161,6 +163,44 @@ it against homologation (`pix-h`) with your own `.p12` before it touches real mo
 mutual-TLS handshake in particular is something only a live call can prove.
 </Callout>
 
+## MED: the Pix version of a chargeback
+
+A Pix cannot be charged back. It **can** be taken back: the Banco Central's *Mecanismo
+Especial de Devolução* returns money to a payer who reported fraud or an operational
+failure, and it needs neither your agreement nor a card network. It arrives on the webhook
+you already have, as an ordinary `devolução` inside the Pix notification, and the only
+thing that distinguishes it from a refund you made yourself is its `natureza`:
+
+| `devolucoes[].natureza` | What it is | Normalized |
+| --- | --- | --- |
+| absent, `ORIGINAL`, `RETIRADA` | the refund **you** asked for | `payment.refunded` |
+| `MED_OPERACIONAL`, `MED_FRAUDE`, `MED_PIX_AUTOMATICO` + `status: DEVOLVIDO` | MED took the money | **`payment.disputed`** |
+| the same three + `status: EM_PROCESSAMENTO` | MED is executing the return | **`payment.dispute_warning`** |
+| the same three + `status: NAO_REALIZADO` | the return did not happen (Efí's own example: insufficient balance) | unchanged — nothing left |
+
+Both dispute events carry the devolução's id as `disputeId` and its `natureza` as `reason`
+— BACEN's own vocabulary, where `MED_FRAUDE` is a founded suspicion of fraud and
+`MED_OPERACIONAL` an operational failure. `findPayment` agrees with them: a charge whose
+settled Pix carries a MED return reads back as `disputed`, not `refunded`.
+
+Calling this a refund was the bug. `payment.refunded` says the merchant chose to give the
+money back, which is the one thing that did not happen — and a handler that reverses an
+order on a refund would have treated a fraud claim as ordinary customer service.
+
+<Callout type="warn" title="There is no warning before the debit, and no deadline in the payload">
+Efí's Pix webhook has four notification kinds — Pix received, Pix sent, devolução received,
+devolução sent — and none of them announces that a MED was **opened**. The first you hear
+of one is the return itself, so `payment.dispute_warning` here means "the return is
+executing", not "you have time to defend". The API Pix devolução object carries no deadline
+field of any kind, so the normalized event carries no `actionableUntil` — this driver does
+not compute one from BACEN's published MED timeline, because a deadline a driver invented
+is worse than no deadline at all.
+</Callout>
+
+Each MED event is keyed as `<endToEndId>:med:<devolucaoId>:<status>`, so an
+`EM_PROCESSAMENTO` followed by a `DEVOLVIDO` is two events in the ledger rather than one
+redelivery that gets skipped.
+
 ## Idempotency is an id, not a header
 
 Efí has no `Idempotency-Key` header, and it does not need one: the two operations that move
@@ -204,10 +244,8 @@ await payments.driver('efi').refund('abc123def456ghi789jkl012mn', undefined, {
   documented path, so the throw is for whoever reaches the driver directly. Fiscal notes
   come from an [invoice provider](/docs/payments/invoices); to list charges, call
   `GET /v2/cob` over a date range yourself.
-- **Disputes.** Pix has no chargeback: a Pix is a bank transfer that has already settled,
-  and there is no card network to reverse it. (BACEN's MED — *Mecanismo Especial de
-  Devolução*, for fraud — is a separate Efí product this driver does not speak.) So
-  `payment.disputed` never fires here, and the driver does not invent an event to carry it.
-  A `devolução` you initiate is a refund, and arrives as `payment.refunded`.
+- **Dispute endpoints.** There are none to call: no dispute resource, no evidence upload,
+  nothing to contest through the API. Money taken back under MED reaches you as a webhook
+  and nowhere else — see below.
 - **Hosted checkout.** `createCheckout` creates a Pix charge and returns the BR Code with an
   empty `url`. There is no page for Efí to host.

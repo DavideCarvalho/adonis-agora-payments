@@ -214,9 +214,12 @@ Mapped onto the canonical types:
 | `subscription.active` | `subscription.created` |
 | `subscription.updated`, `.renewed`, `.plan_changed`, `.on_hold`, `.paused`, `.unpaused`, `.update_payment_method` | `subscription.updated` |
 | `subscription.cancelled`, `.expired`, `.failed` | `subscription.canceled` |
-
 | `dispute.opened` | **`payment.disputed`** |
-| `dispute.challenged`, `.accepted`, `.cancelled`, `.expired`, `.won`, `.lost` | `payment.updated` |
+| `dispute.won` | `payment.dispute_closed` (`won`) |
+| `dispute.lost`, `dispute.accepted` | `payment.dispute_closed` (`lost`) |
+| `dispute.expired` | `payment.dispute_closed` (`expired`) |
+| `dispute.cancelled` | `payment.dispute_closed` (`canceled`) |
+| `dispute.challenged` | `payment.updated` |
 
 Everything else (`refund.failed`, `license_key.*`, `payout.*`, `credit.*`, `dunning.*`,
 `abandoned_checkout.*`, `entitlement_grant.*`) passes through under its Dodo name, so an
@@ -227,21 +230,80 @@ status from `findSubscription` report `Subscription.status === 'paused'`. It use
 `active`, which handed entitlement to a subscriber who is not paying; anything gating access
 on `status === 'active'` will start refusing them, which is the point.
 
-### Disputes: Dodo forwards them, unlike most merchants of record
+### Disputes: Dodo forwards them, and the clock is yours
 
-Dodo bears the chargeback liability, and it still tells you. That is worth knowing when you
-compare it with Polar and Lemon Squeezy, whose event catalogues have no dispute event at
-all: on Dodo you get the full lifecycle and **ten days** to respond to `dispute.opened`.
+Dodo is a merchant of record, so the usual expectation is that the chargeback is Dodo's to
+fight and you hear about it as a line on a payout. **Dodo is the exception**, on both counts,
+and its own dispute reference is explicit:
+
+- **Who fights it?** *You do.* "You have **10 days** to respond after a dispute opens.
+  Evidence gathering and submission must occur within this window **through the Dodo
+  dashboard**." Compare Paddle, whose team contests for you and will not accept your
+  evidence, or Polar and Lemon Squeezy, whose event catalogues have no dispute event at all.
+- **Is the deadline yours?** Yes — and it is short. Ten days from `dispute.opened`, with the
+  same countdown shown on the dispute in the dashboard.
+
+`capabilities.disputes` is nevertheless **`false`**, and the distinction is worth being
+precise about: the capability gates the *API* half — `findDispute` and
+`submitDisputeEvidence`. Dodo's evidence flow is the dashboard, not an endpoint, so there is
+no representment call for this driver to make. Declaring `true` would promise a method that
+cannot exist.
+
+<Callout type="warn" title="The ten-day deadline is not in the payload">
+Dodo sends **no `actionableUntil`**, because it sends no deadline field. The dispute object
+is `dispute_id`, `payment_id`, `business_id`, `amount`, `currency`, `dispute_status`,
+`dispute_stage`, `created_at`, `remarks`, `payment_provider` and `is_resolved_by_rdr` —
+that is all of it.
+
+The driver deliberately does **not** derive one from `created_at + 10 days`. That would put
+a date this library invented into the one field an operator is meant to trust. Compute it
+yourself from `event.raw.data.created_at` if you want a countdown, knowing where the number
+came from — and set an alert on `payment.disputed`, because ten days is not long enough to
+find out from a report.
+</Callout>
 
 `dispute.opened` normalizes to `payment.disputed`, keyed by the **payment** — the row whose
 status has to move to `disputed` — with the disputed amount and currency, plus `disputeId`,
-`disputeStage` and `disputeStatus` on `event.data`. Dodo has sent `amount` as both a number
-and a decimal string; both are read as integer cents.
+`reason` (from `remarks`), `disputeStage` and `disputeStatus` on `event.data`. Dodo has sent
+`amount` as both a number and a decimal string; both are read as integer cents.
 
-The rest of the lifecycle is a plain `payment.updated`, deliberately. This package has no
-canonical *resolution* event: every gateway reports a dispute won or lost differently, and
-a type no driver emits is worse than none. Read `event.raw.type` (`dispute.won`,
-`dispute.lost`, …) when you need the detail.
+**There is no `payment.dispute_warning` here, and that is on purpose.** Dodo carries a
+`dispute_stage` that runs `pre_dispute` → `dispute` → `pre_arbitration`, and it is tempting
+to read `pre_dispute` as a Stripe-style inquiry with the money untouched. Dodo's reference
+does not support that: it says "Cardholder initiates dispute; **funds are held**" for
+`dispute.opened`, without qualifying it by stage. So every `dispute.opened` is a
+`payment.disputed` whatever the stage, and the stage travels on `event.data.disputeStage` for
+you to read. Downgrading a `pre_dispute` open to a warning would write nothing to the row and
+leave it saying `paid` over money Dodo says it has already held — the reference would have to
+say otherwise before that changes.
+
+The closing events carry the outcome Dodo names for each:
+
+| Dodo event | `outcome` | Dodo's own gloss |
+| --- | --- | --- |
+| `dispute.won` | `won` | "Resolved in your favor; funds retained" |
+| `dispute.lost` | `lost` | "Resolved for cardholder; funds returned" |
+| `dispute.accepted` | `lost` | "Dispute accepted without contest; funds returned" |
+| `dispute.expired` | `expired` | "Response window closed without resolution" |
+| `dispute.cancelled` | `canceled` | "Dispute withdrawn; no action needed" |
+
+`accepted` is a **loss**, not a cancellation: you chose not to defend, so the cardholder
+keeps the money — the same reading Adyen's `Accepted` gets. `expired` is not folded into
+`lost` even though Dodo's table calls it "typically resolves against you", because nothing
+was decided; the clock ran out. `canceled` does not return the row to `paid` on its own,
+which is deliberate — a withdrawn dispute is not an acquirer returning funds.
+
+Only `dispute.won` moves the payment row back to `paid`. `dispute.challenged` — evidence
+submitted, network reviewing — stays a `payment.updated`: it is movement inside an open
+dispute, not a resolution of it.
+
+**Visa RDR auto-refunds arrive as `dispute.lost`,** flagged `is_resolved_by_rdr: true` on
+the raw payload. The money is gone and the outcome is honest, but it was never contested —
+read the flag off `event.raw.data` if you distinguish the two in reporting.
+
+A `dispute.*` event whose `data.payload_type` is not `Dispute` degrades to `payment.updated`
+rather than a close: the outcome would not be readable, and the processor **throws** on a
+`payment.dispute_closed` carrying none.
 
 **Dodo has no `subscription.created` event.** `subscription.active` is the first one a
 subscription gets, fired once its first payment clears, so that is what maps to the

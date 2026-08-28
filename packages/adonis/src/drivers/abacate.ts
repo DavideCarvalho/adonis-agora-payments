@@ -513,11 +513,21 @@ export class AbacateDriver implements PaymentsDriver {
       case 'checkout.refunded':
       case 'transparent.refunded':
         return 'payment.refunded';
-      // "Disputa/chargeback aberta" — the dispute is OPENED here. It used to arrive as
-      // `payment.failed`, which files a chargeback as a payment that never went through:
-      // the row stopped saying `paid`, but it said the wrong thing, and the customer
-      // whose access has to be reconsidered was never flagged. AbacatePay sends no
-      // resolution event of any kind, so this is the only dispute signal there is.
+      // "Disputa/chargeback aberta em um checkout" / "…em um pagamento transparente" — the
+      // dispute is OPENED here. It used to arrive as `payment.failed`, which files a
+      // chargeback as a payment that never went through: the row stopped saying `paid`, but
+      // it said the wrong thing, and the customer whose access has to be reconsidered was
+      // never flagged.
+      //
+      // These two are AbacatePay's ENTIRE dispute vocabulary. Its published webhook event
+      // list has no fraud alert, no retrieval request, no "chargeback incoming" — so there
+      // is no `payment.dispute_warning` to map — and no won/lost/reversed event either, so
+      // no `payment.dispute_closed`: the outcome never reaches you as a webhook at all.
+      //
+      // AbacatePay also does not say whether the funds are withdrawn when this fires, and
+      // publishes no payload example for it and no response deadline anywhere. The mapping
+      // therefore stays where it is rather than being demoted to a warning on a guess: a
+      // filed dispute is what `payment.disputed` names. See the provider docs page.
       case 'checkout.disputed':
       case 'transparent.disputed':
         return 'payment.disputed';

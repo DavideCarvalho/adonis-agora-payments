@@ -16,9 +16,11 @@ how many webhooks arrive, in which order, or how many times a gateway redelivers
 
 ## The billing tables
 
-The configure command publishes **two** migrations — `create_billing_tables` and, for installs
-that already ran it, `add_billing_external_reference`, which carries the two columns added
-afterwards. Run both (`node ace migration:run`). Together they create four tables:
+The configure command publishes **three** migrations — `create_billing_tables` and, for installs
+that already ran it, `add_billing_external_reference` (the two columns added afterwards) and
+`add_billing_disputes` (the table added afterwards). Run all of them (`node ace migration:run`);
+on a fresh install the later two find their work already done and say so by doing nothing. Together
+they create five tables:
 
 | Table | Purpose |
 | --- | --- |
@@ -26,6 +28,7 @@ afterwards. Run both (`node ace migration:run`). Together they create four table
 | `billing_subscriptions` | subscriptions — `status`, `plan_id`, `trial_ends_at`, `ends_at` |
 | `billing_payments` | every payment, keyed by **gateway id**, and indexed on `external_reference` — **your** id for the charge |
 | `billing_webhook_events` | the **idempotency ledger**, keyed by gateway event id, storing the raw payload *and* the normalized event |
+| `billing_disputes` | chargebacks and pre-chargeback alerts, keyed by the **dispute's** gateway id — and `evidence_due_by`, the deadline to answer |
 
 `billing_webhook_events` is the heart: it's what makes every redelivery a no-op instead of a
 double-grant.
@@ -55,6 +58,12 @@ await store.findPaymentByExternalReference('order-1042') // ...or by YOURS
 await store.listPayments({ status: 'failed', limit: 20 })
 await store.countPayments({ status: 'pending', createdBefore: cutoff })
 
+await store.findDisputeByGatewayId('dp_1Nx4')            // one dispute, by the DISPUTE's id
+await store.findOpenDisputeByPayment('pi_3Qx7')         // ...or the open one against a payment
+await store.listDisputes({ status: 'open', limit: 20 })
+await store.listDisputesDueWithin({ withinHours: 72 })  // the windows closing soonest, first
+await store.countDisputesDueWithin({ withinHours: 72 })
+
 await store.findWebhookEventByGatewayEventId(eventId)  // one ledger row, with its error
 await store.listWebhookEvents({ status: 'failed' })
 await store.webhookEventBreakdown({ status: 'failed' }) // grouped by provider + type
@@ -74,7 +83,45 @@ stored.
 
 Two aggregates sit on top of those: `billingOverview(store, { from, to })` for the KPI row a
 dashboard renders, and [`billingHealth(store)`](/docs/payments/production#health-checks) for the
-three operational checks — both plain functions over the same store.
+four operational checks — both plain functions over the same store.
+
+### Disputes and their clock
+
+A chargeback is the one webhook that takes revenue **away**, and it comes with a deadline. The three
+dispute events — `payment.dispute_warning`, `payment.disputed`, `payment.dispute_closed` — each
+write a `billing_disputes` row **in addition** to what they already did: a warning still moves no
+money, a chargeback still moves the payment to `disputed`, and a won close still puts it back to
+`paid`.
+
+```ts
+// The work list: open disputes whose window closes in the next three days, soonest first.
+for (const dispute of await store.listDisputesDueWithin({ withinHours: 72 })) {
+  console.log(dispute.gatewayId, dispute.paymentGatewayId, dispute.evidenceDueBy)
+}
+```
+
+Three things worth knowing about that read:
+
+- **A deadline already past stays in the list.** The dispute is still open and still unanswered;
+  dropping it the moment it expires would make an alert go quiet at exactly the moment it became
+  true.
+- **A dispute with no `evidenceDueBy` is never in it.** Plenty of gateways send no deadline, and
+  `null` means "the gateway told us nothing", never "no hurry".
+- **It is ordered by the deadline, not by arrival.** Every other list in the store is newest-first;
+  this one is in the order the work has to be done.
+
+Disputes are keyed on the **dispute's** own gateway id. Where a gateway sends none — several do not
+— the processor keys on `dispute:<provider>:<payment gateway id>` instead, so the later events of the
+same dispute land on the same row rather than accumulating one row per webhook. The cost is that a
+payment disputed twice by such a gateway collapses into one row: a gateway that never names a
+dispute gives nothing to tell the two apart, and a row that could never be closed would alert on its
+deadline forever.
+
+`submitDisputeEvidence` on the driver is how you answer one, and nothing in this library calls it
+for you: whether to fight a dispute or refund it turns on the fee, the evidence your app holds, and
+the chargeback ratio that puts a merchant into a card network's monitoring programme. The table and
+the [health check](/docs/payments/cli#paymentshealth) exist so the decision is never made for you by
+a window closing.
 
 ## The Billable model
 
@@ -345,7 +392,9 @@ import { billingStores, defineConfig } from '@adonis-agora/payments'
 export default defineConfig({
   // ...
   billing: {
-    store: billingStores.lucid({ models: { usageEventModel: MyUsageEvent } }),
+    store: billingStores.lucid({
+      models: { usageEventModel: MyUsageEvent, disputeModel: MyDispute },
+    }),
   },
 })
 ```

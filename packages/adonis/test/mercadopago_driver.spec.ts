@@ -1,6 +1,8 @@
 import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { WebhookProcessor } from '../src/billing/webhook_processor.js';
 import { MercadoPagoDriver } from '../src/drivers/mercadopago.js';
+import { InMemoryBillingStore } from '../src/testing/in_memory_billing_store.js';
 
 const SECRET = 'whsec-mercadopago';
 const REQUEST_ID = '2066ca19-c6f1-498a-be75-1923005edd06';
@@ -60,6 +62,60 @@ function chargebackNotification(caseId: string, paymentId?: string) {
 
 function jsonResponse(body: unknown) {
   return { ok: true, status: 200, json: async () => body };
+}
+
+/** `GET /v1/chargebacks/{id}` — the case, where the evidence deadline lives. */
+function chargebackCase(overrides: Record<string, unknown> = {}) {
+  return {
+    id: '233000061680860000',
+    payments: [999999999],
+    currency: 'BRL',
+    amount: 19.9,
+    reason: 'general',
+    coverage_applied: null,
+    coverage_elegible: true,
+    documentation_required: true,
+    documentation_status: 'not_supplied',
+    date_documentation_deadline: '2026-04-08T12:48:24.000-04:00',
+    date_last_updated: '2026-03-25T12:48:24.000-04:00',
+    live_mode: true,
+    ...overrides,
+  };
+}
+
+/**
+ * A fetch double that answers per URL, so a chargeback notification's two calls — the
+ * payment, then the case — can carry different bodies.
+ */
+function stubRoutes(routes: Array<[RegExp, unknown]>) {
+  const fetchMock = vi.fn(async (url: unknown) => {
+    const match = routes.find(([pattern]) => pattern.test(String(url)));
+    if (match === undefined) throw new Error(`unexpected fetch: ${String(url)}`);
+    const body = match[1];
+    if (body instanceof Error) throw body;
+    return jsonResponse(body);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
+
+function chargebackHeaders(caseId: string) {
+  return { 'x-signature': `ts=${TS},v1=${sign(caseId)}`, 'x-request-id': REQUEST_ID };
+}
+
+/** A charged-back payment as `GET /v1/payments/{id}` returns it. */
+function chargedBackPayment(statusDetail: string) {
+  return {
+    id: 999999999,
+    status: 'charged_back',
+    status_detail: statusDetail,
+    transaction_amount: 19.9,
+    currency_id: 'BRL',
+    payment_method_id: 'master',
+    payment_type_id: 'credit_card',
+    external_reference: 'payment_local_1',
+    payer: { id: 'cus_1' },
+  };
 }
 
 afterEach(() => {
@@ -382,28 +438,15 @@ describe('MercadoPagoDriver', () => {
   // ── Disputes ───────────────────────────────────────────────────────────────────────
 
   it('turns a chargeback notification into payment.disputed against the PAYMENT id', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      jsonResponse({
-        id: 999999999,
-        status: 'charged_back',
-        status_detail: 'in_process',
-        transaction_amount: 19.9,
-        currency_id: 'BRL',
-        payment_method_id: 'master',
-        payment_type_id: 'credit_card',
-        external_reference: 'payment_local_1',
-        payer: { id: 'cus_1' },
-      }),
-    );
-    vi.stubGlobal('fetch', fetchMock);
+    const fetchMock = stubRoutes([
+      [/\/v1\/payments\//, chargedBackPayment('in_process')],
+      [/\/v1\/chargebacks\//, chargebackCase()],
+    ]);
 
     const driver = makeDriver({ webhookSecret: SECRET });
     const event = await driver.parseWebhook(
       chargebackNotification('233000061680860000', '999999999'),
-      {
-        'x-signature': `ts=${TS},v1=${sign('233000061680860000')}`,
-        'x-request-id': REQUEST_ID,
-      },
+      chargebackHeaders('233000061680860000'),
     );
 
     // The case id (`233…`) is not a payment id; the fetch and the row both key off
@@ -411,6 +454,8 @@ describe('MercadoPagoDriver', () => {
     expect(String(fetchMock.mock.calls[0]![0])).toBe(
       'https://api.mercadopago.com/v1/payments/999999999',
     );
+    // `in_process` is the dispute still open — awaiting the issuer's decision, no outcome
+    // to report — so it is `payment.disputed` and not a close.
     expect(event.type).toBe('payment.disputed');
     expect(event.data).toMatchObject({
       gatewayId: '999999999',
@@ -418,6 +463,103 @@ describe('MercadoPagoDriver', () => {
       currency: 'brl',
       externalReference: 'payment_local_1',
     });
+  });
+
+  it('carries the evidence deadline off the chargeback case', async () => {
+    // `date_documentation_deadline` is the only thing that makes a Mercado Pago dispute
+    // actionable, and it is on the CASE, not the payment — which is why the chargeback
+    // topic pays for a second call.
+    const fetchMock = stubRoutes([
+      [/\/v1\/payments\//, chargedBackPayment('in_process')],
+      [/\/v1\/chargebacks\//, chargebackCase()],
+    ]);
+    const event = await makeDriver({ webhookSecret: SECRET }).parseWebhook(
+      chargebackNotification('233000061680860000', '999999999'),
+      chargebackHeaders('233000061680860000'),
+    );
+
+    expect(String(fetchMock.mock.calls[1]![0])).toBe(
+      'https://api.mercadopago.com/v1/chargebacks/233000061680860000',
+    );
+    expect(event.data).toMatchObject({
+      disputeId: '233000061680860000',
+      reason: 'general',
+      actionableUntil: '2026-04-08T12:48:24.000-04:00',
+    });
+  });
+
+  it('keeps the chargeback when only the case lookup fails', async () => {
+    // The money question is already answered by the payment. Throwing here would turn a
+    // chargeback the driver read correctly into a 400 and a redelivery.
+    stubRoutes([
+      [/\/v1\/payments\//, chargedBackPayment('in_process')],
+      [/\/v1\/chargebacks\//, new Error('500 from Mercado Pago')],
+    ]);
+    const event = await makeDriver({ webhookSecret: SECRET }).parseWebhook(
+      chargebackNotification('233000061680860000', '999999999'),
+      chargebackHeaders('233000061680860000'),
+    );
+    expect(event.type).toBe('payment.disputed');
+    expect(event.data).toMatchObject({ gatewayId: '999999999', disputeId: '233000061680860000' });
+    expect(event.data).not.toHaveProperty('actionableUntil');
+  });
+
+  it('closes the dispute as lost on status_detail settled', async () => {
+    // Mercado Pago: "decision against the seller. Money withdrawn from the seller's
+    // account." The row stays `disputed` — only a win moves it back.
+    stubRoutes([
+      [/\/v1\/payments\//, chargedBackPayment('settled')],
+      [/\/v1\/chargebacks\//, chargebackCase({ coverage_applied: false })],
+    ]);
+    const event = await makeDriver({ webhookSecret: SECRET }).parseWebhook(
+      chargebackNotification('233000061680860000', '999999999'),
+      chargebackHeaders('233000061680860000'),
+    );
+    expect(event.type).toBe('payment.dispute_closed');
+    expect(event.data).toMatchObject({ gatewayId: '999999999', outcome: 'lost' });
+  });
+
+  it('closes the dispute as won on status_detail reimbursed, and the row goes back to paid', async () => {
+    // "Decision in favor of the seller. Money refunded to the seller's account." A won
+    // dispute left at `disputed` writes off money that came back: `revenue()` sums `paid`.
+    stubRoutes([
+      [/\/v1\/payments\//, chargedBackPayment('reimbursed')],
+      [/\/v1\/chargebacks\//, chargebackCase({ coverage_applied: true })],
+    ]);
+    const driver = makeDriver({ webhookSecret: SECRET });
+    const store = new InMemoryBillingStore();
+    await store.savePayment({
+      gatewayId: '999999999',
+      provider: 'mercadopago',
+      status: 'disputed',
+      amount: 1990,
+      currency: 'brl',
+      customerId: 'cus_1',
+    });
+
+    const event = await driver.parseWebhook(
+      chargebackNotification('233000061680860000', '999999999'),
+      chargebackHeaders('233000061680860000'),
+    );
+    expect(event.type).toBe('payment.dispute_closed');
+    expect(event.data).toMatchObject({ outcome: 'won' });
+
+    await new WebhookProcessor({ store, driver }).process(event);
+    expect((await store.findPaymentByGatewayId('999999999'))?.status).toBe('paid');
+  });
+
+  it('has no pre-dispute warning to emit — the first Mercado Pago says is the chargeback', async () => {
+    // No topic here is a TC40/inquiry-style alert: `topic_chargebacks_wh` fires on a case
+    // that already exists, and `topic_claims_integration_wh` names a CLAIM id with no
+    // payment beside it, so it is left unmapped rather than filed against a guess.
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const event = await makeDriver({ webhookSecret: SECRET }).parseWebhook(
+      notification('5500000000', 'topic_claims_integration_wh'),
+      { 'x-signature': `ts=${TS},v1=${sign('5500000000')}`, 'x-request-id': REQUEST_ID },
+    );
+    expect(event.type).toBe('topic_claims_integration_wh');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('does not invent a payment when the chargeback names no payment id', async () => {

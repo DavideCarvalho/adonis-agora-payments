@@ -139,6 +139,18 @@ describe('PaymentsManager', () => {
     expect(routed.supportedMethods).toEqual(woovi.supportedMethods);
   });
 
+  it('gates disputes like every other capability', () => {
+    // `capabilities.disputes` was declared on the driver contract and read by nothing, so
+    // an app could call `submitDisputeEvidence` on a gateway that had told it not to. The
+    // driver still throws on its own — a caller reaching past the manager deserves a real
+    // message — but the documented path now stops before the network.
+    const noDisputes = new FakePaymentsDriver({ provider: 'woovi' });
+    const manager = makeManager([['woovi', noDisputes]]);
+    expect(() => manager.assertCapability(manager.driver('woovi'), 'disputes')).toThrow(
+      /does not support disputes/,
+    );
+  });
+
   it('throws a clear error for an unknown driver', () => {
     const manager = makeManager([['stripe', new FakePaymentsDriver()]]);
     expect(() => manager.driver('nope')).toThrow(/not configured|neither a configured provider/);

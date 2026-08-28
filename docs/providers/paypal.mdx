@@ -171,25 +171,73 @@ European local methods (`ideal`, `bancontact`, `eps`, `giropay`, `p24`, `sofort`
 
 ## Disputes
 
-| PayPal event | Normalized |
-| --- | --- |
-| `CUSTOMER.DISPUTE.CREATED` | `payment.disputed` |
-| `RISK.DISPUTE.CREATED` (deprecated spelling) | `payment.disputed` |
-| `CUSTOMER.DISPUTE.UPDATED`, `CUSTOMER.DISPUTE.RESOLVED` | `payment.updated` |
+A PayPal dispute is **not** a card-scheme chargeback. It has a lifecycle of its own —
+`INQUIRY` → `CHARGEBACK` → `PRE_ARBITRATION` → `ARBITRATION` — and PayPal, not a card
+network, decides it. There are only three webhooks for the whole thing, so the interesting
+information is not in the event name but in `dispute_life_cycle_stage`.
 
-`CUSTOMER.DISPUTE.CREATED` is the opening and moves the payment row to `disputed`. Updated
-and resolved are the rest of the case — the resolution, which every gateway reports
-differently and which this library deliberately does not name.
+| PayPal event | Stage / outcome | Normalized |
+| --- | --- | --- |
+| `CUSTOMER.DISPUTE.CREATED` | `INQUIRY` | `payment.dispute_warning` |
+| `CUSTOMER.DISPUTE.CREATED` | `CHARGEBACK`, `PRE_ARBITRATION`, `ARBITRATION`, or no stage | `payment.disputed` |
+| `RISK.DISPUTE.CREATED` (deprecated spelling) | same rule | same |
+| `CUSTOMER.DISPUTE.UPDATED` | past `INQUIRY`, not yet `RESOLVED` | `payment.disputed` |
+| `CUSTOMER.DISPUTE.UPDATED` | still `INQUIRY`, or already `RESOLVED` | `payment.updated` |
+| `CUSTOMER.DISPUTE.RESOLVED` | `RESOLVED_SELLER_FAVOUR` | `payment.dispute_closed` (`won`) |
+| `CUSTOMER.DISPUTE.RESOLVED` | `RESOLVED_BUYER_FAVOUR` | `payment.dispute_closed` (`lost`) |
+| `CUSTOMER.DISPUTE.RESOLVED` | `CANCELED_BY_BUYER` | `payment.dispute_closed` (`canceled`) |
+| `CUSTOMER.DISPUTE.RESOLVED` | anything else | `payment.updated` |
+
+**`CUSTOMER.DISPUTE.CREATED` fires at two different points in the lifecycle.** PayPal's own
+sandbox guide makes this explicit: one test has you assert the stage is `INQUIRY` on the
+webhook you just received, the next has you assert it is `CHARGEBACK`. An inquiry is
+PayPal's words for "a customer and merchant interact in an attempt to resolve a dispute
+without escalation to PayPal" — a 20-day window in the Resolution Center where nothing has
+been adjudicated and a refund closes the case. Calling it `payment.disputed` moves a paid row
+over money still in the account, and hides the one window where the whole thing can still be
+made to go away cheaply.
+
+**`CUSTOMER.DISPUTE.UPDATED` is where an escalation lands.** PayPal sends no dedicated
+"escalated to a claim" event, so an `UPDATED` carrying a stage past `INQUIRY` is the only
+notice a row that opened as a warning ever gets that the money is now at stake. An `UPDATED`
+still in the inquiry (a message, an offer, evidence) or on an already-`RESOLVED` dispute
+moves nothing.
+
+**The deadline is `seller_response_due_date`**, and it comes through as `actionableUntil` on
+every dispute event that carries one. PayPal's own description is the reason it matters: "if
+the merchant does not respond by this date and time, the dispute is closed in the customer's
+favor."
+
+**Only three of PayPal's seven outcome codes name who kept the money.** The other four stay
+`payment.updated` rather than inventing a result:
+
+| Code | Why not |
+| --- | --- |
+| `RESOLVED_WITH_PAYOUT` | "PayPal provided the merchant **or customer** with protection" — it does not say which |
+| `ACCEPTED`, `DENIED` | deprecated in PayPal's current schema, and their descriptions name the *dispute* rather than the party |
+| `NONE` | a previous dispute "closed without any decision" — the definition of no outcome |
+
+<Callout title="What the reference will not tell you">
+PayPal documents the lifecycle stages and the fund holds in different places and never in the
+same sentence. The dispute guide says PayPal "holds the disputed payment until resolution"
+for internal disputes; its own sandbox matrix enumerates both "Dispute **NO HOLD**" and
+"Dispute **WITH HOLD**" scenarios; and the only place it says "PayPal debits the merchant's
+account" is a case resolved in the buyer's favour. So the reference does **not** state that a
+`CHARGEBACK`-stage dispute has already taken the money — only that PayPal is deciding, and
+that losing debits the account. The split above follows the stage PayPal itself uses to
+separate "you and the buyer are talking" from "PayPal is deciding", which is the line an
+operator can act on. `event.raw` always carries the whole dispute if you need more.
+</Callout>
 
 `RISK.DISPUTE.CREATED` is handled too: PayPal's reference says `CUSTOMER.DISPUTE.CREATED`
 supersedes it, and an account still subscribed to the old one should not silently miss the
-chargeback.
+dispute.
 
-The event is keyed on `disputed_transactions[0].seller_transaction_id` — the **capture** id
-this driver keys payments on. `buyer_transaction_id` is the buyer's view of the same money
-and would find no row here. The money is `dispute_amount`, and `event.data` also carries
-`disputeId` and `disputeReason`; a dispute covering several transactions leaves the rest on
-`event.raw`.
+Every one of these is keyed on `disputed_transactions[0].seller_transaction_id` — the
+**capture** id this driver keys payments on. `buyer_transaction_id` is the buyer's view of the
+same money and would find no row here. The money is `dispute_amount`, and `event.data` also
+carries `disputeId`, `reason` and `disputeStage`; a dispute covering several transactions
+leaves the rest on `event.raw`.
 
 ## Authorization
 

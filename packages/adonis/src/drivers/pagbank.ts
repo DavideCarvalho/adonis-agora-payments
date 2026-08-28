@@ -346,7 +346,15 @@ export class PagBankDriver implements PaymentsDriver {
     } catch {
       // PagBank's *post-transaction* events (balance released, chargeback) still use the
       // legacy form-encoded `notificationCode=…&notificationType=transaction` shape, which
-      // is a different API with a different lookup and no authenticity token at all.
+      // is a different API with a different lookup and no authenticity token at all: the
+      // code is resolved against `ws.pagseguro.uol.com.br/v3/transactions/notifications/{code}`
+      // with an account email and `token_api`, and answers in XML. The dispute lives there
+      // as legacy transaction status **9, "Retenção temporária"** ("o comprador abriu uma
+      // solicitação de chargeback junto à operadora do cartão") — status **5, "Em disputa"**
+      // being the earlier in-PagBank complaint. The Orders API enum this driver reads
+      // (AUTHORIZED/PAID/IN_ANALYSIS/DECLINED/CANCELED/WAITING) has no dispute member at
+      // all, so PagBank sends this driver no chargeback, no pre-dispute alert and no
+      // defense deadline — half-parsing a body from the other API would not change that.
       throw new Error(
         '[payments] PagBank webhook body is not JSON. This driver handles Orders API notifications; ' +
           'legacy `notificationCode` notifications (post-transaction events) need their own route.',

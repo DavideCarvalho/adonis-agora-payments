@@ -15,13 +15,21 @@ per-gateway matrix.
   exponent table follows ISO, so a Stripe charge in MGA will disagree with it. Nobody has hit this;
   it is written down so that whoever does finds the reason rather than a bug.
 
-- **Pagar.me's `charge.chargedback` is deprecated.** Pagar.me's own event list says migrate to
-  `chargeback.received` by **2026-09-30**. The driver maps the deprecated event to
-  `payment.disputed` today; the replacement's payload shape is undocumented, and `data.id` there
-  may be a chargeback id rather than a charge id — which would write a `disputed` row under an id
-  nothing reconciles. This needs one real payload from a live account before the deadline. Until
-  then the new event lands in the webhook ledger as an unknown type, which is visible rather than
-  silent.
+- **Pagar.me's `charge.chargedback` is deprecated, and its replacement has no published payload.**
+  Pagar.me's own docs say migrate to `chargeback.received` by **2026-09-30**. The driver still maps
+  the deprecated event to `payment.disputed`, because the replacement's entire public specification
+  is one sentence — "*evento enviado quando um chargeback é criado*" — with no payload, no example
+  and no field list anywhere in the reference. It is also the only `chargeback.*` event: Pagar.me
+  publishes no won/lost counterpart, so there is no close event to map either.
+
+  What has changed since this was written is that Pagar.me's **Disputes API** is now documented, and
+  its dispute object is exactly what the canonical events need: `disputeId`, `chargeId`,
+  `responseDeadline`, `chargebackAmount`, and a `status` of `WAITING_MERCHANT_EVIDENCES`,
+  `WAITING_ACQUIRER_ANALYSIS`, `WAITING_ISSUER`, `MERCHANT_EVIDENCE_DEADLINE_EXPIRED`,
+  `DEADLINE_EXPIRED`, `WON`, `LOST` or `REVERSED`. **If** `chargeback.received`'s payload turns out
+  to be that object, the mapping is mechanical — `chargeId` → `gatewayId`, `responseDeadline` →
+  `actionableUntil`, the terminal statuses → `payment.dispute_closed`. One logged payload from a
+  live account closes this, and the deadline is close.
 - **Batched webhook notifications.** `parseWebhook` returns a single event, while Adyen's
   `notificationItems` and Efí's Pix array can both carry several. Both drivers refuse a batch
   loudly rather than processing the first and dropping the rest, which is the safe half of the

@@ -7,5 +7,6 @@ export type {
   InMemoryPaymentRow,
   InMemoryWebhookEventRow,
   InMemoryUsageEventRow,
+  InMemoryDisputeRow,
 } from './in_memory_billing_store.js';
 export { MutableClock } from './mutable_clock.js';

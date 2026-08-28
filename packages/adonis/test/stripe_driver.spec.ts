@@ -7,6 +7,7 @@ const stripeMock = vi.hoisted(() => ({
   subscriptions: { create: vi.fn(), update: vi.fn(), cancel: vi.fn(), retrieve: vi.fn() },
   checkout: { sessions: { create: vi.fn() } },
   invoices: { list: vi.fn() },
+  disputes: { retrieve: vi.fn(), update: vi.fn() },
   webhooks: { constructEvent: vi.fn() },
 }));
 
@@ -561,5 +562,248 @@ describe('StripeDriver idempotency', () => {
     expect(stripeMock.customers.create.mock.calls[0]![1]).toEqual({ idempotencyKey: 'cus:1' });
     expect(stripeMock.subscriptions.create.mock.calls[0]![1]).toEqual({ idempotencyKey: 'sub:1' });
     expect(stripeMock.subscriptions.update.mock.calls[0]![2]).toEqual({ idempotencyKey: 'upd:1' });
+  });
+});
+
+/** A Stripe Dispute carrying only the fields the driver's mappers read. */
+function dispute(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'du_1',
+    object: 'dispute',
+    amount: 1990,
+    currency: 'eur',
+    charge: 'ch_1',
+    payment_intent: 'pi_1',
+    reason: 'fraudulent',
+    status: 'needs_response',
+    created: 1_767_225_600,
+    is_charge_refundable: true,
+    evidence_details: { due_by: 1_768_000_000, has_evidence: false, past_due: false },
+    ...overrides,
+  };
+}
+
+describe('StripeDriver disputes', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('maps a dispute onto the canonical shape, deadline included', async () => {
+    stripeMock.disputes.retrieve.mockResolvedValue(dispute());
+
+    const found = await makeDriver().findDispute('du_1');
+
+    expect(found).toMatchObject({
+      id: 'du_1',
+      provider: 'stripe',
+      // The PAYMENT's id, not the dispute's — the row this is about.
+      paymentGatewayId: 'pi_1',
+      status: 'open',
+      amount: { amount: 1990, currency: 'eur' },
+      reason: 'fraudulent',
+      evidenceDueBy: '2026-01-09T23:06:40.000Z',
+      canSubmitEvidence: true,
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    // `is_charge_refundable` has no canonical field, and it is half the decision — so it
+    // has to survive on the payload rather than being dropped in the mapping.
+    expect((found as { payload: Record<string, unknown> }).payload.is_charge_refundable).toBe(true);
+  });
+
+  it('falls back to the charge when the dispute has no PaymentIntent', async () => {
+    stripeMock.disputes.retrieve.mockResolvedValue(dispute({ payment_intent: null }));
+
+    const found = await makeDriver().findDispute('du_1');
+
+    expect(found?.paymentGatewayId).toBe('ch_1');
+  });
+
+  it('returns null for a dispute Stripe does not have', async () => {
+    stripeMock.disputes.retrieve.mockRejectedValue(
+      Object.assign(new Error('No such dispute'), { statusCode: 404 }),
+    );
+
+    expect(await makeDriver().findDispute('du_nope')).toBeNull();
+  });
+
+  it('reads canSubmitEvidence from the status and past_due, never from the status alone', async () => {
+    const driver = makeDriver();
+    const cases = [
+      ['needs_response', false, 'open', true],
+      ['warning_needs_response', false, 'warning', true],
+      // Past the deadline the dispute is lost by default — the status still says
+      // needs_response, and answering it is no longer possible.
+      ['needs_response', true, 'open', false],
+      ['under_review', false, 'under_review', false],
+      ['warning_under_review', false, 'warning', false],
+      ['warning_closed', false, 'expired', false],
+      ['won', false, 'won', false],
+      // Stripe closes some disputes as lost immediately; the caller must learn that here
+      // rather than after building a case.
+      ['lost', false, 'lost', false],
+      ['prevented', false, 'canceled', false],
+    ] as const;
+
+    for (const [status, pastDue, mapped, canSubmit] of cases) {
+      stripeMock.disputes.retrieve.mockResolvedValue(
+        dispute({ status, evidence_details: { due_by: 1_768_000_000, past_due: pastDue } }),
+      );
+      const found = await driver.findDispute('du_1');
+      expect(found?.status, `${status} (past_due: ${pastDue}) → status`).toBe(mapped);
+      expect(found?.canSubmitEvidence, `${status} (past_due: ${pastDue}) → canSubmitEvidence`).toBe(
+        canSubmit,
+      );
+    }
+  });
+
+  it("sends every evidence field under Stripe's own name, and submits it", async () => {
+    stripeMock.disputes.retrieve.mockResolvedValue(dispute());
+    stripeMock.disputes.update.mockResolvedValue(dispute({ status: 'under_review' }));
+
+    const updated = await makeDriver().submitDisputeEvidence('du_1', {
+      explanation: 'The customer received and used the product.',
+      shippingCarrier: 'UPS',
+      shippingTrackingNumber: '1Z999',
+      shippingDate: '2026-01-02',
+      serviceDate: '2026-01-03',
+      customerName: 'Jane Austen',
+      customerEmail: 'jane@example.com',
+      customerIpAddress: '127.0.0.1',
+      documents: [
+        { kind: 'receipt', id: 'file_receipt' },
+        { kind: 'shipping', id: 'file_shipping' },
+        // No field of its own at Stripe, so it lands on `uncategorized_file`.
+        { kind: 'other', id: 'file_1' },
+      ],
+      metadata: { product_description: 'Widget ABC' },
+    });
+
+    const [id, params] = stripeMock.disputes.update.mock.calls[0]!;
+    expect(id).toBe('du_1');
+    expect(params.evidence).toEqual({
+      uncategorized_text: 'The customer received and used the product.',
+      shipping_carrier: 'UPS',
+      shipping_tracking_number: '1Z999',
+      shipping_date: '2026-01-02',
+      service_date: '2026-01-03',
+      customer_name: 'Jane Austen',
+      customer_email_address: 'jane@example.com',
+      customer_purchase_ip: '127.0.0.1',
+      receipt: 'file_receipt',
+      shipping_documentation: 'file_shipping',
+      uncategorized_file: 'file_1',
+      product_description: 'Widget ABC',
+    });
+    // The method is named submit; staging by default would report a defense the bank
+    // never received.
+    expect(params.submit).toBe(true);
+    expect(updated.status).toBe('under_review');
+  });
+
+  it('stages a draft when the caller asks for one', async () => {
+    stripeMock.disputes.retrieve.mockResolvedValue(dispute());
+    stripeMock.disputes.update.mockResolvedValue(dispute());
+
+    await makeDriver().submitDisputeEvidence('du_1', {
+      explanation: 'draft',
+      metadata: { submit: false },
+    });
+
+    const [, params] = stripeMock.disputes.update.mock.calls[0]!;
+    expect(params.submit).toBe(false);
+    // `submit` is the update parameter, not an evidence field.
+    expect(params.evidence).toEqual({ uncategorized_text: 'draft' });
+  });
+
+  it('files prior undisputed transactions as Visa Compelling Evidence 3.0', async () => {
+    // A count is not evidence of anything: the networks want the charges themselves, each
+    // with the account, device and IP it was made from. That is why the shared type carries
+    // transactions rather than a number.
+    stripeMock.disputes.retrieve.mockResolvedValue(dispute());
+    stripeMock.disputes.update.mockResolvedValue(dispute({ status: 'under_review' }));
+
+    await makeDriver().submitDisputeEvidence('du_1', {
+      explanation: 'Two prior orders, same device.',
+      priorUndisputedPayments: [
+        { paymentGatewayId: 'ch_a', customerAccountId: 'acct_1', customerIpAddress: '10.0.0.1' },
+        { paymentGatewayId: 'ch_b', customerDeviceId: 'device_9' },
+      ],
+    });
+
+    const [, params] = stripeMock.disputes.update.mock.calls[0]!;
+    expect(params.evidence.enhanced_evidence).toEqual({
+      visa_compelling_evidence_3: {
+        prior_undisputed_transactions: [
+          { charge: 'ch_a', customer_account_id: 'acct_1', customer_purchase_ip: '10.0.0.1' },
+          { charge: 'ch_b', customer_device_id: 'device_9' },
+        ],
+      },
+    });
+  });
+
+  it('refuses evidence Stripe has no home for instead of dropping it', async () => {
+    const driver = makeDriver();
+    stripeMock.disputes.retrieve.mockResolvedValue(dispute());
+    stripeMock.disputes.update.mockResolvedValue(dispute());
+
+    const refusals: Array<[Parameters<typeof driver.submitDisputeEvidence>[1], RegExp]> = [
+      [{ termsAcceptedAt: '2026-01-01' }, /no field for WHEN the customer accepted/],
+      // Visa CE 3.0 is built around exactly two prior transactions; Stripe rejects any
+      // other count, and failing at the API spends the dispute's single submission.
+      [
+        { priorUndisputedPayments: [{ paymentGatewayId: 'ch_1' }] },
+        /takes exactly TWO prior undisputed transactions, and got 1/,
+      ],
+      // Two kinds with no field of their own collide on `uncategorized_file`. Reported,
+      // never silently resolved.
+      [
+        {
+          documents: [
+            { kind: 'invoice', id: 'file_1' },
+            { kind: 'terms', id: 'file_2' },
+          ],
+        },
+        /`uncategorized_file` was set twice/,
+      ],
+      [
+        { explanation: 'x', metadata: { made_up_field: 'y' } },
+        /is not a Stripe dispute evidence field/,
+      ],
+      [
+        { explanation: 'x', metadata: { uncategorized_text: 'y' } },
+        /`uncategorized_text` was set twice/,
+      ],
+      [{ metadata: { receipt: 'https://example.com/r.pdf' } }, /takes a File upload id/],
+      [{ explanation: 'x', metadata: { submit: 'yes' } }, /`metadata.submit`.*must be a boolean/],
+      // An empty submission spends the one chance the dispute has.
+      [{}, /Nothing to submit/],
+    ];
+
+    for (const [evidence, message] of refusals) {
+      await expect(driver.submitDisputeEvidence('du_1', evidence)).rejects.toThrow(message);
+    }
+    // Every one of them failed before Stripe was touched at all.
+    expect(stripeMock.disputes.update).not.toHaveBeenCalled();
+    expect(stripeMock.disputes.retrieve).not.toHaveBeenCalled();
+  });
+
+  it('refuses to submit to a dispute Stripe will not accept evidence for', async () => {
+    stripeMock.disputes.retrieve.mockResolvedValue(dispute({ status: 'lost' }));
+
+    await expect(
+      makeDriver().submitDisputeEvidence('du_1', { explanation: 'let me in' }),
+    ).rejects.toThrow(/will not accept evidence: its status is `lost`/);
+    expect(stripeMock.disputes.update).not.toHaveBeenCalled();
+  });
+
+  it('refuses to submit past the deadline, and names it', async () => {
+    stripeMock.disputes.retrieve.mockResolvedValue(
+      dispute({ evidence_details: { due_by: 1_768_000_000, past_due: true } }),
+    );
+
+    await expect(
+      makeDriver().submitDisputeEvidence('du_1', { explanation: 'too late' }),
+    ).rejects.toThrow(/deadline has already passed \(due by 2026-01-09T23:06:40.000Z\)/);
+    expect(stripeMock.disputes.update).not.toHaveBeenCalled();
   });
 });

@@ -265,16 +265,124 @@ describe('AsaasDriver', () => {
     });
   });
 
-  it('leaves the later chargeback steps as payment.updated, not as a second dispute', () => {
-    // Documents submitted, then the dispute won with the acquirer's transfer pending.
-    // Neither opens anything, and the contract has no resolution event by design.
-    for (const name of ['PAYMENT_CHARGEBACK_DISPUTE', 'PAYMENT_AWAITING_CHARGEBACK_REVERSAL']) {
-      const event = makeOpenDriver().parseWebhook(
-        JSON.stringify({ event: name, payment: paymentIn('CHARGEBACK_DISPUTE') }),
+  it('carries the chargeback deadline, id and reason onto the dispute', () => {
+    // `deadlineToSendDisputeDocuments` is the only response deadline Asaas publishes
+    // anywhere, and it was sitting unread on the payment's `chargeback` object. A dispute
+    // answered after it is a dispute lost by default.
+    const event = makeOpenDriver().parseWebhook(
+      JSON.stringify({
+        event: 'PAYMENT_CHARGEBACK_REQUESTED',
+        payment: {
+          ...paymentIn('CHARGEBACK_REQUESTED'),
+          chargeback: {
+            id: 'chb_1',
+            status: 'REQUESTED',
+            reason: 'FRAUD',
+            disputeStartDate: '2026-02-01',
+            deadlineToSendDisputeDocuments: '2026-02-11',
+            value: 19.9,
+          },
+        },
+      }),
+      {},
+    );
+    expect(event.data).toMatchObject({
+      gatewayId: 'pay_cb',
+      disputeId: 'chb_1',
+      reason: 'FRAUD',
+      actionableUntil: new Date('2026-02-11').toISOString(),
+    });
+  });
+
+  it('still normalizes a chargeback whose payload carries no chargeback object', () => {
+    // No published Asaas webhook example shows the `chargeback` object, so its absence is
+    // an event without a deadline — never a malformed one the processor throws on.
+    const data = makeOpenDriver().parseWebhook(
+      JSON.stringify({
+        event: 'PAYMENT_CHARGEBACK_REQUESTED',
+        payment: paymentIn('CHARGEBACK_REQUESTED'),
+      }),
+      {},
+    ).data as Record<string, unknown>;
+    expect(data.actionableUntil).toBeUndefined();
+    expect(data.disputeId).toBeUndefined();
+  });
+
+  it('leaves the contested step as payment.updated, not as a second dispute', () => {
+    // Documents submitted: movement inside an open dispute, not a resolution.
+    const event = makeOpenDriver().parseWebhook(
+      JSON.stringify({
+        event: 'PAYMENT_CHARGEBACK_DISPUTE',
+        payment: {
+          ...paymentIn('CHARGEBACK_DISPUTE'),
+          chargeback: { id: 'chb_1', deadlineToSendDisputeDocuments: '2026-02-11' },
+        },
+      }),
+      {},
+    );
+    expect(event.type).toBe('payment.updated');
+    expect((event.raw as { event: string }).event).toBe('PAYMENT_CHARGEBACK_DISPUTE');
+    // An update is not a dispute event, so it announces neither an outcome nor a deadline.
+    expect(event.data).not.toHaveProperty('outcome');
+    expect(event.data).not.toHaveProperty('actionableUntil');
+  });
+
+  it('closes the dispute as won on PAYMENT_AWAITING_CHARGEBACK_REVERSAL', () => {
+    // Asaas' own words: "Disputa vencida, aguardando repasse da adquirente" — in the
+    // English docs, "Dispute won, awaiting acquirer settlement". That is an outcome.
+    const event = makeOpenDriver().parseWebhook(
+      JSON.stringify({
+        event: 'PAYMENT_AWAITING_CHARGEBACK_REVERSAL',
+        payment: {
+          ...paymentIn('AWAITING_CHARGEBACK_REVERSAL'),
+          chargeback: { id: 'chb_1', status: 'REVERSED' },
+        },
+      }),
+      {},
+    );
+    expect(event.type).toBe('payment.dispute_closed');
+    expect(event.data).toMatchObject({ gatewayId: 'pay_cb', disputeId: 'chb_1', outcome: 'won' });
+  });
+
+  it('returns a won dispute to paid through the processor', async () => {
+    const driver = makeOpenDriver();
+    const store = new InMemoryBillingStore();
+    await store.savePayment({
+      gatewayId: 'pay_cb',
+      provider: 'asaas',
+      status: 'disputed',
+      amount: 1990,
+      currency: 'brl',
+      customerId: 'cus_1',
+    });
+    await new WebhookProcessor({ store, driver }).process(
+      driver.parseWebhook(
+        JSON.stringify({
+          event: 'PAYMENT_AWAITING_CHARGEBACK_REVERSAL',
+          payment: paymentIn('AWAITING_CHARGEBACK_REVERSAL'),
+        }),
+        {},
+      ),
+    );
+    // `revenue()` sums rows that are `paid`; leaving a won dispute at `disputed` writes off
+    // money that is coming back.
+    expect((await store.findPaymentByGatewayId('pay_cb'))?.status).toBe('paid');
+  });
+
+  it('sends no dispute warning, because Asaas has no pre-chargeback event', () => {
+    // Asaas' payment event list has no fraud alert, no retrieval request and no
+    // "chargeback incoming" notification: the first you hear of one is the chargeback.
+    const driver = makeOpenDriver();
+    for (const name of [
+      'PAYMENT_CHARGEBACK_REQUESTED',
+      'PAYMENT_CHARGEBACK_DISPUTE',
+      'PAYMENT_AWAITING_CHARGEBACK_REVERSAL',
+    ]) {
+      const event = driver.parseWebhook(
+        JSON.stringify({ event: name, payment: paymentIn('CHARGEBACK_REQUESTED') }),
         {},
       );
-      expect(event.type, name).toBe('payment.updated');
-      expect((event.raw as { event: string }).event, name).toBe(name);
+      expect(event.type, name).not.toBe('payment.dispute_warning');
     }
   });
 
@@ -321,6 +429,22 @@ describe('AsaasDriver', () => {
     );
     try {
       expect((await makeDriver().findPayment('pay_cb'))?.status).toBe('disputed');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('reports a won-but-unsettled chargeback the same way its webhook does', async () => {
+    // `AWAITING_CHARGEBACK_REVERSAL` is Asaas saying the dispute was won and the acquirer
+    // has not transferred yet. The webhook closes it as `won`, which puts the row back to
+    // `paid`; a `findPayment` that answered `disputed` for the same state would contradict
+    // the driver's own webhook.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(paymentIn('AWAITING_CHARGEBACK_REVERSAL'))),
+    );
+    try {
+      expect((await makeDriver().findPayment('pay_cb'))?.status).toBe('paid');
     } finally {
       vi.unstubAllGlobals();
     }

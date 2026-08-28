@@ -78,8 +78,10 @@ the resource afterwards, and there is no webhook variant that carries the paymen
 
 So `parseWebhook` verifies the `x-signature` HMAC and then **fetches the resource**:
 `GET /v1/payments/{id}` for the `payment` topic, `GET /preapproval/{id}` for
-`subscription_preapproval`. What you get back is a fully populated event — status, amount,
-currency and your `externalReference`:
+`subscription_preapproval`, and for `topic_chargebacks_wh` the payment named by
+`data.payment_id` plus the case itself (see [Chargebacks](#chargebacks-and-mediations)).
+What you get back is a fully populated event — status, amount, currency and your
+`externalReference`:
 
 ```ts
 // event.type === 'payment.succeeded'
@@ -105,13 +107,24 @@ signature check will reject a genuine webhook.
 
 ## Chargebacks and mediations
 
-Two things can put a Mercado Pago payment into dispute, and both normalize to
-**`payment.disputed`**:
+Mercado Pago says everything about a dispute through the **payment**, not through the
+notification: the topic tells you a case changed, and `status` + `status_detail` say what
+that means.
 
-| Payment status | Meaning |
-| --- | --- |
-| `in_mediation` | A claim was opened inside Mercado Pago. |
-| `charged_back` | A card chargeback. `status_detail` says where it stands: `in_process` (awaiting a decision), `settled` (lost — money withdrawn), `reimbursed` (won — money returned). |
+| Payment status | `status_detail` | Normalized | The money |
+| --- | --- | --- | --- |
+| `in_mediation` | — | `payment.disputed` | a claim opened inside Mercado Pago |
+| `charged_back` | `in_process` | `payment.disputed` | chargeback received, awaiting the decision |
+| `charged_back` | `settled` | `payment.dispute_closed` (`lost`) | gone — "decision against the seller" |
+| `charged_back` | `reimbursed` | `payment.dispute_closed` (`won`) | returned to the seller's account |
+
+`settled` and `reimbursed` are Mercado Pago's own words for the outcome — *"decision against
+the seller, money withdrawn from the seller's account"* and *"decision in favor of the
+seller, money refunded to the seller's account"*. Reading them is what turns a dispute that
+ends into one that ends **in the ledger**: a won dispute left sitting at `disputed` writes
+off money that came back, because `revenue()` sums rows that say `paid`. A `charged_back`
+payment whose `status_detail` this driver does not recognize stays `payment.disputed` rather
+than closing on a guess.
 
 `charged_back` used to arrive as `payment.refunded`, which says the seller gave the money
 back voluntarily — indistinguishable from a real refund, and the row read `refunded`
@@ -135,8 +148,35 @@ writing a row under a case id nothing reconciles. Mercado Pago sends one action 
 opening *and* for every later status change, so what the event means is decided by the
 payment's status, not by the notification.
 
-There is no canonical resolution event, by design. A dispute won or lost shows up as
-`status_detail` on `payment.payload`.
+### The deadline is on the case, so the chargeback topic fetches it
+
+On `topic_chargebacks_wh` — and only there, because it is the only notification that names a
+case — the driver makes a **second** call, `GET /v1/chargebacks/{data.id}`, for the one field
+that makes a Mercado Pago dispute actionable:
+
+| Chargeback field | Normalized |
+| --- | --- |
+| `date_documentation_deadline` | `actionableUntil` — the date evidence has to be uploaded by |
+| `reason` | `reason` |
+| the case id | `disputeId` |
+
+`date_documentation_deadline` is `null` whenever `documentation_required` is false: there is
+nothing to defend, so there is no clock, and the event carries no `actionableUntil`.
+
+That second call **fails soft**, unlike the payment fetch. By the time it runs the money
+question is already answered by the payment's status; throwing would turn a chargeback the
+driver read correctly into a 400 and a redelivery. A missing deadline costs an operator
+context, a dropped chargeback costs the row.
+
+### No pre-dispute warning exists here
+
+Mercado Pago publishes no TC40/SAFE-style alert and no inquiry event: `topic_chargebacks_wh`
+fires on a case that already exists, so **the first thing you hear is the chargeback**. There
+is nothing for this driver to map onto `payment.dispute_warning`, and it does not invent one.
+
+The nearest thing is `topic_claims_integration_wh` ("creation of refunds and claims"), whose
+`data.id` is a **claim** id with no payment beside it — nothing to file a warning against —
+so it is left unmapped and reaches your handlers under its own name.
 
 ## Authorized, not captured
 
@@ -194,6 +234,13 @@ failed; nothing failed, Mercado Pago was told to stop.
   so the driver keys off the notification's `type`, which is.
 - The docs never promise that a chargeback also reaches the `payment` topic; they only
   document it on `topic_chargebacks_wh`. The driver handles both, so subscribe to both.
+- **Whether the funds leave your account when the chargeback opens, or only when it
+  settles, is not stated.** Mercado Pago describes `settled` as the withdrawal, while the
+  payment's top-level status is already `charged_back` from the opening and the guides
+  describe the amount as retained from then on. Because the reference will not settle it,
+  `charged_back`/`in_process` keeps the `payment.disputed` it has always had rather than
+  being downgraded to a warning on a guess. The same goes for `in_mediation`, which the
+  reference describes only as "users have initiated a dispute".
 - `subscription_authorized_payment` (a subscription's recurring charge) is still left as
   `payment.updated`: it is read from `/authorized_payments/{id}`, whose response shape this
   driver has not verified against the reference.

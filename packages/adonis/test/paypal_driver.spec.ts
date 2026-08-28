@@ -410,7 +410,7 @@ describe('PayPalDriver', () => {
 });
 
 describe('PayPalDriver disputes', () => {
-  const disputeEvent = (eventType: string) =>
+  const disputeEvent = (eventType: string, resource: Record<string, unknown> = {}) =>
     JSON.stringify({
       id: 'WH-DISPUTE-1',
       event_type: eventType,
@@ -422,6 +422,7 @@ describe('PayPalDriver disputes', () => {
         reason: 'MERCHANDISE_OR_SERVICE_NOT_RECEIVED',
         status: 'OPEN',
         dispute_life_cycle_stage: 'CHARGEBACK',
+        seller_response_due_date: '2026-04-09T00:00:00.000Z',
         disputed_transactions: [
           {
             // The SELLER's side of the transaction is the capture id this driver keys
@@ -431,10 +432,11 @@ describe('PayPalDriver disputes', () => {
             custom: 'order_42',
           },
         ],
+        ...resource,
       },
     });
 
-  it('maps CUSTOMER.DISPUTE.CREATED onto payment.disputed, keyed on the capture', async () => {
+  it('maps a CHARGEBACK-stage CUSTOMER.DISPUTE.CREATED onto payment.disputed', async () => {
     const event = await makeDriver().parseWebhook(
       disputeEvent('CUSTOMER.DISPUTE.CREATED'),
       SIGNATURE_HEADERS,
@@ -445,7 +447,30 @@ describe('PayPalDriver disputes', () => {
       amount: 1990,
       currency: 'usd',
       disputeId: 'PP-D-1',
+      reason: 'MERCHANDISE_OR_SERVICE_NOT_RECEIVED',
+      actionableUntil: '2026-04-09T00:00:00.000Z',
       externalReference: 'order_42',
+    });
+  });
+
+  it('calls an INQUIRY-stage dispute a warning, not a chargeback', async () => {
+    // PayPal's own sandbox guide has you assert `dispute_life_cycle_stage` is INQUIRY for
+    // one CUSTOMER.DISPUTE.CREATED test and CHARGEBACK for the next. An inquiry is the
+    // buyer and seller talking in the Resolution Center with nothing adjudicated and
+    // nothing debited — calling it `payment.disputed` moves a paid row over money still in
+    // the account.
+    const event = await makeDriver().parseWebhook(
+      disputeEvent('CUSTOMER.DISPUTE.CREATED', { dispute_life_cycle_stage: 'INQUIRY' }),
+      SIGNATURE_HEADERS,
+    );
+    expect(event.type).toBe('payment.dispute_warning');
+    expect(event.type).not.toBe('payment.disputed');
+    // The deadline is the whole value of the alert: PayPal closes an unanswered dispute in
+    // the customer's favour once it passes.
+    expect(event.data).toMatchObject({
+      gatewayId: 'CAPTURE-1',
+      disputeId: 'PP-D-1',
+      actionableUntil: '2026-04-09T00:00:00.000Z',
     });
   });
 
@@ -459,11 +484,73 @@ describe('PayPalDriver disputes', () => {
     expect(event.type).toBe('payment.disputed');
   });
 
-  it('leaves the rest of the dispute case as payment.updated', async () => {
-    for (const eventType of ['CUSTOMER.DISPUTE.UPDATED', 'CUSTOMER.DISPUTE.RESOLVED']) {
-      const event = await makeDriver().parseWebhook(disputeEvent(eventType), SIGNATURE_HEADERS);
-      expect(event.type, eventType).toBe('payment.updated');
+  it('reads the escalation off CUSTOMER.DISPUTE.UPDATED, which is the only place it lands', async () => {
+    // PayPal has no dedicated "escalated to a claim" webhook. A dispute that opened as an
+    // inquiry would otherwise never move the row.
+    const escalated = await makeDriver().parseWebhook(
+      disputeEvent('CUSTOMER.DISPUTE.UPDATED', {
+        dispute_life_cycle_stage: 'CHARGEBACK',
+        status: 'UNDER_REVIEW',
+      }),
+      SIGNATURE_HEADERS,
+    );
+    expect(escalated.type).toBe('payment.disputed');
+
+    // Still in the inquiry, or already resolved: nothing to move.
+    for (const resource of [
+      { dispute_life_cycle_stage: 'INQUIRY' },
+      { dispute_life_cycle_stage: 'CHARGEBACK', status: 'RESOLVED' },
+    ]) {
+      const event = await makeDriver().parseWebhook(
+        disputeEvent('CUSTOMER.DISPUTE.UPDATED', resource),
+        SIGNATURE_HEADERS,
+      );
+      expect(event.type, JSON.stringify(resource)).toBe('payment.updated');
     }
+  });
+
+  it('closes a RESOLVED dispute with the outcome PayPal names', async () => {
+    const cases: Array<[string, string]> = [
+      ['RESOLVED_SELLER_FAVOUR', 'won'],
+      ['RESOLVED_BUYER_FAVOUR', 'lost'],
+      ['CANCELED_BY_BUYER', 'canceled'],
+    ];
+    for (const [outcomeCode, outcome] of cases) {
+      const event = await makeDriver().parseWebhook(
+        disputeEvent('CUSTOMER.DISPUTE.RESOLVED', {
+          status: 'RESOLVED',
+          dispute_outcome: { outcome_code: outcomeCode },
+        }),
+        SIGNATURE_HEADERS,
+      );
+      expect(event.type, outcomeCode).toBe('payment.dispute_closed');
+      expect(event.data, outcomeCode).toMatchObject({ gatewayId: 'CAPTURE-1', outcome });
+    }
+  });
+
+  it('leaves a RESOLVED whose outcome does not name a winner as payment.updated', async () => {
+    // `RESOLVED_WITH_PAYOUT` is "PayPal provided the merchant OR customer with protection";
+    // `ACCEPTED`/`DENIED` are deprecated and name the dispute rather than the party; `NONE`
+    // is a previous dispute "closed without any decision". The processor throws on a close
+    // with no outcome precisely so a driver that cannot read one emits an update instead.
+    for (const outcomeCode of ['RESOLVED_WITH_PAYOUT', 'ACCEPTED', 'DENIED', 'NONE']) {
+      const event = await makeDriver().parseWebhook(
+        disputeEvent('CUSTOMER.DISPUTE.RESOLVED', {
+          status: 'RESOLVED',
+          dispute_outcome: { outcome_code: outcomeCode },
+        }),
+        SIGNATURE_HEADERS,
+      );
+      expect(event.type, outcomeCode).toBe('payment.updated');
+      expect(event.data, outcomeCode).not.toHaveProperty('outcome');
+    }
+
+    // And with no `dispute_outcome` at all.
+    const bare = await makeDriver().parseWebhook(
+      disputeEvent('CUSTOMER.DISPUTE.RESOLVED'),
+      SIGNATURE_HEADERS,
+    );
+    expect(bare.type).toBe('payment.updated');
   });
 });
 

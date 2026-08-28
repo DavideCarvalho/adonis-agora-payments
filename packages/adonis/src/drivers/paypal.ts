@@ -134,6 +134,13 @@ interface PayPalDispute {
   status?: string;
   dispute_state?: string;
   dispute_life_cycle_stage?: string;
+  /**
+   * "The date and time by when the merchant must respond to the dispute… If the merchant
+   * does not respond by this date and time, the dispute is closed in the customer's
+   * favor." RFC 3339, which is already the ISO 8601 `actionableUntil` wants.
+   */
+  seller_response_due_date?: string;
+  dispute_outcome?: { outcome_code?: string; amount_refunded?: PayPalMoney };
   create_time?: string;
   disputed_transactions?: Array<{
     seller_transaction_id?: string;
@@ -642,12 +649,16 @@ export class PayPalDriver implements PaymentsDriver {
   #normalize(rawBody: string): WebhookEvent {
     const payload = JSON.parse(rawBody) as PayPalWebhookPayload;
     const eventType = payload.event_type ?? 'unknown';
+    const resource = payload.resource ?? {};
+    // The dispute events decide their type from the resource (the lifecycle stage), and
+    // the payload then has to know which type it is producing to carry the outcome.
+    const type = this.#mapWebhookType(eventType, resource);
     return {
       id: payload.id ?? `${eventType}-${Date.now()}`,
       provider: this.provider,
-      type: this.#mapWebhookType(eventType),
+      type,
       createdAt: payload.create_time ?? new Date().toISOString(),
-      data: this.#mapWebhookData(eventType, payload.resource ?? {}),
+      data: this.#mapWebhookData(eventType, resource, type),
       raw: payload as unknown as Record<string, unknown>,
     };
   }
@@ -687,7 +698,7 @@ export class PayPalDriver implements PaymentsDriver {
     }
   }
 
-  #mapWebhookType(eventType: string): string {
+  #mapWebhookType(eventType: string, resource: Record<string, unknown>): string {
     switch (eventType) {
       case 'PAYMENT.CAPTURE.COMPLETED':
       case 'PAYMENT.SALE.COMPLETED':
@@ -695,18 +706,49 @@ export class PayPalDriver implements PaymentsDriver {
       case 'PAYMENT.CAPTURE.DECLINED':
       case 'PAYMENT.SALE.DENIED':
         return 'payment.failed';
-      // The buyer has disputed the payment with PayPal — `CUSTOMER.DISPUTE.CREATED` is the
-      // opening. `UPDATED` and `RESOLVED` are the rest of the case, which every gateway
-      // reports differently and which this package deliberately does not name.
-      // `RISK.DISPUTE.CREATED` is the deprecated spelling PayPal's own reference says
-      // `CUSTOMER.DISPUTE.CREATED` supersedes; an account still subscribed to it should not
-      // silently miss the chargeback.
+      // ── The dispute family ───────────────────────────────────────────────────────────
+      // PayPal's dispute is NOT a card-scheme chargeback: it has a lifecycle of its own,
+      // and `CUSTOMER.DISPUTE.CREATED` fires at two very different points in it. PayPal's
+      // own sandbox guide has you assert `dispute_life_cycle_stage` is `INQUIRY` for one
+      // test and `CHARGEBACK` for the next, on the same event.
+      //
+      // `INQUIRY` is PayPal's own words "a customer and merchant interact in an attempt to
+      // resolve a dispute without escalation to PayPal" — a 20-day window in the Resolution
+      // Center that a refund closes. Nothing is adjudicated and nothing is debited; calling
+      // it `payment.disputed` moves a paid row over money still in the account, which is
+      // the same bug Stripe's inquiry and Adyen's notification-of-chargeback had.
+      // `CHARGEBACK` and the two appeal stages are the claim: PayPal is now investigating
+      // and will debit the account if it decides for the buyer.
+      //
+      // With no stage on the resource this stays `payment.disputed` — the mapping it has
+      // always had — rather than downgrading a dispute the driver could not read.
       case 'CUSTOMER.DISPUTE.CREATED':
+      // The deprecated spelling PayPal's own reference says `CUSTOMER.DISPUTE.CREATED`
+      // supersedes; an account still subscribed to it should not silently miss the dispute.
       case 'RISK.DISPUTE.CREATED':
-        return 'payment.disputed';
-      case 'CUSTOMER.DISPUTE.UPDATED':
+        return this.#disputeStage(resource) === 'INQUIRY'
+          ? 'payment.dispute_warning'
+          : 'payment.disputed';
+      // PayPal sends **no dedicated "escalated to a claim" event**: an inquiry becoming a
+      // chargeback arrives as a plain `CUSTOMER.DISPUTE.UPDATED` carrying the new stage. It
+      // is therefore the only place a row that opened as a warning can learn the money is
+      // now at stake, so an UPDATED past the inquiry stage is the chargeback. An UPDATED
+      // still in `INQUIRY` (a message, evidence, an offer) moves nothing, and one on an
+      // already `RESOLVED` dispute is bookkeeping after the fact.
+      case 'CUSTOMER.DISPUTE.UPDATED': {
+        const dispute = resource as unknown as PayPalDispute;
+        const stage = this.#disputeStage(resource);
+        return stage === undefined || stage === 'INQUIRY' || dispute.status === 'RESOLVED'
+          ? 'payment.updated'
+          : 'payment.disputed';
+      }
+      // The outcome lives in `dispute_outcome.outcome_code`, and only three of the seven
+      // codes say who kept the money — see {@link PayPalDriver.#disputeOutcome}. Without a
+      // readable one this stays an update rather than inventing a result.
       case 'CUSTOMER.DISPUTE.RESOLVED':
-        return 'payment.updated';
+        return this.#disputeOutcome(resource) === undefined
+          ? 'payment.updated'
+          : 'payment.dispute_closed';
       case 'PAYMENT.CAPTURE.REFUNDED':
       case 'PAYMENT.CAPTURE.REVERSED':
       case 'PAYMENT.SALE.REFUNDED':
@@ -738,7 +780,62 @@ export class PayPalDriver implements PaymentsDriver {
     }
   }
 
-  #mapWebhookData(eventType: string, resource: Record<string, unknown>): Record<string, unknown> {
+  /**
+   * The dispute's lifecycle stage — `INQUIRY`, `CHARGEBACK`, `PRE_ARBITRATION` or
+   * `ARBITRATION` — or `undefined` when the resource is not a dispute or does not carry
+   * one.
+   *
+   * A caveat worth knowing: PayPal documents the stages and the fund holds separately, and
+   * never in the same sentence. The dispute guide says PayPal "holds the disputed payment
+   * until resolution" for internal disputes, while its own sandbox matrix enumerates both
+   * "Dispute NO HOLD" and "Dispute WITH HOLD" scenarios, and only ever says "PayPal debits
+   * the merchant's account" on a case resolved in the buyer's favour. So the reference
+   * does **not** state that a `CHARGEBACK`-stage dispute has already taken the money — it
+   * states that the claim is being adjudicated and that losing it debits the account. The
+   * split here follows the stage PayPal itself uses to separate "you and the buyer are
+   * talking" from "PayPal is deciding", which is the line an operator can act on.
+   */
+  #disputeStage(resource: Record<string, unknown>): string | undefined {
+    const stage = (resource as unknown as PayPalDispute).dispute_life_cycle_stage;
+    return typeof stage === 'string' ? stage : undefined;
+  }
+
+  /**
+   * `dispute_outcome.outcome_code` → the canonical outcome, or `undefined`.
+   *
+   * PayPal's enum has seven values and only three of them name who ends up with the money:
+   * `RESOLVED_SELLER_FAVOUR`, `RESOLVED_BUYER_FAVOUR` and `CANCELED_BY_BUYER` ("the
+   * customer canceled the dispute"). The rest deliberately return `undefined`:
+   *
+   * - `RESOLVED_WITH_PAYOUT` is "PayPal provided the merchant **or customer** with
+   *   protection and the case is resolved" — it does not say which, and guessing decides
+   *   whether the row goes back to `paid`.
+   * - `ACCEPTED` and `DENIED` are marked DEPRECATED in PayPal's current schema and their
+   *   descriptions ("PayPal accepted the dispute" / "PayPal denied the dispute") name the
+   *   dispute rather than the party, unlike every other code in the same enum.
+   * - `NONE` is "a dispute was created for the same transaction ID, and the previous
+   *   dispute was closed **without any decision**", which is the definition of no outcome.
+   *
+   * Each of those stays `payment.updated` carrying the full resource on `event.raw`.
+   */
+  #disputeOutcome(resource: Record<string, unknown>): 'won' | 'lost' | 'canceled' | undefined {
+    switch ((resource as unknown as PayPalDispute).dispute_outcome?.outcome_code) {
+      case 'RESOLVED_SELLER_FAVOUR':
+        return 'won';
+      case 'RESOLVED_BUYER_FAVOUR':
+        return 'lost';
+      case 'CANCELED_BY_BUYER':
+        return 'canceled';
+      default:
+        return undefined;
+    }
+  }
+
+  #mapWebhookData(
+    eventType: string,
+    resource: Record<string, unknown>,
+    type: string,
+  ): Record<string, unknown> {
     if (eventType.startsWith('BILLING.SUBSCRIPTION.')) {
       const subscription = resource as unknown as PayPalSubscription;
       return {
@@ -776,12 +873,24 @@ export class PayPalDriver implements PaymentsDriver {
       const dispute = resource as unknown as PayPalDispute;
       const currency = (dispute.dispute_amount?.currency_code ?? this.#currency).toLowerCase();
       const transaction = dispute.disputed_transactions?.[0];
+      const outcome =
+        type === 'payment.dispute_closed' ? this.#disputeOutcome(resource) : undefined;
       return {
         gatewayId: transaction?.seller_transaction_id ?? '',
         amount: this.#fromValue(dispute.dispute_amount?.value, currency),
         currency,
         ...(dispute.dispute_id !== undefined ? { disputeId: dispute.dispute_id } : {}),
-        ...(dispute.reason !== undefined ? { disputeReason: dispute.reason } : {}),
+        ...(dispute.reason !== undefined ? { reason: dispute.reason } : {}),
+        // The whole value of an inquiry: PayPal closes an unanswered dispute in the
+        // customer's favour when this passes, so it is the date the alert is worth acting
+        // on. Already RFC 3339, which is the ISO 8601 `actionableUntil` is declared as.
+        ...(dispute.seller_response_due_date !== undefined
+          ? { actionableUntil: dispute.seller_response_due_date }
+          : {}),
+        ...(dispute.dispute_life_cycle_stage !== undefined
+          ? { disputeStage: dispute.dispute_life_cycle_stage }
+          : {}),
+        ...(outcome !== undefined ? { outcome } : {}),
         ...(transaction?.custom !== undefined ? { externalReference: transaction.custom } : {}),
       };
     }

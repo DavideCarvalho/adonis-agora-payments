@@ -188,14 +188,35 @@ paused subscribers, which is the point. The raw value is still on
 ### Disputes: your merchant of record absorbs them
 
 **Polar has no dispute or chargeback event, and this driver does not invent one.** That is
-not a gap in the integration — it is the deal. As merchant of record Polar is the seller on
-the buyer's statement, so a chargeback is raised against Polar and Polar bears it, together
-with the fee and the representment. Its event catalogue is checkouts, customers, orders,
-refunds, subscriptions, benefit grants, benefits, products, discounts and the organization;
-nothing in it is a dispute.
+not a gap in the integration — it is the deal. The two questions every other provider page
+answers both have the same answer here:
 
-So `payment.disputed` never fires on this provider. If your application has a "revoke access
-on chargeback" path, `order.refunded` / `refund.created` is what drives it here. Forcing an
+- **Who fights the dispute?** Polar. As merchant of record Polar is the seller on the buyer's
+  statement, so the chargeback is raised against Polar and Polar runs it end to end —
+  including Rapid Dispute Resolution to settle disputes before they escalate.
+  `capabilities.disputes` is `false` and there is no `submitDisputeEvidence`, because there
+  is nothing to submit. What you carry is the cost: "$15 fee per incident, deducted directly
+  from the merchant balance… non-refundable regardless of the dispute outcome."
+- **What reaches you?** *Nothing dispute-shaped.* Polar's event catalogue is checkouts,
+  customers, orders, refunds, subscriptions, benefit grants, benefits, products, discounts
+  and the organization; none of it is a dispute. Nor is there a dispute *status* to read: an
+  Order is `pending`, `paid`, `refunded`, `partially_refunded` or `void`, and none of those
+  means charged back.
+
+<Callout type="warn">
+The first you hear of a chargeback on Polar is your **balance**. There is no
+`actionableUntil` on this provider because there is no window that belongs to you and no
+event that would carry one.
+</Callout>
+
+So `payment.disputed`, `payment.dispute_warning` and `payment.dispute_closed` never fire on
+this provider — there is a test asserting that no Polar event produces any of them, so a
+well-meaning future mapping cannot quietly add one.
+
+If your application has a "revoke access on chargeback" path, `order.refunded` /
+`refund.created` is what drives it here — and note that this is not purely a fallback:
+Polar's RDR **auto-refunds** a dispute, so a chargeback genuinely can arrive as an ordinary
+refund. It stays `payment.refunded`, because that is what happened to the money. Forcing an
 unrelated event into `payment.disputed` would invent a notification that does not exist.
 
 <Callout title="The webhook secret is used verbatim">

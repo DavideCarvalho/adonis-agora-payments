@@ -76,6 +76,39 @@ export default class extends BaseSchema {
       table.timestamp('updated_at', { useTz: true }).notNullable()
     })
 
+    // A chargeback and its clock. The `evidence_due_by` window is the reason this table
+    // exists: it arrives on a webhook, and without somewhere to keep it the only way to
+    // answer "which windows close this week" is to open every gateway's own dashboard.
+    this.schema.createTable('billing_disputes', (table) => {
+      table.uuid('id').primary()
+      // The DISPUTE's own gateway id — the idempotency key, hence unique. Where a gateway
+      // sends none, the processor synthesizes one from the payment; see `WebhookProcessor`.
+      table.string('gateway_id').unique()
+      // The disputed PAYMENT's gateway id — the join back to `billing_payments.gateway_id`,
+      // and indexed for it: getting from a dispute to its charge is the first thing anyone does.
+      table.string('payment_gateway_id')
+      table.string('provider')
+      table.string('status')
+      table.string('reason').nullable()
+      // Nullable, both: a pre-dispute alert (Stripe's early fraud warning) names a charge and
+      // a fraud type and no money at all.
+      table.bigInteger('amount').nullable()
+      table.string('currency', 3).nullable()
+      // Nullable because plenty of gateways send no deadline. `null` means "this gateway told
+      // us nothing", never "no hurry" — the deadline check counts only rows that carry one.
+      table.timestamp('evidence_due_by', { useTz: true }).nullable()
+      table.string('outcome').nullable()
+      table.timestamp('opened_at', { useTz: true }).nullable()
+      table.timestamp('closed_at', { useTz: true }).nullable()
+      table.jsonb('payload').nullable()
+      table.timestamp('created_at', { useTz: true }).notNullable()
+      table.timestamp('updated_at', { useTz: true }).notNullable()
+      table.index(['payment_gateway_id'], 'billing_disputes_payment_idx')
+      // The deadline query — open disputes ordered by the window that closes soonest — reads
+      // exactly these two columns, in this order.
+      table.index(['status', 'evidence_due_by'], 'billing_disputes_deadline_idx')
+    })
+
     this.schema.createTable('billing_usage_events', (table) => {
       table.uuid('id').primary()
       table.string('subscription_id').nullable()
@@ -95,6 +128,9 @@ export default class extends BaseSchema {
     this.schema.dropTable('billing_subscriptions')
     this.schema.dropTable('billing_payments')
     this.schema.dropTable('billing_webhook_events')
+    // `IfExists`: an install that got this table from `add_billing_disputes` rolls that
+    // migration back first, and it drops the table.
+    this.schema.dropTableIfExists('billing_disputes')
     this.schema.dropTable('billing_usage_events')
   }
 }

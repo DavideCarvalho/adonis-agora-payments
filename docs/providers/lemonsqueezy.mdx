@@ -119,17 +119,41 @@ billing layer's idempotency ledger.
 ### Disputes: your merchant of record absorbs them
 
 **Lemon Squeezy has no dispute or chargeback webhook, and this driver does not invent one.**
-That is not an omission in the integration — it is the deal. As merchant of record, Lemon
-Squeezy is the seller on the buyer's statement, so a chargeback is raised against Lemon
-Squeezy and Lemon Squeezy bears it, along with the fee and the representment. Its entire
-event catalogue is orders, subscriptions, subscription invoices, customers, license keys
-and affiliates; nothing in it is a dispute.
+That is not an omission in the integration — it is the deal. The two questions every other
+provider page answers both have the same answer here:
 
-So `payment.disputed` never fires on this provider. If your application has a "revoke
-access on chargeback" path, it is driven by `order_refunded` here (Lemon Squeezy refunds
-the order when it settles a dispute), not by a dispute event. Forcing an unrelated event
-into `payment.disputed` would invent a notification that does not exist, so the driver
-leaves the unmapped events under their own Lemon Squeezy names for an app handler.
+- **Who fights the dispute?** Lemon Squeezy. As merchant of record it is the seller on the
+  buyer's statement, so the chargeback is raised against Lemon Squeezy, and its own help
+  centre says it "typically manages these disputes on behalf of the seller". You get the
+  bill, not the fight: "the refunded amount, minus the platform fee, plus a $15 dispute fee
+  is deducted from the seller's next payout." `capabilities.disputes` is `false` and there
+  is no `submitDisputeEvidence`, because there is nothing to submit.
+- **What reaches you?** *Nothing.* Not a warning, not the chargeback, not the outcome.
+
+The full webhook catalogue is sixteen names — `order_created`, `order_refunded`, the
+`subscription_*` family, and `license_key_created` / `license_key_updated` — and there is no
+dispute event among them. **There is not even an `order_updated`.** That last detail is the
+one that matters: Lemon Squeezy's Order `status` enum does include `fraudulent`, its value
+for a charged-back order, but `order_created` fires once at creation and nothing fires when a
+status later changes. So the status exists and can never reach a webhook handler.
+
+<Callout type="warn">
+The first you hear of a chargeback on Lemon Squeezy is your **payout**. There is no
+`actionableUntil` on this provider because there is no window that belongs to you and no
+event that would carry one.
+</Callout>
+
+So `payment.disputed`, `payment.dispute_warning` and `payment.dispute_closed` never fire on
+this provider — there is a test asserting that no Lemon Squeezy event produces any of them,
+so a well-meaning future mapping cannot quietly add one. If your application has a "revoke
+access on chargeback" path, `order_refunded` is the closest signal available (Lemon Squeezy
+refunds the order when it settles a dispute), and it is not a reliable one — a settled
+dispute is not guaranteed to surface as a refund. Reconcile against the payout report if the
+distinction matters to you.
+
+Forcing an unrelated event into `payment.disputed` would invent a notification that does not
+exist, so the driver leaves the unmapped events under their own Lemon Squeezy names for an
+app handler.
 
 ### `idempotencyKey` throws
 

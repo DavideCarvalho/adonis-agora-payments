@@ -226,6 +226,70 @@ Every one of these is keyed on `originalReference`, the disputed payment's `pspR
 the row that has to stop saying `paid`. The dispute's own `pspReference` comes through as
 `disputeId`.
 
+### Defending one: `capabilities.disputes` is `false`, on purpose
+
+Not because Adyen has no dispute API — it has one, **Defend Disputes v30** — but because
+this driver cannot drive it honestly through the shared contract. `findDispute()` and
+`submitDisputeEvidence()` exist and both throw, saying exactly this, so a caller who routes
+a dispute here gets the explanation rather than a missing method.
+
+Three things stand in the way, and each is a fact about Adyen rather than a gap in this
+driver:
+
+1. **Nothing reads a dispute back.** v30 is five POSTs —
+   `retrieveApplicableDefenseReasons`, `supplyDefenseDocument`, `defendDispute`,
+   `acceptDispute`, `deleteDisputeDefenseDocument` — and every one is an action. None
+   returns a dispute's status, amount, reason or deadline, so a `Dispute` built here would
+   have those fields invented. What you have is the notification (and the Customer Area
+   dispute report).
+2. **A defense is a reason code, not evidence.** Defending means picking a
+   scheme-specific `defenseReasonCode` from the applicable list, then supplying the
+   document types that reason requires. There is no free-text field anywhere in the flow —
+   no equivalent of Stripe's `uncategorized_text` — so `explanation`, `receiptUrl` and the
+   customer fields of `DisputeEvidence` have nowhere to go, and the code that *is* the
+   defense has no field to come from. A mapping would drop it.
+3. **Documents are bytes, not ids.** `supplyDefenseDocument` takes base64 `content` plus
+   `contentType` and a `defenseDocumentTypeCode` inline; `DisputeEvidence.documentIds`
+   holds ids that Adyen never issues.
+
+There is a fourth, practical one: the API lives on a **different host** from Checkout v71 —
+`https://ca-test.adyen.com/ca/services/DisputeService/v30` (`ca-live` in production) — and
+wants an API credential with the **API dispute management** role, which your Checkout key
+usually is not.
+
+So do it directly, with the deadline this driver already handed you:
+
+```ts
+// 1. Which defenses does the scheme allow for this dispute?
+const reasons = await fetch(
+  'https://ca-test.adyen.com/ca/services/DisputeService/v30/retrieveApplicableDefenseReasons',
+  {
+    method: 'POST',
+    headers: { 'x-api-key': env.get('ADYEN_DISPUTES_API_KEY'), 'content-type': 'application/json' },
+    body: JSON.stringify({
+      disputePspReference: dispute.disputeId,      // from the webhook
+      merchantAccountCode: env.get('ADYEN_MERCHANT_ACCOUNT'),
+    }),
+  },
+).then((r) => r.json())
+
+// 2. Supply each required document (base64), then 3. defendDispute with the reason code.
+// Both answer with `disputeServiceResult: { success, errorMessage }` — a 200 with
+// success:false is NOT a defense, and has to be treated as a failure.
+```
+
+<Callout type="warn" title="`success: false` arrives with an HTTP 200">
+Every Disputes v30 response wraps its outcome in `disputeServiceResult.success`. Code that
+checks only the HTTP status will record a defense that was never accepted — the same class
+of bug as reporting evidence submitted when the gateway never received it.
+</Callout>
+
+The pieces you need are all on the notification the driver already normalizes: the
+dispute's own `pspReference` (as `disputeId`), the payment's (`originalReference`), your
+own `externalReference` echoed back as `merchantReference`, and
+`additionalData.defensePeriodEndsAt` as `actionableUntil` — the deadline that decides
+whether any of this is still worth doing.
+
 ## `idempotencyKey`
 
 Adyen deduplicates on the `Idempotency-Key` **header**, capped at 64 characters (a UUID is

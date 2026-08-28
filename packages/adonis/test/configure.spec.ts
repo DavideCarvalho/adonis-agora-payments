@@ -65,5 +65,9 @@ describe('configure', () => {
 
     expect(stubs).toContain('config/payments.stub');
     expect(stubs).toContain('database/migrations/create_billing_tables.stub');
+    // All three, in order: the two later files are the only way the columns and the table
+    // added after `create_billing_tables` shipped ever reach an install that already ran it.
+    expect(stubs).toContain('database/migrations/add_billing_external_reference.stub');
+    expect(stubs).toContain('database/migrations/add_billing_disputes.stub');
   });
 });

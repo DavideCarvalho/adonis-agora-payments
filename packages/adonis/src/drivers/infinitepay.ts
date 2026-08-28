@@ -256,7 +256,14 @@ export class InfinitePayDriver implements PaymentsDriver {
       // The webhook has no event id of its own; the transaction is the stable, idempotent key.
       id: payload.transaction_nsu ?? payload.invoice_slug ?? `infinitepay-${randomUUID()}`,
       provider: this.provider,
-      // The webhook fires on approved payments only — there is no failure or refund event.
+      // The webhook fires on approved payments only. InfinitePay's checkout reference
+      // documents exactly one notification — "quando o pagamento for aprovado" — and two
+      // endpoints (`POST /links`, `POST /payment_check`). There is no failure event, no
+      // refund event and **no dispute vocabulary at all**: no chargeback webhook, no
+      // pre-dispute alert, no dispute resource. A contested sale is handled inside the
+      // InfinitePay app, which is also the only place defense documents can be uploaded,
+      // and the first the integration hears of one is the debit on the statement. So this
+      // is unconditionally `payment.succeeded` — there is nothing else it could be.
       type: 'payment.succeeded',
       createdAt: new Date().toISOString(),
       data: {

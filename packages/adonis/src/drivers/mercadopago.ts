@@ -87,6 +87,30 @@ interface MercadoPagoRefundResponse {
   date_created?: string;
 }
 
+/**
+ * `GET /v1/chargebacks/{id}` — the chargeback CASE, which is what a `topic_chargebacks_wh`
+ * notification names in `data.id`.
+ *
+ * The one field worth the extra call is `date_documentation_deadline`: the date by which
+ * evidence has to be uploaded, and the only thing in the whole Mercado Pago dispute flow
+ * that makes it actionable. It is `null` when `documentation_required` is false. The case
+ * carries no status of its own — the OUTCOME lives on the payment's `status_detail` — so
+ * nothing here decides an event type.
+ */
+interface MercadoPagoChargebackResponse {
+  id?: number | string;
+  payments?: Array<number | string>;
+  amount?: number | string;
+  currency?: string;
+  reason?: string;
+  coverage_applied?: boolean | null;
+  coverage_elegible?: boolean;
+  documentation_required?: boolean;
+  documentation_status?: string;
+  date_documentation_deadline?: string | null;
+  date_last_updated?: string;
+}
+
 interface MercadoPagoPreferenceResponse {
   id: string;
   init_point?: string;
@@ -544,7 +568,9 @@ export class MercadoPagoDriver implements PaymentsDriver {
     if (type === 'topic_chargebacks_wh') {
       const paymentId = payload.data?.payment_id;
       if (paymentId === undefined) return event;
-      return this.#paymentEvent(event, String(paymentId));
+      return this.#withChargebackDetails(await this.#paymentEvent(event, String(paymentId)), {
+        caseId: resourceId,
+      });
     }
     if (type === 'subscription_preapproval') {
       const preapproval = await this.#request<MercadoPagoPreapprovalResponse>(
@@ -582,9 +608,12 @@ export class MercadoPagoDriver implements PaymentsDriver {
   async #paymentEvent(event: WebhookEvent, paymentId: string): Promise<WebhookEvent> {
     const payment = await this.#request<MercadoPagoPaymentResponse>(`/v1/payments/${paymentId}`);
     const currency = payment.currency_id?.toLowerCase() ?? this.#currency;
+    const type = this.#paymentEventType(payment.status, payment.status_detail);
+    const outcome =
+      type === 'payment.dispute_closed' ? this.#disputeOutcome(payment.status_detail) : undefined;
     return {
       ...event,
-      type: this.#paymentEventType(payment.status),
+      type,
       data: {
         gatewayId: String(payment.id),
         amount: this.#fromAmount(payment.transaction_amount, currency),
@@ -593,6 +622,49 @@ export class MercadoPagoDriver implements PaymentsDriver {
         ...(payment.external_reference !== undefined
           ? { externalReference: payment.external_reference }
           : {}),
+        // The close has to carry its result: the processor throws on a
+        // `payment.dispute_closed` with no outcome rather than inventing one.
+        ...(outcome !== undefined ? { outcome } : {}),
+      },
+    };
+  }
+
+  /**
+   * Add the chargeback CASE's own fields to a dispute event.
+   *
+   * Only `topic_chargebacks_wh` reaches this, because only that notification names a case
+   * (`data.id`). The extra `GET /v1/chargebacks/{id}` buys `date_documentation_deadline` —
+   * the evidence deadline, and the single field that makes a Mercado Pago dispute
+   * actionable — plus the case's `reason`.
+   *
+   * It **fails soft**, unlike the payment fetch. By the time this runs the money question
+   * is already answered from the payment, and throwing here would turn a chargeback the
+   * driver read correctly into a 400 and a redelivery. A missing deadline costs an
+   * operator context; a dropped chargeback costs the row.
+   */
+  async #withChargebackDetails(
+    event: WebhookEvent,
+    { caseId }: { caseId: string },
+  ): Promise<WebhookEvent> {
+    if (event.type !== 'payment.disputed' && event.type !== 'payment.dispute_closed') return event;
+    const data = { ...(event.data as Record<string, unknown>), disputeId: caseId };
+    let chargeback: MercadoPagoChargebackResponse;
+    try {
+      chargeback = await this.#request<MercadoPagoChargebackResponse>(`/v1/chargebacks/${caseId}`);
+    } catch {
+      return { ...event, data };
+    }
+    const deadline = chargeback.date_documentation_deadline;
+    return {
+      ...event,
+      data: {
+        ...data,
+        ...(typeof chargeback.reason === 'string' && chargeback.reason !== ''
+          ? { reason: chargeback.reason }
+          : {}),
+        // ISO 8601 with an offset, e.g. `2024-10-24T12:48:24.000-04:00`. `null` whenever
+        // `documentation_required` is false — there is nothing to defend, so no clock.
+        ...(typeof deadline === 'string' && deadline !== '' ? { actionableUntil: deadline } : {}),
       },
     };
   }
@@ -678,7 +750,7 @@ export class MercadoPagoDriver implements PaymentsDriver {
     }
   }
 
-  #paymentEventType(status: string | undefined): string {
+  #paymentEventType(status: string | undefined, statusDetail?: string): string {
     switch (status) {
       case 'approved':
         return 'payment.succeeded';
@@ -687,19 +759,51 @@ export class MercadoPagoDriver implements PaymentsDriver {
         return 'payment.failed';
       case 'refunded':
         return 'payment.refunded';
-      // Both are the payment being disputed, and `charged_back` used to arrive as
-      // `payment.refunded` — which says the seller gave the money back voluntarily and
-      // leaves nothing to distinguish a refund from revenue taken away by the issuer.
-      // `in_mediation` is a claim opened inside Mercado Pago; `charged_back` is the card
-      // chargeback. How it ENDS is `status_detail` — `settled` (lost) or `reimbursed`
-      // (won) — which stays on `payment.payload`: the contract has no resolution event,
-      // by design, because no two gateways report one the same way.
-      case 'in_mediation':
+      // A card chargeback, and `status_detail` says where it stands. Mercado Pago's own
+      // table: `in_process` is "chargeback received, the dispute is in progress, awaiting a
+      // final decision"; `settled` is "decision against the seller, money withdrawn from
+      // the seller's account"; `reimbursed` is "decision in favor of the seller, money
+      // refunded to the seller's account". So the two terminal details are the outcome, and
+      // reading them is the difference between a dispute that closes and one that sits at
+      // `disputed` forever — a WON dispute left there writes off money that came back,
+      // because `revenue()` only sums `paid`.
+      //
+      // Note what the reference does NOT say: whether the funds leave the account at
+      // `in_process` or only at `settled`. Mercado Pago describes `settled` as the
+      // withdrawal, but the payment's top-level status is already `charged_back` and the
+      // guides describe the amount as retained from the opening. Since the reference will
+      // not settle it, this stays `payment.disputed` — the mapping it already had — rather
+      // than being downgraded to a warning on a guess.
       case 'charged_back':
+        return this.#disputeOutcome(statusDetail) === undefined
+          ? 'payment.disputed'
+          : 'payment.dispute_closed';
+      // A claim opened inside Mercado Pago rather than at the issuer. The reference says
+      // only "users have initiated a dispute" and does not say whether the money is
+      // withheld, so this keeps the `payment.disputed` it has always had; a claim has no
+      // documented `status_detail` outcome to close on either.
+      case 'in_mediation':
         return 'payment.disputed';
       default:
         return 'payment.updated';
     }
+  }
+
+  /**
+   * The outcome of a `charged_back` payment, read from `status_detail`.
+   *
+   * `in_process` — and anything unrecognized — returns `undefined`, which keeps the event
+   * at `payment.disputed`. The dispute is open; there is no result to report, and inventing
+   * one would close a row over money still being argued about.
+   *
+   * `coverage_applied` on the chargeback case says the same thing (`true` favours the
+   * seller), but it is on a resource the `payment` topic never names, so the payment's own
+   * detail is what this reads.
+   */
+  #disputeOutcome(statusDetail: string | undefined): 'won' | 'lost' | undefined {
+    if (statusDetail === 'reimbursed') return 'won';
+    if (statusDetail === 'settled') return 'lost';
+    return undefined;
   }
 
   #mapCustomer(data: MercadoPagoCustomerResponse): Customer {

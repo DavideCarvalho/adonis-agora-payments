@@ -114,6 +114,12 @@ That is a different API, a different format and different credentials, so this d
 rejects those bodies with a clear error rather than half-parsing them. If you take cards
 through PagBank you need a second route for them; until then a chargeback here will not
 move a payment row to `disputed`.
+
+It follows that PagBank sends this driver **no pre-dispute alert and no defense deadline**
+either: there is no fraud-notification event, no retrieval request, and nothing in the
+legacy notification that names a date by which to respond. A contested PagBank sale is
+answered in the PagBank panel. So none of `payment.dispute_warning`, `payment.disputed` or
+`payment.dispute_closed` is ever emitted here — an honest gap, pinned by a test.
 </Callout>
 
 <Callout type="warn" title="Not yet run against a live account">

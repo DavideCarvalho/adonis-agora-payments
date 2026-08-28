@@ -942,15 +942,27 @@ export class SquareDriver implements PaymentsDriver {
         return object?.refund?.status === 'COMPLETED' ? 'payment.refunded' : 'payment.updated';
       case 'invoice.payment_made':
         return 'payment.succeeded';
-      // `dispute.created` is the opening: the card brand has taken the money back pending
-      // the seller's evidence. Everything after it — the state changes, the evidence going
-      // in and out — is the resolution, which this package deliberately does not name, so
-      // it is an update. Square's own advice is to subscribe to both.
+      // ── The dispute family ───────────────────────────────────────────────────────────
+      // Square answers the money question outright for a chargeback: when the bank notifies
+      // it of one, "Square withholds the disputed funds from the seller's Square account
+      // balance until the bank issues a final resolution on the case. If there are
+      // insufficient funds in the Square account balance, the funds are removed (debited)
+      // from the seller's most recently linked bank account." So `dispute.created` is
+      // `payment.disputed` — unless the state says this is an inquiry, see
+      // {@link SquareDriver.#disputeType}. `dispute.state.updated` carries the whole Dispute
+      // object, so it is read the same way and is where the resolution arrives.
       case 'dispute.created':
-        return 'payment.disputed';
       case 'dispute.state.updated':
+      // The deprecated spelling of `dispute.state.updated`; an app still subscribed to it
+      // should not silently miss the resolution.
+      case 'dispute.state.changed':
+        return this.#disputeType(object?.dispute, payload.type);
+      // Evidence going in and out is paperwork inside an open dispute, not a resolution of
+      // it. `.created`/`.deleted` are the current names, `.added`/`.removed` the deprecated
+      // ones Square still publishes.
       case 'dispute.evidence.added':
       case 'dispute.evidence.created':
+      case 'dispute.evidence.deleted':
       case 'dispute.evidence.removed':
         return 'payment.updated';
       case 'subscription.created':
@@ -964,6 +976,61 @@ export class SquareDriver implements PaymentsDriver {
       default:
         return payload.type;
     }
+  }
+
+  /**
+   * A Dispute's `state` → the canonical event type.
+   *
+   * Square's `DisputeState` enum has eight values and splits cleanly in two. Four of them
+   * are a real chargeback — `EVIDENCE_REQUIRED` ("the initial state of a dispute with
+   * evidence required"), `PROCESSING` ("dispute evidence has been submitted and the bank is
+   * processing the dispute"), `WON` and `LOST` — and three more are prefixed `INQUIRY_`,
+   * which Square's own enum descriptions call "an inquiry" rather than a dispute.
+   *
+   * The inquiry states become `payment.dispute_warning`. **Square's reference does not say
+   * in words whether an inquiry withholds funds**: the "Square withholds the disputed funds"
+   * sentence is written about a cardholder requesting a charge reversal, and the support
+   * article on information requests says nothing about money at all. What the reference does
+   * do is name these states inquiries and keep them out of the dispute states, which is the
+   * same distinction Stripe draws with its `warning_*` statuses and the networks draw
+   * between a retrieval request and a chargeback. Reporting an inquiry as a warning writes
+   * nothing to the ledger; reporting it as `payment.disputed` moves a paid row.
+   *
+   * `INQUIRY_CLOSED` is "the inquiry is complete" and names no winner, so it stays a
+   * `payment.updated` — the processor throws on a close with no outcome precisely so a
+   * driver that cannot read one emits an update instead.
+   *
+   * `ACCEPTED` is a **loss**: `AcceptDispute` is documented as "Square returns the disputed
+   * amount to the cardholder and updates the dispute state to `ACCEPTED`. The dispute is now
+   * closed." The seller accepted liability and the money is gone, exactly as with Adyen's
+   * `Accepted` disputeStatus.
+   *
+   * With no state at all — Square marks the field nullable — `dispute.created` keeps the
+   * `payment.disputed` it has always had, and a state change with nothing to change stays an
+   * update.
+   */
+  #disputeType(dispute: SquareDisputeResponse | undefined, eventType: string): string {
+    switch (dispute?.state) {
+      case 'INQUIRY_EVIDENCE_REQUIRED':
+      case 'INQUIRY_PROCESSING':
+        return 'payment.dispute_warning';
+      case 'EVIDENCE_REQUIRED':
+      case 'PROCESSING':
+        return 'payment.disputed';
+      case 'WON':
+      case 'LOST':
+      case 'ACCEPTED':
+        return 'payment.dispute_closed';
+      default:
+        return eventType === 'dispute.created' ? 'payment.disputed' : 'payment.updated';
+    }
+  }
+
+  /** The three terminal states, and only those. `INQUIRY_CLOSED` names no winner. */
+  #disputeOutcome(state: string | undefined): 'won' | 'lost' | undefined {
+    if (state === 'WON') return 'won';
+    if (state === 'LOST' || state === 'ACCEPTED') return 'lost';
+    return undefined;
   }
 
   #mapWebhookData(payload: SquareWebhookPayload): Record<string, unknown> {
@@ -999,12 +1066,19 @@ export class SquareDriver implements PaymentsDriver {
       // saying `paid` is the payment's. `amount_money` is the disputed amount, which for a
       // partial dispute is less than the payment — `event.raw` carries the reason, the
       // state and the evidence deadline.
+      const outcome = this.#disputeOutcome(dispute.state);
       return {
         gatewayId: dispute.disputed_payment?.payment_id ?? '',
         amount: dispute.amount_money?.amount ?? 0,
         currency: (dispute.amount_money?.currency ?? this.#currency).toLowerCase(),
         ...(dispute.id !== undefined ? { disputeId: dispute.id } : {}),
+        ...(dispute.reason !== undefined ? { reason: dispute.reason } : {}),
+        // "The deadline by which the seller must respond to the dispute", already RFC 3339
+        // — and if it passes with no action Square automatically challenges on the seller's
+        // behalf, which is not the same as the seller having decided anything.
+        ...(dispute.due_at !== undefined ? { actionableUntil: dispute.due_at } : {}),
         ...(dispute.state !== undefined ? { disputeState: dispute.state } : {}),
+        ...(outcome !== undefined ? { outcome } : {}),
       };
     }
     const refund = object?.refund;

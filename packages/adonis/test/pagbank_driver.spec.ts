@@ -473,6 +473,41 @@ describe('PagBankDriver capabilities', () => {
     expect(() => makeDriver({ verifyWebhooks: false }).parseWebhook(legacy, {})).toThrow(
       /not JSON/,
     );
+
+    // And no Orders API charge status is a dispute either — the enum is
+    // AUTHORIZED/PAID/IN_ANALYSIS/DECLINED/CANCELED/WAITING and there is no chargeback
+    // member. Every one of them, plus a made-up `CHARGEBACK`, has to stay off the three
+    // dispute types, or a PagBank order would be reported as money taken back.
+    const driver = makeDriver({ verifyWebhooks: false });
+    for (const status of [
+      'AUTHORIZED',
+      'PAID',
+      'IN_ANALYSIS',
+      'DECLINED',
+      'CANCELED',
+      'WAITING',
+      'CHARGEBACK',
+    ]) {
+      const event = driver.parseWebhook(
+        JSON.stringify({
+          id: 'ORDE_D',
+          charges: [
+            {
+              id: 'CHAR_D',
+              status,
+              amount: { value: 1990, summary: { total: 1990, paid: 1990, refunded: 0 } },
+              payment_method: { type: 'CREDIT_CARD' },
+            },
+          ],
+        }),
+        {},
+      );
+      expect([
+        'payment.disputed',
+        'payment.dispute_warning',
+        'payment.dispute_closed',
+      ]).not.toContain(event.type);
+    }
   });
 
   it('does not advertise a payment method it cannot create', () => {

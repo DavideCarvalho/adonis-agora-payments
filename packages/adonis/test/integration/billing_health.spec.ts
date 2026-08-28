@@ -82,6 +82,27 @@ describe('billingHealth (integration)', () => {
       });
       await backdate('billing_payments', 'gateway_id', id, at(age));
     }
+
+    // An open chargeback whose evidence window closes in twelve hours, one that closes in
+    // eight days, one the gateway sent no deadline for, and one already lost. Only the first
+    // may be counted — and its deadline is the only thing that makes it actionable at all.
+    // (A window that has ALREADY closed is covered in the store's own integration spec; it
+    // is deliberately absent here, because nothing could then widen this install to healthy.)
+    for (const [id, status, dueInHours] of [
+      ['dp_closing', 'open', 12],
+      ['dp_next_week', 'warning', 8 * 24],
+      ['dp_no_deadline', 'open', null],
+      ['dp_lost', 'lost', 6],
+    ] as const) {
+      await store.saveDispute({
+        gatewayId: id,
+        paymentGatewayId: `pay_${id}`,
+        provider: 'stripe',
+        status,
+        evidenceDueBy:
+          dueInHours === null ? null : new Date(NOW.getTime() + dueInHours * 60 * MINUTE),
+      });
+    }
   });
 
   afterAll(async () => {
@@ -108,14 +129,27 @@ describe('billingHealth (integration)', () => {
     expect(report.healthy).toBe(false);
   });
 
+  it('counts the closing dispute window and names it', async () => {
+    const report = await billingHealth(store, { now: NOW });
+    // The one closing in twelve hours. Not the one due next week, not the one the gateway
+    // sent no deadline for, and not the one that already closed as lost.
+    expect(report.checks.find((check) => check.key === 'disputes_due')?.count).toBe(1);
+    expect(report.deadlines.map((row) => row.gatewayId)).toEqual(['dp_closing']);
+    expect(report.deadlines[0]?.paymentGatewayId).toBe('pay_dp_closing');
+    expect(report.deadlines[0]?.evidenceDueBy).toEqual(new Date(NOW.getTime() + 12 * HOUR));
+  });
+
   it('reports healthy once the thresholds are widened past every row', async () => {
     const report = await billingHealth(store, {
       now: NOW,
       stuckAfter: 48 * HOUR,
       unconfirmedAfter: 48 * HOUR,
       failedWithin: MINUTE,
+      // The one threshold here that looks FORWARD, so NARROWING it is what quiets it.
+      disputeDueWithin: MINUTE,
     });
     expect(report.healthy).toBe(true);
     expect(report.failures).toEqual([]);
+    expect(report.deadlines).toEqual([]);
   });
 });

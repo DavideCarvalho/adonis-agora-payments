@@ -1,4 +1,4 @@
-import type { BillingStore, WebhookEventBreakdownLine } from './billing_store.js';
+import type { BillingStore, DisputeListItem, WebhookEventBreakdownLine } from './billing_store.js';
 
 /** 15 minutes — an event claimed but unfinished for longer is not slow, it is abandoned. */
 const DEFAULT_STUCK_AFTER = 15 * 60 * 1000;
@@ -6,6 +6,18 @@ const DEFAULT_STUCK_AFTER = 15 * 60 * 1000;
 const DEFAULT_UNCONFIRMED_AFTER = 2 * 60 * 60 * 1000;
 /** 24 hours — the window failures are counted over. */
 const DEFAULT_FAILED_WITHIN = 24 * 60 * 60 * 1000;
+/**
+ * 72 hours — how far ahead a closing evidence window is worth shouting about.
+ *
+ * Gateways give between 7 and 21 days to respond, so three days is late enough that the
+ * check is not permanently red and early enough that somebody can still gather a receipt, a
+ * delivery confirmation and an IP log before the window shuts. Past-due disputes stay
+ * counted: the window closing is what makes it urgent, not what makes it finished.
+ */
+const DEFAULT_DISPUTE_DUE_WITHIN = 72 * 60 * 60 * 1000;
+
+/** How many closing windows the report NAMES. The count is unbounded; this is the list. */
+const DISPUTE_DEADLINE_SAMPLE = 20;
 
 export interface BillingHealthOptions {
   /** Milliseconds an event may sit in `received` before it counts as stuck. Default 15 min. */
@@ -14,12 +26,19 @@ export interface BillingHealthOptions {
   unconfirmedAfter?: number;
   /** The window `failed` events are counted over. Default 24 h. */
   failedWithin?: number;
+  /**
+   * How far ahead to look for a dispute whose evidence window is about to close. Default 72 h.
+   *
+   * In milliseconds like every other threshold here, though the store's read takes hours —
+   * the conversion happens once, at the call.
+   */
+  disputeDueWithin?: number;
   /** Overridable clock — the tests pass a fixed instant. Defaults to now. */
   now?: Date;
 }
 
 export interface BillingHealthCheck {
-  key: 'stuck_webhooks' | 'failed_webhooks' | 'unconfirmed_payments';
+  key: 'stuck_webhooks' | 'failed_webhooks' | 'unconfirmed_payments' | 'disputes_due';
   label: string;
   count: number;
   /** `true` when `count` is zero — every check here is a "should be nothing" check. */
@@ -35,10 +54,16 @@ export interface BillingHealth {
   checks: BillingHealthCheck[];
   /** Which provider/event pairs make up `failed_webhooks`, worst first. */
   failures: WebhookEventBreakdownLine[];
+  /**
+   * The disputes behind `disputes_due`, soonest deadline first — WHICH windows are closing,
+   * not just how many. Capped at {@link DISPUTE_DEADLINE_SAMPLE}; `disputes_due.count` is the
+   * full number, so a report can name twenty and still say there are fifty.
+   */
+  deadlines: DisputeListItem[];
 }
 
 /**
- * The three operational questions about a billing install that nothing else answers, asked
+ * The four operational questions about a billing install that nothing else answers, asked
  * through the store instead of by hand against the tables.
  *
  * Each is a silent failure — the kind where the endpoint keeps returning `200` and revenue
@@ -50,6 +75,10 @@ export interface BillingHealth {
  *   event described — the grant, the activation — never happened.
  * - **Unconfirmed charges**: created and never confirmed. This is what a webhook endpoint
  *   that stopped being reachable looks like from the inside, and nothing errors.
+ * - **Closing dispute windows**: an open chargeback whose evidence deadline is inside the
+ *   next three days. This is the only check here that alerts on a CLOCK rather than on a
+ *   failure — nothing is broken, and the money is lost anyway if the window closes
+ *   unanswered, by default rather than on the merits.
  *
  * Pure store reads, no gateway calls — safe to run on a schedule and to alert on.
  */
@@ -61,13 +90,20 @@ export async function billingHealth(
   const stuckAfter = options.stuckAfter ?? DEFAULT_STUCK_AFTER;
   const unconfirmedAfter = options.unconfirmedAfter ?? DEFAULT_UNCONFIRMED_AFTER;
   const failedWithin = options.failedWithin ?? DEFAULT_FAILED_WITHIN;
+  const disputeDueWithin = options.disputeDueWithin ?? DEFAULT_DISPUTE_DUE_WITHIN;
   const since = (ms: number) => new Date(now.getTime() - ms);
+  // The store's deadline read takes HOURS; every other threshold here is milliseconds.
+  const withinHours = disputeDueWithin / 3_600_000;
 
-  const [stuck, failed, unconfirmed, failures] = await Promise.all([
+  const [stuck, failed, unconfirmed, failures, disputesDue, deadlines] = await Promise.all([
     store.countWebhookEvents({ status: 'received', createdBefore: since(stuckAfter) }),
     store.countWebhookEvents({ status: 'failed', createdAfter: since(failedWithin) }),
     store.countPayments({ status: 'pending', createdBefore: since(unconfirmedAfter) }),
     store.webhookEventBreakdown({ status: 'failed', createdAfter: since(failedWithin) }),
+    // Counted separately from the list, and unbounded: a count taken from a capped page
+    // saturates at the cap, and this number is what the exit code is decided on.
+    store.countDisputesDueWithin({ withinHours, now }),
+    store.listDisputesDueWithin({ withinHours, now, limit: DISPUTE_DEADLINE_SAMPLE }),
   ]);
 
   const checks: BillingHealthCheck[] = [
@@ -92,6 +128,13 @@ export async function billingHealth(
       healthy: unconfirmed === 0,
       hint: 'Charges are being created but never confirmed — the shape of a webhook endpoint that stopped being reachable. Check the gateway dashboard delivery log.',
     },
+    {
+      key: 'disputes_due',
+      label: `Open disputes whose evidence window closes within ${formatDuration(disputeDueWithin)}`,
+      count: disputesDue,
+      healthy: disputesDue === 0,
+      hint: 'A chargeback window is closing. Past it the dispute is lost by default rather than on the merits, and nothing can be done — submit evidence at the gateway, or refund if it is cheaper than the fee. Rows already past their deadline are counted here too: they are still open, and still unanswered.',
+    },
   ];
 
   return {
@@ -99,6 +142,7 @@ export async function billingHealth(
     checkedAt: now,
     checks,
     failures,
+    deadlines,
   };
 }
 

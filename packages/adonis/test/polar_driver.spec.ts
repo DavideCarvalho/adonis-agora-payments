@@ -491,4 +491,55 @@ describe('PolarDriver — the widened contract', () => {
     // The version pin must survive the merge that added the idempotency header.
     expect(headers['Polar-Version']).toBe('2026-04');
   });
+
+  /**
+   * Polar has NO dispute vocabulary. Its event catalogue carries no dispute or chargeback
+   * event, and an Order's `status` is only `pending`, `paid`, `refunded`,
+   * `partially_refunded` or `void` — none of which means charged back. As merchant of
+   * record Polar is the seller on the buyer's statement and runs the dispute itself,
+   * deducting a $15 network fee from the balance whatever the outcome.
+   *
+   * This test exists to stop a well-meaning mapping from inventing one. `refund.created` is
+   * the trap: Polar's Rapid Dispute Resolution auto-refunds a dispute, so a chargeback CAN
+   * reach you as an ordinary refund — and a refund is what the driver must keep calling it.
+   */
+  it('emits no dispute event for any Polar event, because none exists', () => {
+    const driver = makeDriver({ webhookSecret: SECRET });
+    const events = [
+      'order.created',
+      'order.paid',
+      'order.updated',
+      'order.refunded',
+      'refund.created',
+      'refund.updated',
+      'checkout.created',
+      'checkout.updated',
+      'subscription.created',
+      'subscription.active',
+      'subscription.updated',
+      'subscription.canceled',
+      'subscription.revoked',
+      'customer.state_changed',
+    ];
+    const disputeTypes = ['payment.disputed', 'payment.dispute_warning', 'payment.dispute_closed'];
+
+    for (const type of events) {
+      const body = JSON.stringify({ type, data: { ...ORDER, order_id: ORDER.id } });
+      const event = driver.parseWebhook(body, signedHeaders(body));
+      expect(disputeTypes, type).not.toContain(event.type);
+    }
+    // And the RDR refund stays a refund.
+    const refund = JSON.stringify({
+      type: 'refund.created',
+      data: { order_id: 'ord_1', amount: 1990, currency: 'USD' },
+    });
+    expect(driver.parseWebhook(refund, signedHeaders(refund)).type).toBe('payment.refunded');
+  });
+
+  it('never claims a dispute API it does not have', () => {
+    const driver = makeDriver();
+    expect(driver.capabilities.disputes).toBe(false);
+    expect(driver.submitDisputeEvidence).toBeUndefined();
+    expect(driver.findDispute).toBeUndefined();
+  });
 });

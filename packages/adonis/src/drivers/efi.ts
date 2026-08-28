@@ -46,7 +46,13 @@ interface EfiCob {
     txid?: string;
     valor: string;
     horario?: string;
-    devolucoes?: Array<{ id: string; rtrId?: string; valor: string; status: string }>;
+    devolucoes?: Array<{
+      id: string;
+      rtrId?: string;
+      valor: string;
+      status: string;
+      natureza?: string;
+    }>;
   }>;
 }
 
@@ -82,7 +88,31 @@ interface EfiPixNotification {
   valor: string;
   horario?: string;
   infoPagador?: string;
-  devolucoes?: Array<{ id: string; valor: string; status: string }>;
+  devolucoes?: Array<{
+    id: string;
+    valor: string;
+    status: string;
+    /**
+     * BACEN's `DevolucaoNatureza`: `ORIGINAL` and `RETIRADA` are a refund the RECEIVER
+     * asked for; `MED_OPERACIONAL`, `MED_FRAUDE` and `MED_PIX_AUTOMATICO` are a return
+     * executed under the Banco Central's MED — money leaving without the merchant
+     * agreeing to it. Optional: the API Pix spec says an absent `natureza` means
+     * `ORIGINAL`.
+     */
+    natureza?: string;
+    motivo?: string;
+  }>;
+}
+
+/**
+ * A `devolução` executed under BACEN's MED (Mecanismo Especial de Devolução) rather than
+ * asked for by the merchant. The API Pix `natureza` enum has three of them —
+ * `MED_OPERACIONAL` (operational failure), `MED_FRAUDE` (founded suspicion of fraud) and
+ * `MED_PIX_AUTOMATICO` — and every other value (`ORIGINAL`, `RETIRADA`, or nothing) is a
+ * refund the merchant chose to make.
+ */
+function isMedDevolucao(devolucao: { natureza?: string }): boolean {
+  return devolucao.natureza?.startsWith('MED') === true;
 }
 
 /** Renew a token this many seconds before it actually expires. */
@@ -409,22 +439,60 @@ export class EfiDriver implements PaymentsDriver {
     }
 
     const pix = list[0] as EfiPixNotification;
-    const refunded = (pix.devolucoes ?? []).some((d) => d.status === 'DEVOLVIDO');
+    const devolucoes = pix.devolucoes ?? [];
+    // A Pix cannot be charged back — but it CAN be taken back. The Banco Central's MED
+    // returns money to a payer who reported fraud or an operational failure, and it reaches
+    // the merchant as an ordinary `devolução` on this very notification, marked by its
+    // `natureza`. Treating it as a refund said the merchant chose to give the money back;
+    // it is the closest thing Pix has to a chargeback, so it is normalized as one.
+    const med = devolucoes.find(isMedDevolucao);
+    const refunded = devolucoes.some((d) => !isMedDevolucao(d) && d.status === 'DEVOLVIDO');
+    const data = {
+      // The txid is the charge id this library stored as `gatewayId` — and, when the app
+      // gave a txid-shaped `externalReference`, it is that reference too.
+      gatewayId: pix.txid ?? pix.endToEndId,
+      amount: fromDecimal(Number(pix.valor)),
+      currency: 'brl',
+      ...(pix.txid !== undefined ? { externalReference: pix.txid } : {}),
+      metadata: { endToEndId: pix.endToEndId },
+    };
+
+    if (med !== undefined && med.status !== 'NAO_REALIZADO') {
+      // `DEVOLVIDO` is the money already gone; `EM_PROCESSAMENTO` is the return being
+      // executed and is the earliest the merchant hears of it at all — Efí's Pix webhook
+      // has no "a MED was opened" notification, so there is no defense window to announce,
+      // only notice. A `NAO_REALIZADO` MED took nothing (Efí's own example: insufficient
+      // balance) and is deliberately not a dispute event.
+      //
+      // The event id carries the devolução id and its status: the ledger keys on it, and
+      // reusing the Pix's own id would make the DEVOLVIDO that follows an
+      // EM_PROCESSAMENTO look like a redelivery and skip it.
+      const withdrawn = med.status === 'DEVOLVIDO';
+      return {
+        id: `${pix.endToEndId}:med:${med.id}:${med.status}`,
+        provider: this.provider,
+        type: withdrawn ? 'payment.disputed' : 'payment.dispute_warning',
+        createdAt: pix.horario ?? new Date().toISOString(),
+        data: {
+          ...data,
+          disputeId: med.id,
+          // The `natureza` IS the reason, in BACEN's own vocabulary: `MED_FRAUDE` is a
+          // founded suspicion of fraud, `MED_OPERACIONAL` an operational failure.
+          ...(med.natureza !== undefined ? { reason: med.natureza } : {}),
+          // No `actionableUntil`: the API Pix devolução carries no deadline field, and by
+          // the time a MED reaches the receiver as a devolução the analysis is over.
+        },
+        raw: payload as Record<string, unknown>,
+      };
+    }
+
     return {
       // The endToEndId is unique per Pix and stable across redeliveries — a real event id.
       id: refunded ? `${pix.endToEndId}:devolvido` : pix.endToEndId,
       provider: this.provider,
       type: refunded ? 'payment.refunded' : 'payment.succeeded',
       createdAt: pix.horario ?? new Date().toISOString(),
-      data: {
-        // The txid is the charge id this library stored as `gatewayId` — and, when the app
-        // gave a txid-shaped `externalReference`, it is that reference too.
-        gatewayId: pix.txid ?? pix.endToEndId,
-        amount: fromDecimal(Number(pix.valor)),
-        currency: 'brl',
-        ...(pix.txid !== undefined ? { externalReference: pix.txid } : {}),
-        metadata: { endToEndId: pix.endToEndId },
-      },
+      data,
       raw: payload as Record<string, unknown>,
     };
   }
@@ -433,19 +501,25 @@ export class EfiDriver implements PaymentsDriver {
 
   #mapCob(cob: EfiCob): Payment {
     const settled = cob.pix?.[0];
-    const refunded = (settled?.devolucoes ?? []).some((d) => d.status === 'DEVOLVIDO');
+    const returned = (settled?.devolucoes ?? []).filter((d) => d.status === 'DEVOLVIDO');
+    // A MED return is not a refund the merchant made — see `parseWebhook`, which normalizes
+    // the same event to `payment.disputed`. Reading the charge back has to agree with it,
+    // or the driver reports one gateway state two different ways.
+    const medded = returned.some(isMedDevolucao);
     const result: Payment = {
       id: cob.txid,
       gatewayId: cob.txid,
       provider: this.provider,
       amount: { amount: fromDecimal(Number(cob.valor.original)), currency: 'brl' },
-      status: refunded
-        ? 'refunded'
-        : cob.status === 'CONCLUIDA'
-          ? 'paid'
-          : cob.status === 'ATIVA'
-            ? 'pending'
-            : 'canceled',
+      status: medded
+        ? 'disputed'
+        : returned.length > 0
+          ? 'refunded'
+          : cob.status === 'CONCLUIDA'
+            ? 'paid'
+            : cob.status === 'ATIVA'
+              ? 'pending'
+              : 'canceled',
       method: 'pix',
       payload: cob as unknown as Record<string, unknown>,
       createdAt: cob.calendario?.criacao ?? new Date().toISOString(),

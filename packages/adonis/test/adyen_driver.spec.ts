@@ -718,3 +718,55 @@ describe('AdyenDriver — refund idempotency and methods', () => {
     }
   });
 });
+
+describe('AdyenDriver — the dispute API it cannot drive', () => {
+  it('refuses findDispute: Defend Disputes v30 has no endpoint that reads a dispute', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(makeDriver().findDispute?.('9916158720123456')).rejects.toThrow(
+      /no endpoint that reads a dispute back/,
+    );
+    // Nothing is attempted: there is no request that could answer this.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('points findDispute at the notification that does carry the deadline', async () => {
+    await expect(makeDriver().findDispute?.('9916158720123456')).rejects.toThrow(
+      /defensePeriodEndsAt/,
+    );
+  });
+
+  it('refuses submitDisputeEvidence rather than dropping the defense reason', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    // A complete-looking evidence packet: the refusal is not about what is missing from
+    // the caller, it is about what Adyen requires and this shape cannot express.
+    const submit = makeDriver().submitDisputeEvidence?.('9916158720123456', {
+      explanation: 'The shopper received the goods.',
+      customerName: 'Jane Austen',
+      documentIds: ['doc_1'],
+    });
+
+    await expect(submit).rejects.toThrow(/cannot be sent a `DisputeEvidence`/);
+    await expect(submit).rejects.toThrow(/defenseReasonCode/);
+    // The three calls it names, so the caller can go and make them.
+    await expect(submit).rejects.toThrow(/retrieveApplicableDefenseReasons/);
+    await expect(submit).rejects.toThrow(/supplyDefenseDocument/);
+    await expect(submit).rejects.toThrow(/defendDispute/);
+    // And the host, which is not the Checkout one this driver talks to.
+    await expect(submit).rejects.toThrow(/ca-test\.adyen\.com/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('declares disputes unsupported, and still answers the call', () => {
+    const driver = makeDriver();
+    // The pair is the point: the capability says "do not route disputes here", and the
+    // methods exist anyway so a caller who does gets the explanation instead of a
+    // TypeError about a missing method.
+    expect(driver.capabilities.disputes).toBe(false);
+    expect(typeof driver.findDispute).toBe('function');
+    expect(typeof driver.submitDisputeEvidence).toBe('function');
+  });
+});

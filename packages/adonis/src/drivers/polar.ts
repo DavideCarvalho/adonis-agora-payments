@@ -179,7 +179,12 @@ export class PolarDriver implements PaymentsDriver {
    * reference produces either.
    */
   readonly supportedMethods = ['credit_card', 'undefined'] as const;
-  readonly capabilities = { refunds: true, invoices: true, subscriptions: true };
+  /**
+   * `disputes: false`. Polar has no dispute API and no dispute webhook — see
+   * `#mapWebhookType`. As merchant of record Polar manages chargebacks end to end, so
+   * there is nothing here to read and nothing to submit.
+   */
+  readonly capabilities = { refunds: true, invoices: true, subscriptions: true, disputes: false };
 
   #baseUrl: string;
   #bearerToken: string;
@@ -717,11 +722,18 @@ export class PolarDriver implements PaymentsDriver {
         // checkout.*, customer.*, benefit*.*, product.*, organization.* — passed through so
         // an app handler can subscribe to them by their Polar name.
         //
-        // There is deliberately no `payment.disputed` here: Polar's event catalogue has NO
-        // dispute or chargeback event. As merchant of record Polar is the seller on the
-        // buyer's statement, so the chargeback is raised against Polar and Polar absorbs
-        // it — which is a large part of why anyone picks an MoR. Forcing an unrelated
-        // event into `payment.disputed` would invent a notification that does not exist.
+        // There is deliberately no dispute type here: **Polar's event catalogue has NO
+        // dispute or chargeback event** — no warning, no chargeback, no resolution. Nor is
+        // there a dispute status: an Order is `pending`, `paid`, `refunded`,
+        // `partially_refunded` or `void`, and none of those means charged back.
+        //
+        // That is the merchant-of-record bargain rather than an oversight: Polar is the
+        // seller on the buyer's statement, so the chargeback is raised against Polar, Polar
+        // runs the dispute (including Rapid Dispute Resolution, whose auto-refunds arrive
+        // as an ordinary `refund.created`), and the $15 network fee is deducted from the
+        // balance whatever the outcome. There is no deadline that belongs to you and no
+        // evidence you can file. Forcing an unrelated event into `payment.disputed` would
+        // invent a notification that does not exist.
         return event;
     }
   }

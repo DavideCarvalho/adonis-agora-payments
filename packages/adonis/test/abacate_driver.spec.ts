@@ -129,6 +129,32 @@ describe('AbacateDriver', () => {
     );
   });
 
+  it('has no dispute vocabulary beyond "opened", and invents none', () => {
+    // AbacatePay's published event list is `checkout.*`, `transparent.*`, `subscription.*`,
+    // `transfer.*` and `payout.*`. Nothing in it announces a dispute BEFORE it is filed and
+    // nothing reports how one ended — so no AbacatePay event may become a
+    // `payment.dispute_warning` or a `payment.dispute_closed`. The outcome of a dispute is
+    // reconciliation work, not a webhook, and this test is what keeps a later edit from
+    // quietly inventing one.
+    const driver = makeDriver();
+    for (const name of [
+      'checkout.completed',
+      'checkout.refunded',
+      'checkout.disputed',
+      'transparent.completed',
+      'transparent.refunded',
+      'transparent.disputed',
+      'subscription.completed',
+      'subscription.renewed',
+      'subscription.cancelled',
+    ]) {
+      const raw = JSON.stringify({ id: `log_${name}`, event: name, data: { id: 'bill_1' } });
+      const { type } = driver.parseWebhook(raw, { 'x-webhook-signature': sign(raw) });
+      expect(type, name).not.toBe('payment.dispute_warning');
+      expect(type, name).not.toBe('payment.dispute_closed');
+    }
+  });
+
   // ── Idempotency ────────────────────────────────────────────────────────────────────
 
   it('refuses an idempotencyKey on every operation AbacatePay cannot deduplicate', async () => {

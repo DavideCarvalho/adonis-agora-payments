@@ -147,24 +147,69 @@ export interface Dispute {
 export interface DisputeEvidence {
   /** Free-text explanation. Most gateways weigh this heavily. */
   explanation?: string;
-  receiptUrl?: string;
-  invoiceUrl?: string;
   shippingCarrier?: string;
   shippingTrackingNumber?: string;
   shippingDate?: string;
   serviceDate?: string;
-  /** Where the customer accepted the terms, and when. */
-  termsUrl?: string;
+  /** When the customer accepted the terms. The terms themselves are a {@link DisputeDocument}. */
   termsAcceptedAt?: string;
   customerName?: string;
   customerEmail?: string;
   customerIpAddress?: string;
-  /** Prior undisputed payments by the same customer — a strong signal for most networks. */
-  priorUndisputedPayments?: number;
-  /** Documents already uploaded to the gateway, by its own file id. */
-  documentIds?: string[];
+  /**
+   * Prior charges to the same customer that were never disputed — the strongest signal the
+   * card networks accept, and the reason this is a list of transactions rather than a count.
+   * Visa's Compelling Evidence 3.0 wants the charges themselves, each with the account, device
+   * and IP it was made from; a number is not evidence of anything.
+   */
+  priorUndisputedPayments?: PriorUndisputedPayment[];
+  /** Documents already uploaded to the gateway, each addressed by what it proves. */
+  documents?: DisputeDocument[];
   /** Anything gateway-specific the shape above has no name for. */
   metadata?: Record<string, unknown>;
+}
+
+/**
+ * What a piece of evidence proves, which is what every gateway files it by.
+ *
+ * Not a free-form label: a bare list of upload ids cannot be submitted anywhere, because
+ * the gateway needs to know which id is the receipt and which is the shipping proof. Stripe
+ * has nine separate file fields, Adyen has a `defenseDocumentTypeCode`, and neither can be
+ * reached with "here are some files".
+ */
+export type DisputeDocumentKind =
+  | 'receipt'
+  | 'invoice'
+  | 'customer_communication'
+  | 'customer_signature'
+  | 'shipping'
+  | 'service'
+  | 'refund_policy'
+  | 'cancellation_policy'
+  | 'terms'
+  | 'duplicate_charge'
+  | 'other';
+
+/**
+ * A document already uploaded to the gateway, by its own file id.
+ *
+ * A file id, never a URL. The banks reviewing a dispute do not follow links, and no gateway
+ * in this package accepts one — the evidence has to be bytes the gateway already holds.
+ */
+export interface DisputeDocument {
+  kind: DisputeDocumentKind;
+  /** The gateway's own id for the uploaded file. */
+  id: string;
+}
+
+/** A prior charge to the same customer that was never disputed. */
+export interface PriorUndisputedPayment {
+  /** The gateway's id for that charge. */
+  paymentGatewayId: string;
+  /** The account the customer was signed into, if the gateway asks for one. */
+  customerAccountId?: string;
+  customerIpAddress?: string;
+  customerDeviceId?: string;
 }
 
 /** A customer as seen by the gateway. */

@@ -7,7 +7,9 @@ import type {
 } from '../../src/dashboard/actions.js';
 import type { ApiRequest, Deps } from '../../src/dashboard/handlers.js';
 import {
+  DISPUTE_STATUSES,
   PROVIDER_SCAN_CAP,
+  disputes,
   health,
   overview,
   payments,
@@ -322,7 +324,8 @@ describe('health', () => {
       failures: unknown[];
     };
     expect(body.healthy).toBe(true);
-    expect(body.checks).toHaveLength(3);
+    expect(body.checks).toHaveLength(4);
+    expect(body.checks.map((c) => c.key)).toContain('disputes_due');
     expect(body.checks.every((c) => c.count === 0 && c.healthy)).toBe(true);
     expect(body.failures).toEqual([]);
     expect(body.checkedAt).toBe(NOW.toISOString());
@@ -341,6 +344,34 @@ describe('health', () => {
     expect(count('stuck_webhooks')).toBe(1);
     expect(count('failed_webhooks')).toBe(3);
     expect(count('unconfirmed_payments')).toBe(1);
+  });
+
+  it('names the closing dispute windows, as ISO strings', async () => {
+    const store = await healthStore();
+    const due = new Date(NOW.getTime() + 6 * 3_600_000);
+    await store.saveDispute({
+      gatewayId: 'dp_closing',
+      paymentGatewayId: 'pi_1',
+      provider: 'stripe',
+      status: 'open',
+      evidenceDueBy: due,
+    });
+
+    const res = await health(deps(store), req());
+    const body = res.body as {
+      checks: Array<{ key: string; count: number }>;
+      deadlines: Array<{ gatewayId: string; paymentGatewayId: string; evidenceDueBy: string }>;
+    };
+    expect(body.checks.find((c) => c.key === 'disputes_due')?.count).toBe(1);
+    // A count names no gateway dashboard to open — the row has to come with it, and every
+    // timestamp crosses this boundary as an ISO string.
+    expect(body.deadlines).toEqual([
+      expect.objectContaining({
+        gatewayId: 'dp_closing',
+        paymentGatewayId: 'pi_1',
+        evidenceDueBy: due.toISOString(),
+      }),
+    ]);
   });
 
   it('names WHICH provider and event type is failing, worst first', async () => {
@@ -749,5 +780,133 @@ describe('retryWebhookEvent', () => {
     const res = await retryWebhookEvent(deps(store), target('evt_bad'));
     expect(res.status).toBe(503);
     expect((res.body as { error: string }).error).toContain('payments manager');
+  });
+});
+
+/**
+ * `GET <api>/disputes` — the panel that exists so nobody misses a window.
+ *
+ * Read-only by design: whether to fight a chargeback or refund it turns on the fee, the
+ * evidence the app actually holds and the ratio that puts a merchant into a card network's
+ * monitoring programme. That decision stays in the app's code; this endpoint only makes the
+ * clock visible.
+ */
+describe('disputes', () => {
+  const HOUR = 3_600_000;
+
+  /** A store holding one warning, one open dispute closing soon, and one already lost. */
+  async function disputeStore(): Promise<InMemoryBillingStore> {
+    const store = new InMemoryBillingStore();
+    let tick = 0;
+    store.now = () => new Date(NOW.getTime() - 1000 * (100 - tick++));
+
+    await store.saveDispute({
+      gatewayId: 'dp_lost',
+      paymentGatewayId: 'pi_1',
+      provider: 'stripe',
+      status: 'lost',
+      outcome: 'lost',
+      evidenceDueBy: new Date(NOW.getTime() + 2 * HOUR),
+      amount: 4990,
+      currency: 'BRL',
+    });
+    await store.saveDispute({
+      gatewayId: 'dp_soon',
+      paymentGatewayId: 'pi_2',
+      provider: 'stripe',
+      status: 'open',
+      reason: 'fraudulent',
+      evidenceDueBy: new Date(NOW.getTime() + 10 * HOUR),
+      amount: 1000,
+      currency: 'BRL',
+    });
+    await store.saveDispute({
+      gatewayId: 'dp_warning',
+      paymentGatewayId: 'pi_3',
+      provider: 'adyen',
+      status: 'warning',
+      evidenceDueBy: new Date(NOW.getTime() + 4 * HOUR),
+    });
+    return store;
+  }
+
+  const body = (res: { body: unknown }) =>
+    res.body as {
+      disputes: Array<{ gatewayId: string; evidenceDueBy: string | null; amount: number | null }>;
+      dueWithin?: { hours: number; total: number };
+      page: { limit: number; offset: number; count: number };
+      statuses: readonly string[];
+    };
+
+  it('lists every dispute newest first, with amounts as integer minor units', async () => {
+    const res = await disputes(deps(await disputeStore()), req());
+    expect(res.status).toBe(200);
+    const payload = body(res);
+    expect(payload.disputes.map((row) => row.gatewayId)).toEqual([
+      'dp_warning',
+      'dp_soon',
+      'dp_lost',
+    ]);
+    // NOT 49.90 — nothing on this boundary divides.
+    expect(payload.disputes[2]?.amount).toBe(4990);
+    expect(payload.statuses).toEqual(DISPUTE_STATUSES);
+  });
+
+  it('filters by status and by provider', async () => {
+    const store = await disputeStore();
+    expect(
+      body(await disputes(deps(store), req({ status: 'warning' }))).disputes.map(
+        (r) => r.gatewayId,
+      ),
+    ).toEqual(['dp_warning']);
+    expect(
+      body(await disputes(deps(store), req({ provider: 'stripe' }))).disputes.map(
+        (r) => r.gatewayId,
+      ),
+    ).toEqual(['dp_soon', 'dp_lost']);
+  });
+
+  it('switches to the closing windows on ?dueWithin, soonest first, open only', async () => {
+    const res = await disputes(deps(await disputeStore()), req({ dueWithin: '12' }));
+    const payload = body(res);
+    // The lost one is inside the horizon and must not appear — nobody has to answer it.
+    expect(payload.disputes.map((row) => row.gatewayId)).toEqual(['dp_warning', 'dp_soon']);
+    expect(payload.dueWithin).toEqual({ hours: 12, total: 2 });
+  });
+
+  it('reports the full number of closing windows even when the page is smaller', async () => {
+    const res = await disputes(deps(await disputeStore()), req({ dueWithin: '12', limit: '1' }));
+    const payload = body(res);
+    // A page that fills says nothing about how many more windows are closing, and that number
+    // is the one an operator plans their day around.
+    expect(payload.disputes).toHaveLength(1);
+    expect(payload.dueWithin?.total).toBe(2);
+  });
+
+  it('defaults a bare ?dueWithin to the horizon billingHealth alerts on', async () => {
+    const payload = body(await disputes(deps(await disputeStore()), req({ dueWithin: '' })));
+    expect(payload.dueWithin?.hours).toBe(72);
+  });
+
+  it.each(['-5', 'soon'])('rejects %s rather than answering a different question', async (raw) => {
+    // Falling back to the default would answer something the caller did not ask, and they
+    // could not tell from the response which horizon they got.
+    const res = await disputes(deps(await disputeStore()), req({ dueWithin: raw }));
+    expect(res.status).toBe(400);
+  });
+
+  it('says a deadline is missing rather than inventing one', async () => {
+    const store = new InMemoryBillingStore();
+    await store.saveDispute({
+      gatewayId: 'dp_silent',
+      paymentGatewayId: 'pi_9',
+      provider: 'woovi',
+      status: 'open',
+    });
+    const payload = body(await disputes(deps(store), req()));
+    // `null` means the gateway told us nothing — the SPA has to be able to say so.
+    expect(payload.disputes[0]?.evidenceDueBy).toBeNull();
+    // And it is not in the work list at all: nothing to be late for.
+    expect(body(await disputes(deps(store), req({ dueWithin: '999' }))).disputes).toEqual([]);
   });
 });

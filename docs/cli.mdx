@@ -105,11 +105,14 @@ so the handlers run through the normal path.
 
 ## `payments:health`
 
-The scheduled check for the three failures a billing install has that nothing throws on.
+The scheduled check for the four failures a billing install has that nothing throws on. Three of
+them are things that broke. The fourth is a clock: a chargeback whose evidence window is about to
+close, which costs money on time rather than on the merits.
 
 ```sh
 node ace payments:health
 node ace payments:health --window=48 --json
+node ace payments:health --dispute-window=168   # a week of chargeback windows
 ```
 
 | Flag | Meaning |
@@ -117,6 +120,7 @@ node ace payments:health --window=48 --json
 | `--stuck-after` | minutes an event may sit unfinished before it counts as stuck (default 15) |
 | `--unconfirmed-after` | minutes a charge may stay pending before it counts as unconfirmed (default 120) |
 | `--window` | hours that failures are counted over (default 24) |
+| `--dispute-window` | hours ahead to look for a closing evidence window (default 72) |
 | `--json` | print the report as JSON |
 
 ```text
@@ -126,8 +130,18 @@ node ace payments:health --window=48 --json
 1  Charges created over 2h ago and still pending
      Charges are being created but never confirmed — the shape of a webhook endpoint that
      stopped being reachable.
+1  Open disputes whose evidence window closes within 3d
+     A chargeback window is closing. Past it the dispute is lost by default rather than on
+     the merits, and nothing can be done.
   stripe payment.succeeded: 2 failed
+  stripe dp_1Nx4 (payment pi_3Qx7): evidence due 2026-08-30T09:00:00.000Z
 ```
+
+The dispute check names each closing window — the dispute id, the payment it is against and the
+deadline — because a count sends nobody anywhere. A window that has **already** closed keeps being
+counted: it is still open and still unanswered, and going quiet the moment it expires would read as
+"resolved" at exactly the wrong moment. A dispute the gateway sent no deadline for is never counted;
+there is nothing to be late for.
 
 It **exits non-zero** when any count is non-zero, so a cron entry or a container healthcheck pages
 on it without parsing the output. The same report is a function — `billingHealth(store)` — for a

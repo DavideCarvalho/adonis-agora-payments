@@ -127,7 +127,7 @@ export class PaymentsManager {
    */
   assertCapability(
     driver: PaymentsDriver,
-    capability: 'refunds' | 'invoices' | 'subscriptions',
+    capability: 'refunds' | 'invoices' | 'subscriptions' | 'disputes',
   ): void {
     if (
       driver.capabilities?.[capability] === false ||

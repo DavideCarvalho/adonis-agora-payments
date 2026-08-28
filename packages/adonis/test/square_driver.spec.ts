@@ -687,7 +687,7 @@ describe('SquareDriver webhooks', () => {
 
 describe('SquareDriver disputes', () => {
   /** Square's own published `dispute.created` shape, trimmed to what the driver reads. */
-  const disputeEvent = (type: string) => ({
+  const disputeEvent = (type: string, dispute: Record<string, unknown> = {}) => ({
     merchant_id: 'MERCHANT',
     type,
     event_id: 'evt_dispute_1',
@@ -705,35 +705,94 @@ describe('SquareDriver disputes', () => {
           reason: 'AMOUNT_DIFFERS',
           card_brand: 'VISA',
           due_at: '2026-09-01T00:00:00Z',
+          ...dispute,
         },
       },
     },
   });
 
+  const parse = (type: string, dispute: Record<string, unknown> = {}) => {
+    const raw = JSON.stringify(disputeEvent(type, dispute));
+    return makeDriver().parseWebhook(raw, { 'x-square-hmacsha256-signature': signature(raw) });
+  };
+
   it('maps dispute.created onto payment.disputed, keyed on the disputed payment', () => {
-    const raw = JSON.stringify(disputeEvent('dispute.created'));
-    const event = makeDriver().parseWebhook(raw, {
-      'x-square-hmacsha256-signature': signature(raw),
-    });
+    const event = parse('dispute.created');
     expect(event.type).toBe('payment.disputed');
-    expect(event.data).toMatchObject({ gatewayId: 'pmt_1', amount: 1990, currency: 'usd' });
+    expect(event.data).toMatchObject({
+      gatewayId: 'pmt_1',
+      amount: 1990,
+      currency: 'usd',
+      disputeId: 'ORSEVtZAJxb37RA1EiGw',
+      reason: 'AMOUNT_DIFFERS',
+      // "The deadline by which the seller must respond to the dispute", already RFC 3339.
+      actionableUntil: '2026-09-01T00:00:00Z',
+    });
   });
 
-  it('leaves the rest of the dispute family as payment.updated', () => {
-    // The state changes and the evidence going in and out are the resolution, which every
-    // gateway reports differently and which this package deliberately does not name.
+  it('calls an INQUIRY-state dispute a warning, not a chargeback', () => {
+    // Square's own enum descriptions call these "an inquiry" and keep them out of the
+    // dispute states. Reporting one as `payment.disputed` moves a paid row.
+    for (const state of ['INQUIRY_EVIDENCE_REQUIRED', 'INQUIRY_PROCESSING']) {
+      const event = parse('dispute.created', { state });
+      expect(event.type, state).toBe('payment.dispute_warning');
+      expect(event.type, state).not.toBe('payment.disputed');
+      expect(event.data, state).toMatchObject({
+        gatewayId: 'pmt_1',
+        disputeId: 'ORSEVtZAJxb37RA1EiGw',
+        actionableUntil: '2026-09-01T00:00:00Z',
+      });
+    }
+  });
+
+  it('closes the dispute on the terminal states, with ACCEPTED counting as a loss', () => {
+    const cases: Array<[string, string]> = [
+      ['WON', 'won'],
+      ['LOST', 'lost'],
+      // "Square returns the disputed amount to the cardholder and updates the dispute state
+      // to ACCEPTED. The dispute is now closed." The seller accepted liability.
+      ['ACCEPTED', 'lost'],
+    ];
+    for (const [state, outcome] of cases) {
+      const event = parse('dispute.state.updated', { state });
+      expect(event.type, state).toBe('payment.dispute_closed');
+      expect(event.data, state).toMatchObject({ gatewayId: 'pmt_1', outcome });
+    }
+  });
+
+  it('reports a state change into a real dispute state as the chargeback', () => {
+    // An inquiry escalating, or the bank asking for more evidence: Square is withholding
+    // the funds either way, and this is the only event that says so.
+    for (const state of ['EVIDENCE_REQUIRED', 'PROCESSING']) {
+      expect(parse('dispute.state.updated', { state }).type, state).toBe('payment.disputed');
+    }
+  });
+
+  it('leaves a closed inquiry and the evidence paperwork as payment.updated', () => {
+    // `INQUIRY_CLOSED` is "the inquiry is complete" and names no winner, so there is no
+    // outcome to report — the processor throws on a close carrying none.
+    const closed = parse('dispute.state.updated', { state: 'INQUIRY_CLOSED' });
+    expect(closed.type).toBe('payment.updated');
+    expect(closed.data).not.toHaveProperty('outcome');
+
     for (const type of [
-      'dispute.state.updated',
       'dispute.evidence.added',
       'dispute.evidence.created',
+      'dispute.evidence.deleted',
       'dispute.evidence.removed',
     ]) {
-      const raw = JSON.stringify(disputeEvent(type));
-      const event = makeDriver().parseWebhook(raw, {
-        'x-square-hmacsha256-signature': signature(raw),
-      });
-      expect(event.type, type).toBe('payment.updated');
+      expect(parse(type).type, type).toBe('payment.updated');
     }
+  });
+
+  it('handles the deprecated dispute.state.changed spelling the same way', () => {
+    expect(parse('dispute.state.changed', { state: 'WON' }).type).toBe('payment.dispute_closed');
+  });
+
+  it('keeps payment.disputed for a dispute.created with no state at all', () => {
+    // Square marks `state` nullable; an unreadable one keeps the mapping it has always had.
+    expect(parse('dispute.created', { state: undefined }).type).toBe('payment.disputed');
+    expect(parse('dispute.state.updated', { state: undefined }).type).toBe('payment.updated');
   });
 });
 

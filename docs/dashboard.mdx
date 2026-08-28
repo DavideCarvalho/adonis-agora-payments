@@ -24,10 +24,17 @@ node ace configure @adonis-agora/payments
 `config/payments_dashboard.ts`. The provider registers the routes on boot — nothing else to wire,
 and no extra package to install.
 
-<Callout title="It mounts at /payments-dashboard, not /payments">
-The payments provider already owns `POST /payments/webhook/:provider`. A console mounted over that
-prefix would put its authorization guard in front of the gateway's delivery endpoint — which is how
-a webhook ends up answering `403` to Stripe.
+<Callout title="It mounts at /payments, next to the machine endpoints">
+The dashboard shares its prefix with `POST /payments/webhook/:provider` and
+`GET /payments/client/status`, and that is safe for exactly one reason: **every route the provider
+registers is an exact path** — `/payments`, `/payments/assets/:file`, `/payments/api/…`, and the
+login routes. There is no SPA catch-all, so the dashboard's authorization guard can never end up in
+front of a gateway's delivery endpoint.
+
+If you fork this and add a wildcard for client-side routing, the webhook route is what it swallows.
+A webhook answering `403` to Stripe looks exactly like a gateway outage from the outside, and you
+find out by reading someone else's retry logs. A test in the package asserts no route here contains
+a wildcard, for that reason.
 </Callout>
 
 ## What it shows
@@ -38,15 +45,17 @@ a webhook ends up answering `403` to Stripe.
 | **Payments** | `listPayments` | A page of payments, filterable by status and gateway — which charge failed, and when. Refund from here. |
 | **Subscriptions** | `listSubscriptions` | Who is `past_due` or `paused`, on which plan, with the trial and period end dates. |
 | **Webhook events** | `listWebhookEvents` | The ledger, defaulting to `failed`, with each handler's error rendered in full. Retry from here. |
+| **Disputes** | `listDisputes` / `listDisputesDueWithin` | Every chargeback and pre-chargeback alert, and — the reason the screen exists — which evidence windows close next. Read-only. |
 
 ### The health panel
 
 The first thing on the Overview, above the revenue tiles, is [`billingHealth`](/docs/payments/production#health-checks)
-— the same three checks `node ace payments:health` runs, on the same thresholds:
+— the same four checks `node ace payments:health` runs, on the same thresholds:
 
 - **Events claimed and never finished.** Nothing is consuming the dispatcher; the worker is not running.
 - **Events the dispatcher gave up on.** Handlers threw and retries ran out, so those events never took effect.
 - **Charges created that never confirmed.** What a webhook endpoint that stopped being reachable looks like from the inside.
+- **Dispute windows closing.** An open chargeback whose evidence deadline is inside the next three days. The check names each one, so the panel links to the dispute rather than to a number.
 
 Every one of these is a silent failure: the endpoints keep answering `200` while revenue quietly
 stops landing. A healthy install shows one green line. An unhealthy one leads with the count, says
@@ -72,6 +81,30 @@ Asaas failures" and "no Asaas failures in the rows I looked at" are different an
 Amounts are integer **minor units** everywhere — on the wire too — and the divisor is not always
 100. The SPA renders with the currency's own exponent, the same table `src/money.ts` uses, so a
 `¥1990` charge shows as ¥1,990 rather than ¥19.90 and a `KWD` amount keeps its three decimals.
+
+### Disputes
+
+A chargeback has a clock, and it is the only clock in this package that runs against you. The
+Disputes screen has two modes over the same table:
+
+- **the log** — every dispute newest first, filterable by status (`warning`, `open`,
+  `under_review`, then the resolutions) and by gateway;
+- **the work list** — only the OPEN disputes that carry a deadline, ordered by the window that
+  closes soonest.
+
+A dispute whose deadline has already passed **stays in the work list**. It is still open and still
+unanswered, and dropping it the moment it expires would empty the screen at exactly the moment it
+became urgent. A dispute whose gateway sent no deadline at all shows the deadline as unknown rather
+than as distant — the two are not the same, and only one of them is safe to ignore.
+
+<Callout title="There is no Fight button, on purpose">
+Whether to submit evidence or simply refund is a business rule: it turns on the dispute fee, the
+evidence your app actually holds, and the chargeback ratio that puts a merchant into a card
+network's monitoring programme — which is why refunding a dispute you would have won is sometimes
+right. That decision belongs in your code, against your data, not behind a console button. This
+screen exists so nobody misses the window; submitting evidence is
+[`submitDisputeEvidence`](/docs/payments/api-reference) on the driver.
+</Callout>
 
 ## Actions
 
@@ -127,7 +160,7 @@ import { defineConfig } from '@adonis-agora/payments/dashboard'
 
 export default defineConfig({
   // enabled: true,
-  // path: '/payments-dashboard',
+  // path: '/payments',
   // currency: 'BRL',
   // authorize: (ctx) => ctx.auth.user?.isAdmin === true,
 })
@@ -136,7 +169,7 @@ export default defineConfig({
 | Option | Default | Description |
 | --- | --- | --- |
 | `enabled` | `true` | When `false`, no routes are registered at all. |
-| `path` | `'/payments-dashboard'` | Route prefix. The HTML serves at the root; the JSON API at `<path>/api`. |
+| `path` | `'/payments'` | Route prefix. The HTML serves at the root; the JSON API at `<path>/api`. |
 | `currency` | `'BRL'` | ISO 4217 code the money columns render in. Does not change what is stored. |
 | `authorize` | see below | Per-request guard: `(ctx: HttpContext) => boolean \| Promise<boolean>`. |
 | `dashboardAuth` | absent | Opt-in session layer on top of `authorize`. |
@@ -215,6 +248,8 @@ The SPA is a client of a plain API, and so can you be — the same guard covers 
 | `GET <path>/api/health` | — | the `billingHealth` checks plus the failure breakdown |
 | `GET <path>/api/overview` | `period`, `from`, `to` | `billingOverview` metrics for the period |
 | `GET <path>/api/payments` | `status`, `provider`, `limit`, `offset` | a page of payments, newest first |
+| `GET <path>/api/disputes` | `status`, `provider`, `limit`, `offset` | a page of disputes, newest first |
+| `GET <path>/api/disputes` | `dueWithin` (hours), `provider`, `limit`, `offset` | only the OPEN windows closing inside the horizon, soonest first, plus the full `dueWithin.total` |
 | `GET <path>/api/subscriptions` | `status`, `provider`, `limit`, `offset` | a page of subscriptions, plus the whole-table `past_due` count |
 | `GET <path>/api/webhook-events` | `status`, `provider`, `limit`, `offset` | a page of the ledger, newest first |
 | `GET <path>/api/providers` | — | the gateways present in your data |
@@ -223,6 +258,12 @@ The SPA is a client of a plain API, and so can you be — the same guard covers 
 
 Paging is clamped (50 by default, 200 maximum), so an unbounded `limit` from a query string cannot
 select the whole table. A provider-filtered page also reports `scanned` and `truncated`.
+
+`?dueWithin` with no value uses the same 72-hour horizon `payments:health` alerts on, so the console
+and the cron agree about "soon". A value that is present and unreadable answers `400` rather than
+quietly falling back to the default — you would have no way to tell which question you asked. The
+`dueWithin.total` beside the page is a separate count, unbounded by `limit`: a full page says
+nothing about how many more windows are closing, and that number is the one you plan the day around.
 
 The action responses distinguish their failures rather than collapsing them into `500`: `404` for a
 row that is not there, `409` for a row in the wrong state (a payment that is not `paid`, an event

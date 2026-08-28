@@ -128,6 +128,24 @@ export default async function onPaymentSucceeded(event) {
 }
 ```
 
+## Disputes: there is no dispute vocabulary here at all
+
+InfinitePay's checkout reference documents two endpoints (`POST /links`, `POST
+/payment_check`) and one notification, *"quando o pagamento for aprovado"*. There is **no
+chargeback webhook, no pre-dispute alert, no dispute resource and no defense deadline** —
+nothing this driver could map onto `payment.dispute_warning`, `payment.disputed` or
+`payment.dispute_closed`, and it does not invent one.
+
+That is not the same as saying InfinitePay has no chargebacks. It is a card acquirer, so real
+scheme chargebacks happen; they are simply handled entirely inside the InfinitePay app, which
+is also the only place defense documents can be uploaded. **The first your integration learns
+of one is the debit on the statement**, and the payment row will still read `paid`.
+
+If disputed volume matters to you, that is a reason to route cards through a gateway that
+notifies them — every card acquirer on the [Providers](/docs/payments/providers) page except
+this one does — or to reconcile against the app on a schedule. It is a gap in the gateway,
+not one this driver can paper over.
+
 ## `checkPayment` — and why `findPayment` throws
 
 `POST /payment_check` is the only status lookup InfinitePay documents, and it needs **all

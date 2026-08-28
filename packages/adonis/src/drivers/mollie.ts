@@ -65,6 +65,13 @@ interface MolliePaymentResponse {
    * How much of this payment the payer's bank has pulled back. Mollie leaves `status` at
    * `paid` when a chargeback lands — this field is the only thing on the payment that says
    * the money went away, and it is what the classic webhook makes you fetch to find out.
+   *
+   * The classic webhook is called "when a chargeback is received on the payment" and the
+   * reference lists no reversal among its triggers, so on that webhook the driver can only
+   * ever report `payment.disputed`, never the close. Mollie's own description of this field
+   * — "the total amount that was charged back for this payment. Only available when the
+   * total charged back amount is not zero" — also does not say whether a reversal takes it
+   * back to zero. Run the next-gen `chargeback.*` webhooks to hear about the reversal.
    */
   amountChargedBack?: MollieAmount;
   description?: string;
@@ -641,7 +648,24 @@ export class MollieDriver implements PaymentsDriver {
   }
 
   /**
-   * A next-gen `chargeback.*` event: the one webhook that takes revenue away.
+   * A next-gen `chargeback.*` event: the one webhook that takes revenue away, and the one
+   * that gives it back.
+   *
+   * Mollie has exactly two of them — `chargeback.received` ("a chargeback has been received
+   * for a payment") and `chargeback.reversed` ("a previously received chargeback has been
+   * reversed") — and **no pre-dispute vocabulary at all**: no fraud alert, no retrieval
+   * request, no inquiry, and no `payment.dispute_warning` for this driver to emit. Mollie's
+   * own words are that the money "will be reclaimed and deducted from your Mollie balance",
+   * so the first event already is the withdrawal.
+   *
+   * The chargeback object carries no response deadline either — its whole field list is
+   * `id`, `amount`, `settlementAmount`, `reason`, `paymentId`, `settlementId`, `createdAt`,
+   * `reversedAt` — so no `actionableUntil` is emitted rather than one being invented.
+   *
+   * The reversal is read from `reversedAt` as well as from the event name: the payload is a
+   * snapshot of the entity, so a `chargeback.received` redelivered after the reversal
+   * carries the timestamp too, and taking the money back off the row twice would be worse
+   * than reading it from either place.
    *
    * The chargeback entity has to come from the event body. Mollie's only read endpoint is
    * `GET /payments/{paymentId}/chargebacks/{id}` — there is no lookup by chargeback id —
@@ -663,12 +687,16 @@ export class MollieDriver implements PaymentsDriver {
       );
     }
     const amount = this.#fromMollieAmount(entity.amount);
+    const reversed =
+      envelope?.type === 'chargeback.reversed' || typeof entity.reversedAt === 'string';
     return {
       id: envelope?.id ?? `mollie:${entityId}:${envelope?.type ?? 'chargeback'}`,
       provider: this.provider,
-      // `chargeback.reversed` is a dispute RESOLVED in your favour. The package
-      // deliberately has no canonical resolution event, so it arrives as a plain update.
-      type: envelope?.type === 'chargeback.reversed' ? 'payment.updated' : 'payment.disputed',
+      // A reversal is the dispute resolved in your favour and the money back on the
+      // balance, so it closes the dispute as `won` — the processor is what moves the row
+      // off `disputed`, and reporting the reversal as a plain update left it stuck there
+      // with the revenue written off.
+      type: reversed ? 'payment.dispute_closed' : 'payment.disputed',
       ...(envelope?.createdAt !== undefined ? { createdAt: envelope.createdAt } : {}),
       // Keyed by the PAYMENT, not the chargeback: the payment is the row whose status has
       // to move to `disputed`.
@@ -676,7 +704,10 @@ export class MollieDriver implements PaymentsDriver {
         gatewayId: entity.paymentId,
         amount: amount.amount,
         currency: amount.currency,
-        chargebackId: entity.id ?? entityId,
+        disputeId: entity.id ?? entityId,
+        ...(reversed ? { outcome: 'won' } : {}),
+        // Only ever set on a SEPA Direct Debit chargeback — Mollie's reference says the
+        // card schemes send it no reason at all.
         ...(entity.reason?.code !== undefined ? { reason: entity.reason.code } : {}),
       },
       raw: (envelope ?? { id: entityId }) as unknown as Record<string, unknown>,

@@ -243,6 +243,25 @@ describe('InfinitePayDriver', () => {
     expect(data.externalReference).toBe('order_local_1');
   });
 
+  it('has no dispute vocabulary at all: nothing it can send is a chargeback', () => {
+    // InfinitePay documents ONE notification — "quando o pagamento for aprovado" — and no
+    // chargeback event, no pre-dispute alert and no dispute resource. Contested sales are
+    // handled in the app, where the defense documents are uploaded too. Pinned so that
+    // teaching this driver to emit a dispute type has to be a deliberate act with a
+    // reference behind it, not a copy of a neighbour.
+    const driver = makeDriver();
+    const disputeShaped = { ...webhookBody, status: 'chargeback', chargeback: true };
+    for (const body of [webhookBody, disputeShaped]) {
+      const event = driver.parseWebhook(JSON.stringify(body), {});
+      expect(event.type).toBe('payment.succeeded');
+      expect([
+        'payment.disputed',
+        'payment.dispute_warning',
+        'payment.dispute_closed',
+      ]).not.toContain(event.type);
+    }
+  });
+
   it('accepts an unsigned webhook — there is nothing to verify — whatever headers arrive', () => {
     // Documented reality, pinned deliberately: InfinitePay sends no signature header, so an
     // event out of parseWebhook is a claim, not proof. Confirm it with checkPayment().

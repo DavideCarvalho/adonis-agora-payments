@@ -11,9 +11,10 @@ import { stubsRoot } from './stubs/main.js';
  *    but the barrel removes that scan from boot);
  * 3. publishes `config/payments.ts`, `config/payments_dashboard.ts` and
  *    `config/payments_client.ts` (the browser status endpoint — off unless enabled);
- * 4. publishes the Lucid migrations for the billing tables — the `create_billing_tables` one
- *    and the `add_billing_external_reference` one that carries the two columns added after it
- *    (run `node ace migration:run`; delete both files if you only use payments without the
+ * 4. publishes the Lucid migrations for the billing tables — the `create_billing_tables` one,
+ *    the `add_billing_external_reference` one that carries the two columns added after it, and
+ *    the `add_billing_disputes` one that carries the `billing_disputes` table (run
+ *    `node ace migration:run`; delete all three files if you only use payments without the
  *    billing layer);
  * 5. registers the env validations for the payment providers.
  */
@@ -43,6 +44,10 @@ export async function configure(command: Configure) {
     'database/migrations/add_billing_external_reference.stub',
     {},
   );
+  // The third, same reasoning again: `billing_disputes` is a whole TABLE added after
+  // `create_billing_tables` shipped, so it reaches existing installs only as its own file.
+  // Guarded by `hasTable`, so on a fresh install (which gets all three) it does nothing.
+  await codemods.makeUsingStub(stubs, 'database/migrations/add_billing_disputes.stub', {});
 
   await codemods.defineEnvValidations({
     leadingComment: 'PAYMENTS_',

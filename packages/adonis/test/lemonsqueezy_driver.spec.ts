@@ -508,4 +508,57 @@ describe('LemonSqueezyDriver — the widened contract', () => {
     ).rejects.toThrow(/no idempotency mechanism/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  /**
+   * Lemon Squeezy has NO dispute vocabulary. Its whole webhook catalogue is the sixteen
+   * names below — there is not even an `order_updated`, so the `fraudulent` order status
+   * Lemon Squeezy uses for a charged-back order can never reach a webhook handler. That is
+   * the merchant-of-record bargain: Lemon Squeezy is the seller on the buyer's statement and
+   * manages the dispute itself, deducting the amount plus a $15 fee from the next payout.
+   *
+   * This test exists to stop a well-meaning mapping from inventing one.
+   */
+  it('emits no dispute event for any Lemon Squeezy event, because none exists', () => {
+    const driver = makeDriver();
+    const events = [
+      'order_created',
+      'order_refunded',
+      'subscription_created',
+      'subscription_updated',
+      'subscription_cancelled',
+      'subscription_resumed',
+      'subscription_expired',
+      'subscription_paused',
+      'subscription_unpaused',
+      'subscription_payment_success',
+      'subscription_payment_failed',
+      'subscription_payment_recovered',
+      'subscription_payment_refunded',
+      'subscription_plan_changed',
+      'license_key_created',
+      'license_key_updated',
+    ];
+    const disputeTypes = ['payment.disputed', 'payment.dispute_warning', 'payment.dispute_closed'];
+
+    for (const event_name of events) {
+      // `fraudulent` is Lemon Squeezy's own status for a charged-back order. Even carrying
+      // it, no event may become a dispute — the driver has no way to know money moved.
+      const body = JSON.stringify({
+        meta: { event_name },
+        data: {
+          type: 'orders',
+          id: '1',
+          attributes: { status: 'fraudulent', total: 1990, currency: 'USD' },
+        },
+      });
+      expect(disputeTypes, event_name).not.toContain(driver.parseWebhook(body, sign(body)).type);
+    }
+  });
+
+  it('never claims a dispute API it does not have', () => {
+    const driver = makeDriver();
+    expect(driver.capabilities.disputes).toBe(false);
+    expect(driver.submitDisputeEvidence).toBeUndefined();
+    expect(driver.findDispute).toBeUndefined();
+  });
 });

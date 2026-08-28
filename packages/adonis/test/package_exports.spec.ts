@@ -64,9 +64,51 @@ describe('package exports', () => {
  * functions. Every scaffold the command has ever produced was broken.
  */
 describe('published stubs', () => {
+  /**
+   * Every name the package ROOT exports as a TYPE.
+   *
+   * A type-only import cannot be checked the way a value can — `import('../src/index.js')`
+   * returns the runtime namespace, where a type is simply absent, so asking the module
+   * whether it exports `PaymentWebhookData` gets `undefined` for "not exported" and
+   * `undefined` for "exported, but it's a type". This reads the barrel instead, which is
+   * the authority for the root's surface: `src/index.ts` re-exports and declares, and
+   * contains no `export *` (that would make this text scan lie, so it is asserted below).
+   */
+  const rootTypeExports = async (text: string): Promise<Set<string>> => {
+    const names = new Set<string>();
+    for (const match of text.matchAll(/export\s+(?:type\s+)?\{([^}]+)\}/g)) {
+      for (const raw of (match[1] as string).split(',')) {
+        const name = raw
+          .trim()
+          .replace(/^type\s+/, '')
+          .split(/\s+as\s+/)
+          .at(-1)
+          ?.trim();
+        if (name) names.add(name);
+      }
+    }
+    for (const match of text.matchAll(
+      /export\s+(?:declare\s+)?(?:type|interface|class|function|const|enum)\s+([A-Za-z0-9_$]+)/g,
+    )) {
+      names.add(match[1] as string);
+    }
+    return names;
+  };
+
   it('only import symbols the package actually exports', async () => {
     const stubsDir = fileURLToPath(new URL('../stubs/', import.meta.url));
     const root = (await import('../src/index.js')) as Record<string, unknown>;
+    const indexSource = await readFile(
+      fileURLToPath(new URL('../src/index.ts', import.meta.url)),
+      'utf-8',
+    );
+    // The text scan above only sees what the barrel spells out. A star re-export would
+    // add names it cannot see, and every missing type would pass as "exported".
+    expect(
+      indexSource,
+      'src/index.ts gained an `export *`, which this scan cannot follow',
+    ).not.toMatch(/^export\s+\*/m);
+    const typeExports = await rootTypeExports(indexSource);
 
     const missing: string[] = [];
     const walk = async (dir: string): Promise<void> => {
@@ -79,16 +121,21 @@ describe('published stubs', () => {
         if (!item.name.endsWith('.stub')) continue;
         const text = await readFile(full, 'utf-8');
         // Only the package ROOT: a subpath is covered by the export-map test above.
+        // `import type { … }` is matched too — it used to fall outside this regex, so a
+        // stub could import a type that does not exist and this test stayed green.
         for (const match of text.matchAll(
-          /import\s*\{([^}]+)\}\s*from\s*'@adonis-agora\/payments'/g,
+          /import\s+(type\s+)?\{([^}]+)\}\s*from\s*'@adonis-agora\/payments'/g,
         )) {
-          for (const raw of (match[1] as string).split(',')) {
-            const name = raw
-              .trim()
-              .replace(/^type\s+/, '')
-              .split(/\s+as\s+/)[0]
-              ?.trim();
-            if (name && root[name] === undefined) missing.push(`${item.name}: ${name}`);
+          const typeOnly = match[1] !== undefined;
+          for (const raw of (match[2] as string).split(',')) {
+            const cleaned = raw.trim().replace(/^type\s+/, '');
+            const name = cleaned.split(/\s+as\s+/)[0]?.trim();
+            if (!name) continue;
+            // A value import must resolve at runtime; a type import can only be read off
+            // the barrel. `import { type Foo }` is a type in a value import statement.
+            const isType = typeOnly || cleaned !== raw.trim();
+            const exported = isType ? typeExports.has(name) : root[name] !== undefined;
+            if (!exported) missing.push(`${item.name}: ${name}`);
           }
         }
       }

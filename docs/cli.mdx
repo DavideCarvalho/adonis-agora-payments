@@ -171,11 +171,6 @@ export default class User extends compose(BaseModel, withBillable()) {
 }
 ```
 
-<Callout type="warn" title="That import does not resolve today">
-`withBillable` is declared in the package's `src/billing/index.ts`, which has no export subpath, so
-the scaffolded file does not compile as written. Checked against `src/index.ts` on 2026-08-28.
-</Callout>
-
 See [Billing](/docs/payments/billing) for what the mixins add and how to stack the narrower ones.
 
 ## `make:webhook-handler`

@@ -253,12 +253,11 @@ billing: { dispatcher: 'durable' }
 falls back to in-process and nothing says so. Name the backend in production. See
 [Production](/docs/payments/production).
 
-<Callout type="warn" title="`'queue'` is accepted by the config and is not implemented">
-`billing.dispatcher: 'queue'` type-checks and the config accepts it, but the dispatcher has no
-`@adonisjs/queue` path: it falls through to the same resolution `'auto'` uses, so it runs on durable
-when durable is available and in-process otherwise. It does **not** throw, and nothing says so at
-boot. Use `'durable'` if you need a restart-surviving channel; this is reported as a library bug
-rather than documented as a feature.
+<Callout type="warn" title="There is no `'queue'` dispatcher">
+`billing.dispatcher: 'queue'` used to type-check and then silently run durable-or-in-process,
+because the queue path was never implemented. It is now refused at boot with an error naming the
+supported set. The three values are `'auto'`, `'durable'` and `'in-process'` — use `'durable'` when
+you need a restart-surviving channel.
 </Callout>
 
 <Callout type="warn" title="durable needs its worker running">

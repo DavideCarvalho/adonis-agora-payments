@@ -126,8 +126,9 @@ payments timeline showed generic `diagnostic` entries with the payload buried in
 typed `payments` ones. The wiring never varied — read the store off the container, hand
 `record` to the watcher — so it belongs in the provider.
 
-If you have those six lines today, keep them or delete them; both work. Keeping them means
-your registration is the one that runs.
+If you have those six lines today, **delete them**. The claim check means keeping them is not
+harmful — yours registers first and the provider stands down, so nothing records twice — but they
+are dead weight now.
 </Callout>
 
 A write to the telescope store that fails is swallowed. Recording is observability, and
@@ -184,7 +185,7 @@ into a bug report.
 A charge body carries the cardholder's PAN and the payer's CPF/CNPJ, so bodies are not
 recorded unless you ask:
 
-```ts title="start/telescope.ts"
+```ts title="start/payments.ts"
 import { configurePaymentsDiagnostics } from '@adonis-agora/payments'
 
 // Debugging one integration — not a standing production setting.
@@ -267,7 +268,7 @@ Two limits worth knowing, rather than discovering:
   `@adonis-agora/diagnostics` fills `DiagnosticEvent.traceId` from your app's own
   request-context accessor, and overwriting that would break correlation with every other
   Agora library. The watcher merges both, envelope first.
-- **The chain stops at a process boundary.** With `dispatcher: 'durable'` or `'queue'`
+- **The chain stops at a process boundary.** With `dispatcher: 'durable'`
   (or a split `role: 'api'` / `'worker'` deployment) the event is handed to another
   process, and the trace id is not part of the dispatched job — `WebhookEvent` has no
   field for it. The `webhook.received`/`verification` half is traced; the processing half

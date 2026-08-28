@@ -136,8 +136,6 @@ billing: {
   enabled: true,
   /** How a validated webhook is processed — name the backend you actually run. */
   dispatcher: 'durable',
-  /** Queue name for the 'queue' dispatcher. Defaults to the queue's own default. */
-  queue: 'webhooks',
   /**
    * Business webhook handlers run inside the mounted route. A DI service class (the
    * lib calls its `.handle(event)`) or a plain function.
@@ -156,8 +154,7 @@ Every option, and what you get by omitting it:
 | `enabled` | `true` | `false` wires no store, processor or dispatcher. The webhook route still mounts and verifies, and then does nothing with what it verified. |
 | `autoCreateSchema` | `true` | The library creates its own tables on first use. See below. |
 | `dispatcher` | `'auto'` | Which backend runs a validated webhook. See below. |
-| `queue` | the queue's own default | Queue name for `dispatcher: 'queue'`. Ignored by the others. |
-| `role` | `'all'` | `'api'` mounts the route and never processes; `'worker'` processes and never mounts. Both demand an explicit `'durable'` or `'queue'` dispatcher — there is no channel between the halves otherwise, and it is refused at boot. See [Production → Splitting api and worker](/docs/payments/production#splitting-api-and-worker). |
+| `role` | `'all'` | `'api'` mounts the route and never processes; `'worker'` processes and never mounts. Both demand an explicit `'durable'` dispatcher — there is no channel between the halves otherwise, and it is refused at boot. See [Production → Splitting api and worker](/docs/payments/production#splitting-api-and-worker). |
 | `store` | the Lucid store over the billing tables | Where the layer persists. `billingStores.lucid({ models })` swaps the models; a factory of your own replaces the store entirely. See [Billing → The billing store](/docs/payments/billing#the-billing-store). |
 | `handlers` | none | Your business logic, keyed by normalized event type. See below. |
 | `durable` | — | Legacy alias for `dispatcher`. See the callout below. |
@@ -188,13 +185,12 @@ both on is harmless; leaving both *off* means the first query fails on a missing
 ### `dispatcher` — how a webhook gets processed
 
 Webhook processing is exactly the kind of work that must not be lost when a deploy or a crash
-interrupts it. Four backends:
+interrupts it. Three backends:
 
 | Value | Behaviour |
 | --- | --- |
-| `'auto'` (default) | `@adonis-agora/durable` when its provider is registered; else `@adonisjs/queue` when installed; else in-process |
+| `'auto'` (default) | `@adonis-agora/durable` when its provider is registered; otherwise in-process |
 | `'durable'` | a durable workflow run — **throws when durable is missing** |
-| `'queue'` | an `@adonisjs/queue` job — throws when the queue provider is missing |
 | `'in-process'` | inline, retrying in the background with exponential backoff |
 
 `'auto'` is the friendly default and it is also silent: an app that expected durable and forgot to
@@ -203,12 +199,12 @@ then a missing dependency is a boot error rather than a surprise. See
 [Production](/docs/payments/production).
 
 The in-process fallback retries 5 times with exponential backoff (500 ms base, capped at 30 s),
-which covers a transient failure but does **not** survive a process restart. Durable and queue do.
+which covers a transient failure but does **not** survive a process restart. Durable does.
 
 <Callout title="`durable` is the legacy alias">
 `durable: 'auto' | true | false` still works and maps onto `dispatcher` — `true` is `'durable'`,
-`false` is `'in-process'`. New config should use `dispatcher`, which is the only way to reach the
-queue backend.
+`false` is `'in-process'`. New config should use `dispatcher`, which names the backend directly
+instead of encoding it as a boolean.
 </Callout>
 
 ### `handlers` — where your business logic runs
@@ -247,18 +243,28 @@ durable workflow** (durable owns retry + exactly-once) and returns — never doi
 grant inline. See [Webhooks → The money-flow pattern](/docs/payments/webhooks#the-money-flow-pattern-handlers-dispatch-to-durable).
 </Callout>
 
-## `telescope` — the typed watcher
+## Telescope — there is no key for it
 
-A top-level key, not part of `billing`. `'auto'` (the default) registers the typed `payments`
-Telescope watcher when `@adonis-agora/telescope` is resolvable in the app and does nothing when it
-is not; `true` requires it and throws at boot when it is missing; `false` never registers it.
+The typed `payments` Telescope watcher has **no configuration**. There is no `telescope` key in
+`config/payments.ts`; adding one does nothing, and the config type does not accept it.
 
-```ts title="config/payments.ts"
-telescope: 'auto',
-```
+The provider registers the watcher itself, in `ready()`, and disposes it on shutdown. What an
+option would have said, the code detects instead:
 
-The asymmetry is the point: an app that never asked for Telescope should not fail to boot without
-it, and an app that asked for it should not discover it is absent by noticing an empty timeline.
-With `false` the generic diagnostics watcher still records the payments channels as ordinary
-entries — they are plain `node:diagnostics_channel` publishes. See
-[Diagnostics](/docs/payments/diagnostics).
+- **Telescope is not installed.** The import fails, the provider registers nothing, and nothing is
+  logged about it. An app without observability is a normal app, not a misconfigured one, and a
+  missing timeline is not a reason to refuse to take payments.
+- **You wire your own watcher.** A watcher claims the payments diagnostic channels when it
+  registers. `start/` files run before `ready()`, so an app that registered its own has already
+  claimed those channels by the time the provider looks, and the provider stands down. Your
+  registration is the one that runs, and nothing is recorded twice.
+
+<Callout type="warn" title="Delete the old `start/telescope.ts` wiring">
+This page and [Diagnostics](/docs/payments/diagnostics) used to tell you to copy six lines into
+`start/telescope.ts` to register `PaymentsWatcher` by hand. The provider does it now. The hand-wired
+version still works — the claim check makes sure it is not doubled — but it is dead weight, so
+delete it.
+</Callout>
+
+The generic `DiagnosticsWatcher` telescope ships records the payments channels either way: they are
+plain `node:diagnostics_channel` publishes. See [Diagnostics](/docs/payments/diagnostics).

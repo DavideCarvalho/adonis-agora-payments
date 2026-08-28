@@ -109,6 +109,22 @@ export type {
 } from './diagnostics.js';
 export { WebhookProcessor } from './billing/webhook_processor.js';
 export type { WebhookHandler } from './billing/webhook_processor.js';
+/**
+ * The shapes a driver normalizes `event.data` onto. Exported because an app's own webhook
+ * handler receives a `WebhookEvent` and needs to read `externalReference` off its payload —
+ * without these it has to re-declare the shape as an inline cast, which is a type that
+ * agrees with nothing and drifts silently when a field is added here.
+ */
+export type {
+  PaymentWebhookData,
+  SubscriptionWebhookData,
+  DisputeWebhookData,
+} from './billing/webhook_events.js';
+export {
+  isPaymentWebhookData,
+  isDisputeWebhookData,
+  isSubscriptionWebhookData,
+} from './billing/webhook_events.js';
 export {
   withBillable,
   withSubscription,

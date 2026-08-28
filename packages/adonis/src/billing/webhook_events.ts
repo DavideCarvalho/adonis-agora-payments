@@ -92,6 +92,16 @@ export interface DisputeWebhookData {
   outcome?: 'won' | 'lost' | 'canceled' | 'expired';
   amount?: number;
   currency?: string;
+  /**
+   * The `externalReference` the app set on the disputed charge, when the driver has it. The
+   * gateways that build a dispute event out of the payment resource carry it (Asaas nests
+   * `chargeback` on the payment and spreads the payment's fields — see the Asaas driver's
+   * `#disputeExtras`), and an app routing a chargeback back to its own order needs it as
+   * much as a `payment.succeeded` handler does. Optional because a gateway whose dispute is
+   * a standalone object — Stripe's early fraud warning names only a charge — has nothing to
+   * put here.
+   */
+  externalReference?: string;
 }
 
 /** Guard: is this event's `data` shaped like a dispute event? */

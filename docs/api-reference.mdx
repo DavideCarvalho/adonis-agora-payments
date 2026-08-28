@@ -15,7 +15,6 @@ defineConfig({
   default?: string
   providers?: Record<string, PaymentsDriverFactory>
   methods?: Partial<Record<PaymentMethodName, string>>
-  telescope?: 'auto' | boolean
 
   invoice?: {
     default?: string
@@ -26,8 +25,7 @@ defineConfig({
   billing?: {
     enabled?: boolean
     autoCreateSchema?: boolean
-    dispatcher?: 'auto' | 'durable' | 'queue' | 'in-process'
-    queue?: string
+    dispatcher?: 'auto' | 'durable' | 'in-process'
     role?: 'all' | 'api' | 'worker'
     store?: BillingStoreFactory
     durable?: 'auto' | boolean       // legacy alias for dispatcher
@@ -41,16 +39,17 @@ defineConfig({
 | `default` | first configured provider | used by `driver()` with no argument |
 | `providers` | — | name → lazy factory; the SDK loads only when called |
 | `methods` | — | method → provider name, checked against `supportedMethods` |
-| `telescope` | `'auto'` | register the typed Telescope watcher when telescope is registered in the app; `true` throws when it is missing |
 | `billing.enabled` | `true` | `false` skips the store, processor and dispatcher wiring |
 | `billing.autoCreateSchema` | `true` | the library creates its own tables on first use — there is no migration to run |
-| `billing.dispatcher` | `'auto'` | name the backend explicitly in production |
-| `billing.queue` | the queue's default | only used by the `'queue'` dispatcher |
-| `billing.role` | `'all'` | `'api'` mounts the webhook route and never processes; `'worker'` processes and never mounts. Both require `dispatcher` `'durable'` or `'queue'` |
-| `billing.store` | the Lucid store | swap the persistence entirely, or keep it with your own models via `billingStores.lucid({ models })` — note that naming a store makes `autoCreateSchema` no longer reach it |
+| `billing.dispatcher` | `'auto'` | `'auto'` is durable when its provider is registered, else in-process. Name the backend explicitly in production |
+| `billing.role` | `'all'` | `'api'` mounts the webhook route and never processes; `'worker'` processes and never mounts. Both require `dispatcher: 'durable'` |
+| `billing.store` | the Lucid store | swap the persistence entirely, or keep it with your own models via `billingStores.lucid({ models })`. `autoCreateSchema: false` still reaches a Lucid store you build — it can only turn auto-creation off, never on |
 | `billing.handlers` | `{}` | normalized event type → handler or DI service class |
 
-`defineConfig` is a typed identity — every option is checked as you write it.
+`defineConfig` is a typed identity — every option is checked as you write it. There is no
+`telescope` key: the typed Telescope watcher is registered by the provider when
+`@adonis-agora/telescope` resolves, and there is nothing to configure. See
+[Diagnostics](/docs/payments/diagnostics).
 
 The dashboard and the client-side status endpoint are configured in their own files —
 `config/payments_dashboard.ts` and `config/payments_client.ts`, both published by `configure`. See

@@ -271,9 +271,8 @@ a crash. `billing.dispatcher` chooses what carries it:
 
 | Value | Behaviour | Survives a restart |
 | --- | --- | --- |
-| `'auto'` (default) | durable when its provider is registered; else `@adonisjs/queue` when installed; else in-process | depends on what it picked |
+| `'auto'` (default) | durable when its provider is registered; otherwise in-process | depends on what it picked |
 | `'durable'` | a durable workflow run — throws when durable is missing | yes |
-| `'queue'` | an `@adonisjs/queue` job — throws when the queue is missing | yes |
 | `'in-process'` | inline, retrying in the background | no |
 
 The in-process fallback retries up to 5 times with exponential backoff (500 ms base, capped at
@@ -290,8 +289,8 @@ falls back to in-process and nothing says so. Setting `dispatcher: 'durable'` tu
 error, which is where you want to find out. See [Production](/docs/payments/production).
 </Callout>
 
-`billing.durable` is the legacy alias — `true` maps to `'durable'`, `false` to `'in-process'` — and
-cannot reach the queue backend.
+`billing.durable` is the legacy alias — `true` maps to `'durable'`, `false` to `'in-process'`.
+Prefer `dispatcher`, which names the backend instead of encoding it as a boolean.
 
 ## Usage-based billing — metered subscriptions
 
@@ -431,6 +430,30 @@ mixins you can stack on other models:
 - `withSubscription` — a model that owns recurring subscriptions.
 - `withPayment` — a model that owns one-off payments.
 
-Each exposes the corresponding billing-store methods off the model instance, so most
-billing code reads as `user.charge(...)`, `user.subscribe(...)` rather than service-layer
-calls.
+Each adds **columns only** — Lucid `@column` declarations and their types. No methods: there is no
+`user.charge(...)` or `user.subscribe(...)`.
+
+| Mixin | Columns it declares |
+| --- | --- |
+| `withBillable()` | `billingCustomerId`, `billingProvider`, `billingTrialEndsAt` |
+| `withSubscription()` | `gatewayId`, `provider`, `status`, `planId`, `customerId`, `trialEndsAt`, `endsAt`, `payload`, `createdAt`, `updatedAt` |
+| `withPayment()` | `gatewayId`, `provider`, `status`, `amount`, `currency`, `customerId`, `subscriptionId`, `externalReference`, `payload`, `createdAt`, `updatedAt`, `paidAt` |
+
+Charging is not on the model. It goes through the manager and the billing store:
+
+```ts
+import { getBillingStore, getPayments } from '@adonis-agora/payments/services/main'
+
+// The model holds the gateway's customer id — the mixin's contribution.
+const payment = await getPayments().charge({
+  customerId: user.billingCustomerId!,
+  amount: 4990, // integer cents
+  externalReference: order.id,
+})
+
+// Reading and writing the billing rows goes through the store.
+const store = getBillingStore()
+```
+
+See [The billing store](#the-billing-store) above and
+[Getting started → Make your first charge](/docs/payments/getting-started).

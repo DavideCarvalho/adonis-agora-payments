@@ -84,7 +84,7 @@ Woovi's recommended `x-webhook-signature` takes precedence over the deprecated H
 when `webhookPublicKey` is set it is enforced, and `webhookSecret` (if also set) is
 ignored. The public key accepts PEM or the base64-encoded PEM shown in the dashboard.
 
-<Callout type="warn" title="Breaking change: an empty credential slot used to mean "skip"">
+<Callout type="warn" title='Breaking change: an empty credential slot used to mean "skip"'>
 It used to be `if (webhookToken !== undefined)` — a driver with nothing configured verified
 **nothing**, and the mounted `POST /payments/webhook/:provider` accepted any body anyone posted to
 it, including one that marks a payment paid. Nothing logged it and nothing warned.

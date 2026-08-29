@@ -127,3 +127,127 @@ describe('retry after a failed attempt', () => {
     expect(calls).toBe(1);
   });
 });
+
+/**
+ * The durable path, against an engine that enforces durable's ACTUAL rule: a run can only
+ * be started for a workflow NAME the engine has been told about.
+ *
+ * This is the shape of the bug it exists to catch. The dispatcher used to build an
+ * anonymous `class PaymentsWebhookWorkflow extends BaseWorkflow` on the fly and call its
+ * inherited static `dispatch`. That class declared no `static workflow = { name }` and was
+ * never registered anywhere, so `@adonis-agora/durable` answered
+ *
+ *   workflow class PaymentsWebhookWorkflow has no registered name
+ *
+ * for every event. `dispatchAll` collected it as a failed event and the route answered 500,
+ * so the gateway redelivered forever and no payment was ever processed — in every app with
+ * durable installed, which is exactly what the default `'auto'` mode selects.
+ *
+ * Nothing caught it because nothing here had ever driven the durable branch: 1125 unit
+ * tests passed over a path that could not work in an application. A fake engine is enough
+ * to encode the rule that was broken, and the entre-textos integration proved it against
+ * the real one.
+ */
+describe('WebhookDispatcher — durable', () => {
+  /** An engine with durable's registry semantics: `start` an unregistered name and it throws. */
+  class FakeEngine {
+    registered = new Map<string, (ctx: unknown, input: never) => Promise<void>>();
+    started: Array<{ name: string; input: unknown; runId: string }> = [];
+
+    register(name: string, _version: string, fn: (ctx: unknown, input: never) => Promise<void>) {
+      this.registered.set(name, fn);
+    }
+
+    async start(name: string, input: unknown, runId: string) {
+      const fn = this.registered.get(name);
+      if (!fn) throw new Error(`workflow ${name} is not registered`);
+      this.started.push({ name, input, runId });
+      // Durable runs the body out of band; running it here is what lets the test assert the
+      // event actually reached the processor rather than merely being accepted.
+      await fn(undefined, input as never);
+    }
+  }
+
+  const event = (id: string): WebhookEvent => ({
+    id,
+    provider: 'asaas',
+    type: 'payment.succeeded',
+    data: { gatewayId: 'pay_1', amount: 15000, currency: 'brl' },
+    raw: {},
+  });
+
+  it('registers the workflow before starting a run', async () => {
+    const store = new InMemoryBillingStore();
+    const engine = new FakeEngine();
+    const dispatcher = new WebhookDispatcher({
+      processor: new WebhookProcessor({ store }),
+      mode: 'durable',
+      durableEngine: async () => engine,
+    });
+
+    const result = await dispatcher.dispatchAll(event('evt_1'));
+
+    expect(result.failures.map((failure) => failure.error.message)).toEqual([]);
+    expect(result.dispatched).toBe(1);
+    expect([...engine.registered.keys()]).toEqual(['payments-webhook']);
+    expect(engine.started).toHaveLength(1);
+  });
+
+  it('runs the event through the processor and writes the ledger', async () => {
+    const store = new InMemoryBillingStore();
+    const engine = new FakeEngine();
+    const dispatcher = new WebhookDispatcher({
+      processor: new WebhookProcessor({ store }),
+      mode: 'durable',
+      durableEngine: async () => engine,
+    });
+
+    await dispatcher.dispatchAll(event('evt_2'));
+
+    const recorded = await store.findWebhookEventByGatewayEventId('evt_2');
+    expect(recorded, 'the run accepted the event but never processed it').not.toBeNull();
+  });
+
+  it('registers once across many deliveries', async () => {
+    const engine = new FakeEngine();
+    const registerSpy = vi.spyOn(engine, 'register');
+    const dispatcher = new WebhookDispatcher({
+      processor: new WebhookProcessor({ store: new InMemoryBillingStore() }),
+      mode: 'durable',
+      durableEngine: async () => engine,
+    });
+
+    await dispatcher.dispatchAll([event('evt_3'), event('evt_4')]);
+    await dispatcher.dispatchAll(event('evt_5'));
+
+    expect(registerSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives each delivery its own run id', async () => {
+    // Not cosmetic: `engine.start` is idempotent by run id and returns the prior run's
+    // state for a repeat, so a run id derived from the event would turn the gateway's
+    // redelivery of a FAILED event into a silent no-op — the one case redelivery is for.
+    const engine = new FakeEngine();
+    const dispatcher = new WebhookDispatcher({
+      processor: new WebhookProcessor({ store: new InMemoryBillingStore() }),
+      mode: 'durable',
+      durableEngine: async () => engine,
+    });
+
+    await dispatcher.dispatchAll(event('evt_6'));
+    await dispatcher.dispatchAll(event('evt_6'));
+
+    expect(new Set(engine.started.map((run) => run.runId)).size).toBe(2);
+  });
+
+  it('says so when durable is asked for and no engine was wired', async () => {
+    const dispatcher = new WebhookDispatcher({
+      processor: new WebhookProcessor({ store: new InMemoryBillingStore() }),
+      mode: 'durable',
+    });
+
+    const result = await dispatcher.dispatchAll(event('evt_7'));
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]?.error.message).toMatch(/no durable engine was provided/);
+  });
+});

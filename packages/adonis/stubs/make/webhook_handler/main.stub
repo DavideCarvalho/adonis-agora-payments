@@ -6,24 +6,42 @@
   })
 }}}
 import { inject } from '@adonisjs/core'
-import type { WebhookEvent } from '@adonis-agora/payments'
+import type { WebhookEventFor } from '@adonis-agora/payments'
 
 /**
- * Webhook handler para `{{ entity.name }}` — rodado pela rota da própria lib
- * (`/payments/webhook/:provider`) dentro do WebhookProcessor. Um throw marca o evento
- * como failed no ledger e o dispatcher re-tenta (durable/in-process).
+ * Webhook handler for `{{ entity.name }}`, run by the library's own route
+ * (`POST /payments/webhook/:provider`) inside the WebhookProcessor. Throwing marks the
+ * event `failed` in the ledger, the dispatcher retries, and the route answers 500 so the
+ * gateway redelivers — a 2xx over a failed event is the payment lost.
  *
- * Faça a lógica pesada rodar numa fila/workflow durable e dispatch aqui:
+ * The class is resolved from the container, so constructor injection works: add a
+ * dependency and `@inject()` supplies it.
  *
- *   const engine = await app.container.make(WorkflowEngine)
- *   await engine.start(MyWorkflow, { ... }, randomUUID())
+ * `eventType` is checked at BOOT: a type in the `payment.*`/`subscription.*` namespace that
+ * is not one of the normalized `WEBHOOK_EVENT_TYPES` throws, because a handler nothing ever
+ * calls is a grant that silently never happens while the delivery is recorded as processed.
+ *
+ * Webhooks must answer fast. Do the heavy work — the grant, the activation — in a durable
+ * workflow and only dispatch from here:
+ *
+ *   await this.engine.start(MyWorkflow, { externalReference }, randomUUID())
  */
 @inject()
 export default class {{ handlerName }}Handler {
   static readonly eventType = '{{ entity.name }}'
 
-  async handle(event: WebhookEvent): Promise<void> {
-    // Sua lógica de negócio (ou dispatch pra um workflow durable / job da fila)...
-    void event
+  /**
+   * `WebhookEventFor<'{{ entity.name }}'>` types `event.data` from the event type — a payment
+   * payload for the payment events, a dispute payload for the dispute ones — so nothing here
+   * needs the `event.data as PaymentWebhookData` cast that used to open every handler, and
+   * reading a payment field off a dispute is a compile error rather than `undefined`.
+   */
+  async handle(event: WebhookEventFor<'{{ entity.name }}'>): Promise<void> {
+    // `externalReference` is the id YOUR app set on the charge, echoed back by the
+    // gateway — the routing key from this event to your own row.
+    const { externalReference } = event.data
+    if (!externalReference) return
+
+    void externalReference
   }
 }

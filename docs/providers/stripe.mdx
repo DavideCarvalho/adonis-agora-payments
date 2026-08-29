@@ -1,0 +1,304 @@
+---
+title: Stripe
+description: Cards, Pix and boleto on a Brazilian account, hosted invoices, and the Idempotency-Key header — the multi-currency default of the four.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+- **Methods**: pix, credit_card, boleto, undefined. The charge's `method` becomes the
+  intent's `payment_method_types` (`pix` → `pix`, `boleto` → `boleto`, `credit_card` →
+  `card`), so the gateway creates what you asked for. Routing alone does not do it:
+  `payments.driver('pix')` picks the provider, `method: 'pix'` on the charge picks the
+  method. Omit `method` and the intent falls back to the account's dynamic payment
+  methods — Stripe's own default. Pix and boleto have to be enabled on a Brazilian Stripe
+  account first; the driver cannot tell you they are not, the gateway will.
+- **Setup**: `payments.stripe({ apiKey, currency })` — `STRIPE_KEY`; `currency` is
+  **required** (lowercase ISO 4217) and the driver refuses to boot without it. Stripe bills
+  in whatever you hand it, so a default would be a guess at the app's country, and a wrong
+  guess charges instead of failing. The BRL-only gateways below take no such option.
+- **Webhooks**: HMAC verified by the SDK's `constructEvent` — needs `webhookSecret`
+  (`STRIPE_WEBHOOK_SECRET`) — and then **normalized** onto the canonical event types. See
+  [the table below](#webhooks); anything unmapped keeps its Stripe name.
+- **`externalReference`**: mapped into `metadata.external_reference` on the PaymentIntent
+  and the subscription, and read back from the webhook payload.
+- **`idempotencyKey`**: sent as Stripe's `Idempotency-Key` request header — the only
+  thing Stripe deduplicates on — on **every** call that takes one: `charge`,
+  `createCheckout`, `refund`, `createCustomer`, `createSubscription` and
+  `updateSubscription`. Stripe accepts the header on all POST requests, so there is no
+  operation here that has to refuse a key. On a charge it is also copied into
+  `metadata.idempotency_key`, because Stripe does not echo the header back on the object
+  and that copy is what lets `payment.payload` trace a charge to its key.
+- **Pix and boleto payloads**: a Pix intent comes back with `pixCode` (the BR Code the
+  payer copies) and `hostedUrl` (Stripe's instructions page); a boleto intent with
+  `hostedUrl` (the voucher page). `pixQrCodeImage` stays empty — Stripe returns a URL to
+  the PNG, not the base64 image that field promises.
+- **Subscriptions**: SDK-backed recurring billing — pass the Stripe Price id as `planId`.
+  `updateSubscription` applies the description and metadata; the amount needs the
+  subscription item id, which the shared input has no room for, so it is ignored.
+
+```ts title="app/services/checkout_service.ts"
+await payments.driver('credit_card').charge({
+  customerId: 'cus_123',
+  amount: 1990,
+  method: 'credit_card',
+  card: { token: 'tok_visa' },
+  invoice: true,
+})
+```
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`webhookSecret` is not configured (env fallback `STRIPE_WEBHOOK_SECRET`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/stripe` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
+## Webhooks
+
+Every Stripe event is verified, then renamed onto the canonical type the library syncs on.
+The driver used to pass `event.type` through verbatim, which meant the processor — which
+switches on the canonical names — recognized nothing Stripe sent: the events were ledgered
+as processed and `billing_payments` stayed empty.
+
+| Stripe event | Normalized |
+| --- | --- |
+| `payment_intent.succeeded` | `payment.succeeded` |
+| `payment_intent.payment_failed` | `payment.failed` |
+| `payment_intent.canceled`, `.processing`, `.requires_action`, `.amount_capturable_updated` | `payment.updated` |
+| `charge.refunded` (fully refunded) | `payment.refunded` |
+| `charge.refunded` (partial) | `payment.updated` |
+| `charge.dispute.created` (chargeback) | `payment.disputed` |
+| `charge.dispute.created` (inquiry — `warning_*` status) | `payment.dispute_warning` |
+| `radar.early_fraud_warning.created` | `payment.dispute_warning` |
+| `charge.dispute.closed` (`won` / `lost` / `warning_closed`) | `payment.dispute_closed` |
+| `charge.dispute.updated`, `.funds_withdrawn`, `.funds_reinstated` | `payment.updated` |
+| `checkout.session.completed` / `.async_payment_succeeded` with `payment_status: 'paid'` | `payment.succeeded` |
+| `checkout.session.completed` otherwise, `.expired` | `payment.updated` |
+| `checkout.session.async_payment_failed` | `payment.failed` |
+| `customer.subscription.created` | `subscription.created` |
+| `customer.subscription.updated`, `.paused`, `.resumed`, `.trial_will_end` | `subscription.updated` |
+| `customer.subscription.deleted` | `subscription.canceled` |
+
+Anything else — `invoice.*`, `radar.*`, `payout.*` — passes through under its Stripe name
+with the raw object as `event.data`, ledgered and handed to a registered handler. Unknown
+does not mean dropped.
+
+A rename only happens when the canonical payload can actually be built from the object. An
+event whose object has no amount is not a payment event whatever its type says, and the
+built-in handlers throw on a malformed payload — a throw inside the webhook route is a 500
+Stripe retries forever.
+
+### Disputes
+
+**`charge.dispute.created` fires for two different things**, and reading it as one is
+expensive. A chargeback means the cardholder's bank has already pulled the money back. An
+**inquiry** — what Stripe calls the pre-dispute phase, and what the networks call a
+retrieval or a request for information — means the bank is asking a question and **no funds
+have been withdrawn**. Stripe distinguishes them only by a status prefix: an inquiry's
+`status` starts with `warning_`.
+
+So the driver splits them. A chargeback is `payment.disputed` and moves the payment row to
+`disputed`. An inquiry is `payment.dispute_warning` and moves nothing — the payment is still
+paid, because it is.
+
+| Stripe status | Normalized | The money |
+| --- | --- | --- |
+| `needs_response`, `under_review` | `payment.disputed` | withdrawn, held until the outcome |
+| `warning_needs_response`, `warning_under_review` | `payment.dispute_warning` | untouched |
+
+An inquiry payload carries `evidence_details.due_by`, which the driver surfaces as
+`actionableUntil` on the normalized event. That deadline is the entire value of the alert:
+Stripe's own guidance is that failing to answer an inquiry reads to the issuer as accepting
+the claim, and can produce a formal chargeback that is *probably irreversible*.
+
+**`radar.early_fraud_warning.created` is also a `payment.dispute_warning`.** It is the
+issuer's TC40/SAFE fraud report, and it arrives before any dispute exists — Stripe's own
+figure is that around 80% of them become a fraud dispute if you do nothing. It carries no
+deadline, because the window closes when the chargeback is filed, which is the thing you are
+trying to prevent; instead it carries Stripe's `actionable` flag, which is false once a
+dispute has already arrived or the charge is fully refunded, and `reason` from `fraud_type`.
+
+<Callout type="warn" title="Refunding every fraud warning is not the strategy">
+Stripe's published analysis is that the break-even for proactively refunding an early fraud
+warning is a charge worth roughly your dispute fee or less, and that refunding one worth 35%
+more than the fee is probably not worth it. The library gives you the event and the numbers;
+which ones to refund is a business rule, and it stays in your code.
+</Callout>
+
+**`charge.dispute.closed` carries the outcome** — `won`, `lost`, or `warning_closed` for an
+inquiry that sat 120 days without escalating. It normalizes to `payment.dispute_closed` with
+`outcome: 'won' | 'lost' | 'expired'`. `warning_closed` is `expired` rather than `won`
+because the networks send no explicit win for an inquiry: nothing was decided in your
+favour, the clock simply ran out the right way. A close whose status the driver cannot read
+stays a `payment.updated` rather than inventing a result.
+
+`charge.dispute.updated`, `.funds_withdrawn` and `.funds_reinstated` are movement inside an
+open dispute, not a resolution of it, and stay `payment.updated` with the full Dispute
+object on `event.raw`.
+
+Every one of these is keyed on the **PaymentIntent**, because that is the id `charge()`
+returns and every other event here uses. `payment_intent` is nullable on both the Dispute
+and the Early Fraud Warning — a legacy Charges-API charge has none — so the charge id is the
+fallback rather than an assumption.
+
+## Answering a dispute
+
+Stripe is the only driver with `capabilities.disputes: true`, so `findDispute()` and
+`submitDisputeEvidence()` are real here: `GET /v1/disputes/{id}` and
+`POST /v1/disputes/{id}` with the `evidence` hash, on API version `2025-08-27.basil`.
+
+```ts
+// `findDispute` and `submitDisputeEvidence` are optional on the contract, so a driver
+// without them is a type error rather than a runtime surprise — check the capability.
+const stripe = payments.driver('stripe')
+const dispute = await stripe.findDispute?.('du_1NGiUn2eZvKYlo2C')
+
+if (dispute?.canSubmitEvidence) {
+  console.log('respond by', dispute.evidenceDueBy)
+}
+```
+
+`Dispute` leads with the two fields an operator acts on, and both are read from Stripe's
+own `evidence_details` rather than inferred from the status:
+
+- **`evidenceDueBy`** ← `evidence_details.due_by` (a Unix timestamp, surfaced as ISO 8601).
+- **`canSubmitEvidence`** ← the status **and** `evidence_details.past_due`. Past the
+  deadline the dispute is lost by default even while the status still says
+  `needs_response`, so the status alone would say yes to something the API rejects.
+
+| Stripe `status` | `Dispute.status` | `canSubmitEvidence` |
+| --- | --- | --- |
+| `needs_response` | `open` | ✅ (unless `past_due`) |
+| `warning_needs_response` | `warning` | ✅ (unless `past_due`) |
+| `under_review` | `under_review` | — one submission, already spent |
+| `warning_under_review` | `warning` | — |
+| `won` | `won` | — |
+| `lost` | `lost` | — |
+| `warning_closed` | `expired` | — |
+| `prevented` | `canceled` | — |
+
+The `warning_*` statuses stay on the warning side of the money line — an inquiry withdraws
+nothing — which is the same split the webhook mapping makes. `warning_closed` is `expired`
+rather than `won` because an inquiry that lapses is not a decision in your favour, and
+`prevented` — a dispute stopped before it became a formal chargeback — is `canceled`
+because the money never left. **A dispute can arrive already closed**: Stripe closes some
+as `lost` immediately, and the networks forbid contesting some reasons outright. Those read
+`canSubmitEvidence: false`, which is the point — you find out before building the case, not
+at the API error.
+
+The whole Dispute object is on `payload`, including **`is_charge_refundable`**: while it is
+true a refund can still end the matter, and once the charge is fully refunded Stripe
+withdraws nothing further.
+
+<Callout type="warn" title="Submitting is final, and it happens once">
+Stripe forwards your response to the issuing bank immediately. You cannot edit it, add to
+it, or send a second one. `submitDisputeEvidence` therefore re-reads the dispute and
+refuses when Stripe will not accept evidence, refuses an empty hash rather than spending
+the submission on nothing, and refuses any field it cannot carry — see below. It never
+decides *whether* to fight: that depends on margin, customer value and fraud history, and
+it stays in your code.
+</Callout>
+
+### What `DisputeEvidence` maps to
+
+| `DisputeEvidence` | Stripe `evidence` field |
+| --- | --- |
+| `explanation` | `uncategorized_text` |
+| `customerName` | `customer_name` |
+| `customerEmail` | `customer_email_address` |
+| `customerIpAddress` | `customer_purchase_ip` |
+| `shippingCarrier` | `shipping_carrier` |
+| `shippingTrackingNumber` | `shipping_tracking_number` |
+| `shippingDate` | `shipping_date` |
+| `serviceDate` | `service_date` |
+| `documentIds` (exactly one) | `uncategorized_file` |
+| `metadata` | Stripe's own field names, verbatim |
+
+```ts
+await stripe.submitDisputeEvidence?.('du_1NGiUn2eZvKYlo2C', {
+  explanation: 'Delivered and signed for; the customer used the account for six weeks after.',
+  customerEmail: 'jane@example.com',
+  shippingCarrier: 'UPS',
+  shippingTrackingNumber: '1Z999AA10123456784',
+  // Stripe's own field names for everything the shared shape has no name for.
+  metadata: {
+    product_description: 'Widget ABC, red',
+    receipt: 'file_1Mr4LDLkdIwHu7ix1Ur',   // a File upload, purpose `dispute_evidence`
+  },
+})
+```
+
+`metadata` is the escape hatch, and it is checked: a key that is not one of Stripe's 27
+evidence field names throws here rather than failing the whole submission at the API, and a
+field that takes a **File upload id** (`receipt`, `customer_communication`,
+`service_documentation`, `shipping_documentation`, `cancellation_policy`, `refund_policy`,
+`customer_signature`, `duplicate_charge_documentation`, `uncategorized_file`) rejects
+anything that is not a `file_…` id. Setting the same field twice — once through the typed
+shape and once through `metadata` — throws too; the driver will not pick a winner.
+
+Two `metadata` keys are not evidence fields:
+
+- **`submit`** — the update's own parameter. Defaults to `true`, because the method is
+  called submit; `submit: false` stages a draft that stays visible in the API and the
+  Dashboard until someone sends it.
+- **`enhanced_evidence`** — forwarded verbatim, for Visa CE 3.0 and the Visa/Mastercard
+  compliance programs.
+
+### What it refuses, and why
+
+| You pass | It throws, because |
+| --- | --- |
+| `receiptUrl` | Stripe's `receipt` is a **File upload id**, not a URL, and reviewing banks follow no links. Upload with purpose `dispute_evidence`, pass the id as `metadata.receipt`. |
+| `invoiceUrl` | No invoice-URL field exists. Same route: upload it, or describe it in `explanation`. |
+| `termsUrl`, `termsAcceptedAt` | No terms field. The nearest homes are `metadata.refund_policy` / `metadata.cancellation_policy` (files) with their `*_disclosure` text fields. |
+| `priorUndisputedPayments` | Visa CE 3.0 wants exactly **two prior charge ids**, each with the account id, device fingerprint and IP — not a count — and only on a dispute Stripe marked eligible. Build `metadata.enhanced_evidence` yourself. |
+| `documentIds` with more than one id | Stripe files evidence **by type**, one id per field, and an array says nothing about which is which. Name each in `metadata`. |
+| nothing at all | An empty submission is still the one submission. |
+
+None of these costs a round trip: the evidence is mapped before the dispute is read, so a
+field the driver cannot carry fails immediately. The alternative — dropping it — would let
+you believe a receipt was submitted and find out at the outcome, which is the one bug this
+file must not have.
+
+## `authorized` — `requires_capture`
+
+With `capture_method: 'manual'` a confirmed PaymentIntent sits at `requires_capture`: the
+funds are held on the card and nothing has moved. That now maps to `authorized`.
+
+It used to fall through to **`failed`** — a live authorization reported as a dead payment —
+and `requires_confirmation` fell there with it; that one is `pending` now. Capture itself
+is Stripe's `paymentIntents.capture`, which is not on the driver contract.
+
+## Paused subscriptions
+
+Stripe's `paused` status mapped to `active`, which entitled a subscriber nobody is billing —
+pausing collection is precisely how you stop serving them. It is `paused` now: the
+subscription exists, it will bill again, and it grants nothing today.
+
+## Payment methods
+
+`supportedMethods` is unchanged (`pix`, `credit_card`, `boleto`, `undefined`): those are
+the methods `charge()` can actually pin onto `payment_method_types`. Stripe has no single
+type for "a bank transfer" — it has iDEAL, Bancontact, EPS, P24, BLIK and a new one most
+quarters — so routing by the wider categories would promise an instrument this call cannot
+choose. Ask for one of those with `metadata` and Stripe's dashboard settings instead.
+
+What *did* widen is the method reported back on `Payment.method`, which is now a category
+rather than only `card`/`pix`/`boleto`/`unknown`:
+
+| Stripe type | `Payment.method` |
+| --- | --- |
+| `sepa_debit`, `us_bank_account`, `acss_debit`, `bacs_debit`, `au_becs_debit` | `bank_debit` |
+| `ideal`, `bancontact`, `eps`, `p24`, `blik`, `multibanco`, `sofort`, `customer_balance` | `bank_transfer` |
+| `link`, `paypal`, `wechat_pay`, `alipay`, `cashapp`, `revolut_pay`, `amazon_pay`, `twint` | `wallet` |
+| `klarna`, `afterpay_clearpay`, `affirm`, `zip` | `bnpl` |
+| `oxxo`, `konbini`, `paysafecard` | `voucher` |
+
+The brand stays readable on `payment.payload`. The type is read off
+`payment_method_types[0]`, which is the list of methods the intent *allows*: exact when the
+charge named a `method` (one entry), and Stripe's own ordering when the account's dynamic
+payment methods are in play.

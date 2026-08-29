@@ -1,0 +1,269 @@
+---
+title: Asaas
+description: The Brazilian workhorse — Pix, boleto, card and debit, native recurring billing and NFS-e, with externalReference propagated to every installment.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+The Brazilian workhorse: Pix, boleto, card and debit, native recurring billing, and
+native NFS-e.
+
+- **Methods**: pix, boleto, credit_card, debit_card, undefined.
+- **Setup**: `payments.asaas({ apiKey, sandbox, webhookToken })` — `ASAAS_API_KEY`;
+  sandbox defaults to `NODE_ENV !== 'production'` (the sandbox API host is used).
+- **Webhooks**: authenticated by a shared token you set in the dashboard
+  (`asaas-access-token` / `asaas-webhook-token` header), compared timing-safe against
+  `webhookToken`. **The token is required** — without it the driver reports
+  `webhookVerification: 'unconfigured'` and the app refuses to boot. Events `PAYMENT_CREATED`,
+  `PAYMENT_RECEIVED`, `PAYMENT_OVERDUE`, `PAYMENT_REFUNDED`, `PAYMENT_CHARGEBACK_*`,
+  `SUBSCRIPTION_*` — see [Chargebacks](#chargebacks) for the dispute mapping.
+- **Idempotency**: Asaas' API has none, so `charge()` **does the lookup itself** and every
+  other method refuses the key loudly — see [Idempotency](#idempotency-asaas-has-none-so-charge-does-it).
+- **`externalReference`**: sent as the Asaas `externalReference` field — and crucially
+  **propagated to every installment** of a subscription's charges, so a webhook for the
+  3rd monthly charge still routes back to your subscription record.
+- **Subscriptions**: native recurring billing. The gateway generates charges and sends a
+  webhook per charge (with the subscription id). Pass `card` for transparent checkout —
+  a tokenized card auto-charged each cycle.
+- **Invoices**: **native NFS-e** — configure `invoice.asaas({ apiKey })` as the invoice
+  provider so `invoice: true` emits through Asaas itself (or use automatic emission per
+  subscription in the dashboard; the `invoice` option also works through any provider).
+- **Splits**: marketplace-style — pass `split` on the charge to share it across wallets
+  (`walletId` + `percentualValue` and/or `fixedValue`).
+- **Requires** a customer for every charge and subscription.
+
+```ts title="app/services/checkout_service.ts"
+await payments.driver('credit_card').createSubscription({
+  customerId: 'cus_123',
+  planId: 'plan_pro',
+  amount: 4990,
+  startDate: '2026-09-01',
+  externalReference: 'sub:sub_local_1',
+  card: {
+    token: 'tok_123',
+    holder: {
+      name: 'A', email: 'a@b.com', cpfCnpj: '123',
+      postalCode: '000', addressNumber: '1', phone: '999',
+    },
+    remoteIp: '1.2.3.4',
+  },
+})
+```
+
+## Chargebacks
+
+Asaas moves a disputed payment through three states, and sends one event for each:
+
+| Asaas event | Asaas' own words | Normalized |
+| --- | --- | --- |
+| `PAYMENT_CHARGEBACK_REQUESTED` | "Chargeback recebido" | **`payment.disputed`** — the row moves to `disputed` |
+| `PAYMENT_CHARGEBACK_DISPUTE` | "Chargeback em disputa após apresentação de documentos" | `payment.updated` |
+| `PAYMENT_AWAITING_CHARGEBACK_REVERSAL` | "Dispute won, awaiting acquirer settlement" | **`payment.dispute_closed`** (`won`) |
+
+The first one opens the dispute; the middle one is movement inside it — documents
+submitted, nothing decided — and the last is Asaas naming an outcome, which is why it
+closes the dispute as `won` instead of being flattened into an update. A won close puts
+the row back to `paid`: `revenue()` sums rows that are `paid`, so leaving it at `disputed`
+writes off money that is coming back. `event.raw.event` still names which event arrived.
+
+**There is no warning.** Asaas' payment event list has no fraud alert, no retrieval
+request and no "a chargeback is incoming" notification — nothing between a paid charge and
+`PAYMENT_CHARGEBACK_REQUESTED`. The first you hear of a chargeback is the chargeback, so
+this driver emits no `payment.dispute_warning` at all.
+
+### The deadline
+
+When Asaas includes the payment's `chargeback` object on the notification, the driver
+carries three of its fields onto the dispute event:
+
+| Asaas field | Normalized | |
+| --- | --- | --- |
+| `chargeback.deadlineToSendDisputeDocuments` | `actionableUntil` | the only response deadline Asaas publishes anywhere |
+| `chargeback.id` | `disputeId` | the chargeback's own id, for `POST /chargebacks/{id}/dispute` |
+| `chargeback.reason` | `reason` | one of Asaas' 33 reason enums (`FRAUD`, `COMMERCIAL_DISAGREEMENT`, …) |
+
+`amount` stays the **payment's**, not `chargeback.value`: a partial chargeback's value is
+smaller, and the processor writes `amount` onto the row. The disputed figure is on
+`event.raw`.
+
+Asaas' webhook reference sends "the object of the related entity" and points at the
+`GET /payments/{id}` schema for its fields — which is where `chargeback` lives — but no
+published example shows it on a notification. So the driver reads it defensively: if it is
+absent, the event is still a correct `payment.disputed`, just without a deadline. Fetch the
+payment if you need one and it did not arrive.
+
+Plan for it being absent. `evidence_due_by` is what `disputes_due` filters on, so on an Asaas install
+that check can report a healthy **zero** while a chargeback sits open with the money already pulled
+back. The `open_disputes` check needs no deadline and exists for exactly this — see
+[Health checks](/docs/payments/production#health-checks).
+
+<Callout type="warn" title="Asaas does not publish when the money leaves">
+Its developer reference documents `chargeback.status` and says **nothing** about the
+balance; its help centre says the balance is debited when the dispute is *lost*, while also
+describing a won one as the value *returning* to the balance. The two do not agree, so this
+driver does not guess: `CHARGEBACK_REQUESTED` stays `payment.disputed` — the chargeback has
+been filed, and a row that stops counting as revenue while the outcome is open is the safe
+reading either way. Do not read `payment.disputed` here as proof that Asaas has already
+debited you.
+</Callout>
+
+<Callout type="warn" title="Asaas sends no dispute-lost webhook">
+A dispute won ends with the payment returning to `PAYMENT_CONFIRMED`/`PAYMENT_RECEIVED`.
+A dispute **lost** has no event at all — there is no `PAYMENT_CHARGEBACK_LOST` in the event
+list, and it only shows up as `chargeback.status: "DISPUTE_LOST"` on the payment, which you
+have to fetch. Budget a reconciliation job for it rather than waiting for a webhook that
+never comes.
+
+The consequence is that the `billing_disputes` row stays `open` forever — and
+`listDisputesDueWithin` counts past-deadline rows on purpose, so the dispute check stays red until
+nobody reads it. Close the row by hand once you know: from the console,
+[`POST <dashboard>/api/disputes/:gatewayId/resolve`](/docs/payments/dashboard#recording-how-a-dispute-ended),
+which also records who said so; from code, `store.saveDispute({ status: 'lost', outcome: 'lost',
+closedAt })`. Neither sends anything to Asaas.
+</Callout>
+
+`PAYMENT_DUNNING_REQUESTED` and `PAYMENT_DUNNING_RECEIVED` are **not** disputes — that is
+*negativação*, registering a defaulting payer with a credit bureau, which is the opposite
+end of the story from money being pulled back.
+
+## Statuses that mean the money arrived
+
+Two Asaas statuses are a paid charge without Asaas ever moving the money, and both used to
+read as unpaid:
+
+| Status | Maps to | Why |
+| --- | --- | --- |
+| `RECEIVED_IN_CASH` | **`paid`** | Confirmed by hand in the Asaas UI — the customer paid you in cash. It generates no balance in the Asaas account, which is a reconciliation question, not an entitlement one: they paid. |
+| `DUNNING_RECEIVED` | **`paid`** | The debt was settled through the credit bureau. `PAYMENT_DUNNING_RECEIVED` normalizes to `payment.succeeded`, so the row syncs and your handler runs. |
+| `AWAITING_CHARGEBACK_REVERSAL` | **`paid`** | "Dispute won, awaiting acquirer settlement" — the dispute is over and you won it. Its webhook closes the dispute as `won`, which puts the row back to `paid`, and reading the payment back has to agree with it. The acquirer's transfer landing is a reconciliation question, same as the row above. |
+
+And the ones that look like money moving and are not:
+
+| Status | Maps to | Why |
+| --- | --- | --- |
+| `CHARGEBACK_REQUESTED`, `CHARGEBACK_DISPUTE` | `disputed` | The chargeback is open, contested or not — see [Chargebacks](#chargebacks). |
+| `REFUND_REQUESTED`, `REFUND_IN_PROGRESS` | `paid` | Asked for and scheduled. Neither has settled, and Asaas can still deny a refund (`PAYMENT_REFUND_DENIED`). Only `REFUNDED` means the money went back. |
+| `DUNNING_REQUESTED` | `failed` | Overdue and escalated to a credit bureau. Nothing was paid. |
+| `AWAITING_RISK_ANALYSIS` | `pending` | Held for Asaas' manual card review. Their own guidance is to wait before releasing the product. |
+
+`PAYMENT_PARTIALLY_REFUNDED` normalizes to **`payment.updated`**, deliberately not
+`payment.refunded`: the refund handler writes the charge off whole — status `refunded` — so a
+R$10 refund on a R$100 charge would drop R$90 of revenue rather than subtract R$10.
+
+The update is now the handler that records it honestly. `payment.updated` carries
+`refundedAmount` in integer minor units, summed from the payment's own `refunds` array, so
+`billing_payments` keeps its `amount`, its `status` and its `paid_at`, and the net is
+`amount - refunded_amount`. Until that column existed the event reached a branch that did
+nothing at all and the refund was simply lost.
+
+**Only refunds Asaas reports as `DONE` are counted.** An Asaas refund can sit `PENDING`, wait
+on approval, or be `CANCELLED`, and `PAYMENT_REFUND_DENIED` is a real event — summing those
+would write off money still in the account. A notification carrying no `refunds` array at all
+sends **nothing** rather than `0`: absent leaves the stored figure alone, while `0` would
+assert that nothing has gone back.
+
+`PAYMENT_CREDIT_CARD_CAPTURE_REFUSED` and `PAYMENT_REPROVED_BY_RISK_ANALYSIS` both
+normalize to `payment.failed`. `PAYMENT_RECEIVED_IN_CASH_UNDONE` — a cash confirmation
+taken back — is a `payment.updated` rather than a refund: Asaas never held the money, so
+there is nothing to refund. The synced row follows the payload's own status.
+
+## The webhook event id
+
+Asaas sends its **own** `id` on the body of every notification — a value like
+`evt_05b708f9…&368604920`, stable across its retries of that notification — and the driver
+declares it. That id is what the [idempotency ledger](/docs/payments/concepts/idempotency) keys on.
+
+It used to be synthesized as `${event}-${paymentId}`, which is not an event identity: it is a
+(payment, event-type) identity, so the **second** `PAYMENT_UPDATED` about one payment was discarded
+as a replay of the first — and a partial refund arrives as exactly that type. When the payload named
+neither a payment nor a subscription it fell back to `Math.random()`, which turned deduplication off
+outright for those deliveries: every retry of a failing one looked new.
+
+The fallback is now a SHA-256 digest of the raw body, used only when Asaas genuinely sends no `id`.
+It is deterministic — a redelivery of the same notification hashes to the same key and is still
+deduplicated — while two genuinely different notifications differ, which is the property the old key
+lacked.
+
+## Listing invoices pages
+
+`GET /payments` is a paged endpoint (`limit`/`offset`, with an explicit `hasMore` in the envelope),
+and `listInvoices` reads **all** of it: 100 rows per page, `hasMore` as the loop's authority, a short
+page ending it when the envelope omits one. It used to ask with neither parameter and hand back
+whatever default page Asaas felt like returning — so `payments:sync` printed a confident total over
+the most recent page and left every older charge unreconciled, silently.
+
+A paging loop that does not terminate **throws** rather than truncating. Returning a partial list
+quietly is the exact bug the paging replaced.
+
+One mapping is lossy in a direction worth naming: `Invoice['status']` has no `refunded` and no
+`disputed` member, so a refunded or charged-back Asaas payment lands on `draft` — "the gateway said
+something this vocabulary cannot spell". Nothing should read a reversal out of a listing;
+`payments:sync` asks `findPayment` for the authoritative status, which speaks `BillingStatus`.
+
+## Pre-authorized cards
+
+A card charge created with `authorizeOnly: true` holds the money without capturing it, and
+is captured later through `POST /payments/{id}/captureAuthorizedPayment` (three days by
+default, up to 25 for eligible accounts). Asaas reports it as status `AUTHORIZED`, and the
+driver maps it to **`authorized`** — not `pending`, which understates a hold the issuer has
+already granted, and not `paid`, which would grant access against money that evaporates if
+nobody captures it. The `PAYMENT_AUTHORIZED` webhook normalizes to `payment.updated`: the
+contract has no authorization event, and the payment's own status already says it.
+
+## Idempotency: Asaas has none, so `charge()` does it
+
+Asaas documents no idempotency mechanism — no header, no body field, on any endpoint; its
+own guidance is that you deduplicate on your side before you retry. So `refund`,
+`createCustomer`, `createSubscription` and `updateSubscription` **throw** when you pass an
+`idempotencyKey`, rather than accepting it and dropping it: a silently ignored key turns
+your retry guarantee into a second refund.
+
+**`charge()` is the exception, and it honours the key.** It used to accept one and quietly
+repurpose it as an `externalReference` fallback — so an app passing `idempotencyKey: order.id`
+on the one call that moves money, believing it was protected against a double charge on a
+retry, got no protection and no warning either.
+
+It now does the deduplication the refusal message describes, on your behalf: the key travels
+as the charge's `externalReference` — the only handle Asaas echoes back **and** accepts as a
+query filter — and a `GET /payments` scoped to that reference and that customer runs
+**before** the `POST`.
+
+```ts
+await payments.driver('pix').charge({
+  customerId: 'cus_123',
+  amount: 1990,
+  idempotencyKey: `order:${order.id}`,   // at most one Asaas charge for this key
+})
+```
+
+Four properties worth knowing:
+
+- **An explicit `externalReference` wins.** The key only stands in when there is none — they
+  must be the same string, or the second call looks for a key the first never wrote.
+- **A hit returns the charge that already exists**, enriched with its Pix code, so the caller
+  gets a usable payment rather than an error.
+- **Neither side effect re-runs.** No second fiscal invoice is emitted (an NFS-e is a legal
+  document, not a retryable write) and no `charge.created` diagnostic is published for a
+  charge that was not created.
+- **It is not a lock.** Two concurrent calls with the same key can both miss the lookup and
+  both create; Asaas offers nothing to prevent that. It closes the retry case, which is the
+  one that actually happens.
+
+## Transparent checkout — `card`
+
+Asaas' card flow is "tokenize in the frontend, charge with the token" — the card number
+never touches your server. `card` carries the token plus the holder info the gateway
+requires for the charge (and for issuing the NFS-e):
+
+```ts
+await payments.driver('credit_card').charge({
+  customerId: 'cus_123',
+  amount: 1990,
+  card: {
+    token: cardTokenFromFrontend,
+    holder: { name, email, cpfCnpj, postalCode, addressNumber, phone },
+    remoteIp,
+  },
+})
+```

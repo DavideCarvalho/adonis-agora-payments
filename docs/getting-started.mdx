@@ -1,6 +1,6 @@
 ---
 title: Getting started
-description: Install @adonis-agora/payments, configure a gateway, run the billing migrations, register webhooks and make your first charge in about five minutes.
+description: Install @adonis-agora/payments, configure a gateway, register webhooks and make your first charge in about five minutes — with no migration to run.
 icon: Rocket
 ---
 
@@ -18,10 +18,15 @@ node ace add @adonis-agora/payments
 
 The configure command does five things:
 
-1. registers the `payments_provider` in `adonisrc.ts`;
-2. registers the ace commands (`make:billable`, `make:webhook-handler`, `payments:webhook`, `payments:sync`);
-3. publishes `config/payments.ts`;
-4. publishes the billing migrations under `database/migrations/`;
+1. registers three providers in `adonisrc.ts` — `payments_provider`, `dashboard_provider` and
+   `payments_client_provider` (the last two read their own config file and the client one is off
+   unless you enable it), plus the Assembler `init` hook that generates the
+   `app/payment_handlers/` barrel;
+2. registers the ace commands (`make:billable`, `make:webhook-handler`, `payments:webhook`,
+   `payments:sync`, `payments:health`);
+3. publishes `config/payments.ts`, `config/payments_dashboard.ts` and `config/payments_client.ts`;
+4. publishes **one** Lucid migration for the billing tables — which most apps can delete, see the
+   next step;
 5. registers the payment env validations.
 </Step>
 
@@ -54,17 +59,49 @@ export default defineConfig({
 
 Or pass values from anywhere — the driver configs are plain objects, so an API key can come
 from a vault, another config file, or a literal (not recommended for secrets).
+
+<Callout type="warn" title="The webhook credential is not optional">
+`webhookToken` above is what lets the driver authenticate a delivery, and a driver that *can*
+verify with nothing configured **refuses to boot** — because the empty slot used to mean "accept
+anything anyone posts to `/payments/webhook/asaas`", including a body that marks a payment paid.
+
+Set the credential, or, only if verification really happens upstream, say so:
+`allowUnverifiedWebhooks: ['asaas']`. Efí and InfinitePay are exempt: their gateways sign nothing,
+so there is no credential to forget. See
+[Configuration → allowUnverifiedWebhooks](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
 </Step>
 
-<Step title="Run the migrations">
-The billing layer persists subscriptions, payments and the webhook idempotency ledger:
+<Step title="Skip the migration">
+There isn't one to run. The billing layer owns seven tables — customers, subscriptions, payments,
+disputes, usage events, the audit trail and the webhook idempotency ledger — and **it creates them
+itself on first use**, the same convention `@adonis-agora/durable` and `@adonis-agora/authz`
+follow. Nothing to publish, nothing to run, nothing to remember when you upgrade.
+
+The DDL is idempotent, so it costs one round trip on the first query of a process and nothing
+afterwards. Columns added to the library in later versions are carried to a database that already
+has the tables, which is what makes this an upgrade path rather than a first-install convenience.
+
+If you would rather own the DDL — a shared database, a team that reviews every schema change, a
+deploy that runs migrations as their own step — turn it off and run the published migration
+instead:
+
+```ts title="config/payments.ts"
+billing: { autoCreateSchema: false }
+```
 
 ```sh
 node ace migration:run
 ```
 
-If you only want payments without the subscription layer, delete the published migration —
-the drivers work standalone.
+`configure` publishes that one file for exactly this case. It calls the same `createBillingTables`
+the library does, so the two cannot drift. Leaving both on is harmless — whichever runs second
+finds the tables already there — but "who creates this table" is worth having one answer to.
+
+If you want the gateways and none of the persistence, set `billing: { enabled: false }` and delete
+the published migration. The drivers work standalone; what you give up is everything the tables
+carry — the idempotency ledger included, so the mounted webhook route will verify a delivery and
+then do nothing with it.
 </Step>
 
 <Step title="Register webhooks">
@@ -86,6 +123,9 @@ import { getPayments } from '@adonis-agora/payments/services/main'
 
 const payments = getPayments()
 
+// Your own row, created before the money is asked for.
+const order = await Order.create({ total: 1990, status: 'awaiting_payment' })
+
 // A customer at the routed provider for `pix`
 const customer = await payments.driver('pix').createCustomer({
   name: 'Jane Doe',
@@ -93,15 +133,19 @@ const customer = await payments.driver('pix').createCustomer({
   taxId: '123.456.789-00',
 })
 
-// Charge via Pix and emit an invoice through the default invoice provider
+// Charge via Pix. `driver('pix')` threads the method into the charge, so you do not
+// repeat `method: 'pix'` here.
 const payment = await payments.driver('pix').charge({
   customerId: customer.id,
-  amount: 1990, // R$ 19,90 — integer cents, never floats
-  invoice: true,
+  amount: order.total, // 1990 is R$ 19,90 — integer cents, never floats
+  externalReference: order.id, // comes back on every webhook for this charge
 })
 
 // payment.pixCode → the copy-paste BR code to show the customer
 ```
+
+Add `invoice: true` to that call to emit a fiscal note with it — it needs an `invoice` section in
+the config first, or the charge throws. See [Invoices](/docs/payments/invoices).
 </Step>
 </Steps>
 
@@ -116,8 +160,9 @@ actually moves, the gateway calls your webhook endpoint, and the library:
 3. **syncs** the local billing tables to the confirmed state,
 4. runs **your business logic** (grant the credits, activate the subscription).
 
-That last step is where the app's value lives, and it has three equivalent homes —
-[documented in depth in Webhooks](/docs/payments/webhooks#running-your-business-logic). The fastest
+That last step is where the app's value lives, and it has four homes with different failure
+behaviour —
+[documented in depth in Webhooks](/docs/payments/webhooks#running-your-business-logic--four-options). The fastest
 path to something real is the convention folder:
 
 ```sh
@@ -128,13 +173,15 @@ node ace make:webhook-handler payment.succeeded
 @inject()
 export default class PaymentSucceededHandler {
   static readonly eventType = 'payment.succeeded'
-  async handle(event: WebhookEvent): Promise<void> {
+  async handle(event: WebhookEventFor<'payment.succeeded'>): Promise<void> {
     // dispatch a durable workflow — durable owns retry + exactly-once
   }
 }
 ```
 
-The provider picks the file up at boot — no registration step.
+The provider picks the file up at boot — no registration step. `WebhookEventFor<T>` types
+`event.data` from the event type, so there is no cast to write; and `eventType` is checked at boot,
+so a misspelling throws instead of registering a handler nothing ever calls.
 
 <Callout type="info" title="Never trust a payment until the webhook">
 A `PENDING` charge is a *promise*, not revenue. Grant access only after the gateway
@@ -145,8 +192,8 @@ make safe. See [Webhooks](/docs/payments/webhooks) and [Billing](/docs/payments/
 ## Next steps
 
 - [Configuration](/docs/payments/configuration) — providers, method routing, invoices, the billing layer.
-- [Providers](/docs/payments/providers) — Stripe, AbacatePay, Asaas, Woovi specifics.
-- [Webhooks](/docs/payments/webhooks) — signature validation, idempotency, and the three ways to run your business logic.
+- [Providers](/docs/payments/providers) — the eighteen gateways side by side, and what each one cannot do.
+- [Webhooks](/docs/payments/webhooks) — signature validation, idempotency, and the four places your business logic can live.
 - [Billing](/docs/payments/billing) — subscriptions, trials, the billable mixins.
 - [Invoices](/docs/payments/invoices) — emitting invoices with the charge.
 - [Diagnostics](/docs/payments/diagnostics) — every milestone on the observability bus.

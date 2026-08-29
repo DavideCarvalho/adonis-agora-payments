@@ -4,12 +4,13 @@
  * JSON API at `<base>/api`).
  *
  * Mirrors `@adonis-agora/durable-dashboard`'s `durable-client.ts`: the same injected-globals base
- * resolution, the same `http()` helper and the same 401 → auth-surface redirect. The surface is much
- * smaller — this console has three READ endpoints and no control actions, because payments has no
- * run graph and no retry/replay.
+ * resolution, the same `http()` helper and the same 401 → auth-surface redirect.
  *
- * MONEY: every amount here is INTEGER CENTS, exactly as stored. Nothing in this file divides by 100;
- * `src/app/money.ts` formats at render.
+ * Reads are `GET`; the two things that CHANGE something — refunding a payment and retrying a failed
+ * webhook event — are `POST`, and are the only calls in this file that are not idempotent.
+ *
+ * MONEY: every amount here is INTEGER MINOR UNITS, exactly as stored. Nothing in this file divides;
+ * the divisor is not always 100 either (`src/app/money.ts` knows the rule and formats at render).
  */
 
 // ── Wire types (every `Date` is already an ISO string by the time it reaches this client — see
@@ -32,6 +33,16 @@ export interface Overview {
   metrics: OverviewMetric[];
 }
 
+/** The app-side owner of a payment, resolved through `billing_customers`. */
+export interface PaymentOwner {
+  /** `'users'`, or whatever the app passed to `ensureCustomer`. */
+  type: string | null;
+  /** The app's own row id for that owner. */
+  id: string | null;
+  name: string | null;
+  email: string | null;
+}
+
 export interface PaymentRow {
   id: string;
   gatewayId: string;
@@ -43,7 +54,67 @@ export interface PaymentRow {
   currency: string;
   customerId: string | null;
   subscriptionId: string | null;
+  /**
+   * The APP's own id for this charge — its order number, its enrolment id.
+   *
+   * The only field on this row the app itself chose, and therefore the only one that can answer
+   * "did THIS student's payment land?". `null` when the gateway echoed none back.
+   */
+  externalReference: string | null;
+  /** INTEGER MINOR UNITS already refunded; `null` on a row older than the column. Net is
+   *  `amount - refundedAmount` — NEVER divide here. */
+  refundedAmount: number | null;
+  /** Who this payment belongs to in the APP, or `null` when nothing mapped the gateway customer. */
+  owner: PaymentOwner | null;
   paidAt: string | null;
+  createdAt: string | null;
+  /** Whether the server will accept a refund for this row (only a `paid` payment). Taken from the
+   *  server rather than re-derived, so the button and the endpoint can never disagree. */
+  refundable: boolean;
+}
+
+/** One `billing_customers` row — the mapping that ties a gateway customer to an app user. */
+export interface CustomerRow {
+  id: string;
+  /** The GATEWAY's customer id (`cus_…`) — what a payment row carries. */
+  gatewayId: string;
+  provider: string;
+  ownerType: string | null;
+  ownerId: string | null;
+  email: string | null;
+  name: string | null;
+  taxId: string | null;
+  createdAt: string | null;
+}
+
+/** One audit row — who did what, and when. `actor: null` means unattributed, not "the system". */
+export interface AuditRow {
+  id: string;
+  /** `payment.refunded` | `dispute.resolved` | `webhook.rejected`. */
+  action: string;
+  actor: string | null;
+  provider: string | null;
+  subjectType: string | null;
+  subjectId: string | null;
+  /** INTEGER MINOR UNITS, or `null`. */
+  amount: number | null;
+  currency: string | null;
+  message: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string | null;
+}
+
+/** One `billing_subscriptions` row. `paused` is NOT a flavour of `active`: the subscriber is not
+ *  paying and must not be entitled. */
+export interface SubscriptionRow {
+  id: string;
+  gatewayId: string;
+  provider: string;
+  status: string;
+  planId: string;
+  customerId: string | null;
+  trialEndsAt: string | null;
+  endsAt: string | null;
   createdAt: string | null;
 }
 
@@ -57,6 +128,77 @@ export interface WebhookEventRow {
   error: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+  /** Only a `failed` row can be retried — the ledger refuses to re-claim anything else. */
+  retryable: boolean;
+}
+
+/**
+ * One `billing_disputes` row — a chargeback or a pre-chargeback alert.
+ *
+ * Three fields here are nullable for reasons that are NOT "missing data", and the screen has to
+ * render each one as the thing it means:
+ *
+ * - `amount`: a Stripe early fraud warning names no money at all. Not zero — absent.
+ * - `currency`: same row, same reason.
+ * - `evidenceDueBy`: the gateway sent no deadline. Never "no hurry" — several gateways send none,
+ *   and Woovi's three-day rule is policy rather than a field.
+ */
+export interface DisputeRow {
+  id: string;
+  /** The DISPUTE's own gateway id — what you search for in the gateway's dashboard. */
+  gatewayId: string;
+  /** The disputed payment's gateway id — the join back to the payments screen. */
+  paymentGatewayId: string;
+  provider: string;
+  /** A `DisputeStatus`: warning | open | under_review | won | lost | canceled | expired. */
+  status: string;
+  /** The gateway's own reason code, verbatim — the vocabulary is per-network. */
+  reason: string | null;
+  /** INTEGER MINOR UNITS, or `null` when the gateway named no money. NEVER divide here. */
+  amount: number | null;
+  currency: string | null;
+  /** When evidence must be submitted by, or `null` when the gateway sent none. */
+  evidenceDueBy: string | null;
+  outcome: string | null;
+  openedAt: string | null;
+  closedAt: string | null;
+  createdAt: string | null;
+}
+
+/** One `billingHealth()` check. Every one is a "should be zero" check, so `count > 0` IS the alarm. */
+export interface HealthCheck {
+  key:
+    | 'stuck_webhooks'
+    | 'failed_webhooks'
+    | 'unconfirmed_payments'
+    | 'disputes_due'
+    | 'open_disputes'
+    | 'rejected_deliveries';
+  label: string;
+  count: number;
+  healthy: boolean;
+  /** What a non-zero count means and what to do about it. */
+  hint: string;
+}
+
+/** Which provider/event pairs make up the failed-events count, worst first. */
+export interface HealthFailure {
+  provider: string;
+  type: string;
+  count: number;
+}
+
+export interface Health {
+  healthy: boolean;
+  checkedAt: string;
+  checks: HealthCheck[];
+  failures: HealthFailure[];
+  /** WHICH windows are closing, soonest first — a count names no gateway dashboard to open.
+   *  Capped by the server; `disputes_due.count` is the real number. */
+  deadlines: DisputeRow[];
+  /** The unanswered disputes, OLDEST first, deadline or not. On a gateway that publishes no
+   *  deadline this is the only one of the two lists that is ever non-empty. */
+  openDisputes: DisputeRow[];
 }
 
 /** Echoed paging. `count === limit` is the ONLY "there might be more" signal: the server never
@@ -65,6 +207,12 @@ export interface Page {
   limit: number;
   offset: number;
   count: number;
+  /** How many rows the server read to build this page. Equal to `count` unless a provider filter
+   *  made it scan past non-matching rows. */
+  scanned: number;
+  /** `true` when the provider scan stopped at its cap before filling the page — "none found" here
+   *  means "none in the rows scanned", which is a different answer and has to look like one. */
+  truncated: boolean;
 }
 
 export interface PaymentsPage {
@@ -72,12 +220,116 @@ export interface PaymentsPage {
   page: Page;
   statuses: readonly string[];
   currency: string;
+  /** The lookup filters the server applied, echoed back so an empty page can say "no payment
+   *  carries reference X" instead of the much less useful "no payments". */
+  filters: {
+    reference: string | null;
+    gatewayId: string | null;
+    customerId: string | null;
+  };
+}
+
+/**
+ * Everything this system knows about ONE payment.
+ *
+ * Deliberately not called a history. `billing_payments` is a single mutable row upserted in
+ * place, so what changed and when is not recorded anywhere; this assembles what IS knowable —
+ * the current state, the owner, the disputes filed against it, the ledger rows whose delivery
+ * names it, and who refunded it from this console.
+ */
+export interface PaymentDetail {
+  payment: PaymentRow;
+  disputes: DisputeRow[];
+  events: {
+    rows: WebhookEventRow[];
+    /** How the ledger rows were found. `payload-substring` means an unindexed substring scan
+     *  over the stored payload — it can miss, and it can over-match. Say so on screen. */
+    matchedBy: string;
+  };
+  audit: AuditRow[];
+  currency: string;
+}
+
+export interface AuditPage {
+  audit: AuditRow[];
+  page: { limit: number; offset: number; count: number };
+  /** The actions the filter offers. A UI list, not a whitelist — an app may record its own. */
+  actions: readonly string[];
+}
+
+export interface CustomersPage {
+  customers: CustomerRow[];
+  /** Narrower than {@link Page}: every filter here is a column the store applies, so there is
+   *  no bounded scan and therefore no `scanned`/`truncated` caveat to report. */
+  page: { limit: number; offset: number; count: number };
 }
 
 export interface WebhookEventsPage {
   events: WebhookEventRow[];
   page: Page;
   statuses: readonly string[];
+}
+
+export interface SubscriptionsPage {
+  subscriptions: SubscriptionRow[];
+  page: Page;
+  statuses: readonly string[];
+  /** Whole-table counts, not page counts — `past_due` is the figure that decides the morning. */
+  counts: { past_due: number };
+}
+
+/**
+ * A page of disputes.
+ *
+ * `page` is NARROWER than {@link Page} on purpose: the store filters disputes by provider on a
+ * column, so there is no bounded scan behind this list and therefore no `scanned`/`truncated` to
+ * report. Claiming those here would be claiming a caveat that does not apply.
+ *
+ * `dueWithin` is present only in work-list mode (`?dueWithin=<hours>`). Its `total` is a SEPARATE,
+ * unbounded count: a full page says nothing about how many more windows are closing, and that is
+ * the number an operator plans the day around.
+ */
+export interface DisputesPage {
+  disputes: DisputeRow[];
+  page: { limit: number; offset: number; count: number };
+  statuses: readonly string[];
+  dueWithin?: { hours: number; total: number };
+}
+
+/** The gateways this install actually has data for — the provider filter is built from this, never
+ *  from a hardcoded list of the eighteen drivers the package ships. */
+export interface ProvidersList {
+  providers: string[];
+  /** The event types this install has actually RECEIVED, for the ledger's type filter. Same
+   *  reason as `providers`: a filter offering types that return nothing hides the ones that do. */
+  eventTypes: string[];
+}
+
+export interface RefundResult {
+  refund: { gatewayId: string; amount: number; currency: string; status: string };
+  payment: { gatewayId: string; provider: string; amount: number; currency: string };
+  /** The trail entry recording WHO refunded this. `null` on an install whose audit table is not
+   *  there yet — the refund still happened, and saying so beats pretending it was filed. */
+  audit: AuditRow | null;
+  note: string;
+}
+
+export interface ResolveDisputeResult {
+  dispute: {
+    gatewayId: string;
+    paymentGatewayId: string;
+    provider: string;
+    status: string;
+    outcome: string;
+    closedAt: string;
+  };
+  audit: AuditRow | null;
+  note: string;
+}
+
+export interface RetryResult {
+  gatewayEventId: string;
+  status: 'processed';
 }
 
 declare global {
@@ -150,12 +402,46 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error('Session expired; redirecting to sign-in.');
   }
   if (res.status === 503) {
-    // The billing layer is off in this deployment. A generic "500" would send an operator hunting
-    // for a bug; the server's own message names the actual cause.
+    // The billing layer (or the payments manager) is off in this deployment. A generic "500" would
+    // send an operator hunting for a bug; the server's own message names the actual cause.
     throw new Error(await readError(res, 'The billing layer is disabled in this deployment.'));
   }
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    // The server's `{ error }` beats `502 Bad Gateway` every time: when a refund is refused, THAT
+    // sentence is the gateway's own reason, and it is the only thing the operator can act on.
+    throw new Error(await readError(res, `${res.status} ${res.statusText}`));
+  }
   return (await res.json()) as T;
+}
+
+/**
+ * The host app's CSRF token, when it sets one.
+ *
+ * `@adonisjs/shield` guards every state-changing route of the app this console is mounted
+ * in, and it publishes the token as an `XSRF-TOKEN` cookie for exactly this: a browser
+ * client echoes it back in `x-xsrf-token`. Without it the two POST actions below are
+ * rejected before they reach the dashboard's own authorization, and the refund button does
+ * nothing for a reason no message explains.
+ *
+ * Absent cookie → no header, which is the right answer for a host that does not use shield:
+ * sending an empty token would be worse than sending none.
+ */
+function csrfHeader(): Record<string, string> {
+  if (typeof document === 'undefined') return {};
+  const match = /(?:^|;\s*)XSRF-TOKEN=([^;]*)/.exec(document.cookie);
+  const token = match?.[1];
+  if (!token) return {};
+  return { 'x-xsrf-token': decodeURIComponent(token) };
+}
+
+/** A JSON `POST` — the two actions. Kept separate from `http` so no read can ever reach it by
+ *  accident, and so the body/`content-type` are stated in exactly one place. */
+async function post<T>(path: string, body?: unknown): Promise<T> {
+  return http<T>(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...csrfHeader() },
+    body: JSON.stringify(body ?? {}),
+  });
 }
 
 /** Read `{ error }` off a failed response, falling back to `fallback` for an unreadable body. */
@@ -185,26 +471,184 @@ export function buildQuery(params: Record<string, string | number | undefined>):
 
 export interface ListOptions {
   status?: string | undefined;
+  /** Gateway name (`'stripe'`, `'asaas'`, …). Comes from `providers()`, never from a fixed list. */
+  provider?: string | undefined;
   limit?: number | undefined;
   offset?: number | undefined;
 }
 
+/** {@link ListOptions} plus the three EXACT lookups only payments have. */
+export interface PaymentListOptions extends ListOptions {
+  /** The APP's own reference for the charge — an order number, an enrolment id. Exact match. */
+  reference?: string | undefined;
+  /** The gateway's payment id. Exact match. */
+  gatewayId?: string | undefined;
+  /** The gateway's customer id — every payment recorded for one customer. Exact match. */
+  customerId?: string | undefined;
+}
+
+/** {@link ListOptions} plus the ledger's own filter: which EVENT TYPE. */
+export interface WebhookEventListOptions extends ListOptions {
+  type?: string | undefined;
+}
+
+/** The customers screen's filters. `ownerType` + `ownerId` is the key; an id alone is not. */
+export interface AuditListOptions {
+  action?: string | undefined;
+  actor?: string | undefined;
+  provider?: string | undefined;
+  subjectType?: string | undefined;
+  subjectId?: string | undefined;
+  limit?: number | undefined;
+  offset?: number | undefined;
+}
+
+export interface CustomerListOptions {
+  provider?: string | undefined;
+  ownerType?: string | undefined;
+  ownerId?: string | undefined;
+  gatewayId?: string | undefined;
+  limit?: number | undefined;
+  offset?: number | undefined;
+}
+
+/** {@link ListOptions} plus the one filter only disputes have: a deadline horizon in HOURS. */
+export interface DisputeListOptions extends ListOptions {
+  /**
+   * Ask for the WORK LIST instead of the log: only open disputes carrying a deadline inside this
+   * many hours, soonest first. A row already past its deadline is still in it — it is still open
+   * and still unanswered.
+   */
+  dueWithin?: number | undefined;
+}
+
+/** The query every list endpoint takes, built once so the three screens cannot drift apart. */
+function listQuery(opts: ListOptions): string {
+  return buildQuery({
+    status: opts.status,
+    provider: opts.provider,
+    limit: opts.limit,
+    offset: opts.offset,
+  });
+}
+
 export const paymentsClient = {
+  health(): Promise<Health> {
+    return http<Health>('/health');
+  },
   overview(period?: PeriodPreset): Promise<Overview> {
     return http<Overview>(`/overview${buildQuery({ period })}`);
   },
-  payments(opts: ListOptions = {}): Promise<PaymentsPage> {
-    return http<PaymentsPage>(
-      `/payments${buildQuery({ status: opts.status, limit: opts.limit, offset: opts.offset })}`,
-    );
+  providers(): Promise<ProvidersList> {
+    return http<ProvidersList>('/providers');
   },
-  webhookEvents(opts: ListOptions = {}): Promise<WebhookEventsPage> {
-    return http<WebhookEventsPage>(
-      `/webhook-events${buildQuery({
+  payments(opts: PaymentListOptions = {}): Promise<PaymentsPage> {
+    return http<PaymentsPage>(
+      `/payments${buildQuery({
         status: opts.status,
+        provider: opts.provider,
+        reference: opts.reference,
+        gatewayId: opts.gatewayId,
+        customerId: opts.customerId,
         limit: opts.limit,
         offset: opts.offset,
       })}`,
     );
+  },
+  /** Everything knowable about ONE payment — see {@link PaymentDetail}. */
+  payment(gatewayId: string): Promise<PaymentDetail> {
+    return http<PaymentDetail>(`/payments/${encodeURIComponent(gatewayId)}`);
+  },
+  customers(opts: CustomerListOptions = {}): Promise<CustomersPage> {
+    return http<CustomersPage>(
+      `/customers${buildQuery({
+        provider: opts.provider,
+        ownerType: opts.ownerType,
+        ownerId: opts.ownerId,
+        gatewayId: opts.gatewayId,
+        limit: opts.limit,
+        offset: opts.offset,
+      })}`,
+    );
+  },
+  /**
+   * The audit trail — refunds issued here, disputes resolved here, and the deliveries this
+   * endpoint REFUSED. The last kind exists nowhere else: a rejected delivery never becomes a
+   * ledger row, so a rotated webhook secret is otherwise indistinguishable from a quiet week.
+   */
+  audit(opts: AuditListOptions = {}): Promise<AuditPage> {
+    return http<AuditPage>(
+      `/audit${buildQuery({
+        action: opts.action,
+        actor: opts.actor,
+        provider: opts.provider,
+        subjectType: opts.subjectType,
+        subjectId: opts.subjectId,
+        limit: opts.limit,
+        offset: opts.offset,
+      })}`,
+    );
+  },
+  subscriptions(opts: ListOptions = {}): Promise<SubscriptionsPage> {
+    return http<SubscriptionsPage>(`/subscriptions${listQuery(opts)}`);
+  },
+  webhookEvents(opts: WebhookEventListOptions = {}): Promise<WebhookEventsPage> {
+    return http<WebhookEventsPage>(
+      `/webhook-events${buildQuery({
+        status: opts.status,
+        provider: opts.provider,
+        type: opts.type,
+        limit: opts.limit,
+        offset: opts.offset,
+      })}`,
+    );
+  },
+  /**
+   * A page of disputes — the LOG by default, the work list when `dueWithin` (in hours) is given.
+   *
+   * `status` is dropped in work-list mode rather than passed along. The server's work list is
+   * already scoped to the open statuses that carry a deadline, so a status sent alongside
+   * `dueWithin` is silently ignored — and a filter that appears to apply and does not is worse
+   * than no filter at all.
+   */
+  disputes(opts: DisputeListOptions = {}): Promise<DisputesPage> {
+    const workList = opts.dueWithin !== undefined;
+    return http<DisputesPage>(
+      `/disputes${buildQuery({
+        status: workList ? undefined : opts.status,
+        provider: opts.provider,
+        dueWithin: opts.dueWithin,
+        limit: opts.limit,
+        offset: opts.offset,
+      })}`,
+    );
+  },
+
+  // ── Actions. `POST` only — see the note on `post()`. ──────────────────────────────────────────
+
+  /** Refund a payment at its gateway. `amount` is INTEGER MINOR UNITS; omit it for the full amount. */
+  refundPayment(gatewayId: string, amount?: number): Promise<RefundResult> {
+    return post<RefundResult>(
+      `/payments/${encodeURIComponent(gatewayId)}/refund`,
+      amount === undefined ? {} : { amount },
+    );
+  },
+  /** Re-run a failed webhook event's handlers. Safe to repeat: the ledger refuses to re-claim an
+   *  event that is in flight or already processed. */
+  retryWebhookEvent(gatewayEventId: string): Promise<RetryResult> {
+    return post<RetryResult>(`/webhook-events/${encodeURIComponent(gatewayEventId)}/retry`);
+  },
+  /**
+   * Record how a dispute ENDED. Sends nothing to the gateway.
+   *
+   * The loop most gateways never close: Asaas publishes no lost-dispute event at all, so a
+   * dispute that was lost sits `open` forever and the health check stays red until nobody
+   * reads it. `status` must be a finished one (`lost` | `won` | `expired` | `canceled`).
+   */
+  resolveDispute(
+    gatewayId: string,
+    input: { status: string; outcome?: string; note?: string },
+  ): Promise<ResolveDisputeResult> {
+    return post<ResolveDisputeResult>(`/disputes/${encodeURIComponent(gatewayId)}/resolve`, input);
   },
 };

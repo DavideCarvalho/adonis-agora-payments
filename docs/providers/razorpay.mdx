@@ -1,0 +1,289 @@
+---
+title: Razorpay
+description: India's dominant gateway — Orders and Payments in integer paise, native subscriptions, and a hex HMAC on every webhook.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Razorpay through its **v1 API** (`https://api.razorpay.com/v1`), authenticated with HTTP
+Basic: the key id is the username, the key secret the password.
+
+- **Methods**: `undefined` only — see below. A Razorpay order does not name an
+  instrument, so this driver cannot promise one.
+- **Setup**: `payments.razorpay({ keyId, keySecret, currency, webhookSecret })` —
+  `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`. There is no
+  `sandbox` option: test mode is a property of the key pair (`rzp_test_…`), not of a
+  different host.
+- **Money**: integer **paise**, end to end. Razorpay's `amount` is the same unit this
+  library's `Money` is, so nothing is divided or multiplied anywhere in the driver —
+  ₹1990.00 is `199000` in your code and `199000` on the wire.
+- **`externalReference`**: `notes.external_reference` on an order or a subscription;
+  `reference_id` on a payment link. Read back out on `event.data.externalReference`.
+- **Refunds**: `POST /payments/{id}/refund`, full or partial.
+- **Subscriptions**: native, with plans (`POST /plans`) you create outside this driver. A
+  `paused` subscription reads as `paused` (it used to read `past_due`, which said the
+  subscriber owed money they did not); `halted` and `pending` stay `past_due`.
+- **Invoices**: `GET /invoices?customer_id=…`.
+
+<Callout type="warn" title="Not yet run against a live account">
+This driver is written against Razorpay's published API reference and covered by unit
+tests that stub the HTTP layer; nothing in it has touched a real Razorpay account. Verify
+your flow with `rzp_test_…` keys before taking real money.
+</Callout>
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`webhookSecret` is not configured (env fallback `RAZORPAY_WEBHOOK_SECRET`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/razorpay` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
+## `charge()` creates an order, not a payment
+
+Razorpay has no "charge this customer" call for a normal integration. You create an
+**order** — an amount you expect to collect — and the payer settles it inside Razorpay
+Checkout, which produces a **payment** against that order.
+
+```ts
+const payment = await payments.driver('razorpay').charge({
+  amount: 199000,                    // paise, straight through
+  description: 'Pro plan',
+  externalReference: 'pay:local_1',
+  idempotencyKey: 'idem_1',          // becomes the order's `receipt`
+})
+
+payment.gatewayId  // 'order_…' — hand this to Razorpay Checkout in the browser
+payment.status     // 'pending' — nobody has paid yet
+```
+
+`findPayment()` accepts an `order_…`, a `pay_…` or a `plink_…` id and branches on the
+prefix. `refund()` only accepts a `pay_…` id, because an order is not the thing that holds
+money — it throws with the id you gave it if you pass anything else.
+
+`idempotencyKey` becomes the order's `receipt`, which is account-level unique: a second
+create with the same receipt is rejected rather than producing a twin order. Razorpay caps
+it at 40 characters and so does this driver, before the round trip.
+
+## Why `supportedMethods` is only `undefined` — even now that `upi` exists
+
+`PaymentMethodName` has a `upi` member now, and this driver still declares nothing but
+`undefined`. The reason was never the missing name: **`POST /v1/orders` has no `method`
+field.** An order is an amount Razorpay expects to collect, and the payer picks card, UPI,
+netbanking or a wallet inside Checkout — method restriction is a Checkout.js option in the
+browser, not something the server-side call can fix. So `charge()` cannot produce a UPI
+payment on request, and declaring `upi` would promise a rail this call does not choose.
+
+The consequence is deliberate: `methods: { credit_card: 'razorpay' }` fails at the manager.
+Nothing in the Orders API can promise a card was used, so a driver that accepted that
+routing would be lying about which rail the money arrived on. `charge({ method: … })`
+throws for the same reason.
+
+On the way **back** it is different: the payer has chosen by then, and `payment.method`
+says what they chose. That is now mapped by category instead of only `card`:
+
+| Razorpay `method` | `Payment.method` |
+| --- | --- |
+| `upi` | `upi` |
+| `card`, `emi` (a card instalment plan) | `card` / `debit_card` |
+| `wallet` | `wallet` |
+| `netbanking` | `bank_transfer` |
+| `paylater`, `cardless_emi` | `bnpl` |
+
+A UPI payment used to leave `Payment.method` unset, because calling it `pix` would have put
+a Brazilian label on an Indian payment. It says `upi` now.
+
+## `authorized` is not `paid`
+
+A Razorpay payment is `authorized` — funds held on the instrument — before it is
+`captured`, which is when the money moves to you. This is the clearest authorize-then-capture
+split of any gateway here.
+
+**`authorized` maps to `authorized`.** It used to map to `pending`, and the driver said so
+on purpose: of the statuses that existed, `pending` was the only one meaning "not settled,
+not failed". It understated the case — a `pending` payment is one nobody has attempted,
+while an authorized one has the payer's money reserved and a clock running on it, because
+Razorpay voids an uncaptured authorization on its own after a few days.
+
+It is still not `paid`, and the `payment.authorized` webhook still normalizes to
+`payment.updated`, never `payment.succeeded`: there is deliberately no canonical
+`payment.authorized` event, and settling on this one would report an order the merchant has
+not been paid for.
+
+Accounts with auto-capture switched off need a way to finish the job, so the driver exposes
+one method outside the `PaymentsDriver` contract:
+
+```ts
+const driver = payments.driver('razorpay') as RazorpayDriver
+await driver.capturePayment('pay_…', 199000)   // amount must equal the authorized amount
+```
+
+Razorpay rejects a partial capture, so the amount you pass has to be the authorized one.
+
+## Webhooks
+
+`X-Razorpay-Signature` is a **hex** HMAC-SHA256 over the **raw** request body, keyed with
+the webhook secret from the dashboard. The driver verifies it timing-safe and rejects a
+missing or wrong signature. With no `webhookSecret` and no `RAZORPAY_WEBHOOK_SECRET` the driver
+reports `'unconfigured'` and the app refuses to boot — for local development without dashboard
+setup, name the provider in `allowUnverifiedWebhooks`.
+
+`event.id` is Razorpay's own `x-razorpay-event-id` header, which is what makes a redelivery
+dedupe in the ledger.
+
+| Razorpay event | Normalized |
+| --- | --- |
+| `payment.captured`, `order.paid`, `payment_link.paid`, `subscription.charged` | `payment.succeeded` |
+| `payment.failed`, `payment_link.expired` | `payment.failed` |
+| `refund.processed` | `payment.refunded` |
+| `payment.dispute.created` | `payment.disputed` / `payment.dispute_warning` — see [Disputes](#disputes) |
+| `payment.dispute.won`/`.lost`/`.closed` | `payment.dispute_closed` |
+| `payment.authorized`, `payment.dispute.under_review`/`.action_required`, `refund.created`, `refund.failed`, `payment_link.cancelled`, `payment_link.partially_paid` | `payment.updated` |
+| `subscription.authenticated` | `subscription.created` |
+| `subscription.cancelled` | `subscription.canceled` |
+| `subscription.activated`, `.updated`, `.pending`, `.halted`, `.paused`, `.resumed`, `.completed` | `subscription.updated` |
+
+Anything else passes through under its Razorpay name.
+
+`externalReference` is looked for on every entity the envelope carries — the payment's
+notes, the payment link's `reference_id`, then the order's and the subscription's notes.
+The API reference does not state that an order's notes are copied onto the payment it
+produces, so the driver checks all of them rather than trusting one.
+
+### Disputes
+
+Razorpay's six dispute events map cleanly onto all three canonical types, but the split is
+not in the event name — `payment.dispute.created` fires for all five **phases**, and the
+first two are not a chargeback.
+
+| Razorpay event | Phase | Normalized |
+| --- | --- | --- |
+| `payment.dispute.created` | `fraud`, `retrieval` | `payment.dispute_warning` |
+| `payment.dispute.created` | `chargeback`, `pre_arbitration`, `arbitration`, or no phase | `payment.disputed` |
+| `payment.dispute.won` | | `payment.dispute_closed` (`won`) |
+| `payment.dispute.lost` | | `payment.dispute_closed` (`lost`) |
+| `payment.dispute.closed` | | `payment.dispute_closed` (`canceled`) |
+| `payment.dispute.under_review`, `.action_required` | | `payment.updated` |
+
+**`fraud` and `retrieval` are pre-dispute.** Razorpay's own definitions: `fraud` is "a dispute
+raised by the bank when it suspects a transaction to be fraudulent based on the risk
+analysis" — the issuer's TC40/SAFE alert — and `retrieval` is "a request initiated by the
+customer with their issuer bank for additional information about a transaction", which
+Razorpay's guide calls "essentially a *soft* chargeback". Nothing has been pulled back in
+either, and Razorpay's own advice is to "take remedial action during the retrievals and
+chargeback phases to avoid complications". Calling them `payment.disputed` moved a paid row
+over money still in the account.
+
+**`respond_by` is the deadline**, a Unix timestamp — "the Unix timestamp by which a response
+should be sent to the customer" — and it comes through as `actionableUntil` in ISO 8601 on
+every dispute event that carries one. It used to sit unread on `event.raw`.
+
+**`payment.dispute.closed` is `canceled`, not `won`.** Razorpay's definition of the `closed`
+status is "a fraudulent transaction is closed after you provide details of the transaction or
+make a refund to the customer. This is seen in fraudulent transactions only" — no verdict was
+reached and no chargeback amount was ever deducted, so nothing was decided in your favour.
+
+A `won`/`lost`/`closed` event that arrives with no `dispute` entity in the envelope degrades
+to `payment.updated`: there is no dispute id, no amount and nothing to close.
+
+<Callout title="Razorpay does not provisionally debit">
+`amount_deducted` is "the amount, in currency subunits, deducted from your Razorpay current
+balance **when the dispute is lost**. This amount will be 0 unless the status of dispute is
+updated to `lost`." Taken literally that is true of the chargeback phase too — Razorpay's
+process flow only ever says "if you lose the dispute, the amount would be deducted from your
+account". So `payment.disputed` here means *a chargeback has been filed against you and the
+bank has opened its official inquiry*, which is what the canonical event names, rather than a
+debit that has already cleared. `event.data.amountDeducted` carries Razorpay's own figure so
+a handler never has to infer it.
+</Callout>
+
+Every one of these is keyed on `dispute.payment_id`, and the amount is `dispute.amount` — the
+envelope carries the payment entity too, and the two disagree: `payment.amount` is what was
+charged, `dispute.amount` what is being claimed back. `event.data` also carries `disputeId`,
+`reason` (the reason code), `disputeStatus` and `disputePhase`.
+
+## `idempotencyKey` — refunds only
+
+Razorpay has **no general idempotency header**. There is no `Idempotency-Key`, and no
+`X-Razorpay-Idempotency-Key`; idempotency is a per-feature header where it exists at all:
+
+| Call | Mechanism |
+| --- | --- |
+| `charge` | the order's `receipt` (account-level unique, max 40 chars) |
+| `createCheckout` | the link's `reference_id` (unique per link) |
+| `refund` | **`X-Refund-Idempotency`** header — at least 10 characters, `[A-Za-z0-9_-]` only |
+| `createCustomer`, `createSubscription`, `updateSubscription` | **none — the driver throws** |
+
+The refund key is validated before the round trip, because a key Razorpay rejects is a key
+that does not deduplicate. Razorpay also requires the retry to repeat the same body, or it
+answers `BAD_REQUEST`.
+
+The three that throw do so deliberately. `POST /v1/customers` and `POST /v1/subscriptions`
+document no idempotency at all, so accepting a key and dropping it would turn your retry
+guarantee into a second customer — or a second live subscription billing the same person
+every month:
+
+```
+[payments] Razorpay does not deduplicate subscription creation: `POST /v1/subscriptions`
+documents no idempotency key, and Razorpay has no general `Idempotency-Key` header — only
+refunds (`X-Refund-Idempotency`) and RazorpayX payouts have one. …
+```
+
+## Subscriptions
+
+A Razorpay subscription is priced by its **plan**, which you create with `POST /v1/plans`
+outside this driver. Several fields on `CreateSubscriptionInput` therefore have no honest
+home, and the driver refuses them rather than dropping them:
+
+- **`amount`** — the price lives on the plan. Passing it here would be a number the gateway
+  never applies.
+- **`cycle`** — likewise (`period`/`interval` on the plan).
+- **`method`** — the payer picks card, UPI or e-mandate on the hosted authorization link.
+- **`card`** — a mandate is authorized on Razorpay's own link, not from a token you hold.
+
+There is also no open-ended Razorpay subscription: `total_count`, the number of cycles to
+bill, is mandatory and `CreateSubscriptionInput` has no field for it. It comes through the
+provider escape hatch and is **refused when absent**, because guessing a number would
+silently cap or over-run the customer's billing:
+
+```ts
+await payments.driver('razorpay').createSubscription({
+  customerId: 'cust_…',
+  planId: 'plan_…',
+  metadata: { totalCount: 12 },        // required — 12 monthly cycles
+})
+```
+
+The hosted authorization link comes back as `short_url` inside `subscription.payload`; send
+the payer there. `customer_id` is not settable at creation — Razorpay fills it in once the
+payer completes the authorization transaction — so the driver records the id you passed in
+`notes.customer_id` and reads it back from there until Razorpay populates the real one.
+
+`updateSubscription()` refuses `amount` (plans are immutable — create a new plan) and
+`description` (a subscription has none, and `PATCH` does not touch `notes`). What it does
+accept is a real, billed change:
+
+```ts
+await driver.updateSubscription('sub_…', { metadata: { planId: 'plan_new' } })
+await driver.updateSubscription('sub_…', { metadata: { quantity: 3 } })
+```
+
+It sends `schedule_change_at: 'now'` by default. Without it Razorpay schedules the change
+for the next cycle and answers with the *old* subscription, which reads exactly like a
+silent no-op; pass `metadata.scheduleChangeAt: 'cycle_end'` when that is what you want.
+
+## What this driver does not do
+
+- **No `cancelUrl` on checkout.** A Razorpay Payment Link has one redirect
+  (`callback_url`) and no cancel URL; passing `cancelUrl` throws rather than looking
+  configured.
+- **No subscription checkout through a payment link.** `createCheckout({ planId })` throws
+  and points at `createSubscription()`.
+- **No card token server-side.** `charge({ card })` / `charge({ paymentMethodId })` throw:
+  a normal Razorpay account authorizes the card inside Checkout.
+- **No splits.** Razorpay splits through Route transfers, a separate API this driver does
+  not implement, so `charge({ split })` throws instead of ignoring it.
+- **No pagination on `listInvoices`.** It fetches one page of 100.

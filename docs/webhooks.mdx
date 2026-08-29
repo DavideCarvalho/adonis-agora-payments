@@ -51,6 +51,12 @@ returns `400` and is never processed.
 | Asaas | Shared token | `asaas-access-token` | `webhookToken` / `ASAAS_WEBHOOK_ACCESS_TOKEN` |
 | Woovi | RSA-SHA256 (recommended) | `x-webhook-signature` | `webhookPublicKey` / `WOOVI_WEBHOOK_PUBLIC_KEY` |
 | Woovi | Per-webhook HMAC-SHA1 (deprecated) | `X-OpenPix-Signature` | `webhookSecret` / `WOOVI_WEBHOOK_SECRET` |
+| PagBank | SHA-256 of `<token>-<body>` — **not an HMAC**, [read why](/docs/payments/providers/pagbank#webhook-authenticity--read-this-before-you-rely-on-it) | `x-authenticity-token` | `webhookToken` / `PAGBANK_WEBHOOK_TOKEN` (defaults to the API token) |
+| Efí | **None** — mTLS or an `hmac` query param, both [enforced outside the driver](/docs/payments/providers/efi#webhooks-are-not-authenticated-by-this-driver) | — | — |
+| InfinitePay | **None** — the gateway publishes no signature | — | — |
+
+The other eleven drivers each sign their own way; the provider page for each one names the header
+and the env var.
 
 ```ts title="config/payments.ts"
 export default defineConfig({
@@ -63,21 +69,42 @@ export default defineConfig({
 
 ### Enforcement policy
 
-- **Credential configured** → **strict**: requests missing the header, with a wrong
-  signature, or with a tampered body are rejected. All comparisons are timing-safe.
-- **No credential configured** → verification is **skipped** for gateways where signing is
-  optional (Asaas, AbacatePay, Woovi), so local development keeps working. Stripe always
-  requires its secret — events cannot be verified otherwise. **Set the credential before
-  going to production.**
+Every driver declares one of three states, and the app **refuses to boot** on the middle one:
+
+| `webhookVerification` | Meaning | At boot |
+| --- | --- | --- |
+| `'configured'` | it can verify, and the credential is set | mounts the route, strict |
+| `'unconfigured'` | it *can* verify and nothing was configured | **throws** |
+| `'unsupported'` | the gateway signs nothing at all — Efí and InfinitePay | mounts the route |
+
+Strict means what it says: requests missing the header, with a wrong signature, or with a
+tampered body are rejected, and all comparisons are timing-safe.
 
 Woovi's recommended `x-webhook-signature` takes precedence over the deprecated HMAC:
 when `webhookPublicKey` is set it is enforced, and `webhookSecret` (if also set) is
 ignored. The public key accepts PEM or the base64-encoded PEM shown in the dashboard.
 
-<Callout type="warn" title="An unsigned webhook is an unauthenticated endpoint">
-Skipping verification in production means anyone who can reach the URL can claim a payment
-happened. The library treats the credential as opt-in *only* so local development doesn't
-require gateway setup — it is not a recommendation for production.
+<Callout type="warn" title="Breaking change: an empty credential slot used to mean "skip"">
+It used to be `if (webhookToken !== undefined)` — a driver with nothing configured verified
+**nothing**, and the mounted `POST /payments/webhook/:provider` accepted any body anyone posted to
+it, including one that marks a payment paid. Nothing logged it and nothing warned.
+
+If you are upgrading and a provider's webhook credential is not set, the app now throws at boot
+naming the provider and the route it would have mounted. Set the credential (each provider page
+names the env var), or say explicitly that verification happens upstream:
+
+```ts title="config/payments.ts"
+export default defineConfig({
+  providers: { /* ... */ },
+  // Only for a deployment that really does terminate verification at the edge — mutual TLS,
+  // or an API gateway that checks the signature before forwarding.
+  allowUnverifiedWebhooks: ['efi'],
+})
+```
+
+`allowUnverifiedWebhooks: true` opts every provider out at once, which is almost never what you
+want. Efí and InfinitePay never trip this: they report `'unsupported'`, because their gateways sign
+nothing and there is no credential to forget.
 </Callout>
 
 ## The lifecycle of a webhook
@@ -85,14 +112,19 @@ require gateway setup — it is not a recommendation for production.
 Once validated, an event flows through the processor in a strict order:
 
 1. **Ledgered first** — the event id is recorded in `billing_webhook_events` *before* any
-   processing. If that id was already processed, the event is a redelivery and processing
-   **stops** immediately (`false` returned). This is the idempotency guarantee: a gateway
-   retry can never double-grant, because the check happens before the work.
+   processing, together with the raw payload **and** the normalized event (the `normalized`
+   column, which is what the dashboard's retry replays). If that id was already processed, the
+   event is a redelivery and processing **stops** immediately (`false` returned). This is the
+   idempotency guarantee: a gateway retry can never double-grant, because the check happens
+   before the work.
 2. **Synced** — the normalized event (`payment.succeeded`, `subscription.canceled`, …) is
-   upserted into the billing tables (`billing_payments`, `billing_subscriptions`).
+   upserted into the billing tables (`billing_payments`, `billing_subscriptions`), including
+   the `externalReference` it carried.
 3. **Your business logic runs** — the handler for that event type (see below).
 4. **Marked processed** — only after the handler returns. A throwing handler marks the
-   event `failed` (with the error) and the dispatcher retries it.
+   event `failed` (with the error), the dispatcher retries it, and the route answers `500`
+   so the gateway redelivers too — the in-process retry dies with the process, the gateway's
+   does not. A `failed` row is claimable again, which is what lets either retry re-run it.
 5. **Published** — the normalized business event goes out on the `@adonis-agora/diagnostics`
    bus (`agora:payments:payment.succeeded`, …) and the lifecycle events
    (`webhook.received`/`processed`/`failed`) are emitted.
@@ -100,6 +132,77 @@ Once validated, an event flows through the processor in a strict order:
 Because step 1 happens before step 3, the "already processed" guard is the *outer* defense
 and your own idempotency checks are the *inner* one — a redelivery never even reaches your
 handler.
+
+## One delivery, several events
+
+Most gateways POST one event per request. Two do not: Adyen's envelope is a
+`notificationItems` **array** and Efí's Pix notification is a `pix` **array**. So
+`parseWebhook` may return `WebhookEvent[]` as well as a single `WebhookEvent`, and the
+mounted route loops.
+
+Nothing about the lifecycle above changes — it just runs once **per event**:
+
+- **A ledger row each.** Idempotency is keyed on the gateway event id, so four events in one
+  delivery are four rows. A redelivery of that batch where three were already processed runs
+  only the fourth; the other three short-circuit on the ledger before reaching a handler.
+- **A `webhook.received`/`processed`/`failed` triple each.** A delivery carrying four events
+  never looks like one event on the diagnostics bus.
+- **One `traceId` for the whole delivery.** The trace answers *"what happened to this HTTP
+  request"* — the body that arrived, the signature check over it, the response the gateway
+  got — and those are request-scoped facts. Every event in the batch shares it, and each
+  lifecycle event still carries its own `id`, so you can see both that these four arrived
+  together and what became of each one.
+
+### When one event in a batch fails
+
+Two things have to be true at once, and only one of them is obvious:
+
+1. **The siblings are still attempted.** Event 2 throwing says nothing about events 3 and 4 —
+   they are different payments, and refusing them because a neighbour failed loses money for
+   a reason unrelated to them. The route processes every event and collects the failures.
+2. **The gateway is told to retry.** A `2xx` is a promise that it never has to send this
+   again; answering it over an event that failed is how a payment is lost for good. So a
+   delivery with **any** failed event answers `500`:
+
+```json
+{ "received": true, "processed": 3, "failed": ["evt_2"], "error": "..." }
+```
+
+The redelivery is cheap and safe: the three that succeeded are `processed` in the ledger and
+skip, and only the failed one — whose row is `failed`, which is claimable again — actually
+re-runs. Adyen queues a non-2xx for up to 30 days of retries; Efí makes up to 9 attempts.
+
+<Callout type="warn" title="A rejected delivery is still a 400, not a 500">
+A throw out of `parseWebhook` — a bad signature, an unparsable body, an unknown provider — is
+a **rejected** delivery and keeps answering `400`. It would fail identically on every retry,
+and a forged payload must not be answered with an invitation to send it again. `500` is
+reserved for a delivery that was authentic and failed to *process*.
+
+A rejection is refused *before* an event exists, so it never becomes a ledger row. It writes a
+`webhook.rejected` row into `billing_audit_events` instead — the only trace it leaves anywhere,
+and what the `rejected_deliveries` health check counts. The write is best-effort: the delivery is
+already being refused, and failing to file the note must not change the status the gateway sees.
+</Callout>
+
+### Signatures in a batch
+
+Where a gateway signs **per event**, every event is verified before any of them is mapped.
+Adyen is the case that matters: the HMAC lives inside each item's own
+`additionalData.hmacSignature` and nothing signs the envelope, so verifying the first item
+and trusting the rest would let an attacker append anything beside one genuine notification.
+One bad signature rejects the whole delivery.
+
+Efí signs nothing at all — its authenticity comes from mutual TLS or an `hmac` query
+parameter, both [enforced outside the driver](/docs/payments/providers/efi#webhooks-are-not-authenticated-by-this-driver) —
+so a batch there is exactly as trusted as the transport that carried it, and no more.
+
+<Callout title="Writing a driver? One event is still the normal answer">
+The contract is `WebhookEvent | WebhookEvent[]`, a widening rather than a migration. If your
+gateway sends one event per request, keep returning one — an array of length one adds nothing
+and reads as if batching were possible. If it can send several, give each returned event an
+**id of its own**: reusing one id across the batch makes the second event look like a
+redelivery of the first, and it is silently skipped.
+</Callout>
 
 ## Running your business logic — four options
 
@@ -128,15 +231,26 @@ node ace make:webhook-handler payment.succeeded
 
 ```ts title="app/payment_handlers/payment_succeeded.ts"
 import { inject } from '@adonisjs/core'
-import type { WebhookEvent } from '@adonis-agora/payments'
+import type { WebhookEventFor } from '@adonis-agora/payments'
 
 @inject()
 export default class PaymentSucceededHandler {
   static readonly eventType = 'payment.succeeded'
-  async handle(event: WebhookEvent): Promise<void> {
+  async handle(event: WebhookEventFor<'payment.succeeded'>): Promise<void> {
     // dispatch to a durable workflow / queue — never do heavy work inline
   }
 }
+```
+
+Or as a function, with the type inferred from the first argument:
+
+```ts title="app/payment_handlers/payment_disputed.ts"
+import { defineWebhookHandler } from '@adonis-agora/payments'
+
+export default defineWebhookHandler('payment.disputed', async (event) => {
+  event.data.actionableUntil   // DisputeWebhookData
+  event.data.paidAt            // compile error: that is a payment payload
+})
 ```
 
 Nothing else to wire. The provider discovers the folder at boot and registers what it finds.
@@ -167,6 +281,56 @@ billing: {
 
 Handlers here run **inside** `WebhookProcessor.process()` — a throw marks the event
 `failed` in the ledger and the dispatcher retries, exactly like the folder form.
+
+A `defineWebhookHandler(...)` value works as an entry here too: it is callable *and* carries
+`type`/`handle`, so one definition serves both wiring styles.
+
+### Typing `event.data`
+
+`WebhookEvent.data` is `unknown` until something narrows it. Three exports do:
+
+| Export | What it gives you |
+| --- | --- |
+| `WebhookEventDataMap` | which payload each canonical type carries |
+| `WebhookEventFor<T>` | a `WebhookEvent` narrowed to one type, payload included |
+| `TypedWebhookHandler<T>` | the handler signature for one type |
+
+That map is the reason the old `const data = event.data as PaymentWebhookData` line is worth
+deleting rather than keeping. On `payment.disputed` it was simply **wrong**: a dispute carries a
+`DisputeWebhookData`, whose `amount` and `currency` are *optional* — a Stripe early fraud warning
+has neither — so the cast promised two fields that are routinely `undefined`.
+
+A **passthrough** type keeps `data: unknown`. Nothing normalized it, and typing it would be the
+same lie one level down.
+
+### A typo in `eventType` does not boot
+
+`'payment.suceeded'` used to register a handler nothing ever called: the processor looked the type
+up, missed, and skipped — while the ledger still recorded the delivery as **processed** and the
+route still answered `200`, which tells the gateway it never has to send that event again. The
+grant simply never happened, and nothing anywhere said so.
+
+The provider now refuses at boot. The rule is namespace-based and stated in the error:
+
+- `payment.*` / `subscription.*` is **the library's namespace**, so a type there must be one of the
+  ten `WEBHOOK_EVENT_TYPES`.
+- A gateway event a driver could not map arrives **lowercased as the gateway spells it** —
+  Asaas' `PAYMENT_ANTICIPATED` becomes `payment_anticipated`, which has no dot and is accepted as-is.
+- Two handlers claiming the same type also throw, naming both files. Registration is a map keyed by
+  event type, so the second used to silently replace the first.
+
+For the rare gateway that really does spell a passthrough event with a dot inside that namespace,
+declare it:
+
+```ts title="config/payments.ts"
+billing: {
+  passthroughEvents: ['payment.anticipated'],
+}
+```
+
+`WEBHOOK_EVENT_TYPES` (the array), `WebhookEventType` (the union) and `isWebhookEventType` (the
+guard) are exported from the package root — they existed from the start and were not, which is why
+apps typed their handler keys as a bare `string`.
 
 ### 3. Subscribe to the diagnostics events
 
@@ -224,8 +388,8 @@ Without that release, a plain handler dispatches via `engine.start` (fire-and-fo
 export default class PaymentSucceededHandler {
   static readonly eventType = 'payment.succeeded'
   constructor(private engine: WorkflowEngine) {}
-  async handle(event: WebhookEvent): Promise<void> {
-    const externalReference = (event.data as { externalReference?: string }).externalReference
+  async handle(event: WebhookEventFor<'payment.succeeded'>): Promise<void> {
+    const { externalReference } = event.data
     if (!externalReference) return
     await this.engine.start(ProcessPaymentWorkflow, { externalReference }, randomUUID())
   }
@@ -238,7 +402,9 @@ A webhook carries the gateway's ids — but your business logic needs *your* id 
 row, a subscription). `externalReference` is the bridge: set it on the charge or
 subscription, the gateway echoes it back, and the library surfaces it on the normalized
 `event.data.externalReference` and the `payment.succeeded` diagnostics payload — so you
-never dig into `event.raw`:
+never dig into `event.raw`. It is also **stored**, on
+`billing_payments.external_reference` (indexed), so you can ask the store for the payment
+behind one of your ids at any time, not only while handling the webhook:
 
 ```ts title="app/services/checkout_service.ts"
 const payment = await Payment.create({ ... })
@@ -256,6 +422,24 @@ onDiagnostic('payments', 'payment.succeeded', async ({ payload }) => {
 })
 ```
 
+```ts
+// ...or, later, from anywhere: the reference is a stored, indexed column.
+const row = await store.findPaymentByExternalReference(payment.id)
+```
+
+<Callout type="warn" title="Rows written before the column existed stay null">
+`external_reference` arrived after the first release, and there is **nothing to run** for it: the
+library [owns its schema](/docs/payments/billing#the-billing-tables) and adds the column as a
+guarded `ALTER` on the next boot, whether the install is fresh or is upgrading. (The migration
+that used to carry it, `add_billing_external_reference`, no longer exists — a page telling you to
+run it is out of date.)
+
+What does **not** happen is a backfill. Every payment row written before the column was there
+keeps `external_reference` null: `findPaymentByExternalReference` answers `null` for those ids,
+and the browser status endpoint falls back to reading your reference as a gateway id. A reference
+that was never stored cannot be recovered from the payload.
+</Callout>
+
 How each gateway stores it:
 
 - **Asaas** → `externalReference` field — and **propagated to every installment** of a
@@ -264,12 +448,18 @@ How each gateway stores it:
   `externalReference` is absent).
 - **Woovi** → `correlationID`.
 - **Stripe** → `metadata.external_reference`.
+- **PagBank** → the order's `reference_id`, echoed on every notification about that order.
+- **Efí** → the **txid**, and only when your reference fits its charset (26–35
+  alphanumerics); Efí's Pix notification carries no other field of yours. A reference that
+  does not fit is not mangled — Efí generates the txid and you route on the returned
+  `gatewayId`.
 
 ## Webhook events
 
-The normalized event types the processor understands:
+The normalized event types the processor understands — ten of them:
 
 - `payment.succeeded` / `payment.failed` / `payment.refunded` / `payment.updated`
+- `payment.dispute_warning` / `payment.disputed` / `payment.dispute_closed`
 - `subscription.created` / `subscription.updated` / `subscription.canceled`
 
 Each gateway maps onto these — Stripe `invoice.payment_succeeded`, Asaas
@@ -277,3 +467,64 @@ Each gateway maps onto these — Stripe `invoice.payment_succeeded`, Asaas
 `PIX_AUTOMATIC_COBR_COMPLETED` all become `payment.succeeded`. An unknown event type is
 passed through unprocessed — the processor syncs what it understands and runs a handler if
 one is registered.
+
+### `payment.updated` — the one that carries its outcome on the payload
+
+Every other payment event states its outcome in its **type**. An update says only "this payment
+changed", so the new state travels on `event.data`: `status`, `paidAt` and `refundedAmount` are all
+optional there, and all three are read.
+
+It is the event a **partial refund** arrives as. Routing one to `payment.refunded` is not an
+option — that handler writes the whole charge off, so a R$10 refund on a R$100 charge would erase
+R$90 of revenue. So the update keeps the row current instead: `amount` stays the charge,
+`refunded_amount` records the part that went back, and the net is `amount - refunded_amount`.
+
+Three things it deliberately does **not** do:
+
+- **It never creates a row.** An update about a charge this install never recorded is not a charge.
+  `payment.succeeded` and `payments:sync` create rows; this one only updates.
+- **It never moves a row out of `disputed`.** A gateway's payment resource often goes on reporting a
+  charged-back charge as received. Only `payment.dispute_closed`, which carries an outcome, resolves
+  a dispute.
+- **It moves nothing when the driver sends no `status`.** Most drivers normalize none; inventing one
+  is how a paid row becomes pending.
+
+Until this handler existed the event reached a branch that did nothing at all, so a partial refund
+was recorded nowhere and revenue stayed overstated by the refunded part, permanently.
+
+### The three dispute events
+
+They are separate types, not shades of one, because they answer different questions about
+where the money is. That is the question every driver's mapping was checked against: **has
+the gateway taken it yet.**
+
+| Event | What happened | What the payment row does |
+| --- | --- | --- |
+| `payment.dispute_warning` | a pre-chargeback alert — Stripe's early fraud warning, Adyen's `NOTIFICATION_OF_FRAUD`. **No money has moved.** | nothing. It still says `paid`, because it still is. |
+| `payment.disputed` | the funds have been withdrawn | moves to `disputed` |
+| `payment.dispute_closed` | resolved, carrying `outcome` | `won` puts it back to `paid`; `lost`, `expired` and `canceled` leave it alone |
+
+All three also write a [`billing_disputes` row](/docs/payments/billing#disputes-and-their-clock),
+which is where the deadline lives.
+
+A warning is the one worth building on: nothing has been pulled back yet, and refunding
+inside the window stops the chargeback from ever being filed — which matters beyond the one
+sale, because a chargeback counts against the ratio that puts a merchant into a card
+network's monitoring programme. Subscribe to it and put it in front of somebody.
+
+`canceled` deliberately does **not** restore revenue. It means the cardholder withdrew, but
+on Stripe a withdrawn dispute still has to be closed in your favour with evidence, so
+booking it would count money the acquirer has not returned. Understating is the safe
+direction.
+
+A close that carries no outcome **throws** rather than defaulting. A driver that cannot read
+the result emits `payment.updated` instead, and the processor must not undo that by guessing
+on the other side.
+
+<Callout title="Several gateways have no pre-dispute vocabulary at all">
+Asaas, PagBank, InfinitePay, Lemon Squeezy, Polar and AbacatePay send no funds-untouched
+alert, and neither does Paddle — its `chargeback_warning` is not a warning, since the
+disputed amount is already refunded when one is raised, so it maps to `payment.disputed`.
+Each provider page says which of the three its gateway can actually emit. A gateway missing
+from your alerting is not necessarily misconfigured.
+</Callout>

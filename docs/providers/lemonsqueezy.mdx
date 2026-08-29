@@ -1,0 +1,243 @@
+---
+title: Lemon Squeezy
+description: Merchant of record on a JSON:API v1 API — hosted checkout only, money already in cents, and a test mode that lives in the API key.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Lemon Squeezy is a **merchant of record**. It is the seller of record on your customer's
+statement, it calculates and remits sales tax and VAT worldwide, and it pays you out on a
+schedule. You sell to Lemon Squeezy; Lemon Squeezy sells to your customer. That is the
+single fact that explains most of what this driver refuses to do.
+
+The driver targets the **v1 REST API** on `api.lemonsqueezy.com`, which speaks
+**JSON:API** — every field lives under `data.attributes`, `id` is a string at the resource
+level and never inside `attributes`, and both `Accept` and `Content-Type` must be
+`application/vnd.api+json`. No other gateway in this package works that way, which is why
+the driver does its own `fetch` instead of going through the shared HTTP helper.
+
+<Callout type="warn">
+This driver is written against Lemon Squeezy's published API reference and is covered by
+unit tests. It has not been exercised against a live Lemon Squeezy account. Run it in test
+mode against real webhooks before you let it take real money.
+</Callout>
+
+- **Methods**: `undefined` only. The hosted checkout decides which methods to offer from
+  the buyer's country and your store's settings, and the API takes no payment-method
+  argument — so the driver cannot promise a payment will be a card rather than PayPal.
+  Routing `credit_card: 'lemonsqueezy'` in `config.methods` is refused by the manager,
+  which is correct. Route `undefined: 'lemonsqueezy'`, or name the provider directly with
+  `payments.driver('lemonsqueezy')`.
+- **Setup**: `payments.lemonsqueezy({ apiKey, storeId, webhookSecret })`. `apiKey`
+  defaults to `LEMONSQUEEZY_API_KEY`; `storeId` is **required** because every write
+  endpoint takes a store relationship and an account can hold several stores, each with
+  its own currency.
+- **No `currency` option.** A store has exactly one currency, set in the dashboard, and
+  the driver has no way to know it without asking. Rather than let you assert a currency
+  that might not match the store, it reads the currency off whatever the API returns
+  (orders, subscription invoices) and reports nothing when the API states nothing.
+- **No sandbox host, and no sandbox flag either.** Test mode lives in the API key: a
+  test-mode key puts the whole integration in test mode against the same host. Objects
+  come back with `test_mode: true`, and webhooks carry it as `meta.test_mode` — the driver
+  surfaces that on `event.data.testMode`.
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`webhookSecret` is not configured (env fallback `LEMONSQUEEZY_WEBHOOK_SECRET`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/lemonsqueezy` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
+### There is no server-side charge
+
+`charge()` **throws**. Lemon Squeezy has no endpoint that takes money at all: as merchant
+of record it owns the payment page, and a purchase starts with a hosted checkout. Returning
+a `Payment` here would report a charge that was never attempted.
+
+```ts title="app/services/checkout_service.ts"
+const session = await payments.driver('lemonsqueezy').createCheckout({
+  amount: 1990,                    // cents; overrides the variant price
+  planId: '11',                    // a Lemon Squeezy *variant* id
+  successUrl: 'https://app.example/thanks',
+  externalReference: 'order:42',   // the only thing tying the webhook back to your row
+  metadata: {
+    email: 'buyer@example.com',
+    taxNumber: 'GB123456789',
+  },
+})
+
+return response.redirect(session.url)
+```
+
+- **`planId` is a variant id and is required.** A Lemon Squeezy checkout always sells
+  something from the catalog; there is no ad-hoc line item. Omit it and the driver throws
+  instead of guessing a variant.
+- **`amount` becomes `custom_price`**, in cents, overriding the variant's own price.
+- **`successUrl` becomes `product_options.redirect_url`** — Lemon Squeezy has one
+  post-purchase URL, not a success/cancel pair, so `cancelUrl` is ignored.
+- **`trialDays` throws.** A trial is a property of the variant, not of a checkout;
+  accepting the option would bill a customer who was promised a trial.
+- **`CheckoutSession.amount` is deliberately empty.** The checkout response states a price
+  but never a currency, and this package will not invent one. The currency arrives on the
+  `order_created` webhook, read off the order.
+- `metadata.email`, `metadata.name` and `metadata.taxNumber` prefill the checkout
+  (`checkout_data.email` / `name` / `tax_number`). Everything else goes into
+  `checkout_data.custom`.
+
+### Money is already in cents
+
+Unlike the Brazilian gateways in this package, Lemon Squeezy works in **integers of the
+smallest currency unit** — `999` is $9.99 — on `total`, `subtotal`, `tax`, `custom_price`
+and `amount`. There is no decimal conversion anywhere in this driver, in either direction.
+The `*_formatted` twins (`total_formatted: "$9.99"`) are display strings and are never
+read.
+
+### Webhooks
+
+`X-Signature`, verified as HMAC-SHA256 over the **raw body**, hex-encoded, keyed by the
+signing secret you set on the webhook in the dashboard (`LEMONSQUEEZY_WEBHOOK_SECRET`),
+compared timing-safe. Lemon Squeezy always signs, so without a configured secret the driver
+refuses to parse rather than trusting the body.
+
+Normalized event types:
+
+| Lemon Squeezy | canonical |
+| --- | --- |
+| `order_created` | depends on the order's own `status` — see below |
+| `order_refunded`, `subscription_payment_refunded` | `payment.refunded` |
+| `subscription_payment_success`, `subscription_payment_recovered` | `payment.succeeded` |
+| `subscription_payment_failed` | `payment.failed` |
+| `subscription_created` | `subscription.created` |
+| `subscription_updated`, `subscription_plan_changed`, `subscription_paused`, `subscription_unpaused`, `subscription_resumed` | `subscription.updated` |
+| `subscription_cancelled`, `subscription_expired` | `subscription.canceled` |
+
+`order_created` fires for every order Lemon Squeezy records, including ones that failed or
+were refunded, so the driver reads the order's `status` (`paid` / `failed` / `refunded` /
+`pending`) rather than trusting the event name. An order that is not paid does not become
+`payment.succeeded`.
+
+**There is no event id in a Lemon Squeezy webhook**, so the driver derives a stable one:
+`` `${event_name}:${data.type}:${data.id}:${attributes.updated_at}` ``. `updated_at` is
+part of it on purpose — two `subscription_updated` events for the same subscription are
+distinct events, and an id without it would make the second look like a replay to the
+billing layer's idempotency ledger.
+
+### Disputes: your merchant of record absorbs them
+
+**Lemon Squeezy has no dispute or chargeback webhook, and this driver does not invent one.**
+That is not an omission in the integration — it is the deal. The two questions every other
+provider page answers both have the same answer here:
+
+- **Who fights the dispute?** Lemon Squeezy. As merchant of record it is the seller on the
+  buyer's statement, so the chargeback is raised against Lemon Squeezy, and its own help
+  centre says it "typically manages these disputes on behalf of the seller". You get the
+  bill, not the fight: "the refunded amount, minus the platform fee, plus a $15 dispute fee
+  is deducted from the seller's next payout." `capabilities.disputes` is `false` and there
+  is no `submitDisputeEvidence`, because there is nothing to submit.
+- **What reaches you?** *Nothing.* Not a warning, not the chargeback, not the outcome.
+
+The full webhook catalogue is sixteen names — `order_created`, `order_refunded`, the
+`subscription_*` family, and `license_key_created` / `license_key_updated` — and there is no
+dispute event among them. **There is not even an `order_updated`.** That last detail is the
+one that matters: Lemon Squeezy's Order `status` enum does include `fraudulent`, its value
+for a charged-back order, but `order_created` fires once at creation and nothing fires when a
+status later changes. So the status exists and can never reach a webhook handler.
+
+<Callout type="warn">
+The first you hear of a chargeback on Lemon Squeezy is your **payout**. There is no
+`actionableUntil` on this provider because there is no window that belongs to you and no
+event that would carry one.
+</Callout>
+
+So `payment.disputed`, `payment.dispute_warning` and `payment.dispute_closed` never fire on
+this provider — there is a test asserting that no Lemon Squeezy event produces any of them,
+so a well-meaning future mapping cannot quietly add one. If your application has a "revoke
+access on chargeback" path, `order_refunded` is the closest signal available (Lemon Squeezy
+refunds the order when it settles a dispute), and it is not a reliable one — a settled
+dispute is not guaranteed to surface as a refund. Reconcile against the payout report if the
+distinction matters to you.
+
+Forcing an unrelated event into `payment.disputed` would invent a notification that does not
+exist, so the driver leaves the unmapped events under their own Lemon Squeezy names for an
+app handler.
+
+### `idempotencyKey` throws
+
+Lemon Squeezy has no request deduplication of any kind — no `Idempotency-Key` header, no
+request-id field on any endpoint. Accepting a key and dropping it would turn a caller's
+retry guarantee into a second refund or a second checkout, so every entry point that takes
+one (`createCheckout`, `refund`, `createCustomer`, `updateSubscription`) **refuses** it with
+a `[payments]` error naming the operation. Deduplicate on your side: persist the key and
+check it before calling.
+
+### `externalReference`
+
+Sent as **`checkout_data.custom.external_reference`** on the checkout, which Lemon Squeezy
+echoes on every webhook for the resulting order and subscription as **`meta.custom_data`**,
+and read back out onto `event.data.externalReference`.
+
+Pass it as `externalReference` on the checkout. It matters more here than on a gateway with
+a server-side charge: the hosted session is the *only* way a purchase starts on Lemon
+Squeezy, so a session opened without a reference produces an `order_created` your handler
+cannot route back to an order. `metadata.externalReference` is still honoured as a fallback
+for code written before the field existed.
+
+### Subscriptions
+
+Lemon Squeezy **creates** subscriptions; you cannot. There is no create-subscription
+endpoint — one exists once a customer completes a checkout for a subscription variant.
+`createSubscription()` therefore throws and tells you to call
+`createCheckout({ planId: '<variant id>' })` and read the id off the
+`subscription_created` webhook.
+
+What does work:
+
+- **`cancelSubscription(id)`** cancels at the end of the current billing period; the
+  subscription moves to `cancelled` and keeps running until `ends_at`.
+  **`{ atPeriodEnd: false }` throws** — Lemon Squeezy has no immediate termination, and
+  reporting one would leave a customer with access the caller believes was revoked. Revoke
+  it yourself on `ends_at`.
+- **`updateSubscription(id, { metadata: { variantId } })`** swaps the plan. That is the
+  only change this contract can carry, and it is expressed as a variant id, so it is read
+  from `metadata.variantId`; `metadata.invoiceImmediately` and `metadata.disableProrations`
+  ride along. `amount` **throws** (the price belongs to the variant, not the subscription),
+  `description` **throws** (no such field), and calling it with neither throws too rather
+  than making a no-op PATCH.
+- **`Subscription.amount` is always empty.** A Lemon Squeezy subscription object carries no
+  price at all — the amount only appears on each subscription invoice. `renews_at` maps
+  onto `currentPeriodEnd`.
+- **The `paused` status is reported as `paused`.** It used to be reported as `active`,
+  which handed entitlement to a subscriber who is not paying: a paused subscription exists
+  and will resume, but it is not billing *now*. Anything gating access on
+  `status === 'active'` will start refusing paused subscribers, which is the point. The raw
+  value is still on `subscription.payload.status`, and `subscription_paused` /
+  `subscription_unpaused` webhooks carry the new status through to the stored row.
+
+### Refunds
+
+`refund(orderId, amount?)` posts to `POST /v1/orders/{id}/refund`; `amount` is in cents and
+omitting it refunds in full. The endpoint returns the **order**, not a refund resource, so
+`refunded: true` is the only confirmation the API gives and that is what
+`Refund.status === 'succeeded'` is read from.
+
+Renewal charges are *subscription invoices* with their own ids and their own endpoint
+(`POST /v1/subscription-invoices/{id}/refund`); this method does not reach them.
+
+### Invoices and customers
+
+- **`listInvoices(customerId)`** walks the customer's own `orders` relationship
+  (`GET /v1/customers/{id}/orders`), because neither `GET /v1/orders` nor
+  `GET /v1/subscription-invoices` has a customer filter. These are orders — the receipts
+  for a purchase, with `urls.receipt` mapped onto `hostedPdfUrl`. Renewal invoices live
+  under `/v1/subscription-invoices?filter[subscription_id]=…` and are not listed here.
+- **`createCustomer`** requires both a name and an email; Lemon Squeezy rejects a customer
+  without them. `metadata.city` / `region` / `country` are passed through.
+- **A `taxId` throws** on both create and update. Lemon Squeezy has no tax id on a
+  customer — the buyer enters a tax number at checkout — so storing one would be a silent
+  no-op. Pass it as `metadata.taxNumber` on `createCheckout()` instead.
+- **Tax is Lemon Squeezy's job.** The amounts you send are what it charges before it works
+  out the buyer's VAT/sales tax; `tax` on the order is what it added.

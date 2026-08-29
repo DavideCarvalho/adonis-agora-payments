@@ -12,27 +12,214 @@ export type Money = number;
 /** ISO 4217 currency code, lowercase (e.g. `'brl'`, `'usd'`). */
 export type Currency = string;
 
-export type BillingStatus = 'pending' | 'paid' | 'failed' | 'refunded' | 'canceled' | 'disputed';
+/**
+ * Where a payment stands.
+ *
+ * `authorized` is NOT `paid`: the funds are held on the customer's card and nothing has
+ * moved until a capture. Card gateways that separate the two (Razorpay, Square, Adyen,
+ * PayPal) had no name for it, so it collapsed into `pending` — which understates it — or
+ * `paid`, which grants access against money that can still evaporate.
+ */
+export type BillingStatus =
+  | 'pending'
+  | 'authorized'
+  | 'paid'
+  | 'failed'
+  | 'refunded'
+  | 'canceled'
+  | 'disputed';
 
+/**
+ * `paused` is a real state, not a flavour of `active`: the subscription exists, will bill
+ * again, and must NOT entitle the subscriber right now. Mapping it to `active` — which
+ * several gateways forced — grants access to someone who is not paying.
+ */
 export type SubscriptionStatus =
   | 'trialing'
   | 'active'
+  | 'paused'
   | 'past_due'
   | 'incomplete'
   | 'canceled'
   | 'ended';
 
-export type PaymentMethodType = 'card' | 'pix' | 'boleto' | 'debit_card' | 'unknown';
+/** How a payment was actually paid, as reported back on a {@link Payment}. */
+export type PaymentMethodType =
+  | 'card'
+  | 'pix'
+  | 'boleto'
+  | 'debit_card'
+  | 'wallet'
+  | 'bank_transfer'
+  | 'bank_debit'
+  | 'upi'
+  | 'bnpl'
+  | 'voucher'
+  | 'unknown';
 
 /**
  * Canonical payment method names used to route charges to a provider (`config.methods`).
  * `undefined` means "let the customer choose at checkout" (gateway's `UNDEFINED`).
+ *
+ * These are CATEGORIES, not brands, and deliberately so. Enumerating every local method a
+ * gateway offers — iDEAL, Bancontact, EPS, Przelewy24, BLIK, TWINT, MB Way, Multibanco,
+ * Klarna, paysafecard, and a new one every quarter — is a union that never closes, and a
+ * union that never closes cannot make routing a typo fail at the manager, which is the only
+ * reason this type is closed at all.
+ *
+ * So route by category and name the brand where it belongs: the gateway's own field, via
+ * `metadata`. `bank_transfer` covers the push-from-your-bank methods (iDEAL, Bancontact,
+ * Multibanco, Trustly); `bank_debit` the pull-from-your-account ones (SEPA Direct Debit,
+ * ACH); `wallet` the stored-balance and device wallets (PayPal, Apple Pay, Google Pay);
+ * `bnpl` the buy-now-pay-later ones; `upi` is named outright because in India it is the
+ * default way people pay, not a local alternative.
  */
-export type PaymentMethodName = 'pix' | 'credit_card' | 'debit_card' | 'boleto' | 'undefined';
+export const PAYMENT_METHOD_NAMES = [
+  'pix',
+  'credit_card',
+  'debit_card',
+  'boleto',
+  'wallet',
+  'bank_transfer',
+  'bank_debit',
+  'upi',
+  'bnpl',
+  'voucher',
+  'undefined',
+] as const;
+
+/**
+ * The union, derived from the list above rather than written twice.
+ *
+ * The list exists because the routing error message used to spell the members out by hand,
+ * and said "pix, credit_card, debit_card, boleto, undefined" long after six more were added
+ * — so a reader routing `wallet` was told, by the library, that it was not a known method.
+ */
+export type PaymentMethodName = (typeof PAYMENT_METHOD_NAMES)[number];
 
 export interface MoneyAmount {
   amount: Money;
   currency: Currency;
+}
+
+/**
+ * Where a dispute stands. A chargeback is the only thing in this library that takes money
+ * back AFTER it settled, and the window to answer is measured in days.
+ *
+ * `warning` is not a dispute yet — it is the pre-chargeback alert the card networks relay
+ * (Stripe's Early Fraud Warning, Adyen's `NOTIFICATION_OF_FRAUD`), where refunding inside
+ * the window stops the chargeback from ever being filed. That matters beyond the one sale:
+ * a chargeback counts against the ratio that puts a merchant into a card network's
+ * monitoring programme, so it can be worth refunding a dispute you would have won.
+ */
+export type DisputeStatus =
+  | 'warning'
+  | 'open'
+  | 'under_review'
+  | 'won'
+  | 'lost'
+  | 'canceled'
+  | 'expired';
+
+/** A chargeback or pre-chargeback alert, normalized across gateways. */
+export interface Dispute {
+  /** The gateway's id for the dispute itself — NOT the payment's. */
+  id: string;
+  provider: string;
+  /** The disputed payment's gateway id. */
+  paymentGatewayId: string;
+  status: DisputeStatus;
+  /**
+   * How much is being disputed, in the currency's smallest unit. Not always the whole
+   * payment: a partial chargeback is normal.
+   */
+  amount?: MoneyAmount;
+  /** The gateway's own reason code, verbatim — the vocabulary is per-network. */
+  reason?: string;
+  /**
+   * When evidence must be submitted by. The single most operationally important field
+   * here: past it, the dispute is lost by default and nothing can be done.
+   */
+  evidenceDueBy?: string;
+  /** Whether this gateway will still accept evidence — most accept it ONCE. */
+  canSubmitEvidence?: boolean;
+  createdAt?: string;
+  payload: Record<string, unknown>;
+}
+
+/**
+ * Evidence for a representment.
+ *
+ * Every field is optional because no gateway wants all of them and no app has all of them,
+ * but the shape is deliberately concrete rather than a bag: a driver has to map onto the
+ * gateway's own field names, and it cannot map what it cannot recognize.
+ */
+export interface DisputeEvidence {
+  /** Free-text explanation. Most gateways weigh this heavily. */
+  explanation?: string;
+  shippingCarrier?: string;
+  shippingTrackingNumber?: string;
+  shippingDate?: string;
+  serviceDate?: string;
+  /** When the customer accepted the terms. The terms themselves are a {@link DisputeDocument}. */
+  termsAcceptedAt?: string;
+  customerName?: string;
+  customerEmail?: string;
+  customerIpAddress?: string;
+  /**
+   * Prior charges to the same customer that were never disputed — the strongest signal the
+   * card networks accept, and the reason this is a list of transactions rather than a count.
+   * Visa's Compelling Evidence 3.0 wants the charges themselves, each with the account, device
+   * and IP it was made from; a number is not evidence of anything.
+   */
+  priorUndisputedPayments?: PriorUndisputedPayment[];
+  /** Documents already uploaded to the gateway, each addressed by what it proves. */
+  documents?: DisputeDocument[];
+  /** Anything gateway-specific the shape above has no name for. */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * What a piece of evidence proves, which is what every gateway files it by.
+ *
+ * Not a free-form label: a bare list of upload ids cannot be submitted anywhere, because
+ * the gateway needs to know which id is the receipt and which is the shipping proof. Stripe
+ * has nine separate file fields, Adyen has a `defenseDocumentTypeCode`, and neither can be
+ * reached with "here are some files".
+ */
+export type DisputeDocumentKind =
+  | 'receipt'
+  | 'invoice'
+  | 'customer_communication'
+  | 'customer_signature'
+  | 'shipping'
+  | 'service'
+  | 'refund_policy'
+  | 'cancellation_policy'
+  | 'terms'
+  | 'duplicate_charge'
+  | 'other';
+
+/**
+ * A document already uploaded to the gateway, by its own file id.
+ *
+ * A file id, never a URL. The banks reviewing a dispute do not follow links, and no gateway
+ * in this package accepts one — the evidence has to be bytes the gateway already holds.
+ */
+export interface DisputeDocument {
+  kind: DisputeDocumentKind;
+  /** The gateway's own id for the uploaded file. */
+  id: string;
+}
+
+/** A prior charge to the same customer that was never disputed. */
+export interface PriorUndisputedPayment {
+  /** The gateway's id for that charge. */
+  paymentGatewayId: string;
+  /** The account the customer was signed into, if the gateway asks for one. */
+  customerAccountId?: string;
+  customerIpAddress?: string;
+  customerDeviceId?: string;
 }
 
 /** A customer as seen by the gateway. */

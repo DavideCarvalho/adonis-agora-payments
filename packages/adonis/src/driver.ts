@@ -1,6 +1,8 @@
 import type {
   CheckoutSession,
   Customer,
+  Dispute,
+  DisputeEvidence,
   Invoice,
   InvoiceOptions,
   Money,
@@ -18,6 +20,9 @@ import type {
  * normalizing its own API onto the shared domain types. The billing layer and application
  * code depend only on this contract, so swapping gateways is a config change.
  */
+/** See {@link PaymentsDriver.webhookVerification}. */
+export type WebhookVerificationState = 'configured' | 'unconfigured' | 'unsupported';
+
 export interface PaymentsDriver {
   /** Stable provider name, e.g. `'stripe'`, `'abacate'`, `'asaas'`, `'woovi'`. */
   readonly provider: string;
@@ -36,6 +41,12 @@ export interface PaymentsDriver {
    * the limitation early instead of at the gateway.
    */
   readonly capabilities?: {
+    /**
+     * Whether the gateway exposes a dispute API — reading a chargeback and submitting
+     * evidence for it. Separate from the rest because a gateway can settle money perfectly
+     * and give you nothing but an email when one is filed.
+     */
+    disputes?: boolean;
     /** Full refunds against a payment. Woovi/OpenPix lacks it. */
     refunds?: boolean;
     /** Lists gateway invoices. Woovi/OpenPix has no invoice concept. */
@@ -43,6 +54,32 @@ export interface PaymentsDriver {
     /** Recurring subscriptions. InfinitePay-style links lack it. */
     subscriptions?: boolean;
   };
+
+  /**
+   * Whether this driver can authenticate an incoming webhook delivery, and whether it was
+   * given what it needs to.
+   *
+   * The failure it exists to close: a driver with a credential SLOT and no credential in it
+   * verified nothing — `if (this.#webhookToken !== undefined)` — so the mounted
+   * `POST /payments/webhook/:provider` accepted any body anyone posted, and the built-in sync
+   * dutifully marked payments paid. Nothing anywhere said so. The ecosystem app that found it
+   * had to write the warning into its config, into `start/env.ts`, and into a dedicated test
+   * asserting the env var was non-empty, because otherwise its two webhook-security tests
+   * passed vacuously.
+   *
+   * Reporting `'unconfigured'` here makes the provider refuse at boot instead
+   * ({@link import('./webhook_security.js').assertWebhookVerification}).
+   *
+   * - `'configured'` — it can verify and it has the credential.
+   * - `'unconfigured'` — it CAN verify but nothing was configured. Fails the boot check.
+   * - `'unsupported'` — the gateway signs nothing (Efí's Pix callback carries no signature;
+   *   authenticity is the edge's job), so there is nothing to configure and nothing to warn
+   *   about.
+   *
+   * Optional so a custom driver outside this package keeps compiling; absent is read as
+   * `'unsupported'`, because a driver that never opted in cannot be assumed to verify.
+   */
+  readonly webhookVerification?: WebhookVerificationState;
 
   // ── Customers ────────────────────────────────────────────────────────────────────────
 
@@ -60,7 +97,11 @@ export interface PaymentsDriver {
   /** Find a payment by its gateway id. */
   findPayment(gatewayId: string): Promise<Payment | null>;
   /** Refund a payment, optionally a partial amount. */
-  refund(paymentGatewayId: string, amount?: Money): Promise<Refund>;
+  refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund>;
 
   // ── Checkout ─────────────────────────────────────────────────────────────────────────
 
@@ -89,21 +130,84 @@ export interface PaymentsDriver {
   /** List invoices for a customer. */
   listInvoices(customerId: string): Promise<Invoice[]>;
 
+  // ── Disputes ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Fetch a chargeback by the gateway's dispute id.
+   *
+   * Optional: a gateway with no dispute API declares `capabilities.disputes = false` and
+   * omits this, rather than returning something invented. The webhook still reports the
+   * dispute — what is missing is the ability to read or answer it over the API.
+   */
+  findDispute?(disputeGatewayId: string): Promise<Dispute | null>;
+
+  /**
+   * Submit evidence for a chargeback — a representment.
+   *
+   * **Most gateways accept this ONCE.** A driver must not retry it on its own, and the
+   * library never submits automatically: whether to fight a dispute or refund it is a risk
+   * decision about the merchant's own economics — refunding costs the sale, losing costs
+   * the fee and the ratio — and no library has the standing to make it. The library's job
+   * ends at making the deadline visible and the submission one honest call.
+   */
+  submitDisputeEvidence?(disputeGatewayId: string, evidence: DisputeEvidence): Promise<Dispute>;
+
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * Verify the webhook signature and normalize the raw payload into a {@link WebhookEvent}.
-   * Throws when the signature is invalid.
+   * Verify the webhook signature and normalize the raw payload into a {@link WebhookEvent},
+   * or into an ARRAY of them when the delivery carries more than one. Throws when the
+   * signature is invalid.
+   *
+   * May return a promise. Most gateways sign a self-describing payload, so this is a pure
+   * function of the body and headers — but not all: Mollie's webhook is a bare payment id
+   * with no status and no signature, and the ONLY way to learn what happened, or that the
+   * call is genuine, is an authenticated fetch of that payment. A synchronous signature
+   * forced such a driver to report `payment.updated` and nothing else, so the mounted route
+   * ledgered the event and never marked the payment paid. The mounted route awaits this.
+   *
+   * **Why the array half exists.** Two gateways put a LIST in the delivery envelope: Adyen's
+   * `notificationItems` and Efí's `pix`. Adyen documents that JSON/HTTP POST webhooks carry a
+   * single item (only the legacy SOAP transport batches, up to six), and Efí sends one Pix in
+   * practice — but "sends one in practice" is a fact about traffic, not about the contract,
+   * and the shape that arrives is a list either way. Returning only the first entry drops
+   * captures, refunds and settled Pix silently, with the money already moved; refusing the
+   * whole delivery loses the entries that were fine. So the contract carries what the
+   * envelope carries, and the mounted route loops.
+   *
+   * **A single event is still the normal answer.** Every other driver returns one
+   * `WebhookEvent` and the union lets it: this is a widening, not a migration. A driver
+   * whose gateway sends one event per request should keep returning one — an array of length
+   * one adds nothing and reads as if batching were possible.
+   *
+   * **Each returned event is independent.** The ledger keys on `WebhookEvent.id`, so every
+   * event in a batch needs an id of its own (Adyen's per-item `pspReference`, Efí's
+   * `endToEndId`) — reusing one id across the batch would make the second event look like a
+   * redelivery of the first and skip it. Idempotency, handlers and retries are all per event,
+   * never per delivery.
+   *
+   * **Verification is per event where the gateway signs per event.** Adyen's HMAC lives in
+   * each item's own `additionalData.hmacSignature`, so a driver that verifies the first item
+   * and trusts the rest is a forgery hole: an attacker replays one genuine item and appends
+   * whatever they like. A driver returning N events must have authenticated all N.
    */
   parseWebhook(
     rawBody: string,
     headers: Record<string, string | string[] | undefined>,
-  ): WebhookEvent;
+  ): WebhookEvent | WebhookEvent[] | Promise<WebhookEvent | WebhookEvent[]>;
 }
 
 // ── Input types ─────────────────────────────────────────────────────────────────────────
 
 export interface CreateCustomerInput {
+  /**
+   * Idempotency key — reusing it must not perform the operation twice.
+   *
+   * A driver whose gateway has no deduplication mechanism must REFUSE this rather than
+   * accept and ignore it: silently dropping it turns a caller's retry guarantee into a
+   * second charge, a second refund, or a second subscription.
+   */
+  idempotencyKey?: string;
   email?: string;
   name?: string;
   /** CPF/CNPJ (BR gateways) or tax id. */
@@ -210,6 +314,30 @@ export interface CheckoutInput {
   trialDays?: number;
   /** Idempotency key — reusing it must not create a duplicate session. */
   idempotencyKey?: string;
+  /**
+   * Your own id for this purchase, echoed back on the gateway's webhooks.
+   *
+   * The same contract as {@link ChargeInput.externalReference}, and it matters MORE here:
+   * several gateways (Paddle, Lemon Squeezy, PayPal, and any merchant-of-record) have no
+   * server-side charge at all, so a hosted session is the only way a purchase starts. A
+   * session opened without a reference produces a confirmation the handler cannot route
+   * back to an order, and the failure is a silent `return`.
+   */
+  externalReference?: string;
+  /**
+   * The payer's identity, for gateways that demand it up front rather than collecting it
+   * on the hosted page.
+   *
+   * Most checkouts ask the payer who they are, so this is usually unnecessary. PagBank's
+   * Orders API is the counter-example: every order carries the payer inline and is refused
+   * without a CPF/CNPJ, so a checkout there cannot be opened at all without it. Same shape
+   * as {@link ChargeInput.customer}, so a flow that already has the data passes it either way.
+   */
+  customer?: {
+    name?: string;
+    taxId?: string;
+    email?: string;
+  };
   /** Emit an invoice for this checkout: `true`/name/options. */
   invoice?: boolean | string | InvoiceOptions;
   /** Extra provider-specific fields. */
@@ -217,6 +345,14 @@ export interface CheckoutInput {
 }
 
 export interface CreateSubscriptionInput {
+  /**
+   * Idempotency key — reusing it must not perform the operation twice.
+   *
+   * A driver whose gateway has no deduplication mechanism must REFUSE this rather than
+   * accept and ignore it: silently dropping it turns a caller's retry guarantee into a
+   * second charge, a second refund, or a second subscription.
+   */
+  idempotencyKey?: string;
   customerId: string;
   /** Price/plan id at the gateway. */
   planId: string;
@@ -260,6 +396,14 @@ export interface CreateSubscriptionInput {
 }
 
 export interface UpdateSubscriptionInput {
+  /**
+   * Idempotency key — reusing it must not perform the operation twice.
+   *
+   * A driver whose gateway has no deduplication mechanism must REFUSE this rather than
+   * accept and ignore it: silently dropping it turns a caller's retry guarantee into a
+   * second charge, a second refund, or a second subscription.
+   */
+  idempotencyKey?: string;
   /** New amount in the currency's smallest unit. */
   amount?: Money;
   /** New description. */

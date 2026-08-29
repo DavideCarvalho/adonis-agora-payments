@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { AbacateDriverConfig } from '../define_config.js';
 import {
   publishPaymentDiagnostics,
@@ -12,11 +13,11 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { headerValue, httpRequest, isNotFound } from '../http.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
 import type { EmitInvoiceContext } from '../invoice/emit_invoice.js';
-import { fromDecimal, toDecimal } from '../money.js';
 import type {
   CheckoutSession,
   Customer,
@@ -82,7 +83,7 @@ export class AbacateDriver implements PaymentsDriver {
   readonly provider = 'abacate';
   // AbacatePay is Pix-first — no credit card.
   readonly supportedMethods = ['pix', 'boleto', 'undefined'] as const;
-  readonly capabilities = { refunds: true, subscriptions: true };
+  readonly capabilities = { refunds: true, invoices: true, subscriptions: true };
 
   #baseUrl: string;
   #publicKey: string | undefined;
@@ -107,6 +108,7 @@ export class AbacateDriver implements PaymentsDriver {
   // ── Customers ────────────────────────────────────────────────────────────────────────
 
   async createCustomer(input: CreateCustomerInput): Promise<Customer> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createCustomer');
     const data = await this.#request<AbacateCustomerResponse>('/customer/create', {
       method: 'POST',
       body: {
@@ -231,7 +233,12 @@ export class AbacateDriver implements PaymentsDriver {
     }
   }
 
-  async refund(paymentGatewayId: string, _amount?: Money): Promise<Refund> {
+  async refund(
+    paymentGatewayId: string,
+    _amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
+    this.#refuseIdempotencyKey(options?.idempotencyKey, 'refund');
     const data = await this.#request<AbacateBillingResponse>(
       `/billing/refund/${paymentGatewayId}`,
       {
@@ -244,7 +251,7 @@ export class AbacateDriver implements PaymentsDriver {
       gatewayId: data.id,
       provider: this.provider,
       amount: {
-        amount: data.amount !== undefined ? fromDecimal(data.amount) : 0,
+        amount: data.amount !== undefined ? Math.round(data.amount) : 0,
         currency: data.currency ?? 'brl',
       },
       status: 'succeeded',
@@ -264,7 +271,15 @@ export class AbacateDriver implements PaymentsDriver {
       method: 'POST',
       body: {
         customerId: input.customerId,
-        amount: toDecimal(input.amount),
+        // Centavos, straight through. AbacatePay documents it outright — "valores
+        // monetários são sempre em centavos (ex.: 10000 = R$ 100,00)" — which is the same
+        // integer minor unit this package uses, so there is nothing to convert.
+        //
+        // This ran `toDecimal` and created a checkout for **1/100 of the amount**: R$19,90
+        // went out as `19.9` and AbacatePay read 19 centavos. `charge()` on the neighbouring
+        // v2 endpoint always passed the integer through, so the driver disagreed with itself
+        // and the two paths were never compared.
+        amount: input.amount,
         ...(input.description !== undefined ? { description: input.description } : {}),
       },
     });
@@ -275,7 +290,7 @@ export class AbacateDriver implements PaymentsDriver {
       url: data.url ?? '',
       status: 'open',
       amount: {
-        amount: data.amount !== undefined ? fromDecimal(data.amount) : input.amount,
+        amount: data.amount !== undefined ? Math.round(data.amount) : input.amount,
         currency: data.currency ?? 'brl',
       },
       customerId: input.customerId,
@@ -288,11 +303,13 @@ export class AbacateDriver implements PaymentsDriver {
   // ── Subscriptions ────────────────────────────────────────────────────────────────────
 
   async createSubscription(input: CreateSubscriptionInput): Promise<Subscription> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'createSubscription');
     const data = await this.#request<AbacateSubscriptionResponse>('/subscription/create', {
       method: 'POST',
       body: {
         customerId: input.customerId,
-        ...(input.amount !== undefined ? { amount: toDecimal(input.amount) } : {}),
+        // Centavos — see the note in `createCheckout`.
+        ...(input.amount !== undefined ? { amount: input.amount } : {}),
         frequency: input.cycle ?? 'MONTHLY',
         ...(input.startDate !== undefined ? { nextBillingAt: input.startDate } : {}),
         ...(input.description !== undefined ? { description: input.description } : {}),
@@ -332,12 +349,14 @@ export class AbacateDriver implements PaymentsDriver {
     subscriptionGatewayId: string,
     input: UpdateSubscriptionInput,
   ): Promise<Subscription> {
+    this.#refuseIdempotencyKey(input.idempotencyKey, 'updateSubscription');
     const data = await this.#request<AbacateSubscriptionResponse>(
       `/subscription/update/${subscriptionGatewayId}`,
       {
         method: 'PATCH',
         body: {
-          ...(input.amount !== undefined ? { amount: toDecimal(input.amount) } : {}),
+          // Centavos — see the note in `createCheckout`.
+          ...(input.amount !== undefined ? { amount: input.amount } : {}),
           ...(input.description !== undefined ? { description: input.description } : {}),
         },
       },
@@ -358,7 +377,7 @@ export class AbacateDriver implements PaymentsDriver {
       customerId,
       status: billing.status === 'PAID' ? 'paid' : billing.status === 'CANCELED' ? 'void' : 'open',
       amount: {
-        amount: billing.amount !== undefined ? fromDecimal(billing.amount) : 0,
+        amount: billing.amount !== undefined ? Math.round(billing.amount) : 0,
         currency: billing.currency ?? 'brl',
       },
       createdAt: billing.createdAt ?? new Date().toISOString(),
@@ -368,6 +387,16 @@ export class AbacateDriver implements PaymentsDriver {
   }
 
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * AbacatePay signs the body with the dashboard public key. Without it `parseWebhook` skips
+   * the HMAC check entirely and every POST to the route is accepted.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#publicKey !== undefined ? 'configured' : 'unconfigured';
+  }
 
   parseWebhook(
     rawBody: string,
@@ -388,12 +417,41 @@ export class AbacateDriver implements PaymentsDriver {
     };
     const event = payload.event ?? 'unknown';
     return {
-      id: payload.id ?? `${event}-${Math.random()}`,
+      // A CONTENT hash, never a random id. A payload with no id used to get a fresh
+      // `Math.random()` on every delivery, so the ledger saw each redelivery as a new
+      // event and processed it again — the exact double-grant the ledger exists to stop.
+      id:
+        payload.id ??
+        `${event}-${createHash('sha256').update(rawBody, 'utf8').digest('hex').slice(0, 32)}`,
       provider: this.provider,
       type: this.#mapWebhookType(event),
       createdAt: new Date().toISOString(),
-      data: payload.data ?? {},
+      data: this.#mapWebhookData(payload.data),
       raw: payload as unknown as Record<string, unknown>,
+    };
+  }
+
+  /**
+   * The normalized shape the built-in sync needs (`gatewayId`, `amount`, `currency`).
+   *
+   * This used to hand the processor AbacatePay's raw `data`, which its shape guard
+   * rejected — so every AbacatePay webhook was ledgered, threw `Malformed`, and was retried
+   * forever while the billing tables never learned the payment was paid. `raw` still
+   * carries the original.
+   */
+  #mapWebhookData(data: Record<string, unknown> | undefined): Record<string, unknown> {
+    if (data === undefined) return {};
+    const billing = (data.billing ?? data) as AbacateBillingResponse;
+    if (billing?.id === undefined) return data;
+    const payment = this.#mapPayment(billing);
+    return {
+      gatewayId: payment.gatewayId,
+      amount: payment.amount.amount,
+      currency: payment.amount.currency,
+      ...(payment.customerId !== undefined ? { customerId: payment.customerId } : {}),
+      ...(typeof (billing as unknown as { externalId?: unknown }).externalId === 'string'
+        ? { externalReference: (billing as unknown as { externalId: string }).externalId }
+        : {}),
     };
   }
 
@@ -415,7 +473,7 @@ export class AbacateDriver implements PaymentsDriver {
       gatewayId: data.id,
       provider: this.provider,
       amount: {
-        amount: data.amount !== undefined ? fromDecimal(data.amount) : 0,
+        amount: data.amount !== undefined ? Math.round(data.amount) : 0,
         currency: data.currency ?? 'brl',
       },
       status:
@@ -458,7 +516,7 @@ export class AbacateDriver implements PaymentsDriver {
       status: statusMap[data.status] ?? 'active',
       planId: data.frequency ?? '',
       amount: {
-        amount: data.amount !== undefined ? fromDecimal(data.amount) : 0,
+        amount: data.amount !== undefined ? Math.round(data.amount) : 0,
         currency: 'brl',
       },
       ...(data.nextBillingAt !== undefined ? { endsAt: data.nextBillingAt } : {}),
@@ -475,9 +533,24 @@ export class AbacateDriver implements PaymentsDriver {
       case 'checkout.refunded':
       case 'transparent.refunded':
         return 'payment.refunded';
+      // "Disputa/chargeback aberta em um checkout" / "…em um pagamento transparente" — the
+      // dispute is OPENED here. It used to arrive as `payment.failed`, which files a
+      // chargeback as a payment that never went through: the row stopped saying `paid`, but
+      // it said the wrong thing, and the customer whose access has to be reconsidered was
+      // never flagged.
+      //
+      // These two are AbacatePay's ENTIRE dispute vocabulary. Its published webhook event
+      // list has no fraud alert, no retrieval request, no "chargeback incoming" — so there
+      // is no `payment.dispute_warning` to map — and no won/lost/reversed event either, so
+      // no `payment.dispute_closed`: the outcome never reaches you as a webhook at all.
+      //
+      // AbacatePay also does not say whether the funds are withdrawn when this fires, and
+      // publishes no payload example for it and no response deadline anywhere. The mapping
+      // therefore stays where it is rather than being demoted to a warning on a guess: a
+      // filed dispute is what `payment.disputed` names. See the provider docs page.
       case 'checkout.disputed':
       case 'transparent.disputed':
-        return 'payment.failed';
+        return 'payment.disputed';
       case 'subscription.completed':
         return 'subscription.created';
       case 'subscription.renewed':
@@ -487,6 +560,24 @@ export class AbacateDriver implements PaymentsDriver {
       default:
         return event;
     }
+  }
+
+  /**
+   * AbacatePay documents no idempotency mechanism — the only request header on any
+   * endpoint is `Authorization`, and its own guidance mentions idempotency solely for
+   * consuming webhooks (dedupe on the event `id`). Accepting the key and dropping it
+   * would turn a caller's retry guarantee into a second refund or a second subscription,
+   * so the driver refuses it instead.
+   *
+   * `charge()` is not an exception to this: there `idempotencyKey` has never meant
+   * deduplication, it is a legacy fallback for `externalReference` (sent as the
+   * transparent checkout's `externalId`) and is documented as such.
+   */
+  #refuseIdempotencyKey(key: string | undefined, operation: string): void {
+    if (key === undefined) return;
+    throw new Error(
+      `[payments] AbacatePay has no idempotency mechanism, so \`${operation}\` cannot honour an idempotencyKey — no AbacatePay endpoint documents an idempotency header or field. Deduplicate before you call.`,
+    );
   }
 
   #mapMethod(method: string): string {

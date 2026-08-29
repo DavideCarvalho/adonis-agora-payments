@@ -1,4 +1,9 @@
-import type { BillingStore, WebhookEventBreakdownLine } from './billing_store.js';
+import {
+  AUDIT_ACTIONS,
+  type BillingStore,
+  type DisputeListItem,
+  type WebhookEventBreakdownLine,
+} from './billing_store.js';
 
 /** 15 minutes — an event claimed but unfinished for longer is not slow, it is abandoned. */
 const DEFAULT_STUCK_AFTER = 15 * 60 * 1000;
@@ -6,6 +11,31 @@ const DEFAULT_STUCK_AFTER = 15 * 60 * 1000;
 const DEFAULT_UNCONFIRMED_AFTER = 2 * 60 * 60 * 1000;
 /** 24 hours — the window failures are counted over. */
 const DEFAULT_FAILED_WITHIN = 24 * 60 * 60 * 1000;
+/**
+ * 72 hours — how far ahead a closing evidence window is worth shouting about.
+ *
+ * Gateways give between 7 and 21 days to respond, so three days is late enough that the
+ * check is not permanently red and early enough that somebody can still gather a receipt, a
+ * delivery confirmation and an IP log before the window shuts. Past-due disputes stay
+ * counted: the window closing is what makes it urgent, not what makes it finished.
+ */
+const DEFAULT_DISPUTE_DUE_WITHIN = 72 * 60 * 60 * 1000;
+
+/**
+ * 24 hours — the window rejected deliveries are counted over.
+ *
+ * A rejection is not a slow-burning condition like a stuck event: a rotated webhook token, a
+ * secret that never made it into the deploy, a gateway pointed at the wrong route, all produce
+ * rejections immediately and continuously. A day is long enough to survive a redeploy and short
+ * enough that the number means "right now".
+ */
+const DEFAULT_REJECTED_WITHIN = 24 * 60 * 60 * 1000;
+
+/** How many closing windows the report NAMES. The count is unbounded; this is the list. */
+const DISPUTE_DEADLINE_SAMPLE = 20;
+
+/** How many open disputes the report NAMES, oldest first. The count is unbounded. */
+const OPEN_DISPUTE_SAMPLE = 20;
 
 export interface BillingHealthOptions {
   /** Milliseconds an event may sit in `received` before it counts as stuck. Default 15 min. */
@@ -14,12 +44,27 @@ export interface BillingHealthOptions {
   unconfirmedAfter?: number;
   /** The window `failed` events are counted over. Default 24 h. */
   failedWithin?: number;
+  /**
+   * How far ahead to look for a dispute whose evidence window is about to close. Default 72 h.
+   *
+   * In milliseconds like every other threshold here, though the store's read takes hours —
+   * the conversion happens once, at the call.
+   */
+  disputeDueWithin?: number;
+  /** The window rejected deliveries are counted over. Default 24 h. */
+  rejectedWithin?: number;
   /** Overridable clock — the tests pass a fixed instant. Defaults to now. */
   now?: Date;
 }
 
 export interface BillingHealthCheck {
-  key: 'stuck_webhooks' | 'failed_webhooks' | 'unconfirmed_payments';
+  key:
+    | 'stuck_webhooks'
+    | 'failed_webhooks'
+    | 'unconfirmed_payments'
+    | 'disputes_due'
+    | 'open_disputes'
+    | 'rejected_deliveries';
   label: string;
   count: number;
   /** `true` when `count` is zero — every check here is a "should be nothing" check. */
@@ -35,10 +80,25 @@ export interface BillingHealth {
   checks: BillingHealthCheck[];
   /** Which provider/event pairs make up `failed_webhooks`, worst first. */
   failures: WebhookEventBreakdownLine[];
+  /**
+   * The disputes behind `disputes_due`, soonest deadline first — WHICH windows are closing,
+   * not just how many. Capped at {@link DISPUTE_DEADLINE_SAMPLE}; `disputes_due.count` is the
+   * full number, so a report can name twenty and still say there are fifty.
+   */
+  deadlines: DisputeListItem[];
+  /**
+   * The disputes behind `open_disputes`, OLDEST first — the ones nobody has answered, whether or
+   * not a deadline was ever published for them. Capped at {@link OPEN_DISPUTE_SAMPLE}.
+   *
+   * Overlaps `deadlines` on purpose: a dispute that has both a deadline and no answer belongs in
+   * both lists, and suppressing it from one of them to keep them disjoint would make the
+   * deadline-free check quietly incomplete on exactly the install it exists for.
+   */
+  openDisputes: DisputeListItem[];
 }
 
 /**
- * The three operational questions about a billing install that nothing else answers, asked
+ * The six operational questions about a billing install that nothing else answers, asked
  * through the store instead of by hand against the tables.
  *
  * Each is a silent failure — the kind where the endpoint keeps returning `200` and revenue
@@ -50,6 +110,21 @@ export interface BillingHealth {
  *   event described — the grant, the activation — never happened.
  * - **Unconfirmed charges**: created and never confirmed. This is what a webhook endpoint
  *   that stopped being reachable looks like from the inside, and nothing errors.
+ * - **Closing dispute windows**: an open chargeback whose evidence deadline is inside the
+ *   next three days. This is the only check here that alerts on a CLOCK rather than on a
+ *   failure — nothing is broken, and the money is lost anyway if the window closes
+ *   unanswered, by default rather than on the merits.
+ * - **Open disputes**: the same money, without the clock. `disputes_due` can only ever see a
+ *   dispute whose gateway PUBLISHED a deadline, and most do not — Asaas' comes from
+ *   `chargeback.deadlineToSendDisputeDocuments`, which no published webhook example contains.
+ *   On such an install the deadline check is zero forever while a chargeback sits open with the
+ *   money already pulled back, and the report says healthy. This one asks the question the
+ *   deadline cannot.
+ * - **Rejected deliveries**: gateway calls the endpoint REFUSED — a bad signature, an unparsable
+ *   body, a provider nobody configured. They never become ledger rows, so a rotated webhook
+ *   token used to look exactly like a quiet week: zero events, zero failures, every check green.
+ *   `unconfirmed_payments` eventually notices, but only for charges the app itself created;
+ *   refunds, chargebacks and dispute closures produce no pending payment and simply vanish.
  *
  * Pure store reads, no gateway calls — safe to run on a schedule and to alert on.
  */
@@ -61,13 +136,39 @@ export async function billingHealth(
   const stuckAfter = options.stuckAfter ?? DEFAULT_STUCK_AFTER;
   const unconfirmedAfter = options.unconfirmedAfter ?? DEFAULT_UNCONFIRMED_AFTER;
   const failedWithin = options.failedWithin ?? DEFAULT_FAILED_WITHIN;
+  const disputeDueWithin = options.disputeDueWithin ?? DEFAULT_DISPUTE_DUE_WITHIN;
+  const rejectedWithin = options.rejectedWithin ?? DEFAULT_REJECTED_WITHIN;
   const since = (ms: number) => new Date(now.getTime() - ms);
+  // The store's deadline read takes HOURS; every other threshold here is milliseconds.
+  const withinHours = disputeDueWithin / 3_600_000;
 
-  const [stuck, failed, unconfirmed, failures] = await Promise.all([
+  const [
+    stuck,
+    failed,
+    unconfirmed,
+    failures,
+    disputesDue,
+    deadlines,
+    openDisputeCount,
+    openDisputes,
+    rejected,
+  ] = await Promise.all([
     store.countWebhookEvents({ status: 'received', createdBefore: since(stuckAfter) }),
     store.countWebhookEvents({ status: 'failed', createdAfter: since(failedWithin) }),
     store.countPayments({ status: 'pending', createdBefore: since(unconfirmedAfter) }),
     store.webhookEventBreakdown({ status: 'failed', createdAfter: since(failedWithin) }),
+    // Counted separately from the list, and unbounded: a count taken from a capped page
+    // saturates at the cap, and this number is what the exit code is decided on.
+    store.countDisputesDueWithin({ withinHours, now }),
+    store.listDisputesDueWithin({ withinHours, now, limit: DISPUTE_DEADLINE_SAMPLE }),
+    // No window and no deadline: an open dispute is unanswered however old it is, and on a
+    // gateway that publishes no deadline this is the ONLY read that can see it at all.
+    store.countOpenDisputes({}),
+    store.listOpenDisputes({ limit: OPEN_DISPUTE_SAMPLE }),
+    store.countAuditEvents({
+      action: AUDIT_ACTIONS.webhookRejected,
+      createdAfter: since(rejectedWithin),
+    }),
   ]);
 
   const checks: BillingHealthCheck[] = [
@@ -92,6 +193,27 @@ export async function billingHealth(
       healthy: unconfirmed === 0,
       hint: 'Charges are being created but never confirmed — the shape of a webhook endpoint that stopped being reachable. Check the gateway dashboard delivery log.',
     },
+    {
+      key: 'disputes_due',
+      label: `Open disputes whose evidence window closes within ${formatDuration(disputeDueWithin)}`,
+      count: disputesDue,
+      healthy: disputesDue === 0,
+      hint: 'A chargeback window is closing. Past it the dispute is lost by default rather than on the merits, and nothing can be done — submit evidence at the gateway, or refund if it is cheaper than the fee. Rows already past their deadline are counted here too: they are still open, and still unanswered.',
+    },
+    {
+      key: 'open_disputes',
+      label: 'Disputes still open and unanswered',
+      count: openDisputeCount,
+      healthy: openDisputeCount === 0,
+      hint: 'A chargeback is open and the money is already out of the account. This check does NOT need a deadline, which is the point: most gateways publish none, and on those installs the deadline check reports zero forever. Answer it at the gateway, then close it here (POST <dashboard>/api/disputes/:gatewayId/resolve) — several gateways never send a lost-dispute event, so nothing else will ever close the row.',
+    },
+    {
+      key: 'rejected_deliveries',
+      label: `Gateway deliveries refused in the last ${formatDuration(rejectedWithin)}`,
+      count: rejected,
+      healthy: rejected === 0,
+      hint: 'The webhook endpoint answered 400: a signature that did not verify, a body it could not parse, or a provider nobody configured. The usual cause is a rotated webhook secret that never reached the deployment — and the deliveries lost that way are invisible everywhere else, because a rejected delivery never becomes a ledger row. Read them with listAuditEvents({ action: "webhook.rejected" }).',
+    },
   ];
 
   return {
@@ -99,6 +221,8 @@ export async function billingHealth(
     checkedAt: now,
     checks,
     failures,
+    deadlines,
+    openDisputes,
   };
 }
 

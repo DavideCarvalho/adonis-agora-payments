@@ -37,34 +37,71 @@ const withFee = Math.round(amount * 1.1)   // not `amount * 1.1`
 
 ## Where the decimal conversion lives
 
-Stripe works in cents. The Brazilian gateways — Asaas, AbacatePay, Woovi — work in decimal reais. The
-whole mapping is two functions, used only inside driver implementations:
+Stripe works in cents. Asaas and AbacatePay work in decimal reais. The whole mapping is two
+functions — three, counting `formatDecimal` below — used only inside driver implementations:
 
 ```ts
 import { toDecimal, fromDecimal } from '@adonis-agora/payments'
 
-toDecimal(1990)    // 19.9   — cents → the gateway's decimal
-fromDecimal(19.9)  // 1990   — the gateway's decimal → cents
+toDecimal(1990, 'brl')    // 19.9   — minor units → the gateway's decimal
+fromDecimal(19.9, 'brl')  // 1990   — the gateway's decimal → minor units
 ```
 
 `fromDecimal` rounds, which is what makes a round trip stable: a gateway that answers `19.900000001`
 still becomes `1990`.
 
-Application code should never call either. If you find yourself converting in a service, the amount
-crossed a boundary it should not have.
+<Callout type="warn" title="Not every Brazilian gateway wants a decimal">
+"Brazilian gateway" is not the rule — the gateway's own documentation is. Woovi/OpenPix documents
+`value` as *o valor em centavos*, the same integer minor unit this package uses, so its driver sends
+`input.amount` straight through and converts nothing. It did convert, once, and the two halves
+agreed with each other: `toDecimal(1990)` went out as `19.9`, Woovi read it as 19 centavos and
+created a **R$ 0,20** charge for a R$ 19,90 order. The tests agreed with both halves, which is why
+it survived review.
+
+The lesson for a [custom driver](/docs/payments/custom-providers): read what the gateway says the
+unit is, and write the answer down beside the call. A conversion that is wrong in one direction is
+caught by the first live payment; one that is wrong in both directions is not caught at all.
+</Callout>
+
+<Callout type="warn" title="The exponent is not always two">
+Both take the currency because dividing by 100 is only right for most of them. The yen and the won
+have **no** minor unit — `1990` JPY is ¥1,990, not ¥19.90 — and the Kuwaiti dinar, the Bahraini
+dinar and the Tunisian dinar have **three** digits. Omit the currency and both assume two, which is
+the old behaviour and correct for BRL, USD and EUR. `currencyExponent('jpy')` answers `0` if you
+need the number yourself.
+</Callout>
+
+Application code should never call either **in business logic**. If you find yourself converting in
+a service, the amount crossed a boundary it should not have. The presentation edge is the one place
+it belongs — see [Formatting](#formatting-for-humans).
 
 ## Currency
 
 Lowercase ISO 4217, everywhere: `'brl'`, `'usd'`, `'eur'`. A charge that does not name one falls
-back to the driver's configured currency, which for Stripe defaults to `'brl'`:
+back to the driver's configured currency, and on a multi-currency gateway that currency is
+**required** — there is no default:
 
 ```ts
 providers: {
-  stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY'), currency: 'brl' }),
+  stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY'), currency: 'eur' }),
 }
 ```
 
-The Brazilian gateways are BRL-only and do not take the option at all.
+Leave it out and the driver refuses to boot:
+
+```
+[payments] Driver "stripe" has no currency configured. Set `currency` in
+config/payments.ts — a multi-currency gateway has no safe default.
+```
+
+That is deliberate. Stripe bills in whatever currency you hand it, so a default would be a guess at
+which country the app charges in — and the wrong guess does not fail, it charges. A startup error
+you read once is cheaper than a euro-area app quietly taking reais.
+
+Eleven drivers require it. The BRL-only Brazilian gateways — Asaas, AbacatePay, Woovi, Pagar.me,
+PagBank, Efí, InfinitePay — do not take the option at all, because there is no choice to express.
+Lemon Squeezy is a third case: it is a merchant of record, the store's own settings decide the
+currency, and the driver reads it back off the order rather than sending one.
 
 Amounts and currencies travel together in `MoneyAmount` rather than as a bare number, so a value
 that reaches a total or a report cannot lose the unit it was denominated in:
@@ -79,17 +116,76 @@ payment.amount.amount      // 1990
 Formatting is a presentation concern and the library does none of it. Convert once, at the edge:
 
 ```ts
+import { toDecimal } from '@adonis-agora/payments'
+
 const format = (money: MoneyAmount) =>
   new Intl.NumberFormat('pt-BR', {
     style: 'currency',
     currency: money.currency.toUpperCase(),
-  }).format(money.amount / 100)
+  }).format(toDecimal(money.amount, money.currency))
 
 format({ amount: 1990, currency: 'brl' })   // 'R$ 19,90'
 ```
 
-Divide by 100 in the formatter and nowhere else. A `19.9` floating around a service layer is an
+Convert in the formatter and nowhere else — and convert with `toDecimal`, not `/ 100`, so the
+formatter stays right the day the app takes a yen. A `19.9` floating around a service layer is an
 amount waiting to be added to something.
+
+`formatDecimal(amount, currency)` is the other direction and is **not** a human formatter: it
+returns the decimal *string* a gateway's JSON wants (`'19.90'`, `'1990'`, `'19.900'`), built by
+shifting the integer's digits rather than dividing, so the value never passes through a float on
+the way. `toDecimal(x).toFixed(2)` does pass through one, which is the classic way to send
+`"19.89"`. Drivers should use `formatDecimal` on the wire; screens should use `Intl`.
+
+## A partial refund is a subtraction, never a division
+
+`billing_payments` carries `amount` **and** `refunded_amount`, both integer minor units, both
+`BIGINT`. Net revenue for a row is one subtraction:
+
+```ts
+const net = payment.amount - (payment.refundedAmount ?? 0)
+```
+
+The alternative before that column existed was overwriting `status` with `refunded` and `amount`
+with the refunded figure — which writes off the whole charge, so a R$10 refund on a R$100 charge
+erased R$90 of revenue. A partial refund therefore keeps the row `paid`, keeps its full `amount`,
+keeps its `paid_at`, and records what went back separately.
+
+`null` and `0` are different answers here. `null` means nothing has been *said* about refunds on
+this row — a gateway that sent no refunds array, or a row written before the column existed. `0`
+asserts that nothing has gone back. The store's leave-alone rule keeps them distinct: an absent
+`refundedAmount` on a write does not clear a stored one.
+
+## Gross and net are two figures, and both are published
+
+The store answers the same window twice:
+
+```ts
+await store.revenue({ from, to })     // GROSS — sums `amount`, subtracts nothing
+await store.netRevenue({ from, to })  // NET   — sums `amount - COALESCE(refunded_amount, 0)`
+```
+
+Same rows (`status = 'paid'`), same window (`paid_at`), same integer minor units. The only
+difference is the figure summed, and both are legitimate: gross is what you collected, net is what
+you kept. A half-refunded charge counts at full value in the first and at `amount - refunded_amount`
+in the second.
+
+`billingOverview` publishes both, as `revenue` and `net_revenue`, and the console shows them side by
+side as **Revenue (gross)** and **Revenue (net)**.
+
+<Callout type="warn" title="`revenue()` is gross, and stays gross">
+It was the only revenue figure for two releases, and apps read it. Redefining it to net would have
+changed the meaning of a number already on other people's screens without a single error to
+announce it, so `netRevenue()` was added beside it instead. Whichever you render, **say which one it
+is** — a number labelled only "Revenue" over a gross figure is exactly the bug this pair exists to
+close.
+</Callout>
+
+<Callout title="`COALESCE`, not `-` alone">
+`refunded_amount` is `NULL` on every row written before the column existed, and `amount - NULL` is
+`NULL` in SQL, which `SUM` carries across the whole window. Reading `NULL` as zero is not defensive
+padding — without it one legacy row makes the entire figure disappear.
+</Callout>
 
 ## Splitting an amount
 
@@ -104,8 +200,12 @@ function split(total: Money, shares: number[]): Money[] {
   return parts
 }
 
-split(1000, [0.333, 0.333, 0.334])  // [334, 333, 333] — sums to exactly 1000
+split(1000, [1 / 3, 1 / 3, 1 / 3])  // [334, 333, 333] — sums to exactly 1000
 ```
+
+Three floors of `333.33` are `999`; the missing cent goes to the first recipient. Which one gets it
+is a business decision, not an arithmetic one — but it has to go to exactly one of them, and it has
+to be decided in code rather than by whichever rounding mode the language picked.
 
 The gateway's own split (Asaas' `split` array on a charge) takes percentages or fixed amounts and
 does this arithmetic on its side — but the same rule applies to any total you compute yourself,

@@ -1,0 +1,346 @@
+---
+title: Adyen
+description: Checkout API v71 — stored-token card charges, Pay by Link, HMAC-signed webhooks, and no customer, subscription or read-back endpoint to pretend about.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+<Callout type="warn">
+  Written against Adyen's published Checkout API v71 reference and covered by unit tests —
+  including Adyen's own published HMAC test vector — but never pointed at a live Adyen
+  account. Run it against `checkout-test.adyen.com` before it takes real money.
+</Callout>
+
+Adyen is a processor, not a billing system. Most of what makes this driver worth reading
+is where the two disagree, and what it does there: it refuses.
+
+- **Methods**: `credit_card`, `undefined`. `charge()` sends a stored card token
+  (`paymentMethod.type: 'scheme'`); `createCheckout()` opens a Pay by Link page where the
+  shopper picks. Adyen's ~100 local methods reach a shopper through Drop-in/Components,
+  which this driver does not front.
+- **Setup**: `payments.adyen({ apiKey, merchantAccount, currency, hmacKey, liveUrlPrefix })`
+  — `ADYEN_API_KEY`, `ADYEN_MERCHANT_ACCOUNT`, `ADYEN_HMAC_KEY`,
+  `ADYEN_LIVE_URL_PREFIX`. The API key travels as `X-API-Key`. `currency` is **required**
+  and the driver refuses to boot without it.
+- **Environment**: test is `https://checkout-test.adyen.com/v71`. Live is per-customer —
+  `https://{prefix}-checkout-live.adyenpayments.com/checkout/v71`, where `{prefix}` comes
+  from Customer Area → Developers → API URLs. Booting live without it fails at boot, not
+  as a DNS error on the first charge. Defaults to test unless `NODE_ENV=production`.
+- **Money**: `{ "value": 1990, "currency": "EUR" }` — an integer in the currency's minor
+  units, the same unit this package uses. Nothing is converted in either direction. (The
+  Mollie driver next door converts to a decimal string; that is Mollie's shape, not an
+  inconsistency here.)
+- **`externalReference`**: **required** on `charge` and `createCheckout`. It becomes
+  Adyen's `reference`, which every webhook echoes back as `merchantReference` — and since
+  `merchantReference` is one of the eight HMAC-signed fields, it is both the routing key
+  and part of what the signature protects. `parseWebhook` reads it onto
+  `event.data.externalReference`.
+- **`idempotencyKey`**: sent as Adyen's `Idempotency-Key` request header on `charge` and
+  `createCheckout` — the only thing Adyen deduplicates on, and it never echoes the key back
+  on the response, so there is nothing to store alongside it. Adyen's reference recommends a
+  UUID and caps it at 64 characters.
+
+```ts title="app/services/checkout_service.ts"
+const session = await payments.driver('adyen').createCheckout({
+  amount: 1990,
+  successUrl: 'https://example.org/thanks',
+  externalReference: 'order:order_local_1',
+})
+// session.url is the Pay by Link page.
+```
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`hmacKey` is not configured (env fallback `ADYEN_HMAC_KEY`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/adyen` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
+## Webhooks
+
+Adyen signs each notification item with HMAC-SHA256 and puts the result in
+`additionalData.hmacSignature`. The signed payload is eight fields of the item, joined
+with `:`, empty string for the absent ones:
+
+```
+pspReference:originalReference:merchantAccountCode:merchantReference:amount.value:amount.currency:eventCode:success
+```
+
+Two details are where implementations go wrong, and both are pinned by tests here:
+
+1. **The key is hex.** It must be decoded to bytes before signing — HMAC-ing with the
+   key's *characters* produces a signature that never matches.
+2. **Nothing is escaped.** The `\` → `\\`, `:` → `\:` rule that circulates in Adyen
+   examples belongs to the classic HPP/dictionary signature, not to standard webhooks.
+   Adyen's own Node, PHP, Java and Python libraries all join the eight fields unescaped,
+   and so does this driver — so a `merchantReference` containing a colon verifies
+   correctly instead of being rejected as a forgery. The unit tests include Adyen's
+   published vector and a colon-bearing reference.
+
+`hmacKey` is required: an unsigned or wrongly-signed notification throws, and leaving the key
+unset no longer means "skip verification" — the app refuses to boot instead. For local development
+without Customer Area setup, name the provider in `allowUnverifiedWebhooks`.
+
+Event mapping: `AUTHORISATION`/`CAPTURE` → `payment.succeeded` (or `payment.failed` when
+`success` is `"false"`), `REFUND` → `payment.refunded`, and `CANCELLATION`, `REFUND_FAILED`,
+`REFUNDED_REVERSED` and friends → `payment.updated`, since this package has no canonical
+event for them; `event.raw` still carries the `eventCode` for an app handler. The dispute
+family gets its own treatment — see [Disputes](#disputes). A modification carries its own `pspReference` and names the payment in
+`originalReference`, so `event.data.gatewayId` is the **original** payment — that is the
+row the ledger should move.
+
+### Two things to know about the mounted route
+
+- **Batches, and the per-item HMAC.** Adyen's notification envelope is a
+  `notificationItems` array and **each item carries its own `additionalData.hmacSignature`** —
+  nothing signs the envelope. So the driver verifies *every* item before mapping *any* of
+  them, and returns one `WebhookEvent` per item; the mounted route loops, giving each event
+  its own ledger row. Adyen documents that JSON and HTTP POST webhooks carry a single item
+  (only the legacy SOAP transport batches, up to six when events land in rapid succession),
+  so in practice you get one event — but the array is read in full, not truncated to its
+  first entry.
+
+  A forged item is not partially accepted. One bad signature anywhere in the array rejects
+  the whole delivery with `400` and nothing is processed, because verifying the first item
+  and trusting the rest is a replay hole: an attacker appends whatever they like beside one
+  genuine notification.
+- **`[accepted]`.** Adyen's webhook docs ask for a `200` whose body is `[accepted]`; the
+  package's mounted `/payments/webhook/:provider` route answers `200 {"received": true}`.
+  Current Adyen documentation says a `2xx` is what it needs, so this should be fine — but
+  if your account is configured to require the literal body, mount your own route for
+  Adyen. A delivery whose processing **failed** answers `500` instead, which is what puts it
+  in Adyen's retry queue — three attempts at 9/18/27 seconds, then up to 30 days of
+  increasing intervals.
+
+## What it refuses
+
+Adyen genuinely has no endpoint behind these. Each one throws with a message naming the
+alternative, because a driver that returns a plausible object for a call the gateway never
+saw is worse than one that has no such call.
+
+- **`createCustomer` / `findCustomer` / `updateCustomer`** — Adyen has no customer
+  resource. `shopperReference` is a string you invent (your own user id) and it exists only
+  on the payments carrying it. Pass yours as `customerId`.
+- **`findPayment`** — Checkout v71 has no `GET /payments/{pspReference}`. Payment state
+  reaches you through webhooks; read your own `billing_payments` row, which they keep in
+  sync.
+- **`refund` with no amount** — Adyen requires the amount and, per the point above, the
+  driver cannot read the payment back to infer a full refund. Pass it explicitly.
+- **All four subscription methods** — Adyen has no subscription resource. Recurring
+  billing is you charging a stored token on your own schedule: tokenize with
+  `storePaymentMethod: true`, then call `charge({ paymentMethodId })` each cycle.
+  `capabilities.subscriptions` is `false`, so the manager stops the call before it reaches
+  the driver.
+- **`listInvoices`** — no invoice resource in Checkout.
+- **A charge with no payment method** — there is no server-side way to charge without one.
+- **`split`** — Adyen splits with absolute amounts against balance accounts
+  (`splits[].account`); the percent-based `split` input cannot express that.
+
+## `Authorised` is read as paid — with a caveat
+
+`charge()` maps `resultCode: 'Authorised'` onto `status: 'paid'`, because Adyen captures
+automatically by default. On an account configured for **manual capture** it means only
+that the funds are held, and nothing is settled until the `CAPTURE` webhook. The API
+reference does not expose which mode an account is in, so the driver cannot tell the
+difference — if you use manual capture, treat `paid` from `charge()` as "authorised" and
+let the `CAPTURE` webhook be your settlement signal.
+
+## Passing Adyen-specific fields
+
+A stored-token charge usually needs `shopperInteraction` and `recurringProcessingModel`;
+which values are right is a business question (is the shopper present? is this a
+subscription?), so the driver forwards yours and invents neither:
+
+```ts
+await payments.driver('adyen').charge({
+  customerId: 'shopper_42',
+  amount: 1990,
+  paymentMethodId: 'stored_pm_id',
+  externalReference: 'order:order_local_1',
+  metadata: {
+    shopperInteraction: 'ContAuth',
+    recurringProcessingModel: 'Subscription',
+    returnUrl: 'https://example.org/return',
+  },
+})
+```
+
+`paymentMethodType`, `shopperInteraction`, `recurringProcessingModel` and `returnUrl` are
+lifted out of `metadata` onto the request; everything else in `metadata` is sent as
+Adyen's `metadata`.
+
+## Capture mode — what `Authorised` means
+
+`captureMode` is the one option that changes what a successful payment *means*, and Adyen's
+Checkout API will not tell you which mode your account is in: `captureDelay` is a
+**Management** API field (`GET /merchants/{merchantId}`) and both modes answer `/payments`
+identically. So the driver asks rather than guessing, and defaults to Adyen's own default.
+
+```ts
+providers: {
+  adyen: payments.adyen({ currency: 'eur', captureMode: 'manual' }),
+}
+```
+
+- **`'automatic'` (default)** — the capture follows the authorization on its own and Adyen
+  sends **no** CAPTURE webhook, so `resultCode: Authorised` is the last word the driver
+  gets about that money. It reads as **`paid`**, and the `AUTHORISATION` webhook is
+  `payment.succeeded`.
+- **`'manual'`** — `Authorised` is a hold that expires unless you capture it. It reads as
+  **`authorized`** (funds reserved, money not moved), `AUTHORISATION` normalizes to
+  `payment.updated`, and **`CAPTURE` is what settles it** into `payment.succeeded`.
+
+Getting this wrong in the other direction is the expensive one: on an automatic-capture
+account, downgrading `AUTHORISATION` would leave every payment unsettled forever.
+
+Capture itself is `POST /v71/payments/{pspReference}/captures`, which is not on the driver
+contract — call it directly on a manual-capture account.
+
+## Disputes
+
+Adyen's chargeback flow is a family of notifications with different meanings, and the line
+that matters runs through the middle of it: **has Adyen taken the money yet.** Adyen's own
+webhook reference answers that per event, and the mapping follows it exactly.
+
+| `eventCode` | Normalized | Funds |
+| --- | --- | --- |
+| `NOTIFICATION_OF_FRAUD` | `payment.dispute_warning` | untouched — a TC40/SAFE alert from the issuer |
+| `REQUEST_FOR_INFORMATION` | `payment.dispute_warning` | untouched — the scheme asking a question |
+| `NOTIFICATION_OF_CHARGEBACK` | `payment.dispute_warning` | untouched — a chargeback announced, not yet taken |
+| `CHARGEBACK` | **`payment.disputed`** | withdrawn |
+| `CHARGEBACK_REVERSED`, `PREARBITRATION_WON` | `payment.dispute_closed` (`won`) | returned |
+| `SECOND_CHARGEBACK`, `PREARBITRATION_LOST` | `payment.dispute_closed` (`lost`) | gone |
+| `DISPUTE_DEFENSE_PERIOD_ENDED` | `payment.dispute_closed`, outcome from `disputeStatus` | depends |
+| `INFORMATION_SUPPLIED` | `payment.updated` | untouched — defense documents uploaded |
+
+**`NOTIFICATION_OF_CHARGEBACK` is a warning, not a chargeback.** It used to map to
+`payment.disputed`, which moved a paid row over money still sitting in the account — Adyen
+lists "funds withdrawn: no" for it. It is also the **only** event that carries
+`additionalData.defensePeriodEndsAt`, which the driver surfaces as `actionableUntil` on the
+normalized event. That deadline is what makes a dispute actionable at all, and flattening the
+event into one with no room for it threw the field away.
+
+**`CHARGEBACK` stands alone rather than assuming a warning came first.** For card schemes a
+`NOTIFICATION_OF_CHARGEBACK` does precede it, but an **ACH return goes straight to
+`CHARGEBACK`** with no notification and cannot be defended at all — mapping only the
+notification would miss exactly the disputes nobody can fight.
+
+**`DISPUTE_DEFENSE_PERIOD_ENDED` means "expired or liability accepted"**, and the event code
+alone does not say which. The driver reads `additionalData.disputeStatus`: `Won` → `won`,
+`Lost` / `Accepted` / `Undefended` → `lost` (you did not defend, so the cardholder keeps the
+money), `Expired` → `expired`. With no recognizable status it stays a `payment.updated` —
+reporting a loss that might be a win is worse than reporting nothing.
+
+<Callout title="A close is not always the last word">
+Adyen does not treat `CHARGEBACK_REVERSED` as final: pre-arbitration can follow and send a
+second `payment.dispute_closed` carrying the opposite outcome. The alternative was emitting
+nothing at all for a successful defense, which is the outcome operators most want to hear
+about — so it is reported, and a later close overrides it.
+</Callout>
+
+Every one of these is keyed on `originalReference`, the disputed payment's `pspReference` —
+the row that has to stop saying `paid`. The dispute's own `pspReference` comes through as
+`disputeId`.
+
+### Defending one: `capabilities.disputes` is `false`, on purpose
+
+Not because Adyen has no dispute API — it has one, **Defend Disputes v30** — but because
+this driver cannot drive it honestly through the shared contract. `findDispute()` and
+`submitDisputeEvidence()` exist and both throw, saying exactly this, so a caller who routes
+a dispute here gets the explanation rather than a missing method.
+
+Three things stand in the way, and each is a fact about Adyen rather than a gap in this
+driver:
+
+1. **Nothing reads a dispute back.** v30 is five POSTs —
+   `retrieveApplicableDefenseReasons`, `supplyDefenseDocument`, `defendDispute`,
+   `acceptDispute`, `deleteDisputeDefenseDocument` — and every one is an action. None
+   returns a dispute's status, amount, reason or deadline, so a `Dispute` built here would
+   have those fields invented. What you have is the notification (and the Customer Area
+   dispute report).
+2. **A defense is a reason code, not evidence.** Defending means picking a
+   scheme-specific `defenseReasonCode` from the applicable list, then supplying the
+   document types that reason requires. There is no free-text field anywhere in the flow —
+   no equivalent of Stripe's `uncategorized_text` — so `explanation`, `receiptUrl` and the
+   customer fields of `DisputeEvidence` have nowhere to go, and the code that *is* the
+   defense has no field to come from. A mapping would drop it.
+3. **Documents are bytes, not ids.** `supplyDefenseDocument` takes base64 `content` plus
+   `contentType` and a `defenseDocumentTypeCode` inline; `DisputeEvidence.documentIds`
+   holds ids that Adyen never issues.
+
+There is a fourth, practical one: the API lives on a **different host** from Checkout v71 —
+`https://ca-test.adyen.com/ca/services/DisputeService/v30` (`ca-live` in production) — and
+wants an API credential with the **API dispute management** role, which your Checkout key
+usually is not.
+
+So do it directly, with the deadline this driver already handed you:
+
+```ts
+// 1. Which defenses does the scheme allow for this dispute?
+const reasons = await fetch(
+  'https://ca-test.adyen.com/ca/services/DisputeService/v30/retrieveApplicableDefenseReasons',
+  {
+    method: 'POST',
+    headers: { 'x-api-key': env.get('ADYEN_DISPUTES_API_KEY'), 'content-type': 'application/json' },
+    body: JSON.stringify({
+      disputePspReference: dispute.disputeId,      // from the webhook
+      merchantAccountCode: env.get('ADYEN_MERCHANT_ACCOUNT'),
+    }),
+  },
+).then((r) => r.json())
+
+// 2. Supply each required document (base64), then 3. defendDispute with the reason code.
+// Both answer with `disputeServiceResult: { success, errorMessage }` — a 200 with
+// success:false is NOT a defense, and has to be treated as a failure.
+```
+
+<Callout type="warn" title="`success: false` arrives with an HTTP 200">
+Every Disputes v30 response wraps its outcome in `disputeServiceResult.success`. Code that
+checks only the HTTP status will record a defense that was never accepted — the same class
+of bug as reporting evidence submitted when the gateway never received it.
+</Callout>
+
+The pieces you need are all on the notification the driver already normalizes: the
+dispute's own `pspReference` (as `disputeId`), the payment's (`originalReference`), your
+own `externalReference` echoed back as `merchantReference`, and
+`additionalData.defensePeriodEndsAt` as `actionableUntil` — the deadline that decides
+whether any of this is still worth doing.
+
+## `idempotencyKey`
+
+Adyen deduplicates on the `Idempotency-Key` **header**, capped at 64 characters (a UUID is
+what Adyen recommends), and honours it on every POST — including
+`POST /payments/{pspReference}/refunds`. `charge`, `createCheckout` and `refund` all send
+it; a longer key throws here rather than costing a round trip and a 422.
+
+There is nothing to refuse: `createCustomer`, `createSubscription` and `updateSubscription`
+already throw on this driver, because Adyen has neither resource.
+
+## Payment methods
+
+`supportedMethods` stays `credit_card` and `undefined` — what `charge()` (a stored card
+token) and `createCheckout()` (Pay by Link, shopper picks) can promise. Adyen fronts about a
+hundred local methods, but they reach a shopper through Drop-in/Components, which this
+driver does not front.
+
+What the driver *reports back* is now a category rather than a flat `card`. It reads
+`additionalData.paymentMethod` — the instrument Adyen settled on — and falls back to the
+type the request asked for:
+
+| Adyen type/brand | `Payment.method` |
+| --- | --- |
+| `scheme`, `visa`, `mc`, `amex`, `discover`, `diners`, `jcb`, `cup`, `elo` | `card` |
+| `maestro` | `debit_card` |
+| `sepadirectdebit`, `ach`, anything `…directdebit` | `bank_debit` |
+| `ideal`, `bcmc`, `eps`, `trustly`, `multibanco`, `mbway`, `blik`, `przelewy24`, `onlineBanking…` | `bank_transfer` |
+| `paypal`, `applepay`, `googlepay`, `alipay`, `twint`, `vipps`, `wechatpay…` | `wallet` |
+| `klarna…`, `afterpay…`, `clearpay` | `bnpl` |
+| `paysafecard` | `voucher` |
+
+It used to be hardcoded to `card`, which labelled a SEPA mandate or an iDEAL transfer a card
+payment — a lie the ledger cannot tell apart from a real one. Pass a non-card type as
+`metadata: { paymentMethodType: 'sepadirectdebit' }`; the brand stays on `payment.payload`.

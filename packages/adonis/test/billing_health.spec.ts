@@ -34,8 +34,10 @@ describe('billingHealth', () => {
 
     const report = await billingHealth(store, { now: NOW });
     expect(report.healthy).toBe(true);
-    expect(report.checks.map((check) => check.count)).toEqual([0, 0, 0]);
+    expect(report.checks.map((check) => check.count)).toEqual([0, 0, 0, 0, 0, 0]);
     expect(report.failures).toEqual([]);
+    expect(report.deadlines).toEqual([]);
+    expect(report.openDisputes).toEqual([]);
   });
 
   it('counts an event claimed and never finished as stuck — but only past the threshold', async () => {
@@ -115,6 +117,75 @@ describe('billingHealth', () => {
     expect(label('stuck_webhooks')).toContain('5m');
     expect(label('unconfirmed_payments')).toContain('3h');
     expect(label('failed_webhooks')).toContain('2d');
+    expect(label('disputes_due'), '72h reads as 3d').toContain('3d');
+  });
+
+  describe('closing dispute windows', () => {
+    /** An open dispute whose evidence window closes `hoursAhead` from `NOW`. */
+    const disputeDue = async (gatewayId: string, hoursAhead: number | null, status = 'open') =>
+      store.saveDispute({
+        gatewayId,
+        paymentGatewayId: `pi_${gatewayId}`,
+        provider: 'stripe',
+        status,
+        evidenceDueBy: hoursAhead === null ? null : new Date(NOW.getTime() + hoursAhead * HOUR),
+      });
+
+    it('counts an open dispute whose window closes inside the default 72h', async () => {
+      await disputeDue('dp_soon', 12);
+      await disputeDue('dp_far', 200);
+
+      const report = await billingHealth(store, { now: NOW });
+      const due = report.checks.find((check) => check.key === 'disputes_due');
+      expect(due?.count, 'only the window closing inside three days').toBe(1);
+      expect(due?.healthy).toBe(false);
+      expect(report.healthy).toBe(false);
+    });
+
+    it('keeps counting a window that has already closed', async () => {
+      await disputeDue('dp_overdue', -48);
+      // Going quiet the moment the deadline passes would read as "resolved" — at exactly the
+      // moment it became true. It is still open, and still unanswered.
+      const report = await billingHealth(store, { now: NOW });
+      expect(report.checks.find((check) => check.key === 'disputes_due')?.count).toBe(1);
+    });
+
+    it('ignores a dispute the gateway sent no deadline for, and a closed one', async () => {
+      await disputeDue('dp_no_deadline', null);
+      await disputeDue('dp_lost', 1, 'lost');
+
+      const report = await billingHealth(store, { now: NOW });
+      expect(report.checks.find((check) => check.key === 'disputes_due')?.count).toBe(0);
+      // The DEADLINE check ignores it, which is correct — there is no window to be late for.
+      // The install is NOT healthy, though: the chargeback is open and the money is out. That
+      // used to read `healthy: true` here, and it was the whole bug — on a gateway that
+      // publishes no deadline, `disputes_due` is the only dispute check and it can never fire.
+      expect(report.healthy).toBe(false);
+      expect(report.checks.find((check) => check.key === 'open_disputes')?.count).toBe(1);
+    });
+
+    it('honors a custom horizon', async () => {
+      await disputeDue('dp_next_week', 120);
+      expect(
+        (await billingHealth(store, { now: NOW })).checks.find((c) => c.key === 'disputes_due')
+          ?.count,
+      ).toBe(0);
+      expect(
+        (await billingHealth(store, { now: NOW, disputeDueWithin: 7 * 24 * HOUR })).checks.find(
+          (c) => c.key === 'disputes_due',
+        )?.count,
+      ).toBe(1);
+    });
+
+    it('names which windows are closing, soonest first', async () => {
+      await disputeDue('dp_second', 40);
+      await disputeDue('dp_first', 4);
+
+      const report = await billingHealth(store, { now: NOW });
+      // A count names nobody to email and no gateway dashboard to open.
+      expect(report.deadlines.map((row) => row.gatewayId)).toEqual(['dp_first', 'dp_second']);
+      expect(report.deadlines[0]?.paymentGatewayId).toBe('pi_dp_first');
+    });
   });
 
   it('is unhealthy when any single check trips', async () => {

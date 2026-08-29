@@ -15,6 +15,7 @@ defineConfig({
   default?: string
   providers?: Record<string, PaymentsDriverFactory>
   methods?: Partial<Record<PaymentMethodName, string>>
+  allowUnverifiedWebhooks?: boolean | string[]
 
   invoice?: {
     default?: string
@@ -24,10 +25,13 @@ defineConfig({
 
   billing?: {
     enabled?: boolean
-    dispatcher?: 'auto' | 'durable' | 'queue' | 'in-process'
-    queue?: string
+    autoCreateSchema?: boolean
+    dispatcher?: 'auto' | 'durable' | 'in-process'
+    role?: 'all' | 'api' | 'worker'
+    store?: BillingStoreFactory
     durable?: 'auto' | boolean       // legacy alias for dispatcher
     handlers?: Record<string, WebhookHandler | WebhookHandlerService>
+    passthroughEvents?: string[]
   }
 })
 ```
@@ -36,32 +40,64 @@ defineConfig({
 | --- | --- | --- |
 | `default` | first configured provider | used by `driver()` with no argument |
 | `providers` | — | name → lazy factory; the SDK loads only when called |
-| `methods` | — | method → provider name, checked against `supportedMethods` |
+| `methods` | — | method → provider name, checked against `supportedMethods`; also consulted by `driver()` with no argument |
+| `allowUnverifiedWebhooks` | — | providers allowed to take an **unverified** delivery. Without it, a driver that can verify and has no credential refuses to boot |
 | `billing.enabled` | `true` | `false` skips the store, processor and dispatcher wiring |
-| `billing.dispatcher` | `'auto'` | name the backend explicitly in production |
-| `billing.queue` | the queue's default | only used by the `'queue'` dispatcher |
-| `billing.handlers` | `{}` | normalized event type → handler or DI service class |
+| `billing.autoCreateSchema` | `true` | the library creates its own tables on first use — there is no migration to run |
+| `billing.dispatcher` | `'auto'` | `'auto'` is durable when its provider is registered, else in-process. Name the backend explicitly in production |
+| `billing.role` | `'all'` | `'api'` mounts the webhook route and never processes; `'worker'` processes and never mounts. Both require `dispatcher: 'durable'` |
+| `billing.store` | the Lucid store | swap the persistence entirely, or keep it with your own models via `billingStores.lucid({ models })`. `autoCreateSchema: false` still reaches a Lucid store you build — it can only turn auto-creation off, never on |
+| `billing.handlers` | `{}` | normalized event type → handler or DI service class. Keys are validated at boot |
+| `billing.passthroughEvents` | `[]` | gateway event types spelled **with a dot** inside the `payment.*`/`subscription.*` namespace, which the boot check would otherwise read as a typo |
 
-`defineConfig` is a typed identity — every option is checked as you write it.
+`defineConfig` is a typed identity — every option is checked as you write it. There is no
+`telescope` key: the typed Telescope watcher is registered by the provider when
+`@adonis-agora/telescope` resolves, and there is nothing to configure. See
+[Diagnostics](/docs/payments/diagnostics).
+
+The dashboard and the client-side status endpoint are configured in their own files —
+`config/payments_dashboard.ts` and `config/payments_client.ts`, both published by `configure`. See
+[Dashboard](/docs/payments/dashboard) and [Client](/docs/payments/client).
 
 ### Driver factories
 
+Eighteen, all on `payments`:
+
 ```ts
-payments.stripe({ apiKey?, currency?, webhookSecret? })
+// Brazil-first
 payments.abacate({ apiKey?, publicKey?, webhookSecret? })
 payments.asaas({ apiKey?, sandbox?, webhookToken? })
+payments.efi({ clientId?, clientSecret?, pixKey?, sandbox?, certificate?,
+               certificatePassphrase?, expirationSeconds?, fetch? })
+payments.infinitepay({ handle?, baseUrl?, webhookUrl? })
+payments.pagarme({ secretKey?, baseUrl?, webhookUser?, webhookPassword?, pixExpiresIn? })
+payments.pagbank({ token?, sandbox?, webhookToken?, verifyWebhooks?, notificationUrls? })
 payments.woovi({ appId?, baseUrl?, webhookSecret?, webhookPublicKey? })
+
+// Multi-currency — `currency` is required on every one of these
+payments.stripe({ currency, apiKey?, webhookSecret? })
+payments.adyen({ currency, apiKey?, merchantAccount?, hmacKey?, liveUrlPrefix?,
+                 environment?, captureMode? })
+payments.mercadopago({ currency, accessToken?, webhookSecret? })
+payments.mollie({ currency, apiKey?, webhookSecret? })
+payments.paypal({ currency, clientId?, clientSecret?, sandbox?, webhookId? })
+payments.razorpay({ currency, keyId?, keySecret?, webhookSecret? })
+payments.square({ currency, accessToken?, locationId?, sandbox?,
+                  webhookSignatureKey?, notificationUrl?, apiVersion? })
+
+// Merchant of record
+payments.dodo({ currency, apiKey?, sandbox?, billingCountry?, webhookKey? })
+payments.lemonsqueezy({ storeId, apiKey?, webhookSecret? })
+payments.paddle({ currency, apiKey?, sandbox?, productId?, webhookSecret?,
+                  webhookMaxAgeSeconds? })
+payments.polar({ currency, accessToken?, sandbox?, webhookSecret? })
 ```
 
-| Driver | Env fallbacks |
-| --- | --- |
-| Stripe | `STRIPE_KEY`, `STRIPE_WEBHOOK_SECRET` |
-| AbacatePay | `ABACATE_API_KEY`, `ABACATE_PUBLIC_KEY` |
-| Asaas | `ASAAS_API_KEY`, `ASAAS_WEBHOOK_ACCESS_TOKEN` (or `ASAAS_WEBHOOK_TOKEN`) |
-| Woovi | `WOOVI_APP_ID`, `WOOVI_WEBHOOK_SECRET`, `WOOVI_WEBHOOK_PUBLIC_KEY` |
-
-The env names are a convenience for when you pass nothing — not a contract. Pass the value and your
-own naming wins. `sandbox` defaults to `NODE_ENV !== 'production'`; `currency` defaults to `'brl'`.
+Every credential falls back to an environment variable when you pass nothing, named per gateway on
+its [provider page](/docs/payments/providers) — that is a convenience, not a contract, so pass the
+value and your own naming wins. `sandbox` defaults to `NODE_ENV !== 'production'`. `currency` has
+**no** default on a multi-currency gateway: it is required above because the driver refuses to boot
+without it.
 
 ### Invoice provider factories
 
@@ -84,16 +120,65 @@ import { getPayments } from '@adonis-agora/payments/services/main'
 const payments = getPayments()
 ```
 
-| Method | Returns |
+| Member | Returns |
 | --- | --- |
 | `driver(methodOrName?)` | `PaymentsDriver` — by method, by provider name, or the default |
+| `drivers` | `ReadonlyMap<string, PaymentsDriver>` — every configured driver, by config key |
 | `invoice(name?)` | `InvoiceProvider` — throws when none is configured |
 | `assertCapability(driver, capability)` | `void` — throws when the driver lacks it |
 
-`capability` is `'refunds' \| 'invoices' \| 'subscriptions'`.
+`capability` is `'refunds' \| 'invoices' \| 'subscriptions' \| 'disputes'`. A capability is
+supported only when the driver sets it to `true`: both `false` and *absent* are refused, and the
+error names only the capabilities actually enabled. Which gateway has which is on its
+[provider page](/docs/payments/providers).
+
+`driver('pix')` returns the driver **bound to** `pix`: `charge()` and `createSubscription()` made
+through it carry `method: 'pix'` without repeating it, and an explicit `method` on the input still
+wins — unless `config.methods` routes that method to a *different* provider, which is refused
+rather than sent to the wrong gateway. A driver resolved by name — `driver('stripe')` — routed
+nothing and is returned untouched, and `config.methods` is deliberately not consulted: naming the
+provider already answered the question the map answers.
+
+`driver()` with no argument consults `config.methods` too. Exactly one method routed to the default
+provider is bound; several is **ambiguous**, and `charge()`/`createSubscription()` through that
+driver throw rather than falling back to whatever the gateway dashboard defaults to. Every other
+method on the driver is unaffected, as is any call that names a `method:`.
 
 Also exported: `resolveDrivers(config, invoices?)` — builds the driver map from a config, for tests
 and custom bootstraps.
+
+### `services/main` — the singletons, eager and lazy
+
+```ts
+import {
+  getPayments, findPayments,
+  getBillingStore, findBillingStore,
+  getWebhookDispatcher, findWebhookDispatcher,
+  lazyPayments, lazyBillingStore, lazyPaymentsDriver,
+} from '@adonis-agora/payments/services/main'
+```
+
+| Accessor | Behaviour before the provider's `booted()` hook |
+| --- | --- |
+| `getPayments()` / `getBillingStore()` / `getWebhookDispatcher()` | **throws** |
+| `findPayments()` / `findBillingStore()` / `findWebhookDispatcher()` | `undefined` |
+| `lazyPayments()` / `lazyBillingStore()` / `lazyPaymentsDriver(methodOrName?)` | returns a stand-in; resolves on first property access |
+
+The lazy three exist because providers registered earlier boot first — `@adonis-agora/durable`
+constructs workflow services before payments has set anything — so `#payments = getPayments()` in a
+field initializer throws, in every app that tries it.
+
+```ts
+export default class GrantAccess {
+  #payments = lazyPayments()          // safe in a field initializer
+  #store = lazyBillingStore()
+  #pix = lazyPaymentsDriver('pix')    // routing resolved lazily too
+}
+```
+
+Nothing is resolved until the service actually calls something, which by definition happens after
+boot. `instanceof PaymentsManager` still answers `true`. Keep `getPayments()` where you *want* the
+eager throw — a `start/` file asserting the wiring is right is a legitimate use of it.
 
 ## `PaymentsDriver`
 
@@ -101,7 +186,11 @@ and custom bootstraps.
 interface PaymentsDriver {
   readonly provider: string
   readonly supportedMethods: readonly PaymentMethodName[]
-  readonly capabilities?: { refunds?: boolean; invoices?: boolean; subscriptions?: boolean }
+  readonly capabilities?: {
+    refunds?: boolean; invoices?: boolean; subscriptions?: boolean; disputes?: boolean
+  }
+  /** 'configured' | 'unconfigured' | 'unsupported'. Absent reads as 'unsupported'. */
+  readonly webhookVerification?: WebhookVerificationState
 
   createCustomer(input: CreateCustomerInput): Promise<Customer>
   findCustomer(customerId: string): Promise<Customer | null>
@@ -109,7 +198,7 @@ interface PaymentsDriver {
 
   charge(input: ChargeInput): Promise<Payment>
   findPayment(gatewayId: string): Promise<Payment | null>
-  refund(paymentGatewayId: string, amount?: Money): Promise<Refund>
+  refund(paymentGatewayId: string, amount?: Money, options?: { idempotencyKey?: string }): Promise<Refund>
 
   createCheckout(input: CheckoutInput): Promise<CheckoutSession>
 
@@ -120,9 +209,36 @@ interface PaymentsDriver {
 
   listInvoices(customerId: string): Promise<Invoice[]>
 
-  parseWebhook(rawBody: string, headers: Record<string, string | string[] | undefined>): WebhookEvent
+  // Optional. A gateway with no dispute API declares `capabilities.disputes: false` and omits
+  // both, rather than inventing a Dispute it cannot read back.
+  findDispute?(disputeGatewayId: string): Promise<Dispute | null>
+  submitDisputeEvidence?(disputeGatewayId: string, evidence: DisputeEvidence): Promise<Dispute>
+
+  parseWebhook(
+    rawBody: string,
+    headers: Record<string, string | string[] | undefined>,
+  ): WebhookEvent | WebhookEvent[] | Promise<WebhookEvent | WebhookEvent[]>
 }
 ```
+
+Three things about `parseWebhook` that the signature only half says. It **may be async** — Mollie's
+callback is a bare payment id, and the authenticated fetch of that payment is both the only way to
+learn what happened and the only thing proving the call is genuine. It **may return several
+events**, because Adyen's `notificationItems` and Efí's `pix` are lists in the envelope; a single
+event is still the normal answer and a driver whose gateway sends one should keep returning one.
+And a driver returning N events must have **verified all N** — Adyen's HMAC lives in each item, so
+checking the first and trusting the rest is a forgery hole.
+
+`submitDisputeEvidence` is a **once** call at most gateways. The library never submits
+automatically: whether to fight a chargeback or refund it is a risk decision about your own
+economics, and no library has the standing to make it. See
+[Disputes](/docs/payments/patterns/disputes).
+
+`webhookVerification` is what the provider's boot check reads. `'unconfigured'` — the driver can
+authenticate a delivery and was given no credential — **throws at boot** unless the provider is
+named in `allowUnverifiedWebhooks`. `'unsupported'` is for a gateway that signs nothing (Efí,
+InfinitePay). It is optional so a custom driver outside this package keeps compiling, and **absent
+is read as `'unsupported'`**: a driver that never opted in cannot be assumed to verify.
 
 ### `ChargeInput`
 
@@ -151,6 +267,7 @@ interface PaymentsDriver {
   customerId: string
   planId: string
   amount?: Money                      // required by the BR gateways
+  idempotencyKey?: string
   cycle?: 'WEEKLY' | 'BIWEEKLY' | 'MONTHLY' | 'QUARTERLY' | 'SEMIANNUALLY' | 'YEARLY'
   method?: string
   description?: string
@@ -183,10 +300,17 @@ interface CheckoutInput {
   planId?: string
   trialDays?: number
   idempotencyKey?: string
+  externalReference?: string          // matters MORE here — see below
+  customer?: { name?: string; taxId?: string; email?: string }
   invoice?: boolean | string | InvoiceOptions
   metadata?: Record<string, unknown>
 }
 ```
+
+`externalReference` matters more on a checkout than on a charge: Paddle, Lemon Squeezy, PayPal and
+every merchant-of-record gateway have no server-side charge at all, so a hosted session is the only
+way a purchase starts. `customer` is for the gateways that demand the payer up front rather than
+collecting them on the hosted page — PagBank refuses an order without a CPF/CNPJ.
 
 ## Domain types
 
@@ -195,10 +319,23 @@ type Money = number         // integer, smallest currency unit
 type Currency = string      // lowercase ISO 4217
 interface MoneyAmount { amount: Money; currency: Currency }
 
-type BillingStatus = 'pending' | 'paid' | 'failed' | 'refunded' | 'canceled' | 'disputed'
-type SubscriptionStatus = 'trialing' | 'active' | 'past_due' | 'incomplete' | 'canceled' | 'ended'
-type PaymentMethodType = 'card' | 'pix' | 'boleto' | 'debit_card' | 'unknown'
-type PaymentMethodName = 'pix' | 'credit_card' | 'debit_card' | 'boleto' | 'undefined'
+// 'authorized' = funds held, nothing captured. Money has NOT moved.
+type BillingStatus =
+  | 'pending' | 'authorized' | 'paid' | 'failed' | 'refunded' | 'canceled' | 'disputed'
+
+// 'paused' is not a flavour of 'active': it exists, it will bill again, it must not entitle.
+type SubscriptionStatus =
+  | 'trialing' | 'active' | 'paused' | 'past_due' | 'incomplete' | 'canceled' | 'ended'
+
+// Categories, not brands. 'wallet' covers PayPal/Apple Pay/Google Pay, 'bank_transfer' the
+// push-from-your-bank methods (iDEAL, Bancontact, Multibanco), 'bank_debit' the pull ones
+// (SEPA Direct Debit, ACH). The brand goes in the gateway's own field, via metadata.
+type PaymentMethodType =
+  | 'card' | 'pix' | 'boleto' | 'debit_card' | 'wallet' | 'bank_transfer'
+  | 'bank_debit' | 'upi' | 'bnpl' | 'voucher' | 'unknown'
+type PaymentMethodName =
+  | 'pix' | 'credit_card' | 'debit_card' | 'boleto' | 'wallet' | 'bank_transfer'
+  | 'bank_debit' | 'upi' | 'bnpl' | 'voucher' | 'undefined'
 
 interface Payment {
   id: string
@@ -249,7 +386,64 @@ interface WebhookEvent<T = unknown> {
 
 interface Customer { id: string; email?: string; name?: string; taxId?: string; metadata?: Record<string, unknown> }
 interface Refund { id: string; gatewayId: string; provider: string; amount: MoneyAmount; status: 'succeeded' | 'pending' | 'failed'; createdAt: string }
-interface CheckoutSession { id: string; gatewayId: string; provider: string; url: string; status: 'open' | 'complete' | 'expired'; amount?: MoneyAmount; subscriptionId?: string; customerId?: string }
+interface CheckoutSession { id: string; gatewayId: string; provider: string; url: string; status: 'open' | 'complete' | 'expired'; amount?: MoneyAmount; subscriptionId?: string; customerId?: string; pixCode?: string; pixCopiaECola?: string }
+```
+
+### Disputes
+
+A chargeback is the only thing in this library that takes money back **after** it settled, and the
+window to answer it is measured in days.
+
+```ts
+// 'warning' is not a dispute yet — it is the pre-chargeback alert the networks relay (Stripe's
+// early fraud warning, Adyen's NOTIFICATION_OF_FRAUD), where a refund inside the window stops
+// the chargeback from ever being filed. Worth taking even on a dispute you would have won: a
+// chargeback counts against the ratio that puts a merchant into a network monitoring programme.
+type DisputeStatus =
+  | 'warning' | 'open' | 'under_review' | 'won' | 'lost' | 'canceled' | 'expired'
+
+interface Dispute {
+  id: string                          // the DISPUTE's own gateway id, not the payment's
+  provider: string
+  paymentGatewayId: string
+  status: DisputeStatus
+  amount?: MoneyAmount                // not always the whole payment — partials are normal
+  reason?: string                     // the gateway's own code, verbatim; the vocabulary is per-network
+  evidenceDueBy?: string              // past it the dispute is lost by default, and nothing can be done
+  canSubmitEvidence?: boolean         // most gateways accept evidence ONCE
+  createdAt?: string
+  payload: Record<string, unknown>
+}
+
+interface DisputeEvidence {
+  explanation?: string                // most gateways weigh this heavily
+  shippingCarrier?: string; shippingTrackingNumber?: string; shippingDate?: string
+  serviceDate?: string
+  termsAcceptedAt?: string
+  customerName?: string; customerEmail?: string; customerIpAddress?: string
+  priorUndisputedPayments?: PriorUndisputedPayment[]
+  documents?: DisputeDocument[]
+  metadata?: Record<string, unknown>
+}
+
+// What a document proves, which is what every gateway files it by. Stripe has nine separate
+// file fields and Adyen a defenseDocumentTypeCode; neither is reachable with "here are some files".
+type DisputeDocumentKind =
+  | 'receipt' | 'invoice' | 'customer_communication' | 'customer_signature' | 'shipping'
+  | 'service' | 'refund_policy' | 'cancellation_policy' | 'terms' | 'duplicate_charge' | 'other'
+
+// A file id, never a URL: the banks reviewing a dispute do not follow links, and no gateway
+// here accepts one. The bytes have to be at the gateway already.
+interface DisputeDocument { kind: DisputeDocumentKind; id: string }
+
+// The transactions themselves, not a count — Visa's Compelling Evidence 3.0 wants the charges,
+// each with the account, device and IP they were made from. A number is not evidence of anything.
+interface PriorUndisputedPayment {
+  paymentGatewayId: string
+  customerAccountId?: string
+  customerIpAddress?: string
+  customerDeviceId?: string
+}
 ```
 
 ### `InvoiceOptions`
@@ -279,32 +473,143 @@ class WebhookProcessor {
 }
 
 type WebhookHandler = (event: WebhookEvent) => void | Promise<void>
+
+// Typed authoring — `event.data` inferred from the event type.
+defineWebhookHandler<T>(type: T, handle: TypedWebhookHandler<T>): WebhookHandlerDefinition<T>
+
+interface WebhookEventDataMap { 'payment.succeeded': PaymentWebhookData; /* … */ }
+type WebhookEventDataFor<T> = T extends WebhookEventType ? WebhookEventDataMap[T] : unknown
+type WebhookEventFor<T>     = WebhookEvent<WebhookEventDataFor<T>> & { type: T }
+type TypedWebhookHandler<T> = (event: WebhookEventFor<T>) => void | Promise<void>
+
+// Boot-time validation. The provider calls this; it is exported for a custom bootstrap.
+assertWebhookHandlerTypes(
+  registrations: readonly { type: string; source: string }[],
+  options?: { passthroughEvents?: readonly string[] },
+): void
 ```
 
-Normalized event types: `payment.succeeded`, `payment.failed`, `payment.refunded`,
+The value `defineWebhookHandler` returns is callable **and** carries `type`/`handle`, so one
+definition works as a `billing.handlers` entry and as an `app/payment_handlers/` default export. A
+passthrough type keeps `data: unknown` — nothing normalized it.
+
+`assertWebhookHandlerTypes` throws on a type in the `payment.*`/`subscription.*` namespace that is
+not canonical, and on two registrations claiming the same type. A passthrough spelled without a dot
+(`payment_anticipated`) is accepted as-is; one spelled *with* a dot needs
+`billing.passthroughEvents`.
+
+Normalized event types (`WEBHOOK_EVENT_TYPES`): `payment.succeeded`, `payment.failed`,
+`payment.refunded`, `payment.disputed`, `payment.dispute_warning`, `payment.dispute_closed`,
 `payment.updated`, `subscription.created`, `subscription.updated`, `subscription.canceled`.
+
+The three dispute events are separate because they mean different things about the money.
+`payment.dispute_warning` is a pre-chargeback alert and **nothing has moved** — the processor
+publishes it and writes no payment row. `payment.disputed` is the money withdrawn, and moves the
+row to `disputed`. `payment.dispute_closed` carries an `outcome`, and only `'won'` moves a
+`disputed` row back to `paid`. `'lost'` moves a row that is **not** already `disputed` to
+`disputed` — Razorpay, PayPal and Woovi never debit provisionally, so on them the sequence is
+warning → closed with nothing in between to move the row, and the payment whose money is gone would
+otherwise still read `paid`. `'expired'` and `'canceled'` move nothing: neither is a statement about
+where the money ended up. A close carrying no outcome **throws** rather than defaulting — a driver
+that cannot read one is required to emit `payment.updated` instead.
+
+`payment.updated` is the event that carries its outcome on the **payload** rather than in its type,
+and it is what a partial refund arrives as. Its built-in sync reads the optional `status`, `paidAt`
+and `refundedAmount` off `event.data` and keeps the row current. It never creates a row, never moves
+one out of `disputed`, and moves nothing at all when the driver normalized no `status`.
 
 ### `BillingStore`
 
 ```ts
 interface BillingStore {
+  saveCustomer(customer): Promise<CustomerRow>
+  findCustomerByGatewayId(gatewayId): Promise<CustomerRow | null>
+  findCustomerByOwner(ownerType, ownerId, provider): Promise<CustomerRow | null>
+  listCustomers(query: CustomerListQuery): Promise<CustomerListItem[]>
+  listCustomersByGatewayIds(gatewayIds): Promise<CustomerListItem[]>   // a page of owners in one read
+
   saveSubscription(sub): Promise<SubscriptionRow>
   findSubscriptionByGatewayId(gatewayId): Promise<SubscriptionRow | null>
+  listSubscriptions(query): Promise<SubscriptionListItem[]>
+  countSubscriptions(query): Promise<number>
+  countActiveSubscriptions(): Promise<number>
 
   savePayment(payment): Promise<PaymentRow>
   findPaymentByGatewayId(gatewayId): Promise<PaymentRow | null>
+  findPaymentByExternalReference(reference): Promise<PaymentRow | null>
+  listPayments(query: PaymentListQuery): Promise<PaymentListItem[]>
+  countPayments(query): Promise<number>
+  revenue(query: { from?: Date; to?: Date }): Promise<number>     // GROSS — sums `amount`
+  netRevenue(query: { from?: Date; to?: Date }): Promise<number>  // NET   — minus refunded_amount
+
+  saveDispute(dispute): Promise<DisputeRow | null>             // null ⇒ no billing_disputes table
+  findDisputeByGatewayId(gatewayId): Promise<DisputeRow | null>
+  findOpenDisputeByPayment(paymentGatewayId): Promise<DisputeRow | null>
+  listDisputes(query): Promise<DisputeListItem[]>
+  countDisputes(query): Promise<number>
+  listDisputesDueWithin(query: DisputeDeadlineQuery): Promise<DisputeListItem[]>
+  countDisputesDueWithin(query): Promise<number>
+  listOpenDisputes(query: OpenDisputeQuery): Promise<DisputeListItem[]>   // oldest first
+  countOpenDisputes(query: { provider?: string }): Promise<number>
 
   recordWebhookEvent(event): Promise<WebhookEventRow | null>   // null ⇒ redelivery
   markWebhookProcessed(id): Promise<void>
   markWebhookFailed(id, error): Promise<void>
+  findWebhookEventByGatewayEventId(gatewayEventId): Promise<WebhookEventListItem | null>
+  listWebhookEvents(query: WebhookEventListQuery): Promise<WebhookEventListItem[]>
+  listWebhookEventsForPayment(paymentGatewayId, query?): Promise<WebhookEventListItem[]>
+  countWebhookEvents(query): Promise<number>
+  webhookEventBreakdown(query): Promise<WebhookEventBreakdownLine[]>
+
+  recordAuditEvent(event): Promise<AuditEventListItem | null>  // null ⇒ no billing_audit_events table
+  listAuditEvents(query: AuditEventQuery): Promise<AuditEventListItem[]>
+  countAuditEvents(query: AuditEventCountQuery): Promise<number>
 
   recordUsage(event): Promise<UsageEventRow>
   usageReport(query): Promise<Array<{ meter: string; quantity: number }>>
+}
 
-  revenue(query: { from?: Date; to?: Date }): Promise<number>
-  countActiveSubscriptions(): Promise<number>
+const AUDIT_ACTIONS = {
+  refund: 'payment.refunded',
+  disputeResolved: 'dispute.resolved',
+  webhookRejected: 'webhook.rejected',
 }
 ```
+
+`listOpenDisputes` / `countOpenDisputes` are the deadline-**free** counterpart to the two reads
+above them: they take every dispute in `OPEN_DISPUTE_STATUSES` regardless of `evidence_due_by`, and
+order oldest first. On a gateway that publishes no deadline they are the only reads that can see a
+chargeback at all.
+
+`listWebhookEventsForPayment` is a `CAST(payload AS TEXT) LIKE` scan: unindexed, able to over-match,
+and blind to a delivery that never stored the id. It is bounded by `limit`, newest first, and never
+returns the payload. The dashboard reports `events.matchedBy: 'payload-substring'` beside the
+result rather than presenting it as a history.
+
+`recordAuditEvent` answers `null` on an install whose `billing_audit_events` table is not there yet
+— the audit row is additional to an action that already happened, so a missing table skips the note
+rather than failing a refund the gateway already accepted. `action` is a free string; `AUDIT_ACTIONS`
+holds the three this package writes.
+
+`saveDispute` and `savePayment` share one rule worth knowing before you call either: an **absent**
+field does not erase a stored one, and only an explicit `null` clears it. The event that opens a
+dispute carries the deadline and the reason; the event that closes it carries neither, and blanking
+them on the close would destroy the record of the window that was answered.
+
+On `savePayment` that rule covers `externalReference`, **`paidAt` and `refundedAmount`**. `paidAt`
+used to be written through unconditionally, so a refund, a chargeback or a dispute close — none of
+which carries a settlement date — set `paid_at = NULL`, and `revenue()` filters on that column. A
+dispute closed as *won* therefore restored `status = 'paid'` with no date, and the recovered money
+left every windowed revenue figure.
+
+`revenue` and `netRevenue` are the same query with a different figure summed: both take
+`status = 'paid'` rows windowed on `paid_at`, both answer integer minor units, and the second
+subtracts `COALESCE(refunded_amount, 0)` per row. `revenue` is **gross** and stays gross — it was
+the only revenue figure for two releases and apps read it — so a partially refunded charge counts at
+full value there and at its net in `netRevenue`. `COALESCE` carries the weight: `refunded_amount` is
+`NULL` on every row predating the column, and `amount - NULL` is `NULL`, which `SUM` would spread
+across the whole window. On an install whose table has no `refunded_amount` at all, `netRevenue`
+answers exactly what `revenue` does, because no refund was ever recorded to subtract.
 
 <Callout title="recordWebhookEvent claims a failed event again">
 `null` means in flight or already processed — a redelivery. An event whose previous attempt
@@ -312,15 +617,90 @@ interface BillingStore {
 [Idempotency](/docs/payments/concepts/idempotency).
 </Callout>
 
+The list reads take `BillingListQuery` — `{ status?, provider?, limit?, offset? }` — and three of
+them extend it:
+
+```ts
+interface PaymentListQuery extends BillingListQuery {
+  externalReference?: string   // the app's own id for the charge
+  gatewayId?: string           // the gateway's payment id
+  customerId?: string          // the gateway's customer id
+}
+interface WebhookEventListQuery extends BillingListQuery { type?: string }
+interface CustomerListQuery    extends BillingListQuery { ownerType?, ownerId?, gatewayId? }
+```
+
+Every one of those is an **exact** match, never a prefix or a substring: they are join keys, and
+`order-4` returning `order-42` is a wrong answer to a question about money.
+
+The count reads take `BillingCountQuery` — `{ status?, createdBefore?, createdAfter? }`. Paging is clamped
+(`BILLING_LIST_DEFAULT_LIMIT` 50, `BILLING_LIST_MAX_LIMIT` 200). Every list returns a normalized
+plain shape — `CustomerListItem`, `PaymentListItem`, `SubscriptionListItem`, `DisputeListItem`,
+`WebhookEventListItem` — never the implementation's row type, so a reader never depends on Lucid.
+
+The deadline reads are separate from `BillingListQuery` on purpose: they filter on a **deadline**,
+not on a creation time, and they are what an alert is built on.
+
+```ts
+interface DisputeDeadlineQuery {
+  withinHours: number      // 72 = "everything due in the next three days"
+  now?: Date               // overridable clock
+  provider?: string
+  limit?: number
+  offset?: number
+}
+
+const OPEN_DISPUTE_STATUSES = ['warning', 'open', 'under_review']
+```
+
+Three behaviours of `listDisputesDueWithin` that are decisions, not accidents. It is the only list
+here ordered **soonest deadline first** rather than newest first, because the window closing
+tomorrow outranks the dispute that arrived today. A deadline **already past** is included: it is
+still open and still unanswered, and going quiet the moment it expires reads as resolved. And a
+dispute whose gateway sent **no** `evidenceDueBy` is excluded entirely — there is nothing to be late
+for, and it would bury the rows that do have one. `countDisputesDueWithin` exists separately because
+a count taken from a capped page saturates at the cap.
+
 Implementations: `LucidBillingStore` / `lucidBillingStore()`, and `InMemoryBillingStore` from
 `@adonis-agora/payments/testing`.
+
+### Schema
+
+The library owns its tables and creates them on first use — `billing.autoCreateSchema` is on by
+default and there is no migration to run. The same DDL is exported, for an app that would rather run
+it itself:
+
+```ts
+createBillingTables(db: LucidDatabase): Promise<void>   // idempotent; also carries later columns
+dropBillingTables(db: LucidDatabase): Promise<void>     // for a migration's down() and for tests
+truncateBillingTables(db: LucidDatabase): Promise<void> // empties the rows, keeps the schema
+BILLING_TABLES  // ['billing_customers', 'billing_subscriptions', 'billing_payments',
+                //  'billing_webhook_events', 'billing_disputes', 'billing_usage_events',
+                //  'billing_audit_events']
+```
+
+`LucidDatabase` is the slice of Lucid these need — a root `Database`, a connection, or a migration's
+deferred query client. `createBillingTables` is what the published migration stub calls, so the two
+paths cannot drift, and it is idempotent: an install that already ran the older migrations gets
+no-ops. There is deliberately **no** auto-drop.
+
+`truncateBillingTables` is what a test suite between groups actually wants. Dropping invalidates the
+store (see below), while leaving the rows in place means one test's webhook ledger deduplicates the
+next test's event — the library's own idempotency working against the suite. Reverse creation order,
+so a foreign key never blocks a delete; `DELETE FROM`, which every dialect here spells the same way;
+a table that was never created is skipped rather than raised.
+
+`dropBillingTables` now tells every live `LucidBillingStore` to forget its memoized "the schema
+exists" answer. Without that, a store built before the drop went on believing the tables were there
+and every following query failed on a missing relation.
 
 ## Billing helpers
 
 ```ts
 billingOverview(store, { from: Date; to: Date }): Promise<BillingOverview>
 // → { period, metrics: [{ key, label, value }] }
-//   revenue (cents) · active_subscriptions · meter:<name> per meter
+//   revenue (cents, GROSS) · net_revenue (cents, minus refunded_amount)
+//   · active_subscriptions · meter:<name> per meter
 
 meteredBill(usage, rates): MeteredBill
 meteredBillForSubscription(store, { subscriptionId, from, to, rates }): Promise<MeteredBill>
@@ -332,8 +712,64 @@ interface MeteredBill   { lines: MeteredBillLine[]; total: number }
 
 Usage for a meter with no matching rate is ignored rather than billed at zero.
 
-Mixins: `withBillable()`, `withSubscription()`, `withPayment()`, `withUsageEvent()`,
-`withWebhookEvent()`.
+```ts
+billingHealth(store, options?: BillingHealthOptions): Promise<BillingHealth>
+
+interface BillingHealthOptions {
+  stuckAfter?: number         // ms an event may sit in `received`.  Default 15 min
+  unconfirmedAfter?: number   // ms a `pending` payment may age.     Default 2 h
+  failedWithin?: number       // the window failures are counted over. Default 24 h
+  disputeDueWithin?: number   // ms ahead to look for a closing evidence window. Default 72 h
+  rejectedWithin?: number     // the window rejected deliveries are counted over. Default 24 h
+  now?: Date
+}
+
+interface BillingHealth {
+  healthy: boolean            // false when ANY check is non-zero — the command's exit code
+  checkedAt: Date
+  checks: BillingHealthCheck[]
+  failures: WebhookEventBreakdownLine[]   // which provider/event pairs make up failed_webhooks
+  deadlines: DisputeListItem[]            // WHICH windows are closing, soonest first, capped at 20
+  openDisputes: DisputeListItem[]         // WHICH are unanswered, OLDEST first, capped at 20
+}
+
+interface BillingHealthCheck {
+  key: 'stuck_webhooks' | 'failed_webhooks' | 'unconfirmed_payments'
+     | 'disputes_due' | 'open_disputes' | 'rejected_deliveries'
+  label: string
+  count: number
+  healthy: boolean            // true when count is zero — every check is a "should be nothing" check
+  hint: string
+}
+```
+
+Every threshold is milliseconds here even though the store's deadline read takes hours; the
+conversion happens once, at the call. `open_disputes` has **no** threshold at all: an open
+chargeback is money already out of the account, and there is no horizon at which that stops
+mattering.
+
+`deadlines` and `openDisputes` are each capped at twenty while the counts are not, so a report can
+name twenty and still say there are fifty. They **overlap on purpose** — a dispute with both a
+deadline and no answer belongs in both, and suppressing it from one would make the deadline-free
+check incomplete on exactly the install it exists for. Pure store reads, no gateway calls — safe to
+run on a schedule. See [Health checks](/docs/payments/production#health-checks).
+
+Model mixins: `withBillable()`, `withSubscription()`, `withPayment()` — all three on the package
+root. The tables the library reads without a mixin have ready-made models instead —
+`BillingCustomer`, `BillingDispute`, `BillingUsageEvent`, `BillingAuditEvent`, `BillingPayment`,
+`BillingSubscription`, `BillingWebhookEvent` — and `BillingModels` swaps any of them.
+
+`withPayment()` declares `gatewayId`, `provider`, `status`, `amount`, `currency`, `customerId`,
+`subscriptionId`, `externalReference`, `refundedAmount`, `payload`, `paidAt`, `createdAt`,
+`updatedAt`. Net revenue for a row is `amount - refundedAmount`; never divide either.
+
+<Callout type="warn" title="Three of the ready-made models are not on the package root">
+`BillingPayment`, `BillingSubscription` and `BillingWebhookEvent` are declared in
+`src/billing/mixins/index.ts` and re-exported from `src/billing/index.ts`, neither of which has an
+export subpath — so importing them from `@adonis-agora/payments` does not resolve. `BillingCustomer`,
+`BillingDispute`, `BillingUsageEvent` and `BillingAuditEvent` are on the root, as are the three
+mixin functions. Checked against `src/index.ts` on 2026-08-28.
+</Callout>
 
 ## Building blocks for custom drivers
 
@@ -342,16 +778,24 @@ httpRequest<T>(path, options: HttpRequestOptions): Promise<T>
 headerValue(headers, name): string | undefined
 isNotFound(error): boolean
 
-toDecimal(cents: Money): number
-fromDecimal(value: number): Money
+// All four take the currency, because the exponent is not always 2: JPY and KRW have none,
+// KWD and BHD have three. Omitting it assumes 2. `formatDecimal` builds the wire string by
+// shifting the integer's digits rather than dividing — (x/100).toFixed(2) routes through a
+// binary float, which is the classic way to ship "19.89".
+currencyExponent(currency?: Currency): number
+toDecimal(amount: Money, currency?: Currency): number
+fromDecimal(value: number, currency?: Currency): Money
+formatDecimal(amount: Money, currency?: Currency): string
 
-ensureCustomer(driver, existingId, input): Promise<Customer>
+ensureCustomer(driver, existingId, input, options?): Promise<Customer>
+//   options: { store?: BillingStore; owner?: { type: string; id: string | number } }
 emitInvoice(ctx, options): Promise<Invoice>
 emitInvoiceIfRequested(ctx, input, payment, driver): Promise<void>
 ```
 
 Webhook security helpers (from `@adonis-agora/payments/webhook_security`): `safeCompare`,
-`verifyHmacSignature`, `verifyRsaSha256Signature`, `requireMatchingCredential`.
+`verifyHmacSignature`, `verifyHmacOverPayload`, `verifyRsaSha256Signature`,
+`verifyStandardWebhookSignature`, `verifyPagBankAuthenticityToken`, `requireMatchingCredential`.
 
 See [Custom providers](/docs/payments/custom-providers).
 
@@ -367,32 +811,78 @@ tracePayments(...)
 
 Events: `charge.created`, `charge.refunded`, `subscription.created`, `subscription.updated`,
 `subscription.canceled`, `payment.succeeded`, `payment.failed`, `payment.refunded`,
-`payment.updated`, `invoice.emitted`, `webhook.received`, `webhook.processed`, `webhook.failed`.
-See [Diagnostics](/docs/payments/diagnostics).
+`payment.disputed`, `payment.dispute_warning`, `payment.dispute_closed`, `payment.updated`,
+`invoice.emitted`, `webhook.received`, `webhook.verification`, `webhook.processed`,
+`webhook.failed`, `gateway.request`, `gateway.request.failed`.
+[Diagnostics](/docs/payments/diagnostics) has the payload of each; a test fails when an event on
+the bus is missing from that table.
 
 ## Testing kit
 
 ```ts
-import { FakePaymentsDriver, InMemoryBillingStore, MutableClock } from '@adonis-agora/payments/testing'
+import {
+  FakePaymentsDriver, InMemoryBillingStore, MutableClock,
+  fakePayments, swapPayments, swapBillingStore, flushWebhooks,
+} from '@adonis-agora/payments/testing'
 
 new FakePaymentsDriver({ provider?, webhookEvents? })
 //   .chargeCalls, .refundCalls, … — every call recorded
 new InMemoryBillingStore()
 new MutableClock()   // .advance(ms)
+
+fakePayments(driver?: FakePaymentsDriver): PaymentsManager   // a REAL manager over the fake
+swapPayments(manager: PaymentsManager): () => void           // returns the restore
+swapBillingStore(store: BillingStore): () => void            // same, for the store
+flushWebhooks(options?: { timeoutMs?: number }): Promise<void>
 ```
 
-See [Testing](/docs/payments/testing).
+`fakePayments()` builds a real `PaymentsManager`, so `invoice()` and `assertCapability()` are there
+— the `setPayments({ driver: () => fake } as never)` apps used to write erased exactly the two
+methods whose absence would have been caught. No `methods` routing is configured, so `driver()`
+returns the fake unbound; route explicitly if the test is *about* routing.
+
+Both swaps return a restore that works when **nothing** was set, which is the normal case in a test
+that never booted a provider — and the case a hand-rolled save/restore could not express, because
+saving meant calling a `getPayments()` that throws.
+
+`flushWebhooks()` resolves when the accepted work has actually run, background in-process retries
+included. It is a no-op when the billing layer is off, and it **throws on timeout** rather than
+hanging — including the honest case where a separate worker process runs the events and no
+in-process wait can ever see them. See [Testing](/docs/payments/testing).
 
 ## Routes and commands
 
 | Route | Purpose |
 | --- | --- |
 | `POST /payments/webhook/:provider` | mounted by the provider; validates, ledgers, syncs, dispatches |
+| `GET /payments` | the dashboard SPA, with `/payments/assets/:file` and a JSON API under `/payments/api` |
+| `GET /payments/client/status` | the client-side poll, when `config/payments_client.ts` enables it |
+
+The dashboard shares the `/payments` prefix with the webhook route, which is safe because every
+route it registers is an exact path — a test asserts there is no wildcard. Both prefixes are
+configurable.
+
+The webhook route answers `200` when every event in the delivery was processed, `500` when **any**
+of them failed, and `400` when the delivery was rejected before that — a bad signature, an
+unparsable body, an unknown provider. The `500` is the important one and it is deliberate: a 2xx
+tells the gateway never to send that delivery again, which over a failed event is the payment lost.
+Its body names what did land:
+
+```json
+{ "received": true, "processed": 3, "failed": ["evt_4"], "error": "…" }
+```
+
+A redelivery costs almost nothing, because the events that succeeded are already `processed` in the
+ledger and only the failed one is claimable again. A rejected delivery stays `400`, since
+redelivering it would fail identically — and writes a `webhook.rejected` row into
+`billing_audit_events`, which is the only trace it leaves, since it is refused before a ledger row
+exists.
 
 | Command | Flags |
 | --- | --- |
 | `payments:webhook` | `--provider=<name>` · `--create` (Stripe) |
 | `payments:sync` | `--customer=<id>` · `--all` · `--provider=<name>` |
+| `payments:health` | `--stuck-after=<min>` · `--unconfirmed-after=<min>` · `--window=<h>` · `--dispute-window=<h>` · `--json` |
 | `make:billable <model>` | |
 | `make:webhook-handler <event>` | |
 

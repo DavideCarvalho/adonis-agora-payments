@@ -11,12 +11,16 @@ gap between that and money moving.
 
 ## Set every webhook credential
 
-This is the one that must not be skipped.
+The app **will not boot** without them, which is the change most likely to bite an upgrade.
 
-The library treats signature verification as **opt-in for the gateways where signing is optional**
-(Asaas, AbacatePay, Woovi) so that local development works without configuring a dashboard. In
-production that same leniency means an **unauthenticated endpoint**: anyone who can reach the URL
-can POST a payload claiming a payment happened, and your handler will grant it.
+Verification used to be opt-in for the gateways where signing is optional (Asaas, AbacatePay,
+Woovi), so local development worked without configuring a dashboard. In production that same
+leniency meant an **unauthenticated endpoint**: anyone who could reach the URL could POST a payload
+claiming a payment happened, and the built-in sync would mark it paid.
+
+Every driver now declares `webhookVerification`, and a driver that *can* verify with nothing
+configured refuses at boot — the same failing-closed the dashboard already does on a missing session
+secret.
 
 ```ts title="config/payments.ts"
 providers: {
@@ -30,13 +34,14 @@ providers: {
   }),
   stripe: payments.stripe({
     apiKey: env.get('STRIPE_KEY'),
+    currency: 'brl',                                     // required — no default
     webhookSecret: env.get('STRIPE_WEBHOOK_SECRET'),     // Stripe always requires it
   }),
 }
 ```
 
-Make them required in your env validation so a deploy without them fails at boot rather than at the
-first forged callback:
+Making them required in your env validation is still worth doing — it fails earlier, and with a
+message about the variable rather than about the provider:
 
 ```ts title="start/env.ts"
 ASAAS_WEBHOOK_TOKEN: Env.schema.string(),
@@ -46,6 +51,22 @@ STRIPE_WEBHOOK_SECRET: Env.schema.string(),
 For Woovi, prefer `webhookPublicKey` (RSA-SHA256) over the deprecated per-webhook HMAC. When both
 are set the public key wins and the HMAC is ignored. See
 [Webhooks → Validation](/docs/payments/webhooks#validation-per-provider).
+
+<Callout type="warn" title="Upgrading: this is a breaking change">
+An app that has been running with a webhook credential unset will not come up. The boot error names
+the provider and the route it would have mounted. Two ways out, in order of preference:
+
+1. **Set the credential.** Each provider page names the env var.
+2. **Declare the exemption** — only when verification genuinely happens upstream (mutual TLS at the
+   edge, an API gateway that checks the signature before forwarding):
+
+   ```ts title="config/payments.ts"
+   allowUnverifiedWebhooks: ['efi'],   // or `true` for all, which is almost never right
+   ```
+
+Efí and InfinitePay never trip it: their gateways sign nothing, so they report `'unsupported'` and
+there is no credential to forget. Deploy the credentials **before** the version that requires them.
+</Callout>
 
 ## Turn off sandbox deliberately
 
@@ -69,9 +90,8 @@ a production key pointed at staging charges real cards.
 
 | Value | Behaviour |
 | --- | --- |
-| `'auto'` (default) | durable when its provider is registered; else `@adonisjs/queue` when installed; else in-process |
+| `'auto'` (default) | durable when its provider is registered; otherwise in-process |
 | `'durable'` | a durable workflow run — **throws at boot when durable is missing** |
-| `'queue'` | an `@adonisjs/queue` job — throws when the queue provider is missing |
 | `'in-process'` | inline, with exponential-backoff retries in the background |
 
 `'auto'` is the friendly default and it is also **silent**: an app that expected durable and forgot
@@ -88,7 +108,7 @@ Then a missing durable provider is a boot error, which is where you want to find
 The in-process dispatcher retries in the background with exponential backoff — 5 attempts, 500 ms
 base, capped at 30 s. That covers a transient database or gateway failure. It does **not** survive a
 process restart: a deploy in the middle of the backoff window drops the pending retries. Durable
-and queue backends do. Choose accordingly for money paths.
+does. Choose accordingly for money paths.
 </Callout>
 
 ### Splitting api and worker
@@ -116,7 +136,7 @@ boot when `role` is set, so a split deployment cannot come up half-wired:
 ```text
 [payments] billing.role is "api", which splits receiving from processing — but
 billing.dispatcher is "auto", which has no channel between the two halves.
-Set dispatcher to "durable" or "queue", or drop billing.role.
+Set dispatcher to "durable", or drop billing.role.
 ```
 </Callout>
 
@@ -125,12 +145,10 @@ deploy independence actually forces the split.
 
 ### The worker the dispatcher depends on
 
-`'durable'` and `'queue'` move processing out of the web process, which means something has to be
-consuming it:
+`'durable'` moves processing out of the web process, which means something has to be consuming it:
 
 ```sh
 node ace durable:work   # dispatcher: 'durable'
-node ace queue:listen   # dispatcher: 'queue'
 ```
 
 This is the deployment mistake that hides best: the webhook endpoint keeps answering `200`, the
@@ -161,6 +179,19 @@ async handle(event: WebhookEvent) {
 Keep out of the handler: sending email, calling third-party APIs, generating PDFs, anything that
 takes seconds. Those belong in the workflow or job the handler dispatches.
 
+<Callout type="warn" title="The webhook route answers 500 when a handler fails">
+It used to answer `200`. A 2xx tells the gateway it never has to send that delivery again, which
+over a failed event is the payment lost for good — while the in-process retry that was supposed to
+cover it dies with the next deploy. Adyen retries a non-2xx for up to 30 days and Efí makes nine
+attempts, and neither starts on a 2xx.
+
+Two consequences for a running install. **Anything alerting on 5xx from `/payments/webhook/*` will
+now fire** — that is the honest signal, and it was firing at the gateway all along, invisibly. And
+the redelivery is cheap: the events that succeeded are already `processed` in the ledger, so only the
+failed one is claimable again. A delivery rejected before processing — bad signature, unparsable
+body — still answers `400`, because redelivering it would fail identically.
+</Callout>
+
 ## Watch the right events
 
 Every milestone is on the [diagnostics bus](/docs/payments/diagnostics), which is where alerting
@@ -187,8 +218,8 @@ not on either number.
 
 ## Health checks
 
-Three failures in a billing install are silent — nothing throws, the endpoint keeps answering `200`,
-and the first person to notice is a customer. `payments:health` asks about all three:
+Six failures in a billing install are silent — nothing throws, and the first person to notice is a
+customer. `payments:health` asks about all six:
 
 ```sh
 node ace payments:health
@@ -196,14 +227,45 @@ node ace payments:health
 
 | Check | What a non-zero count means |
 | --- | --- |
-| **Stuck** — claimed over 15m ago, never finished | Nothing is consuming the dispatcher. The worker is not running. |
-| **Failed** — dispatcher gave up, last 24h | Handlers threw and retries ran out; those events never took effect. |
-| **Unconfirmed** — charges created over 2h ago, still pending | Charges are being created and never confirmed — a webhook endpoint that stopped being reachable. |
+| `stuck_webhooks` — claimed over 15m ago, never finished | Nothing is consuming the dispatcher. The worker is not running. |
+| `failed_webhooks` — dispatcher gave up, last 24h | Handlers threw and retries ran out; those events never took effect. |
+| `unconfirmed_payments` — charges created over 2h ago, still pending | Charges are being created and never confirmed — a webhook endpoint that stopped being reachable. |
+| `disputes_due` — an open chargeback whose evidence window closes within 72h | Nothing is broken. The money goes anyway if nobody answers in time. |
+| `open_disputes` — any dispute in `warning`, `open` or `under_review` | A chargeback is open and the money is already out of the account. No threshold, no flag. |
+| `rejected_deliveries` — deliveries the endpoint refused, last 24h | A signature that did not verify, a body it could not parse, a provider nobody configured. Usually a rotated webhook secret that never reached the deployment. |
+
+The last three are different in kind and that is why they are on this page rather than only in the
+CLI reference. The first three are things that broke; these are money.
+
+`disputes_due` alerts on a **clock**: every part of the system is working, and past the deadline the
+dispute is lost by default rather than on the merits, with no appeal. A window that has **already**
+closed keeps being counted — it is still open and still unanswered, and going quiet the moment it
+expires would read as resolved.
+
+`open_disputes` exists because `disputes_due` is structurally blind on most installs: it requires
+`evidence_due_by`, and only a gateway that publishes a deadline can fill it. On Asaas that comes from
+`chargeback.deadlineToSendDisputeDocuments`, which no published webhook example even contains — so
+the deadline check answers zero forever while a chargeback sits open with the money already pulled
+back. This one takes no deadline and **cannot be silenced**: an open chargeback is money out of the
+account, and there is no horizon at which that stops mattering. `billingHealth()` returns
+`openDisputes` alongside it, up to twenty rows, **oldest first** — with no deadline to sort on, age
+is the only priority left.
+
+`rejected_deliveries` is the only visibility a refused delivery has anywhere. It is answered `400`
+before an event exists, so it never becomes a ledger row: a rotated webhook secret used to look
+exactly like a quiet week — zero events, zero failures, every check green — while every refund,
+chargeback and dispute closure was dropped on the floor. `unconfirmed_payments` eventually notices,
+but only for charges the app itself created. Each rejection now writes a `webhook.rejected` row into
+`billing_audit_events`; read them with `listAuditEvents({ action: 'webhook.rejected' })`.
+
+See [Disputes](/docs/payments/patterns/disputes) for what to do when a dispute check fires.
 
 It exits **non-zero** when anything is wrong, so a cron entry or a container healthcheck can page on
 it without parsing output. Thresholds are flags — `--stuck-after=5` (minutes),
-`--unconfirmed-after=30` (minutes), `--window=48` (hours) — and `--json` prints the machine-readable
-form for a metrics shipper:
+`--unconfirmed-after=30` (minutes), `--window=48` (hours), `--dispute-window=168` (hours) — and
+`--json` prints the machine-readable form for a metrics shipper. There is no flag for the two new
+checks: `open_disputes` has no threshold at all, and `rejected_deliveries` uses a fixed 24 h window
+from the command (`billingHealth(store, { rejectedWithin })` takes one in code):
 
 ```sh
 node ace payments:health --window=48 --json
@@ -226,10 +288,26 @@ export default class BillingHealthJob {
     for (const check of report.checks.filter((check) => !check.healthy)) {
       logger.error({ check: check.key, count: check.count }, check.hint)
     }
-    // report.failures groups the failed events by provider and type, worst first
+    // report.failures groups the failed events by provider and type, worst first.
+    // report.deadlines names the closing dispute windows, soonest first — the dispute id,
+    // the payment it is against, and evidenceDueBy. A count sends nobody anywhere.
+    for (const dispute of report.deadlines) {
+      logger.warn({ dispute: dispute.gatewayId, dueBy: dispute.evidenceDueBy }, 'dispute window closing')
+    }
+    // report.openDisputes names the unanswered ones, oldest first — including every dispute
+    // whose gateway published no deadline, which report.deadlines can never contain.
+    for (const dispute of report.openDisputes) {
+      logger.warn({ dispute: dispute.gatewayId, since: dispute.createdAt }, 'dispute unanswered')
+    }
   }
 }
 ```
+
+`report.deadlines` and `report.openDisputes` are each capped at twenty; the counts are not. A report
+can name twenty of fifty without pretending it named all of them. The two lists **overlap on
+purpose**: a dispute that has both a deadline and no answer belongs in both, and hiding it from one
+to keep them disjoint would make the deadline-free check incomplete on exactly the install it exists
+for.
 
 To read the failures themselves — the handler's error message survives nowhere else — page the
 ledger:
@@ -242,23 +320,55 @@ const failures = await store.listWebhookEvents({ status: 'failed', limit: 20 })
 ## Reconcile on a schedule
 
 Webhooks are reliable, not infallible: an outage window, a dashboard edit, a gateway incident.
-`payments:sync` pulls paid invoices back into the billing tables:
+`payments:sync` pages every invoice the gateway holds and reconciles the billing tables **in both
+directions** — a local row saying `paid` while the gateway says refunded is corrected, not skipped:
 
 ```sh
 node ace payments:sync --all
 ```
 
 Run it nightly. Remember what it does **not** do: it writes billing rows, it does not run your
-handlers, so it will not grant anything. After a large reconcile, compare against your own tables —
-or replay the events from the gateway dashboard so the normal path runs. See [CLI](/docs/payments/cli).
+handlers, so it will not grant anything. Two rows it will not touch either — a local `disputed` row
+(the gateway usually still reports a charged-back payment as received, and reconciling that to
+`paid` re-counts money the bank pulled back) and a `paid_at` that is already recorded. After a large
+reconcile, compare against your own tables — or replay the events from the gateway dashboard so the
+normal path runs. See [CLI](/docs/payments/cli).
 
-## Migrations and the ledger
+## The schema and the ledger
 
-The billing migrations create `billing_customers`, `billing_subscriptions`, `billing_payments`,
-`billing_webhook_events` and `billing_usage_events`. `billing_webhook_events` is the one with an
-operational profile: it grows with every event, forever, and it is what makes redeliveries safe.
+The billing layer owns `billing_customers`, `billing_subscriptions`, `billing_payments`,
+`billing_disputes`, `billing_webhook_events`, `billing_usage_events` and `billing_audit_events`, and
+creates them itself on first use. Columns added in later versions are carried to a database that
+already has the tables,
+so an upgrade is a deploy rather than a deploy plus a migration — and if your schema is managed
+elsewhere, `billing.autoCreateSchema: false` plus the published migration is the same DDL under
+your control. Nothing is ever backfilled: a column that arrives today is `null` on every row
+written before it.
 
-Do not prune it aggressively. A gateway can redeliver an event days later, and a pruned id is an id
+<Callout type="warn" title="Turning it off means owning the upgrades too">
+`createBillingTables` is idempotent and also applies the columns added after a table shipped — but a
+migration you already ran does not run again. So with `autoCreateSchema: false`, an upgrade needs a
+**new** migration calling `createBillingTables` once more, in the same deploy as the code. Skipping
+that does not always fail loudly: the store probes for `billing_payments.external_reference`,
+`billing_payments.refunded_amount`, `billing_webhook_events.normalized` and the `billing_disputes`
+and `billing_audit_events` tables before using them, and skips what is not there — so references
+stop being stored, partial refunds stop being recorded, disputes and rejected deliveries go
+unwritten, and `payments:health` reports a healthy zero over a table that does not exist. The probe
+answers once per process and is cached, so **restart** after running the DDL.
+
+`autoCreateSchema: false` does reach a store you built yourself with `billing.store` (including
+`billingStores.lucid({ models })`): the provider turns auto-creation off on it after your factory
+returns. So `billing: { autoCreateSchema: false, store: () => billingStores.lucid({ models }) }` is
+enough — no DDL runs against the database the flag was set to protect.
+
+It only ever turns the flag **off**, never on. A store you constructed with
+`autoCreateSchema: false` of your own is left that way even when the config says `true`, and a store
+that is not a `LucidBillingStore` is left alone entirely — the provider has no way to reach into a
+persistence layer it did not build.
+</Callout>
+
+`billing_webhook_events` is the one with an operational profile: it grows with every event, forever,
+and it is what makes redeliveries safe. Do not prune it aggressively. A gateway can redeliver an event days later, and a pruned id is an id
 that will be processed a second time. Ninety days is a reasonable floor; longer if your gateway's
 replay window is longer.
 
@@ -272,15 +382,18 @@ replay window is longer.
 
 ## Before you ship
 
-- [ ] Every configured provider has its webhook credential set, and env validation requires it
+- [ ] Every configured provider has its webhook credential set (the app refuses to boot otherwise), and env validation requires it
+- [ ] `allowUnverifiedWebhooks` names only providers whose verification really happens upstream — and is not `true`
 - [ ] `sandbox` is explicit, and keys differ per environment
 - [ ] Webhook endpoints registered in each dashboard (`node ace payments:webhook`)
 - [ ] `billing.dispatcher` names the backend you actually run — not `'auto'`
-- [ ] The matching worker is running (`durable:work` / `queue:listen`) if the dispatcher is not `in-process`
+- [ ] `durable:work` is running if the dispatcher is `'durable'`
 - [ ] If the deployment is split, `billing.role` is set per process and the dispatcher has a channel
-- [ ] Migrations run; `billing_webhook_events` has a retention floor, not an aggressive prune
+- [ ] If `billing.autoCreateSchema` is off, this deploy's migration ran; `billing_webhook_events` has a retention floor, not an aggressive prune
 - [ ] Handlers dispatch rather than grant inline
 - [ ] Every grant has an **inner** idempotency guard at the database
-- [ ] Alerting on `webhook.failed`, and on the `charge.created` ÷ `payment.succeeded` ratio
+- [ ] Alerting on `webhook.failed`, on 5xx from the webhook route, and on the `charge.created` ÷ `payment.succeeded` ratio
+- [ ] `payments:health` on a cron — the dispute window closes on a clock, not on a failure, and `rejected_deliveries` is the only place a rotated secret shows up
+- [ ] Someone is named as the person who answers an `open_disputes` count, and closes it in the console afterwards
 - [ ] `payments:sync --all` scheduled
 - [ ] Someone has watched an end-to-end payment succeed in production

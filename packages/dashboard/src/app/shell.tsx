@@ -69,6 +69,30 @@ export function QueryState<T>({
 }
 
 /**
+ * The one line a provider-filtered page owes the operator.
+ *
+ * `provider` is filtered server-side over pages read from the store (`BillingListQuery` has no
+ * provider column), which is bounded work — and a bounded scan that came up empty means "none in
+ * the rows I looked at", not "none". Saying nothing there would let "no Asaas failures" read as
+ * good news when it is really an unfinished search.
+ */
+export function ScanNotice({
+  page,
+  noun,
+}: {
+  page: { scanned: number; truncated: boolean } | undefined;
+  noun: string;
+}) {
+  if (page === undefined || !page.truncated) return null;
+  return (
+    <p className="border-t border-warn/30 bg-warn/[0.06] px-4 py-2 text-[11px] text-amber-300">
+      Searched the {page.scanned} most recent {noun} for this gateway and stopped there. Narrow the
+      status filter to look further back.
+    </p>
+  );
+}
+
+/**
  * Offset paging.
  *
  * `count === limit` is the ONLY signal that another page might exist — the server never counts the

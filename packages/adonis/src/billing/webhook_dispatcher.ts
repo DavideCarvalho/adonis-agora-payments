@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { WebhookEvent } from '../types.js';
 import type { WebhookProcessor } from './webhook_processor.js';
 
@@ -6,13 +7,12 @@ import type { WebhookProcessor } from './webhook_processor.js';
  *
  * - `durable` — the event is dispatched as a fire-and-forget durable workflow run
  *   (`@adonis-agora/durable`), so processing survives crashes and retries deterministically.
- * - `queue` — the event is dispatched as an `@adonisjs/queue` job (`queueDispatch`).
  * - `in-process` — the event runs inline (awaited); on failure it is retried with
  *   exponential backoff in the background.
  * - `auto` — uses `durable` when its provider is registered, else `queue` when the queue
  *   provider is, else `in-process`.
  */
-export type WebhookDispatchMode = 'durable' | 'queue' | 'in-process' | 'auto';
+export type WebhookDispatchMode = 'durable' | 'in-process' | 'auto';
 
 export interface WebhookDispatcherOptions {
   processor: WebhookProcessor;
@@ -20,7 +20,7 @@ export interface WebhookDispatcherOptions {
    * How webhooks are processed. `'auto'` (default) lazily resolves
    * `@adonis-agora/durable` and uses it when installed AND available (the app has the
    * durable provider registered), else `@adonisjs/queue` when available, else
-   * `in-process`. `'durable'`/`'queue'` require their backend (throw when missing).
+   * `in-process`. `'durable'` requires its backend (throws when missing).
    * `'in-process'` never touches either.
    */
   mode?: WebhookDispatchMode;
@@ -43,16 +43,58 @@ export interface WebhookDispatcherOptions {
    */
   durableAvailable?: () => Promise<boolean>;
   /**
-   * Dispatch a webhook event as an `@adonisjs/queue` job. The provider wires this (it owns
-   * the job class, its container binding and the queue-manager registration). Absent =
-   * queue mode is unavailable.
+   * Resolve the app's durable {@link DurableEngineLike}. The provider wires this from the
+   * container; without it there is no engine to register the workflow ON, and durable mode
+   * cannot work — see {@link DurableEngineLike} for why registration is not optional.
    */
-  queueDispatch?: (event: WebhookEvent) => Promise<{ jobId?: string }>;
+  durableEngine?: () => Promise<DurableEngineLike>;
 }
 
-/** The minimal durable surface we use: a workflow class with a static `dispatch`. */
-export interface DurableWorkflowLike {
-  dispatch(input: { event: WebhookEvent }): Promise<{ runId: string }>;
+/**
+ * The slice of `@adonis-agora/durable`'s `WorkflowEngine` this needs.
+ *
+ * Both halves are load-bearing. `start` alone is not enough: the engine looks the workflow
+ * up by NAME in its registry and throws `workflow … is not registered` for anything it has
+ * not been told about, so the webhook workflow has to be REGISTERED before the first
+ * dispatch. This class used to build an anonymous `class extends BaseWorkflow` and call its
+ * static `dispatch`, which registers nothing and has no `static workflow = { name }` — so
+ * every delivery threw `workflow class PaymentsWebhookWorkflow has no registered name`, was
+ * collected as a failed event, and the route answered 500. In an app with durable installed
+ * — which is exactly what `'auto'` selects — that was every webhook, forever.
+ */
+export interface DurableEngineLike {
+  register(name: string, version: string, fn: (ctx: unknown, input: never) => Promise<void>): void;
+  start(name: string, input: unknown, runId: string): Promise<unknown>;
+}
+
+/**
+ * The durable workflow's identity. Stable and explicit: the engine registry is keyed by
+ * name, an in-flight run records the name+version it started on, and a name that changed
+ * between deploys would strand runs mid-flight.
+ */
+export const WEBHOOK_WORKFLOW_NAME = 'payments-webhook';
+export const WEBHOOK_WORKFLOW_VERSION = '1';
+
+/** One event of a delivery that did not get through, and why. */
+export interface WebhookDeliveryFailure {
+  event: WebhookEvent;
+  error: Error;
+}
+
+/**
+ * What became of one webhook DELIVERY — which may carry several events (Adyen's
+ * `notificationItems`, Efí's `pix` array).
+ *
+ * The route turns this into the HTTP status: any failure at all means a non-2xx, because
+ * a 2xx is a promise to the gateway that it never has to send this again.
+ */
+export interface WebhookDeliveryResult {
+  /** How many events the delivery carried. */
+  total: number;
+  /** How many were processed (in-process) or accepted by durable/queue. */
+  dispatched: number;
+  /** The ones that threw, in delivery order. Empty on a clean delivery. */
+  failures: WebhookDeliveryFailure[];
 }
 
 /**
@@ -67,9 +109,20 @@ export class WebhookDispatcher {
   #maxAttempts: number;
   #baseDelayMs: number;
   #maxDelayMs: number;
-  #workflow: DurableWorkflowLike | undefined;
+  #engine: DurableEngineLike | undefined;
+  #registered = false;
   #durableChecked = false;
   #durableAvailable: (() => Promise<boolean>) | undefined;
+  #durableEngine: (() => Promise<DurableEngineLike>) | undefined;
+  /**
+   * Work that has been ACCEPTED but is not finished: durable runs the engine has taken but
+   * not yet executed, workflow bodies currently running, and in-process background retries.
+   *
+   * Kept so {@link WebhookDispatcher.flushWebhooks} can answer "is anything still in
+   * flight?" — see there for why a test cannot answer it any other way.
+   */
+  #accepted = 0;
+  #inFlight = new Set<Promise<unknown>>();
 
   constructor(options: WebhookDispatcherOptions) {
     this.#processor = options.processor;
@@ -78,6 +131,7 @@ export class WebhookDispatcher {
     this.#baseDelayMs = options.retries?.baseDelayMs ?? 500;
     this.#maxDelayMs = options.retries?.maxDelayMs ?? 30_000;
     this.#durableAvailable = options.durableAvailable;
+    this.#durableEngine = options.durableEngine;
   }
 
   /**
@@ -85,9 +139,73 @@ export class WebhookDispatcher {
    * or fully processed (in-process).
    */
   async dispatch(event: WebhookEvent): Promise<{ runId?: string }> {
+    const { runId } = await this.#dispatchOne(event);
+    return runId !== undefined ? { runId } : {};
+  }
+
+  /**
+   * Dispatch a whole DELIVERY: one event, or the several a batched envelope carried.
+   *
+   * **The loop lives here, not in the route.** Everything it has to get right — the ledger
+   * claim, the retry policy, which backend runs the work — is already this class's job; the
+   * route's job is to turn the outcome into a status code. It also makes the batch testable
+   * without standing up an HTTP context.
+   *
+   * **Sequential, deliberately.** Two events in one envelope routinely touch the same row
+   * (an Adyen AUTHORISATION and its CAPTURE; a Pix and its devolução), and running them
+   * concurrently would race the ledger claim and the payment upsert against each other,
+   * which is how you get a `paid` row overwritten by the `pending` that preceded it. The
+   * gateway's order is the order the money moved in, so it is the order they run in.
+   *
+   * **One failure does not cancel its siblings.** Event 2 of 4 throwing says nothing about
+   * events 3 and 4 — they are different payments, and refusing to process them because a
+   * neighbour failed loses money for a reason unrelated to them. So every event is attempted
+   * and the failures are COLLECTED. The caller is then responsible for the other half:
+   * reporting a non-2xx so the gateway redelivers, since a 200 tells it the failed one is
+   * done and it is never sent again. The redelivery re-runs only the failed event — the
+   * ledger claims a `failed` row again, while the ones that succeeded answer `null` and skip.
+   */
+  async dispatchAll(events: WebhookEvent | WebhookEvent[]): Promise<WebhookDeliveryResult> {
+    const list = Array.isArray(events) ? events : [events];
+    const failures: WebhookDeliveryFailure[] = [];
+    let dispatched = 0;
+    for (const event of list) {
+      try {
+        const { error } = await this.#dispatchOne(event);
+        if (error !== undefined) failures.push({ event, error });
+        else dispatched += 1;
+      } catch (thrown) {
+        // The durable/queue path throws rather than reporting (an unreachable engine, a
+        // workflow that will not build). Caught here for the same reason as above: the
+        // remaining events still deserve their attempt.
+        failures.push({ event, error: asError(thrown) });
+      }
+    }
+    return { total: list.length, dispatched, failures };
+  }
+
+  /** One event through the active backend. Durable/queue may throw; in-process reports. */
+  async #dispatchOne(event: WebhookEvent): Promise<{ runId?: string; error?: Error }> {
     if (await this.#useDurable()) {
-      const workflow = await this.#resolveDurable();
-      const { runId } = await workflow.dispatch({ event });
+      const engine = await this.#resolveEngine();
+      this.#registerWorkflow(engine);
+      // A FRESH run id per delivery, deliberately. `engine.start` is idempotent by run id
+      // and returns the prior run's state for a repeat — so a deterministic id derived from
+      // the event would make the gateway's redelivery of a FAILED event a silent no-op,
+      // which is the one case redelivery exists for. Deduplication of an already-processed
+      // event is the ledger's job (the claim answers `null` and the run skips), and it
+      // makes that decision from the row's state rather than from the id alone.
+      const runId = randomUUID();
+      // Counted BEFORE the start and cleared when the workflow body begins, so the window
+      // between "the engine took it" and "the engine ran it" is not a window in which
+      // `flushWebhooks()` reports quiet. That window is the entire bug it exists for.
+      this.#accepted += 1;
+      try {
+        await engine.start(WEBHOOK_WORKFLOW_NAME, { event }, runId);
+      } catch (error) {
+        this.#accepted -= 1;
+        throw error;
+      }
       return { runId };
     }
 
@@ -100,72 +218,87 @@ export class WebhookDispatcher {
   }
 
   /**
-   * Decide whether durable handles this event. `auto` performs the lazy import once and
-   * caches the answer; `durable` forces it (throwing when missing); `in-process` never.
+   * Decide whether durable handles this event. `auto` resolves the engine once and caches
+   * the answer; `durable` forces it (throwing when missing); `in-process` never.
    */
   async #useDurable(): Promise<boolean> {
     if (this.#mode === 'in-process') return false;
     if (this.#mode === 'durable') return true;
     // 'auto'
-    if (this.#durableChecked) return this.#workflow !== undefined;
+    if (this.#durableChecked) return this.#engine !== undefined;
     this.#durableChecked = true;
     try {
       if (this.#durableAvailable && !(await this.#durableAvailable())) {
-        this.#workflow = undefined;
+        this.#engine = undefined;
         return false;
       }
-      await import('@adonis-agora/durable');
-      this.#workflow = await this.#buildWorkflow();
+      this.#engine = await this.#resolveEngine();
       return true;
     } catch {
-      this.#workflow = undefined;
+      this.#engine = undefined;
       return false;
     }
   }
 
   /**
-   * Lazily build a durable workflow class that runs the event through the shared
-   * processor hook. Only called when durable is actually installed.
+   * The app's durable engine, from the seam the provider wires.
+   *
+   * There is no fallback that imports `@adonis-agora/durable` and builds its own: an engine
+   * is bound to a store and a transport that only the app has configured, and a second one
+   * would persist runs nothing ever executes.
    */
-  async #buildWorkflow(): Promise<DurableWorkflowLike> {
-    const durable = await import('@adonis-agora/durable');
-    const { BaseWorkflow } = durable as typeof import('@adonis-agora/durable');
-    const processor = this.#processor;
-    // The workflow's `run(ctx, input)` is the durable body; `dispatch` (static, inherited)
-    // enqueues it fire-and-forget. Input is the webhook event.
-    const workflow = class PaymentsWebhookWorkflow extends BaseWorkflow {
-      async run(_ctx: unknown, input: { event: WebhookEvent }): Promise<void> {
-        await processor.process(input.event);
-      }
-    };
-    return workflow as unknown as DurableWorkflowLike;
-  }
-
-  async #resolveDurable(): Promise<DurableWorkflowLike> {
-    const workflow = this.#workflow ?? (await this.#buildWorkflow());
-    if (!workflow) {
+  async #resolveEngine(): Promise<DurableEngineLike> {
+    if (this.#engine) return this.#engine;
+    if (!this.#durableEngine) {
       throw new Error(
-        '[payments] billing.durable is set to true/auto but @adonis-agora/durable is not installed. ' +
-          'Install it (`node ace add @adonis-agora/durable`) or set billing.durable to false.',
+        '[payments] billing.dispatcher is durable but no durable engine was provided. ' +
+          'The payments provider wires this from the container — install @adonis-agora/durable ' +
+          'and register its provider, or set billing.dispatcher to "in-process".',
       );
     }
-    return workflow;
+    this.#engine = await this.#durableEngine();
+    return this.#engine;
+  }
+
+  /**
+   * Register the webhook workflow on the engine. Idempotent, and it has to happen before
+   * the first `start`: the engine resolves a run by looking its NAME up in the registry and
+   * throws `workflow payments-webhook is not registered` otherwise.
+   */
+  #registerWorkflow(engine: DurableEngineLike): void {
+    if (this.#registered) return;
+    const processor = this.#processor;
+    engine.register(
+      WEBHOOK_WORKFLOW_NAME,
+      WEBHOOK_WORKFLOW_VERSION,
+      async (_ctx: unknown, input: never) => {
+        this.#accepted = Math.max(0, this.#accepted - 1);
+        await this.#track(processor.process((input as { event: WebhookEvent }).event));
+      },
+    );
+    this.#registered = true;
   }
 
   /**
    * In-process fallback: run through the processor, retrying with exponential backoff on
    * failure (up to `#maxAttempts`). Retries run in the background — the first attempt is
    * awaited so the webhook endpoint can respond.
+   *
+   * The failure is REPORTED as well as retried. The background retry lives and dies with
+   * this process, so a crash between the failure and the retry loses the event outright;
+   * the gateway's own redelivery is the only durable retry there is, and it only happens if
+   * the route answers non-2xx. Both run, and the ledger keeps that safe: whichever attempt
+   * claims the `failed` row first does the work, and the other short-circuits on the claim.
    */
-  async #processWithRetry(event: WebhookEvent): Promise<{ runId?: string }> {
+  async #processWithRetry(event: WebhookEvent): Promise<{ runId?: string; error?: Error }> {
     try {
       await this.#processor.process(event);
       return {};
     } catch (error) {
       // Retry in the background (don't block the webhook response). The processor itself
       // publishes `webhook.failed` on the diagnostics channel.
-      void this.#retry(event, 2);
-      return {};
+      void this.#track(this.#retry(event, 2));
+      return { error: asError(error) };
     }
   }
 
@@ -179,8 +312,66 @@ export class WebhookDispatcher {
       await this.#retry(event, attempt + 1);
     }
   }
+  /** Record a promise as in-flight until it settles, and hand it back unchanged. */
+  #track<T>(promise: Promise<T>): Promise<T> {
+    const tracked = promise.finally(() => {
+      this.#inFlight.delete(tracked);
+    });
+    // A rejection here is somebody else's to report (`dispatchAll` collects it, the retry
+    // loop swallows it); this handler only exists so tracking never adds an unhandled
+    // rejection of its own.
+    tracked.catch(() => {});
+    this.#inFlight.add(tracked);
+    return promise;
+  }
+
+  /**
+   * Resolve when nothing this dispatcher accepted is still being processed.
+   *
+   * **The asymmetry this fixes.** In `in-process` mode `dispatchAll` resolves when the event
+   * has been PROCESSED, so a test can assert straight after it. In `durable` mode it
+   * resolves when the event has been ACCEPTED — the run executes out of band — so the same
+   * assertion races the workflow. Every app that pairs `billing.dispatcher` with durable
+   * writes the same polling `waitFor(() => ...)` helper to paper over it, and then cannot
+   * write a NEGATIVE assertion at all: "nothing was granted" against a poll is a timed
+   * sleep, which is slow when it passes and lies when the machine is loaded.
+   *
+   * `await dispatcher.flushWebhooks()` is that assertion made possible: after it, an
+   * unchanged row means the webhook genuinely changed nothing.
+   *
+   * It waits for the background in-process RETRIES too, which have exactly the same problem
+   * — the first attempt is awaited and the retries are not.
+   *
+   * Only reaches work this process accepted. A worker-role deployment runs the events in
+   * another process, and no in-process await can see those; the timeout says so rather than
+   * hanging.
+   */
+  async flushWebhooks(options: { timeoutMs?: number } = {}): Promise<void> {
+    const timeoutMs = options.timeoutMs ?? 5_000;
+    const deadline = Date.now() + timeoutMs;
+    while (this.#accepted > 0 || this.#inFlight.size > 0) {
+      if (Date.now() > deadline) {
+        throw new Error(
+          [
+            `[payments] flushWebhooks timed out after ${timeoutMs}ms with`,
+            `${this.#accepted + this.#inFlight.size} webhook(s) still in flight.`,
+            'If the events are processed by a separate worker process, no in-process wait can',
+            'observe them — assert against the ledger instead.',
+          ].join(' '),
+        );
+      }
+      // Yield to whatever is running rather than polling on a timer: an in-process retry is
+      // on a real `setTimeout` and a durable run may be a microtask away.
+      await Promise.race([...this.#inFlight, sleep(1)]).catch(() => {});
+    }
+  }
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** A thrown value as an `Error` — a handler may throw a string, and the message is the point. */
+function asError(thrown: unknown): Error {
+  return thrown instanceof Error ? thrown : new Error(String(thrown));
 }

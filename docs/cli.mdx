@@ -72,27 +72,63 @@ node ace payments:sync --all --provider=stripe
 | Flag | Meaning |
 | --- | --- |
 | `--customer` | one gateway customer id |
-| `--all` | every gateway customer id recorded in `billing_customers` |
+| `--all` | every gateway customer recorded in `billing_customers` (paged) |
 | `--provider` | which configured provider to sync (default: the configured default) |
 
-It pulls the customer's invoices from the gateway and upserts the **paid** ones into
-`billing_payments`. Non-paid invoices are counted and skipped — a pending invoice is not a payment,
-and the reconciler will not invent one.
+It pages **every** invoice the gateway holds for the customer, asks the gateway what each charge's
+payment actually says, and writes that back — in **both directions**. A local row saying `paid`
+while the gateway says refunded is corrected to `refunded`, which is the one drift a
+gateway-is-truth reconcile exists for and the one it used to be unable to fix.
 
 ```text
-  cus_123: 7 invoice(s), 5 synced, 2 skipped (non-paid)
-Synced 5 paid invoice(s) across 1 customer(s).
+  cus_123: 7 invoice(s), 2 reconciled, 4 already current, 1 undecidable (gateway had no payment)
+Reconciled 2 payment(s) across 1 customer(s).
 ```
 
-Two guards fail fast rather than doing nothing quietly: neither `--customer` nor `--all` is an error
-rather than a silent no-op, and a gateway with no invoice concept (Woovi/OpenPix) is refused up
-front by the capability check instead of listing nothing.
+- **reconciled** — the local row now says what the gateway says.
+- **already current** — the two already agreed, so nothing was written. A reconcile over a stable
+  install writes nothing at all rather than churning every row's `updated_at`.
+- **undecidable** — the gateway lists the invoice but has no payment resource behind it, so there
+  is no authoritative status to copy. It is left alone, not guessed at.
 
-<Callout type="warn" title="`--all` reads a table the library does not populate">
-`billing_customers` is created by the migration, but nothing in the library writes to it — the
-[billable mixin](/docs/payments/billing) stores the gateway customer id on **your** model. Unless
-your app fills that table itself, `--all` finds nothing to sync. Use `--customer` with the ids you
-hold, and iterate your own billable rows.
+The status comes from the gateway's **payment** resource, not from the invoice listing: an
+`Invoice['status']` has no `refunded` and no `disputed` member, so a reversed charge appears in the
+listing as `draft`. The listing enumerates; `findPayment` decides.
+
+Three guards fail fast rather than doing nothing quietly: neither `--customer` nor `--all` is an
+error rather than a silent no-op, a gateway with no invoice concept (Woovi/OpenPix) is refused up
+front by the capability check instead of listing nothing, and a paging loop that never terminates
+throws instead of returning a partial list as if it were whole.
+
+<Callout type="warn" title="A local `disputed` row is never reconciled away">
+A chargeback is money the bank has already pulled back, and the gateway's payment resource
+frequently goes on reporting the charge as received while the dispute is open. Reconciling that to
+`paid` would re-count money that is gone and silence the dispute at the same time — so a local row
+in `disputed` is left alone, named on the console, and counted in the tail of the summary:
+
+```text
+  pay_1abc: local row is disputed, gateway says paid — left alone.
+Reconciled 2 payment(s) across 1 customer(s); 1 disputed row(s) left alone.
+```
+
+Only `payment.dispute_closed`, which carries an outcome, resolves a dispute — or
+[the console's resolve action](/docs/payments/dashboard#recording-how-a-dispute-ended), for a
+gateway that never sends one.
+</Callout>
+
+<Callout title="Settlement dates come from the gateway, or not at all">
+`revenue()` windows on `paid_at`. This used to stamp `new Date()` on every row it wrote, which
+filed historic money in the month the reconcile *ran* — run it in two different months and the same
+charge was counted in both. It now takes the gateway's own settlement date, never overwrites one
+already recorded, and records none when the gateway states none.
+</Callout>
+
+<Callout title="`--all` iterates what you recorded">
+It pages `billing_customers` through the store, and that table is opt-in: it is written by
+[`ensureCustomer({ store, owner })`](/docs/payments/billing#reusing-a-gateway-customer) (or
+`store.saveCustomer()` directly). An app that never records mappings has nothing for `--all` to
+reconcile over — use `--customer` with the ids you hold until it does. `--provider` narrows the
+iteration to one gateway's customers.
 </Callout>
 
 <Callout type="warn" title="Sync writes to billing tables, not to your business logic">
@@ -104,11 +140,14 @@ so the handlers run through the normal path.
 
 ## `payments:health`
 
-The scheduled check for the three failures a billing install has that nothing throws on.
+The scheduled check for the six failures a billing install has that nothing throws on. Three of
+them are things that broke. The other three are money: a chargeback whose evidence window is about
+to close, a chargeback nobody has answered at all, and a delivery the endpoint refused.
 
 ```sh
 node ace payments:health
 node ace payments:health --window=48 --json
+node ace payments:health --dispute-window=168   # a week of chargeback windows
 ```
 
 | Flag | Meaning |
@@ -116,6 +155,7 @@ node ace payments:health --window=48 --json
 | `--stuck-after` | minutes an event may sit unfinished before it counts as stuck (default 15) |
 | `--unconfirmed-after` | minutes a charge may stay pending before it counts as unconfirmed (default 120) |
 | `--window` | hours that failures are counted over (default 24) |
+| `--dispute-window` | hours ahead to look for a closing evidence window (default 72) |
 | `--json` | print the report as JSON |
 
 ```text
@@ -125,12 +165,58 @@ node ace payments:health --window=48 --json
 1  Charges created over 2h ago and still pending
      Charges are being created but never confirmed — the shape of a webhook endpoint that
      stopped being reachable.
+1  Open disputes whose evidence window closes within 3d
+     A chargeback window is closing. Past it the dispute is lost by default rather than on
+     the merits, and nothing can be done.
+3  Disputes still open and unanswered
+     A chargeback is open and the money is already out of the account. This check does NOT
+     need a deadline, which is the point.
+0  Gateway deliveries refused in the last 24h
   stripe payment.succeeded: 2 failed
+  stripe dp_1Nx4 (payment pi_3Qx7): evidence due 2026-08-30T09:00:00.000Z
 ```
 
+The dispute check names each closing window — the dispute id, the payment it is against and the
+deadline — because a count sends nobody anywhere. The list stops at twenty; the count does not, so a
+report can name twenty of fifty without pretending it named all of them. A window that has
+**already** closed keeps being counted: it is still open and still unanswered, and going quiet the
+moment it expires would read as "resolved" at exactly the wrong moment. A dispute the gateway sent
+no deadline for is never counted there; there is nothing to be late for. That is what
+`open_disputes` is for.
+
+### `open_disputes` has no threshold and no flag
+
+`disputes_due` can only ever see a dispute whose gateway **published** a deadline, and most do not:
+on Asaas it comes from `chargeback.deadlineToSendDisputeDocuments`, which no published webhook
+example even contains. On such an install the deadline check answers zero forever while a chargeback
+sits open with the money already pulled back — a healthy report about an install that is losing
+money by default.
+
+`open_disputes` counts every dispute in `warning`, `open` or `under_review`, with no window and no
+way to silence it. An open chargeback is money already out of the account, so there is no horizon at
+which it stops mattering. `billingHealth()` also returns `openDisputes` — up to twenty rows, **oldest
+first**, because with no deadline to sort on, age is the only priority signal left.
+
+### `rejected_deliveries` is the only trace a refused delivery leaves
+
+A delivery the endpoint answers `400` to — a bad signature, an unparsable body, a provider nobody
+configured — never becomes a ledger row, because it is refused before an event exists to record. So
+a rotated webhook secret used to look exactly like a quiet week: zero events, zero failures, every
+check green. Each rejection now writes a `webhook.rejected` row into `billing_audit_events`, and
+this check counts them over the last 24 h. Read them with
+`listAuditEvents({ action: 'webhook.rejected' })`, or on
+[the console's Activity screen](/docs/payments/dashboard#activity--the-trail-nothing-else-keeps).
+
+<Callout title="Two checks have no flag of their own">
+`--stuck-after`, `--unconfirmed-after`, `--window` and `--dispute-window` are the whole flag set.
+`open_disputes` has no threshold by design. `rejected_deliveries` uses a fixed 24 h window from the
+command; `billingHealth(store, { rejectedWithin })` takes one if you call the function directly.
+</Callout>
+
 It **exits non-zero** when any count is non-zero, so a cron entry or a container healthcheck pages
-on it without parsing the output. The same report is a function — `billingHealth(store)` — for a
-scheduled job that ships it to your metrics. See
+on it without parsing the output. It also exits non-zero, with nothing checked, when
+`billing.enabled` is `false` — there is no install to report on. The same report is a function —
+`billingHealth(store)` — for a scheduled job that ships it to your metrics. See
 [Health checks](/docs/payments/production#health-checks).
 
 ## `make:billable`
@@ -141,8 +227,12 @@ Scaffolds a Lucid model composed with the billing mixins:
 node ace make:billable user
 ```
 
-```ts title="app/models/user.ts"
-import { BaseModel, compose, column } from '@adonisjs/lucid/orm'
+The file is `app/models/<name>_model.ts` — `make:billable user` writes `app/models/user_model.ts`,
+not `user.ts`. The class is named after the argument:
+
+```ts title="app/models/user_model.ts"
+import { BaseModel, compose } from '@adonisjs/lucid/orm'
+import { column } from '@adonisjs/lucid/orm'
 import { withBillable } from '@adonis-agora/payments'
 
 export default class User extends compose(BaseModel, withBillable()) {
@@ -163,19 +253,32 @@ node ace make:webhook-handler payment.succeeded
 
 ```ts title="app/payment_handlers/payment_succeeded.ts"
 import { inject } from '@adonisjs/core'
-import type { WebhookEvent } from '@adonis-agora/payments'
+import type { WebhookEventFor } from '@adonis-agora/payments'
 
 @inject()
 export default class PaymentSucceededHandler {
   static readonly eventType = 'payment.succeeded'
 
-  async handle(event: WebhookEvent): Promise<void> {
+  async handle(event: WebhookEventFor<'payment.succeeded'>): Promise<void> {
+    const { externalReference } = event.data   // typed — no cast
     // dispatch durable work — never grant inline
   }
 }
 ```
 
+`WebhookEventFor<T>` types `event.data` from the event type, so the
+`event.data as PaymentWebhookData` that used to open every handler is gone — and reading a payment
+field off a dispute event is now a compile error rather than `undefined` at runtime.
+
 The file is discovered at boot with no further wiring. `node ace add` registers an Assembler `init`
 hook that generates a barrel of the folder at build and dev time (the file watcher re-runs it); when
 that hook is absent the provider falls back to a runtime scan, so the convention works either way.
 See [Reacting to payments](/docs/payments/patterns/reacting-to-payments).
+
+<Callout type="warn" title="A misspelled `eventType` no longer boots">
+`eventType` is validated at boot. A type in the library's own `payment.*`/`subscription.*`
+namespace that is not one of the normalized `WEBHOOK_EVENT_TYPES` throws, naming the file — because
+`'payment.suceeded'` used to register a handler nothing ever called while the delivery was still
+recorded as processed and the route still answered `200`. Two handler files claiming the same type
+throw too, naming both. See [Webhooks](/docs/payments/webhooks#a-typo-in-eventtype-does-not-boot).
+</Callout>

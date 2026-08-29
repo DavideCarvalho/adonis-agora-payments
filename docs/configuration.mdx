@@ -1,17 +1,24 @@
 ---
 title: Configuration
-description: The config/payments.ts reference — named providers built with lazy factories, method routing with capability checks, the invoice section, and the billing layer (durable webhook processing, business handlers).
+description: The config/payments.ts reference — named providers built with lazy factories, method routing with capability checks, the invoice section, and the billing layer (who owns the schema, how a webhook is processed, where business handlers live).
 icon: Settings2
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
 
-`config/payments.ts` is the whole wiring surface of the library. It answers four questions:
+`config/payments.ts` answers four questions:
 
 1. **Which gateways do I accept payments through?** — `providers` (a named map of driver factories).
 2. **Which gateway handles each payment method?** — `methods` (e.g. `pix → woovi`, `credit_card → stripe`).
 3. **Who emits my invoices?** — `invoice` (independent of the gateway).
-4. **How are webhooks processed?** — `billing` (durable/in-process, and where your business logic runs).
+4. **How are webhooks processed, and where do the tables come from?** — `billing`.
+
+`configure` publishes two more files, each with its own page: `config/payments_dashboard.ts`
+([Dashboard](/docs/payments/dashboard)) and `config/payments_client.ts`
+([Client](/docs/payments/client)). Both are separate because they are separate **authorization
+surfaces** — the dashboard mounts at `/payments` and the client status endpoint at
+`/payments/client`, sharing that prefix with `POST /payments/webhook/:provider`. Nothing on this
+page opens a route to a browser.
 
 A minimal config is two blocks:
 
@@ -22,7 +29,7 @@ import { defineConfig, payments } from '@adonis-agora/payments'
 export default defineConfig({
   default: 'stripe',
   providers: {
-    stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY') }),
+    stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY'), currency: 'brl' }),
   },
 })
 ```
@@ -53,12 +60,17 @@ providers: {
 
 ### Driver config options
 
+A sample — the other twelve gateways document their own options on their
+[provider page](/docs/payments/providers):
+
 | Driver | Key config | Convenience env fallback |
 | --- | --- | --- |
-| Stripe | `apiKey`, `currency`, `webhookSecret` | `STRIPE_KEY`, `STRIPE_WEBHOOK_SECRET` |
+| Stripe | `apiKey`, **`currency` (required)**, `webhookSecret` | `STRIPE_KEY`, `STRIPE_WEBHOOK_SECRET` |
 | AbacatePay | `apiKey`, `webhookSecret`/`publicKey` | `ABACATE_API_KEY`, `ABACATE_PUBLIC_KEY` |
 | Asaas | `apiKey`, `sandbox`, `webhookToken` | `ASAAS_API_KEY`, `ASAAS_WEBHOOK_ACCESS_TOKEN` |
 | Woovi | `appId`, `webhookSecret`, `webhookPublicKey` | `WOOVI_APP_ID`, `WOOVI_WEBHOOK_SECRET`, `WOOVI_WEBHOOK_PUBLIC_KEY` |
+| PagBank | `token`, `sandbox`, `webhookToken` | `PAGBANK_TOKEN`, `PAGBANK_WEBHOOK_TOKEN` |
+| Efí | `clientId`, `clientSecret`, `pixKey`, `certificate` | `EFI_CLIENT_ID`, `EFI_CLIENT_SECRET`, `EFI_PIX_KEY`, `EFI_CERTIFICATE` |
 
 Every credential is a **config value first** — name your `.env` variables however you want
 and reference them with `env.get('YOUR_NAME')`. The "env fallback" column is only what a
@@ -68,6 +80,36 @@ ecosystem's conventional names. It's a convenience default, not a contract: pass
 
 The webhook credentials are what make the mounted route **enforce** signatures — see
 [Webhooks → Validation](/docs/payments/webhooks#validation-per-provider).
+
+### `allowUnverifiedWebhooks` — the opt-out for a boot refusal
+
+A driver that *can* authenticate a webhook and was given no credential **refuses to boot**. The
+empty slot used to mean "skip verification", which made `POST /payments/webhook/:provider` accept
+any body anyone posted to it — including one that marks a payment paid.
+
+```ts title="config/payments.ts"
+export default defineConfig({
+  providers: { efi: payments.efi({ /* ... */ }) },
+  allowUnverifiedWebhooks: ['efi'],
+})
+```
+
+| Value | Meaning |
+| --- | --- |
+| omitted (default) | any driver reporting `'unconfigured'` throws at boot, naming the provider |
+| `['efi', 'asaas']` | those providers may take unverified deliveries |
+| `true` | every provider may. Almost never what you want |
+
+Set it only when verification genuinely happens upstream — mutual TLS at the edge, or an API
+gateway that checks the signature before forwarding. Efí and InfinitePay never trip the check:
+their gateways sign nothing, so they report `'unsupported'` rather than `'unconfigured'` and there
+is no credential to forget.
+
+<Callout type="warn" title="This is a breaking change for an existing app">
+An app that has been running with, say, `ASAAS_WEBHOOK_ACCESS_TOKEN` unset will not boot after
+upgrading. That is the point — it was accepting forged deliveries — but it is a deploy-time
+failure, so set the credentials before you ship, not after.
+</Callout>
 
 ## Methods — routing a payment method to a provider
 
@@ -84,7 +126,7 @@ methods: {
 },
 ```
 
-Then `getPayments().driver('pix')` resolves to the routed provider. Two rules keep a
+Then `getPayments().driver('pix')` resolves to the routed provider. Four rules keep a
 misconfiguration from failing *at the gateway*:
 
 1. **Unknown method/provider** → the manager throws with a helpful list of what's
@@ -93,6 +135,21 @@ misconfiguration from failing *at the gateway*:
    a Pix-only gateway (AbacatePay, Woovi) is a config error, and it's caught when you
    resolve the driver — not after a request to the gateway. The manager checks
    `driver.supportedMethods` before returning the driver.
+3. **`driver()` with no argument consults `methods` too.** It used to skip the map entirely, so an
+   app that configured routing and then called `driver()` got a driver bound to **nothing** and
+   every charge fell back to whatever the gateway dashboard defaults to. Now: exactly one method
+   routed to that provider is applied, the same binding `driver('pix')` would have produced.
+4. **Ambiguity is refused, not guessed.** When `methods` routes several methods to the provider
+   `driver()` resolved, there is no honest answer — so `charge()` and `createSubscription()` throw
+   unless the call names a `method:`, and the message names both ways to say what you meant. Every
+   other method on the driver is untouched. An app that already passes `method:` everywhere is
+   unaffected.
+
+Once a driver was resolved *through* the routing map, a `method:` on the call that the map routes
+**elsewhere** is refused rather than sent to the wrong gateway — `driver('pix').charge({ method:
+'credit_card' })` throws when `methods.credit_card` names another provider. Resolving by provider
+**name** is the deliberate escape hatch: `driver('stripe')` says which gateway you mean, so
+`methods` is not consulted at all and nothing is bound.
 
 ## Invoice — independent of the gateway
 
@@ -124,8 +181,6 @@ billing: {
   enabled: true,
   /** How a validated webhook is processed — name the backend you actually run. */
   dispatcher: 'durable',
-  /** Queue name for the 'queue' dispatcher. Defaults to the queue's own default. */
-  queue: 'webhooks',
   /**
    * Business webhook handlers run inside the mounted route. A DI service class (the
    * lib calls its `.handle(event)`) or a plain function.
@@ -137,16 +192,51 @@ billing: {
 }
 ```
 
+Every option, and what you get by omitting it:
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `enabled` | `true` | `false` wires no store, processor or dispatcher. The webhook route still mounts and verifies, and then does nothing with what it verified. |
+| `autoCreateSchema` | `true` | The library creates its own tables on first use. See below. |
+| `dispatcher` | `'auto'` | Which backend runs a validated webhook. See below. |
+| `role` | `'all'` | `'api'` mounts the route and never processes; `'worker'` processes and never mounts. Both demand an explicit `'durable'` dispatcher — there is no channel between the halves otherwise, and it is refused at boot. See [Production → Splitting api and worker](/docs/payments/production#splitting-api-and-worker). |
+| `store` | the Lucid store over the billing tables | Where the layer persists. `billingStores.lucid({ models })` swaps the models; a factory of your own replaces the store entirely. See [Billing → The billing store](/docs/payments/billing#the-billing-store). |
+| `handlers` | none | Your business logic, keyed by normalized event type. See below. |
+| `passthroughEvents` | none | Gateway event types your drivers pass through unmapped that you register a handler for, when the type happens to fall in the library's own `payment.*`/`subscription.*` namespace. See below. |
+| `durable` | — | Legacy alias for `dispatcher`. See the callout below. |
+
+### `autoCreateSchema` — who owns the DDL
+
+`true` by default, and there is **no migration to run**: on its first query the Lucid store
+creates the seven billing tables itself, the same convention `@adonis-agora/durable` and
+`@adonis-agora/authz` follow. The DDL is idempotent (`CREATE TABLE IF NOT EXISTS`, plus guarded
+`ALTER`s for columns added after a table shipped), so it costs one round trip per process and an
+install that already ran an older migration gets no-ops.
+
+```ts title="config/payments.ts"
+billing: { autoCreateSchema: false }
+```
+
+Turn it off when the schema is managed elsewhere — a shared database you do not own, a team that
+reviews every DDL, a deploy that runs migrations as their own step. Then run the migration
+`configure` published:
+
+```sh
+node ace migration:run
+```
+
+That file calls the same exported `createBillingTables`, so the two paths cannot drift. Leaving
+both on is harmless; leaving both *off* means the first query fails on a missing table.
+
 ### `dispatcher` — how a webhook gets processed
 
 Webhook processing is exactly the kind of work that must not be lost when a deploy or a crash
-interrupts it. Four backends:
+interrupts it. Three backends:
 
 | Value | Behaviour |
 | --- | --- |
-| `'auto'` (default) | `@adonis-agora/durable` when its provider is registered; else `@adonisjs/queue` when installed; else in-process |
+| `'auto'` (default) | `@adonis-agora/durable` when its provider is registered; otherwise in-process |
 | `'durable'` | a durable workflow run — **throws when durable is missing** |
-| `'queue'` | an `@adonisjs/queue` job — throws when the queue provider is missing |
 | `'in-process'` | inline, retrying in the background with exponential backoff |
 
 `'auto'` is the friendly default and it is also silent: an app that expected durable and forgot to
@@ -155,19 +245,19 @@ then a missing dependency is a boot error rather than a surprise. See
 [Production](/docs/payments/production).
 
 The in-process fallback retries 5 times with exponential backoff (500 ms base, capped at 30 s),
-which covers a transient failure but does **not** survive a process restart. Durable and queue do.
+which covers a transient failure but does **not** survive a process restart. Durable does.
 
 <Callout title="`durable` is the legacy alias">
 `durable: 'auto' | true | false` still works and maps onto `dispatcher` — `true` is `'durable'`,
-`false` is `'in-process'`. New config should use `dispatcher`, which is the only way to reach the
-queue backend.
+`false` is `'in-process'`. New config should use `dispatcher`, which names the backend directly
+instead of encoding it as a boolean.
 </Callout>
 
 ### `handlers` — where your business logic runs
 
 The route validates the signature, syncs the billing tables, then runs **your** logic. Two
 equivalent authoring forms (plus a third — the `app/payment_handlers/` folder — covered
-in [Webhooks](/docs/payments/webhooks#running-your-business-logic)):
+in [Webhooks](/docs/payments/webhooks#running-your-business-logic--four-options)):
 
 - A **DI service class** — the lib resolves it from the container and calls its
   `handle(event)` method. Inject whatever you need; no boilerplate:
@@ -193,8 +283,56 @@ in [Webhooks](/docs/payments/webhooks#running-your-business-logic)):
 A throwing handler marks the event `failed` in the ledger and the dispatcher retries — so
 handler failures surface instead of being silently swallowed.
 
+Keys are **validated at boot**. A type in the `payment.*`/`subscription.*` namespace that is not
+one of the ten `WEBHOOK_EVENT_TYPES` throws, and so do two handlers claiming the same type. On a
+`role: 'api'` process, where handlers are not resolved at all, the config keys are still checked —
+a misspelling is a config error on both halves of a split deployment.
+
+### `passthroughEvents` — the exception to that check
+
+A gateway event a driver could not map arrives lowercased as the gateway spells it: Asaas'
+`PAYMENT_ANTICIPATED` becomes `payment_anticipated`, which has no dot and needs no declaration.
+This option is for the rare gateway that spells one **with** a dot inside the library's own
+namespace, where the boot check would otherwise read it as a typo:
+
+```ts title="config/payments.ts"
+billing: {
+  passthroughEvents: ['payment.anticipated'],
+  handlers: { 'payment.anticipated': onAnticipated },
+}
+```
+
+The handler's `event.data` stays `unknown` for a passthrough type: nothing normalized it, and
+typing it would be a claim no driver is making.
+
 <Callout type="info" title="The money-flow pattern">
 Webhooks must respond fast. The recommended shape is: the handler only **dispatches a
 durable workflow** (durable owns retry + exactly-once) and returns — never doing the heavy
 grant inline. See [Webhooks → The money-flow pattern](/docs/payments/webhooks#the-money-flow-pattern-handlers-dispatch-to-durable).
 </Callout>
+
+## Telescope — there is no key for it
+
+The typed `payments` Telescope watcher has **no configuration**. There is no `telescope` key in
+`config/payments.ts`; adding one does nothing, and the config type does not accept it.
+
+The provider registers the watcher itself, in `ready()`, and disposes it on shutdown. What an
+option would have said, the code detects instead:
+
+- **Telescope is not installed.** The import fails, the provider registers nothing, and nothing is
+  logged about it. An app without observability is a normal app, not a misconfigured one, and a
+  missing timeline is not a reason to refuse to take payments.
+- **You wire your own watcher.** A watcher claims the payments diagnostic channels when it
+  registers. `start/` files run before `ready()`, so an app that registered its own has already
+  claimed those channels by the time the provider looks, and the provider stands down. Your
+  registration is the one that runs, and nothing is recorded twice.
+
+<Callout type="warn" title="Delete the old `start/telescope.ts` wiring">
+This page and [Diagnostics](/docs/payments/diagnostics) used to tell you to copy six lines into
+`start/telescope.ts` to register `PaymentsWatcher` by hand. The provider does it now. The hand-wired
+version still works — the claim check makes sure it is not doubled — but it is dead weight, so
+delete it.
+</Callout>
+
+The generic `DiagnosticsWatcher` telescope ships records the payments channels either way: they are
+plain `node:diagnostics_channel` publishes. See [Diagnostics](/docs/payments/diagnostics).

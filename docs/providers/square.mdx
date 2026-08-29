@@ -1,0 +1,408 @@
+---
+title: Square
+description: Square Connect v2 — location-scoped, integer minor units, an idempotency key in the body, and a webhook signature that covers your own URL.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Square through the **Connect v2 API** (`https://connect.squareup.com/v2`), authenticated
+with a Bearer access token and a pinned `Square-Version` header.
+
+- **Methods**: `credit_card`, `debit_card`, `undefined`. The instrument is fixed by the
+  token you pass, not by the call — see below.
+- **Setup**:
+  `payments.square({ accessToken, locationId, currency, sandbox, webhookSignatureKey, notificationUrl })`
+  — `SQUARE_ACCESS_TOKEN`, `SQUARE_LOCATION_ID`, `SQUARE_WEBHOOK_SIGNATURE_KEY`,
+  `SQUARE_WEBHOOK_NOTIFICATION_URL`.
+- **Money**: integer **minor units**, end to end. Square's `{ amount: 1990, currency:
+  "USD" }` is the same unit this library's `Money` is, so nothing is divided or multiplied
+  anywhere in the driver — $19.90 is `1990` in your code and `1990` on the wire. (The
+  Brazilian drivers next door do divide, because their gateways want decimal reais.)
+- **`externalReference`**: `reference_id` on a payment; on a checkout, the order's
+  `reference_id` *and* `metadata.external_reference` *and* the link's `payment_note`. Read
+  back out on `event.data.externalReference`.
+- **Refunds**: `POST /v2/refunds`, full or partial.
+- **Subscriptions**: native, against a catalog plan **variation**.
+- **Invoices**: `POST /v2/invoices/search`, filtered by location and customer.
+
+<Callout type="warn" title="Not yet run against a live account">
+This driver is written against Square's published API reference and covered by unit tests
+that stub the HTTP layer; nothing in it has touched a real Square account. Verify your flow
+in the Sandbox (`sandbox: true`, `connect.squareupsandbox.com`) before taking real money.
+</Callout>
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — unless
+**both** `webhookSignatureKey` and `notificationUrl` are configured (env fallbacks
+`SQUARE_WEBHOOK_SIGNATURE_KEY` / `SQUARE_WEBHOOK_NOTIFICATION_URL`). Square's signature is computed
+over the notification URL as well as the body, so one without the other cannot verify anything.
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/square` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
+## `locationId` is required, and that is deliberate
+
+Payments, payment links, subscriptions and the invoice search are all scoped to a seller
+location. Square documents a convenient fallback — "defaults to the main location" — and
+that fallback is exactly the kind of default this package refuses: money booked against
+whichever location the account happens to list first, with nothing in the flow saying so.
+
+Configure it, or the driver throws at **boot**:
+
+```ts
+providers: {
+  square: payments.square({
+    accessToken: env.get('SQUARE_ACCESS_TOKEN'),
+    locationId: env.get('SQUARE_LOCATION_ID'),
+    currency: 'usd',
+  }),
+}
+```
+
+`currency` is required for the same reason: Square sells in USD, CAD, GBP, EUR, AUD and JPY
+depending on the seller's country, so there is no safe default and a wrong guess is
+accepted by the API. JPY is zero-decimal — `1990` is ¥1990, not ¥19.90 — which the driver
+gets right for free precisely because it converts nothing.
+
+`Square-Version` is pinned to `2026-08-19`, the version these mappings were written
+against. Omitting the header would let Square pick the account's default version and change
+response shapes underneath the driver; override it with `apiVersion` when you have read the
+changelog.
+
+## `charge()` needs a token you cannot mint on the server
+
+`POST /v2/payments` takes a `source_id`: a single-use card token from the Web Payments SDK
+in the browser, or a saved card id (`ccof:…`) plus the `customerId` that owns it. There is
+no "charge this customer for this amount" call, so the driver refuses a charge without one
+rather than inventing a flow.
+
+```ts
+const payment = await payments.driver('square').charge({
+  amount: 1990,                        // minor units, straight through
+  paymentMethodId: 'cnon:card-nonce',  // from the Web Payments SDK
+  customerId: 'cus_…',
+  description: 'Pro plan',             // becomes the payment's `note`
+  externalReference: 'pay:local_1',    // becomes `reference_id`, max 40 chars
+  idempotencyKey: 'idem_1',            // a BODY field, not a header
+})
+```
+
+**`idempotency_key` is a body field on Square**, on payments, refunds, subscriptions and
+payment links alike, and Square *requires* it on payments and refunds. A call that arrives
+without `idempotencyKey` gets a generated UUID — enough to make Square's own retry safe,
+but not your job queue's. Pass your own when a retry from outside the process must not
+double-charge. Square caps it at 45 characters and so does the driver.
+
+`method` may only be `credit_card` or `debit_card`, and even then it is not a request: the
+token decides, and Square reports which it turned out to be in
+`card_details.card.card_type`. A Cash App or Afterpay payment (`source_type` `WALLET` /
+`BUY_NOW_PAY_LATER`) leaves `Payment.method` unset rather than being labelled `card`,
+because the ledger could not tell it apart from a real card payment afterwards.
+
+### `APPROVED` is not `paid`
+
+Square separates authorization from capture. A payment created with `metadata:
+{ autocomplete: false }` sits at `APPROVED` — funds held on the buyer's card, nothing moved
+to the seller — and Square voids the hold on its own when the delay window runs out. The
+canonical `BillingStatus` has no name for that, so **`APPROVED` maps to `pending`**, and
+the `payment.updated` webhook that carries it normalizes to `payment.updated`, never
+`payment.succeeded`. Finish it with the one method outside the driver contract:
+
+```ts
+const driver = payments.driver('square') as SquareDriver
+await driver.completePayment('pmt_…')
+```
+
+A fully refunded payment is the mirror image: Square keeps its `status` at `COMPLETED` and
+records the money in `refunded_money`, so the driver reads that field and reports
+`refunded` rather than leaving it as `paid`.
+
+### Refunding without an amount costs a read
+
+`RefundPayment` has no "refund everything" mode — `amount_money` is mandatory. So
+`refund(paymentId)` with no amount fetches the payment first and refunds exactly what
+Square reports for it, never a number the driver computed. `refund(paymentId, 500)` skips
+the read.
+
+A card refund comes back `PENDING`; only the `refund.updated` webhook carrying `COMPLETED`
+means the money left, and only that one normalizes to `payment.refunded`.
+
+## Webhooks sign your own URL
+
+Square's `x-square-hmacsha256-signature` is a **base64** HMAC-SHA256 over the notification
+URL **concatenated with** the raw body:
+
+```
+base64( HMAC-SHA256( signatureKey, notificationUrl + rawBody ) )
+```
+
+The URL is part of the signed material, which means the driver has to be told its own
+public address. It cannot be derived from the request. So:
+
+- Set **both** `webhookSignatureKey` and `notificationUrl`, matching the webhook
+  subscription in the Developer Console exactly — scheme, host, path, no trailing slash the
+  console does not have.
+- Setting the key **without** the URL throws at boot. The alternatives were a driver that
+  rejects every genuine webhook, or one that quietly skips verification because it is
+  missing a piece of its own input; neither is something to discover in production.
+- With neither configured the driver reports `'unconfigured'` and the app refuses to boot. For
+  local development without dashboard setup, name the provider in `allowUnverifiedWebhooks`.
+
+`event.id` is Square's `event_id`, which is what makes a redelivery dedupe in the ledger.
+
+| Square event | Normalized |
+| --- | --- |
+| `payment.created` / `payment.updated`, `COMPLETED` | `payment.succeeded` |
+| `payment.created` / `payment.updated`, fully refunded | `payment.refunded` |
+| `payment.created` / `payment.updated`, `FAILED` or `CANCELED` | `payment.failed` |
+| `payment.created` / `payment.updated`, `APPROVED` or `PENDING` | `payment.updated` |
+| `refund.created` / `refund.updated`, `COMPLETED` | `payment.refunded` |
+| `refund.created` / `refund.updated`, anything else | `payment.updated` |
+| `invoice.payment_made` | `payment.succeeded` |
+| `subscription.created` | `subscription.created` |
+| `subscription.updated`, `CANCELED` or `DEACTIVATED` | `subscription.canceled` |
+| `subscription.updated`, anything else | `subscription.updated` |
+
+Anything else passes through under its Square name. A refund event is keyed on the
+**payment** id, because that is the row the refunded amount came off.
+
+## Getting your own reference back — read this before relying on it
+
+A Square `PaymentLink` has no reference field of its own. An `Order` does, so
+`createCheckout()` uses the **order** form rather than `quick_pay`, and writes your
+reference into three places at once:
+
+```ts
+const session = await payments.driver('square').createCheckout({
+  amount: 1990,
+  successUrl: 'https://app.example.com/thanks',
+  description: 'Pro plan',
+  externalReference: 'order:local_9',   // max 40 chars
+})
+```
+
+1. `order.reference_id` — the documented "associate this with an entity in another system"
+   field, readable with `RetrieveOrder`;
+2. `order.metadata.external_reference` — a second copy, since order metadata is what Square
+   describes as the place for references to resources outside Square;
+3. `payment_note` — which Square copies onto the resulting `Payment.note`.
+
+<Callout type="warn" title="Square's payment webhooks may not echo `reference_id`">
+Square's published `payment.created` / `payment.updated` payload examples do not include
+`reference_id`, `note` or `customer_id`, and developers have reported `reference_id` being
+absent from payment events for at least the Terminal checkout flow. `parseWebhook` reads
+`payment.reference_id` first and falls back to `payment.note` — which is why the reference
+is written to `payment_note` as well — but treat the round trip as **verified for
+`charge()`** (where the driver sets `reference_id` on the payment itself) and **to be
+confirmed in Sandbox for hosted links**. The always-available fallback is
+`event.data.orderId`: store it when you create the link and reconcile on it.
+</Callout>
+
+`checkout_options.redirect_url` carries `successUrl`. There is no cancel URL — a buyer who
+abandons the link simply stays on it — so `cancelUrl` throws rather than looking
+configured. `planId` on a checkout is passed as `checkout_options.subscription_plan_id`,
+which must be a plan **variation** id: Square subscribes buyers to variations, not to
+plans.
+
+## Subscriptions
+
+A Square subscription bills against a catalog plan **variation** (`planId` here) for a
+customer, charged either to a card on file or by emailed invoice.
+
+```ts
+await payments.driver('square').createSubscription({
+  customerId: 'cus_…',
+  planId: 'VAR_…',                    // a plan VARIATION id
+  amount: 1990,                       // → price_override_money, minor units
+  startDate: '2026-09-01',            // → start_date, YYYY-MM-DD
+  metadata: { cardId: 'card_…' },     // the card on file to charge
+})
+```
+
+`amount` is the one contract field with a real home here: `price_override_money` overrides
+the variation's price for a statically-priced plan, and it is set at creation.
+
+What it refuses, and why:
+
+- **`cycle`** — the cadence lives on the plan variation.
+- **`trialDays`** — Square expresses a trial as a *free phase* on the variation, not as a
+  number of days on the subscription.
+- **`method`** — there is no method to name; it is a card on file or an invoice.
+- **`card`** — a Web Payments SDK token is single-use and cannot become a subscription
+  card. Save it with `POST /v2/cards` first, then pass the `card_…` id as `metadata.cardId`.
+- **`externalReference`** — and this one matters most. A Square subscription has **no**
+  reference or metadata field at all, so a reference passed here would be silently dropped
+  and could never come back on `subscription.updated`. The driver throws rather than
+  accepting an id it cannot honour; key your record on `customerId` plus the returned
+  subscription id.
+
+### Cancelling is always period-end
+
+`POST /v2/subscriptions/{id}/cancel` sets `canceled_date` to the end of the current billing
+period; the status stays `ACTIVE` until then. There is no immediate cancel in the API, so
+`cancelSubscription(id, { atPeriodEnd: false })` **throws** instead of reporting a
+cancellation that did not happen. Call it without that flag, and refund the last invoice if
+the buyer should not have been billed for the period.
+
+### Updating
+
+`UpdateSubscription` documents only `card_id` and `canceled_date` as changeable, so:
+
+- **`amount` throws.** Square will not reprice a live subscription. Swap to a variation at
+  the new price instead — `metadata: { planVariationId: 'VAR_…' }` runs
+  `POST /v2/subscriptions/{id}/swap-plan`, which is a change Square actually applies.
+- **`description` throws.** A Square subscription has no description field.
+- **`metadata: { cardId }`** updates the card on file.
+- Anything else throws, rather than returning a subscription the gateway never changed.
+
+## What this driver does not do
+
+- **No splits.** `app_fee_money` is a single application fee for an OAuth-connected seller,
+  not a split across recipients, so `charge({ split })` throws. Pass
+  `metadata.appFeeAmount` if the fee is what you meant.
+- **No arbitrary tax id.** A Square customer has exactly one tax field, `tax_ids.eu_vat`.
+  `createCustomer({ taxId })` throws unless you also pass
+  `metadata: { taxIdType: 'eu_vat' }`, rather than dropping the value on the floor.
+- **No name splitting.** Square stores `given_name` / `family_name` and has no single name
+  field; splitting on whitespace guesses which token is the surname, which is wrong for
+  much of the world. The whole `name` goes in `given_name`; pass
+  `metadata.familyName` when you genuinely know the split.
+- **No payment-link status.** Square has no status on a `PaymentLink` — it exists or it does
+  not — so `CheckoutSession.status` is always `'open'`. Track completion through
+  `payment.updated`.
+- **No metadata bag on a charge.** `CreatePayment` has none; the driver reads only
+  `metadata.autocomplete` and `metadata.appFeeAmount`, and nothing else is sent. Order
+  metadata on a checkout is the place for arbitrary keys.
+- **No pagination on `listInvoices`.** It fetches one page of 100.
+
+## Disputes
+
+Square puts everything in the Dispute object's `state`, not in the event name, so
+`dispute.created` and `dispute.state.updated` are read the same way. Square's own advice is
+to subscribe to both, and both are handled here.
+
+| `state` | Normalized | Funds |
+| --- | --- | --- |
+| `INQUIRY_EVIDENCE_REQUIRED`, `INQUIRY_PROCESSING` | `payment.dispute_warning` | see the callout |
+| `EVIDENCE_REQUIRED`, `PROCESSING` | `payment.disputed` | withheld |
+| `WON` | `payment.dispute_closed` (`won`) | released |
+| `LOST`, `ACCEPTED` | `payment.dispute_closed` (`lost`) | gone |
+| `INQUIRY_CLOSED` | `payment.updated` | — |
+| missing | `payment.disputed` on `dispute.created`, `payment.updated` on a state change | — |
+
+`dispute.evidence.created`/`.deleted` — and the deprecated `.added`/`.removed` spellings
+Square still publishes — are paperwork inside an open dispute, not a resolution, and stay
+`payment.updated`. `dispute.state.changed` is the deprecated spelling of
+`dispute.state.updated` and is handled identically, so an app still subscribed to it does not
+silently miss the resolution.
+
+**A chargeback withdraws the money before you hear about it.** Square's reference is blunt:
+"Square withholds the disputed funds from the seller's Square account balance until the bank
+issues a final resolution on the case. If there are insufficient funds in the Square account
+balance, the funds are removed (debited) from the seller's most recently linked bank account."
+
+**`ACCEPTED` is a loss.** `AcceptDispute` is documented as "Square returns the disputed amount
+to the cardholder and updates the dispute state to `ACCEPTED`. The dispute is now closed." The
+seller accepted liability, so the money is gone — the same call this library makes on Adyen's
+`Accepted` disputeStatus.
+
+**`INQUIRY_CLOSED` names no winner.** Square's description is "the inquiry is complete", and
+nothing in it says who kept the money, so it stays a `payment.updated` rather than inventing
+a result. The processor throws on a `payment.dispute_closed` carrying no outcome for exactly
+this reason.
+
+**`due_at` is the deadline** — "the deadline by which the seller must respond to the dispute",
+already RFC 3339 — and it comes through as `actionableUntil`. Note that letting it pass is not
+the same as accepting: "if the `due_at` deadline passes with no action from the seller, Square
+automatically challenges the dispute on the seller's behalf."
+
+<Callout type="warn" title="Square does not say whether an inquiry withholds funds">
+`INQUIRY_EVIDENCE_REQUIRED` and `INQUIRY_PROCESSING` are mapped to `payment.dispute_warning`,
+but that is a judgement call and worth knowing about. Square's enum descriptions call these
+states "an inquiry" and keep them out of the four dispute states; its withholding sentence is
+written about a cardholder "requesting a charge reversal"; and its support article on
+information requests says nothing about money at all. Nowhere does the reference say, in
+words, that an inquiry leaves the balance alone.
+
+The mapping follows the distinction Square's own vocabulary draws — the same one Stripe draws
+with its `warning_*` statuses and the card networks draw between a retrieval request and a
+chargeback — and it fails in the safe direction: a warning writes nothing to the ledger, while
+`payment.disputed` would move a paid row. `event.data.disputeState` and `event.raw` carry the
+raw state if your reconciliation needs it.
+</Callout>
+
+Every one of these is keyed on `data.object.dispute.disputed_payment.payment_id` — nested, not
+a top-level `payment_id` — because the row that has to stop saying `paid` is the payment's.
+`amount_money` is the **disputed** amount, which for a partial dispute is less than the
+payment. `event.data` also carries `disputeId`, `reason`, `disputeState` and, on a close, the
+`outcome`.
+
+## `authorized` — `APPROVED` is not `pending`
+
+A payment created with `metadata: { autocomplete: false }` comes back `APPROVED`: Square is
+holding the funds and the authorization expires on its own if `CompletePayment` never runs.
+That is `authorized` now. It used to read `pending`, which is the status of a payment nobody
+has attempted — an `APPROVED` one has the buyer's money reserved and a clock against it.
+`PENDING` still maps to `pending`: Square has approved nothing yet.
+
+```ts
+const driver = payments.driver('square') as SquareDriver
+await driver.completePayment('pmt_…')   // APPROVED → COMPLETED
+```
+
+`completePayment` stays outside the `PaymentsDriver` contract — the contract has one verb for
+taking money — but it is public because something has to be able to finish the job.
+
+## Paused subscriptions
+
+Square's `PAUSED` mapped to `past_due`, which said the buyer owed money they did not. It is
+`paused` now: it bills nothing today, it resumes later, and it entitles nobody either way —
+which is the part that must not change.
+
+## Payment methods
+
+`supportedMethods` is `credit_card`, `debit_card`, `wallet`, `bank_debit`, `bnpl` and
+`undefined`. The Web Payments SDK mints more than card tokens, and all of them arrive at
+`POST /v2/payments` through the same `source_id`, so `charge()` genuinely produces those
+categories. `method` on the charge is still a **declaration**, not an instruction — the token
+decides — and a `method` Square cannot produce at all (`pix`, `boleto`) still throws.
+
+`Payment.method` comes back from `source_type`:
+
+| `source_type` | `Payment.method` |
+| --- | --- |
+| `CARD` | `card` / `debit_card` (from `card_details.card.card_type`) |
+| `WALLET` (Cash App, Apple Pay, Google Pay), `SQUARE_ACCOUNT` | `wallet` |
+| `BANK_ACCOUNT` (ACH) | `bank_debit` |
+| `BUY_NOW_PAY_LATER` (Afterpay/Clearpay) | `bnpl` |
+| `CASH`, `EXTERNAL` | *unset* — money taken outside Square, which no member of the union describes |
+
+Everything but `CARD` used to come back unset, which is indistinguishable from "Square did
+not say".
+
+## `idempotencyKey`
+
+Square's key is a **body field**, `idempotency_key`, not a header — and the caller's key now
+reaches it on every call that has one:
+
+| Call | Field | Cap |
+| --- | --- | --- |
+| `charge` | `idempotency_key` on `CreatePayment` | 45 |
+| `refund` | `idempotency_key` on `RefundPayment` | 45 |
+| `createCheckout` | `idempotency_key` on `CreatePaymentLink` | 45 (Square allows 192) |
+| `createCustomer` | `idempotency_key` on `CreateCustomer` | 45 |
+| `createSubscription` | `idempotency_key` on `CreateSubscription` | 45 |
+| `updateSubscription` | — | **throws** |
+
+`refund`, `createCustomer` and `createSubscription` used to generate a UUID and drop yours,
+which made Square's own retry safe and a retried **job** double-refund. A call that still
+arrives without a key gets a generated UUID, because Square requires one on payments and
+refunds.
+
+`updateSubscription` throws on an `idempotencyKey`: neither `PUT /v2/subscriptions/{id}` nor
+`POST /v2/subscriptions/{id}/swap-plan` takes one, unlike the create call, and accepting it
+would turn your retry guarantee into a second plan swap.

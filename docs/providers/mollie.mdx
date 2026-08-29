@@ -1,0 +1,287 @@
+---
+title: Mollie
+description: European gateway on api.mollie.com/v2 — cards and a hosted page in any currency, native subscriptions, and a webhook that tells you nothing until you fetch it.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+<Callout type="warn">
+  Written against Mollie's published v2 API reference and covered by unit tests. Nobody has
+  yet pointed it at a live Mollie account, so run a sandbox payment (a `test_` key) end to
+  end before it touches real money.
+</Callout>
+
+- **Methods**: `credit_card`, `bank_transfer`, `bank_debit`, `wallet`, `bnpl`, `voucher`,
+  `undefined` — **categories, not brands**. Which Mollie brand sits in which category, and
+  how to pin one, is in [Payment methods](#payment-methods).
+- **Setup**: `payments.mollie({ apiKey, currency, webhookSecret })` — `MOLLIE_API_KEY`.
+  There is no sandbox flag: a `test_...` key is test mode and a `live_...` key is live, on
+  the same host. `currency` is **required** (lowercase ISO 4217) and the driver refuses to
+  boot without one; Mollie settles in whatever you hand it, so a default would be a guess
+  at the country the app bills in, and the wrong guess still takes money.
+- **Money**: Mollie's `amount` is a decimal **string** in the currency's own scale —
+  `"19.90"` for EUR, `"1990"` for JPY, `"1.990"` for KWD. The package works in the
+  currency's smallest unit throughout; the conversion happens only at the HTTP boundary,
+  through `formatDecimal`/`fromDecimal`, which shift the integer's digits rather than
+  dividing. A charge of `1990` in `jpy` is ¥1990, not ¥19.90.
+- **`externalReference`**: sent as `metadata.externalReference` on payments (from `charge`
+  and `createCheckout`) and on subscriptions, and read back out of the fetched payment's
+  metadata onto `event.data.externalReference`.
+- **`idempotencyKey`**: sent as Mollie's `Idempotency-Key` request header on every POST the
+  driver makes — `charge`, `createCheckout`, `refund`, `createCustomer` and
+  `createSubscription`. That header is the only thing Mollie deduplicates on; the key is
+  *not* copied into `metadata`, because a copy there would be echoed back and protect
+  nothing. Mollie keeps a key for one hour, after which the same key creates a second
+  resource. `updateSubscription` **throws** on a key: Mollie's own words are that "all
+  `POST` endpoints accept idempotency keys" and that sending one for `GET`, `PATCH` or
+  `DELETE` "is not necessary since these API requests are repeatable by nature" — updating
+  a subscription is a `PATCH`, so accepting a key would promise a deduplication Mollie
+  never performs.
+- **Subscriptions**: native. `POST /v2/customers/{customerId}/subscriptions` — so a
+  customer is required, and so is a **mandate**: the shopper grants one by completing a
+  first payment, and Mollie charges the schedule against it afterwards.
+- **Invoices**: `capabilities.invoices` is `false` and `listInvoices` throws. Mollie's
+  Invoices API returns the monthly invoices Mollie issues to **you** for its fees, not
+  documents you issue to your customers — returning those as `Invoice[]` would be a lie
+  with a plausible shape. Use a configured `invoice` provider and `invoice: true` instead.
+- **Disputes**: Mollie has real chargebacks and this driver reports them as
+  `payment.disputed` — see [Chargebacks](#chargebacks).
+- **`authorized`**: Mollie's `authorized` payment status maps to the contract's
+  `authorized`, not `pending`. Funds are held on the instrument and nothing has been
+  captured, which is what pay-later methods and a manual-capture card look like before a
+  capture.
+
+```ts title="app/services/checkout_service.ts"
+const session = await payments.driver('mollie').createCheckout({
+  amount: 1990,
+  successUrl: 'https://example.org/thanks',
+  cancelUrl: 'https://example.org/cart',
+  externalReference: 'order:order_local_1',
+})
+// session.url is Mollie's hosted checkout page.
+```
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`webhookSecret` is not configured (env fallback `MOLLIE_WEBHOOK_SECRET`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/mollie` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
+## Webhooks — the fetch is the authentication
+
+Mollie's classic webhook is a form-encoded POST carrying one field:
+
+```http
+POST /payments/webhook/mollie HTTP/1.1
+Content-Type: application/x-www-form-urlencoded
+
+id=tr_5B8cwPMGnU6qLbRvo7qEZo
+```
+
+There is no signature, and there is deliberately no status. That is the whole security
+model: because the body never says "paid", a forged call cannot make you think a payment
+succeeded. You learn what happened by fetching the payment with your API key — and it is
+that authenticated fetch, not the request, that makes the notification trustworthy.
+
+So that is what `parseWebhook` does. It reads the id out of the body, fetches the payment,
+and returns an event built entirely from what the authenticated call came back with:
+
+```ts
+const event = await payments.driver('mollie').parseWebhook(rawBody, headers)
+// { type: 'payment.succeeded',
+//   id: 'mollie:tr_5B8cwPMGnU6qLbRvo7qEZo:paid',
+//   data: { gatewayId, amount, currency, customerId, externalReference } }
+```
+
+Nothing in the request body is trusted beyond the id. `parseWebhook` returns a promise
+here — the driver contract allows it, and the package's mounted
+`/payments/webhook/:provider` route awaits it — so the normal route marks payments paid
+with no extra wiring on your side.
+
+**A failed fetch throws.** If Mollie is unreachable, or the payment 404s, the error
+propagates: the route answers `400`, and Mollie retries. Reporting an event nobody could
+confirm would be worse than a retry.
+
+Event ids are `mollie:<paymentId>:<status>` — stable per *transition*, so a redelivery of
+the same status dedupes in the ledger while the next status still gets through. A refund
+and a chargeback both leave Mollie's own `status` at `paid`, so those two get a suffix
+(`:refunded`, `:chargeback`); without it their event id is byte-identical to the earlier
+`payment.succeeded` one and the ledger discards the webhook that takes the money away.
+
+### Next-gen (signed) webhooks
+
+Mollie's newer Webhooks API sends a JSON event and signs it with `X-Mollie-Signature:
+sha256=<hex>` — an HMAC-SHA256 over the raw body under a signing secret you choose. Set
+`webhookSecret` and the driver switches to fail-closed: a request with no signature, or a
+wrong one, is rejected before anything is fetched.
+
+Leaving it unset is the classic flow, where the callback is a bare payment id and the authenticated
+fetch of that payment is what proves the call is genuine. The driver cannot tell the two apart from
+its credential slot, so it reports `'unconfigured'` and the app refuses to boot. **On the classic
+flow that refusal is a false positive** — name `mollie` in `allowUnverifiedWebhooks` and say in a
+comment that the fetch is the authentication. Note that Mollie's *payment* event types are still beta
+and enabled on request; the classic `webhookUrl` remains the supported path.
+
+A signed event still gets fetched. The signature proves who sent the event; it does not
+say what the payment is worth, and the built-in billing sync needs the amount. Signed
+events keep their own Mollie event id, which is already stable and unique. An event about
+a resource that is not a payment (a payment link, a sales invoice) is reported from the
+envelope without a fetch, for an app handler to pick up.
+
+## Payment methods
+
+`PaymentMethodName` names **categories**, not brands — enumerating iDEAL, Bancontact, EPS,
+Przelewy24, BLIK, TWINT and a new one each quarter is a union that never closes, and a
+union that never closes cannot make a routing typo fail at the manager. So Mollie's
+catalogue maps onto six categories, and every method that used to be unroutable now has a
+home:
+
+| Category | Mollie method ids |
+| --- | --- |
+| `credit_card` | `creditcard` (Visa, Mastercard, Amex, Maestro, V PAY, Cartes Bancaires) |
+| `bank_transfer` — push from your bank | `ideal`, `bancontact`, `banktransfer` (SEPA Bank Transfer), `belfius`, `bizum`, `blik`, `eps`, `kbc`, `mbway`, `mobilepay`, `multibanco`, `mybank`, `paybybank`, `przelewy24`, `satispay`, `swish`, `trustly`, `twint`, `vipps`, `bancomatpay` |
+| `bank_debit` — pull from your account | `directdebit` (SEPA Direct Debit), `bacs` |
+| `wallet` | `paypal`, `applepay`, `googlepay` |
+| `bnpl` | `klarna`, `in3`, `riverty`, `billie`, `billink`, `alma` |
+| `voucher` | `voucher` (meal/eco vouchers), `giftcard`, `paysafecard` |
+
+Mollie's `method` parameter takes a single id **or an array of ids**, which is exactly what
+a category is — `bank_transfer` is not one brand, it is iDEAL in the Netherlands,
+Bancontact in Belgium and Multibanco in Portugal. So routing a category sends that whole
+set and lets Mollie present the ones the buyer's country and your profile actually enable:
+
+```ts
+// The hosted page shows only bank-push methods, whichever of them are available.
+await payments.driver('mollie').charge({
+  amount: 1990,
+  method: 'bank_transfer',
+  metadata: { redirectUrl: 'https://example.org/done' },
+})
+```
+
+To ask for **one brand**, name it in Mollie's own field — `metadata.mollieMethod` — which
+is where a brand belongs. It is validated against the category when both are given, so a
+typo or a mismatch fails here rather than at the gateway:
+
+```ts
+await payments.driver('mollie').charge({
+  amount: 1990,
+  method: 'bank_transfer',
+  metadata: { redirectUrl: 'https://example.org/done', mollieMethod: 'ideal' },
+})
+// method: 'bank_transfer' + mollieMethod: 'klarna' → throws: klarna is bnpl, not bank_transfer.
+```
+
+Omit `method` entirely (`'undefined'`) and Mollie's hosted page offers everything the
+profile has enabled, as before. On the way back, `payment.method` is the category the
+instrument belongs to — an iDEAL payment reports `bank_transfer`, a Klarna one `bnpl`.
+
+**`debit_card` is still absent, and re-checking did not change that.** Mollie has no
+debit-only method to ask for: debit cards (Maestro, V PAY) are processed through the single
+`creditcard` id, and Bancontact — a debit scheme — is a bank redirect, not a card. A
+`debit_card` route here could only be a `creditcard` charge wearing another name, so the
+driver refuses it. `pix` and `boleto` are Brazilian and Mollie has neither.
+
+## Chargebacks
+
+A chargeback is the one webhook that takes revenue **away**, and Mollie reports it in two
+places depending on which webhook you run.
+
+**On the classic webhook** — the default — a chargeback simply fires the payment's
+`webhookUrl` again with the same bare `id=tr_…`. Mollie leaves the payment's own `status`
+at `paid`; the only field that says the bank pulled the money back is `amountChargedBack`
+on the fetched payment. The driver reads it, reports `payment.disputed`, and the processor
+moves the stored row to `disputed`:
+
+```ts
+const event = await payments.driver('mollie').parseWebhook(rawBody, headers)
+// { type: 'payment.disputed',
+//   id: 'mollie:tr_5B8cwPMGnU6qLbRvo7qEZo:paid:chargeback',
+//   data: { gatewayId, amount, currency, customerId } }
+```
+
+`payment.status` is `'disputed'` from `findPayment` too, for the same reason.
+
+**On next-gen webhooks** Mollie sends `chargeback.received` and `chargeback.reversed` as
+their own events:
+
+| Mollie event | Normalized | Funds |
+| --- | --- | --- |
+| `chargeback.received` | `payment.disputed` | withdrawn — "the money will be reclaimed and deducted from your Mollie balance" |
+| `chargeback.reversed` | `payment.dispute_closed` (`won`) | returned |
+
+Both are keyed by the **payment** (the row whose status has to move), and carry the
+chargeback's amount, its id as `disputeId`, and `reason.code` — which Mollie only ever fills
+in for SEPA Direct Debit; the card schemes send it no reason at all.
+
+The reversal is read from `reversedAt` as well as from the event name. The payload is a
+snapshot of the entity, so a `chargeback.received` redelivered after the reversal carries the
+timestamp too, and taking the money off the row a second time would be worse than reading the
+outcome from either place.
+
+<Callout type="warn" title="Mollie sends no pre-dispute warning, and no deadline">
+Mollie has **no** fraud alert, retrieval request or inquiry — its whole dispute vocabulary is
+those two events — so this driver never emits `payment.dispute_warning`. The first you hear
+about a chargeback is the chargeback, with the money already gone.
+
+There is no response deadline either. The chargeback object's complete field list is `id`,
+`amount`, `settlementAmount`, `reason`, `paymentId`, `settlementId`, `createdAt` and
+`reversedAt`; nothing in it is a due date, so no `actionableUntil` is emitted rather than one
+being invented. Mollie's own line is that "depending on the nature of the chargeback, there
+will be an opportunity to respond to this notification" — but the API does not say when that
+opportunity closes.
+
+The **classic** webhook is worse still: its documented triggers are a status change, a
+refund, and "a chargeback is received on the payment". A *reversal* is not among them, so on
+the classic webhook the driver can only ever report `payment.disputed`, never the close.
+Mollie also does not say whether `amountChargedBack` drops back to zero once a chargeback is
+reversed. Run the next-gen `chargeback.*` webhooks if you want to hear about a win.
+</Callout>
+
+<Callout type="warn">
+  Configure that webhook with the **full snapshot payload**, not the id-only one. A
+  chargeback cannot be read back on its own — `GET /v2/payments/{paymentId}/chargebacks/{id}`
+  needs the payment id, and Mollie has no lookup by chargeback id — so an id-only
+  `chargeback.received` is unresolvable and the driver throws rather than passing the money
+  event through silently. The route answers `400` and Mollie retries.
+</Callout>
+
+## What it refuses
+
+Every one of these throws rather than pretending, because on money a quiet wrong answer
+is worse than a loud missing feature:
+
+- **`split`** — Mollie Connect routes split to organization ids with absolute amounts;
+  the percent-based `split` input cannot express that.
+- **`trialDays`** on a subscription — Mollie has no trial. Faking one as a later first
+  charge would leave nothing at the gateway calling it a trial. Pass `startDate`.
+- **`planId`/`trialDays`** on a checkout — a subscription needs a mandate, which the
+  shopper grants by completing a first payment; check that out, then create the
+  subscription.
+- **A charge with no redirect URL** — Mollie requires `redirectUrl` on anything a shopper
+  completes. Pass `metadata.redirectUrl`, or use `createCheckout({ successUrl })`.
+- **A method Mollie has no id for** (`pix`, `boleto`, `debit_card`).
+- **`metadata.mollieMethod`** naming a brand outside the category being routed.
+- **`idempotencyKey` on `updateSubscription`** — Mollie accepts the header on POST only.
+- **`listInvoices`**, as above.
+
+## Subscription ids are customer-scoped
+
+Every Mollie subscription endpoint is nested under a customer
+(`/v2/customers/{customerId}/subscriptions/{id}`), but `cancelSubscription`,
+`updateSubscription` and `findSubscription` receive only the subscription id. The driver
+remembers the pairing for subscriptions it created, and otherwise looks the id up in
+Mollie's account-wide subscription list. When neither finds it, it throws rather than
+guessing — pass the id as `"cst_xxx/sub_xxx"` and it goes straight through.
+
+```ts
+await payments.driver('mollie').cancelSubscription('cst_8wmqcHMN4U/sub_rVKGtNd6s3')
+```
+
+Cancelling is immediate at Mollie; there is no period-end flag, so `atPeriodEnd` has
+nothing to map onto and is ignored.

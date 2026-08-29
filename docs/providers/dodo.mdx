@@ -1,0 +1,339 @@
+---
+title: Dodo Payments
+description: Merchant-of-record billing for SaaS — cards worldwide plus Pix in Brazil, with every charge bound to a product you created in Dodo.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Dodo Payments sells your digital products on your behalf. It is the **merchant of record**:
+the legal seller, the name on the customer's statement, and the party that registers for,
+calculates, files and remits sales tax and VAT across 220+ regions. It also carries
+chargeback liability and PCI scope, and pays you net. None of that is something this
+library models — it is why you would pick Dodo over a plain gateway, and it is a business
+decision, not a code one.
+
+The consequence for the driver is concrete: **there is no amount-only endpoint anywhere in
+the API**. Every payment names a product you created in Dodo, and an arbitrary amount only
+works on a product with Pay What You Want enabled.
+
+- **Methods**: `credit_card`, `debit_card`, `pix`, `upi`, `wallet`, `bank_transfer`,
+  `bank_debit`, `bnpl`, `undefined` — **categories, not brands**. The charge's `method`
+  becomes `allowed_payment_method_types`, the field that restricts what the hosted checkout
+  offers; the mapping is in [Payment methods](#payment-methods). **Boleto is not offered**
+  and `voucher` has no Dodo equivalent.
+- **Pix has three requirements**, all Dodo's: `billing_currency` must be `BRL`, `pix` must
+  be in `allowed_payment_method_types`, and the customer's billing country must be Brazil.
+  Dodo does not support Pix for subscriptions. The payer gets the QR on Dodo's hosted page
+  — **no `pixCode` or `pixQrCodeImage` comes back on the `Payment`**, because Dodo's API
+  returns neither. What you get is `hostedUrl`.
+- **Setup**: `payments.dodo({ apiKey, currency, sandbox, billingCountry, webhookKey })` —
+  `DODO_PAYMENTS_API_KEY`. `currency` is **required** (lowercase ISO 4217) and is sent as
+  Dodo's `billing_currency`; Dodo settles in 140+ currencies and bills in whatever you hand
+  it, so a default would be a guess. `sandbox` defaults to `NODE_ENV !== 'production'` and
+  switches the host between `https://test.dodopayments.com` and
+  `https://live.dodopayments.com`; test and live keys are not interchangeable.
+- **Webhooks**: [Standard Webhooks](https://www.standardwebhooks.com/) —
+  `webhook-id` / `webhook-timestamp` / `webhook-signature`, base64 HMAC-SHA256 over
+  `{id}.{timestamp}.{body}`, with a ±5 minute replay window and support for the
+  space-separated rotation list. Needs `webhookKey` (`DODO_PAYMENTS_WEBHOOK_KEY`).
+- **`externalReference`**: written to `metadata.external_reference` on the payment, the
+  checkout session and the subscription, and read back out of the same key. Dodo echoes
+  `metadata` on every webhook about that record, which is what makes it survive the round
+  trip and route a `payment.succeeded` back to your own row.
+- **Invoices**: Dodo issues one per payment (it is the seller, so the invoice is its own)
+  and puts the PDF on `invoice_url`. `listInvoices(customerId)` maps a customer's payments
+  and fills `hostedPdfUrl` from it, which saves a call to `GET /invoices/payments/{id}`.
+
+<Callout type="warn" title="Not yet verified against a live account">
+This driver is written against Dodo Payments' published API reference and covered by unit
+tests. It has not been exercised against a live Dodo Payments account — run it in test mode
+and confirm a real payment, webhook and refund before you take real money with it.
+</Callout>
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`webhookKey` is not configured (env fallback `DODO_PAYMENTS_WEBHOOK_KEY`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/dodo` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
+## Every charge names a product
+
+```ts title="app/services/checkout_service.ts"
+await payments.driver('dodo').charge({
+  customerId: 'cus_...',
+  amount: 1990,                      // minor units; honored only on a pay-what-you-want product
+  method: 'credit_card',
+  externalReference: 'order:1234',
+  metadata: {
+    productId: 'pdt_...',            // required — Dodo has no ad-hoc line item
+    billingCountry: 'US',            // required unless `billingCountry` is set on the driver
+  },
+})
+```
+
+There is no way around the product id. If your amounts vary per charge, create **one**
+product with Pay What You Want enabled (Single Payment only — PWYW is not available for
+subscription products), set its minimum price, and pass that product's id every time; the
+`amount` you send is then honored, as long as it sits inside the product's bounds. On a
+fixed-price product Dodo ignores `amount` and charges the product's price. Products can be
+created through the API (`POST /products`), so this does not force you into the dashboard.
+
+`billing.country` (ISO 3166-1 alpha-2) is mandatory on every Dodo payment. Pass it per
+charge as `metadata.billingCountry`, or a whole address as `metadata.billing`, or set a
+fallback with `payments.dodo({ billingCountry: 'US' })`. With none of the three the driver
+refuses rather than picking a country for you.
+
+**The returned `Payment` is `pending`, not paid.** `POST /payments` hands back a
+`payment_link` the customer still has to pay on — settlement arrives later as a
+`payment.succeeded` webhook. `hostedUrl` carries that link.
+
+<Callout>
+Dodo marks `POST /payments` and `POST /subscriptions` deprecated in favour of checkout
+sessions. They still work and are still documented, and `POST /payments` is the only call
+that returns a payment id up front, which is what `charge()` has to hand back — so that is
+what it uses. `createCheckout()` already uses the newer `POST /checkouts`.
+</Callout>
+
+## Payment methods
+
+`PaymentMethodName` names **categories**, not brands, and each one maps onto the
+`allowed_payment_method_types` entries that restrict Dodo's hosted checkout:
+
+| Category | `allowed_payment_method_types` |
+| --- | --- |
+| `credit_card` | `credit` |
+| `debit_card` | `debit` |
+| `pix` | `pix`, `credit`, `debit` |
+| `upi` | `upi_collect`, `credit`, `debit` |
+| `wallet` | `apple_pay`, `google_pay`, `amazon_pay`, `cashapp`, `revolut_pay`, `credit`, `debit` |
+| `bank_transfer` | `ideal`, `bancontact_card`, `eps`, `multibanco`, `blik`, `credit`, `debit` |
+| `bank_debit` | `sepa`, `ach`, `credit`, `debit` |
+| `bnpl` | `klarna`, `afterpay_clearpay`, `credit`, `debit` |
+
+Dodo's own caveat applies: naming a method never *guarantees* the customer sees it —
+eligibility still depends on their country and your merchant settings — and a checkout
+whose every listed method is unavailable simply **fails**. That is why every category keeps
+`credit`/`debit` alongside it, exactly as Dodo advises: a category is a set of local methods
+by definition, and the card fallback is what stops an out-of-region buyer from hitting a
+dead checkout.
+
+**Boleto is not offered.** It appears in the raw `PaymentMethodTypes` enum, but that enum is
+a processor-level superset used for filtering, and boleto is absent from Dodo's
+supported-methods documentation. `voucher` has no Dodo equivalent at all.
+
+On the way back, `payment.method` reports the category the instrument belongs to: an iDEAL
+payment is `bank_transfer`, a SEPA one `bank_debit`, Klarna `bnpl`, Apple Pay `wallet`, UPI
+`upi`. All of those used to come back `unknown`.
+
+## Money
+
+All Dodo amounts are integers in the currency's smallest unit — its own field docs say
+*"cents for USD, yen for JPY, fils for KWD"*. That is exactly what this package uses, so
+nothing is converted in either direction. Currency codes go out uppercase (`USD`) and come
+back lowercase on `MoneyAmount`, matching the rest of the library.
+
+One asymmetry worth knowing: `Payment.amount` is the payment's `total_amount`, which
+**includes** tax, while `Subscription.amount` is `recurring_pre_tax_amount`, which does
+not. That is how Dodo reports them, and inventing a conversion between the two would be a
+guess at a tax rate.
+
+## What it refuses
+
+Every one of these throws a `[payments]` error rather than reporting a change Dodo never
+made.
+
+- **`refund(paymentId, amount)`** — a partial refund. Dodo's `POST /refunds` has no
+  top-level amount: partial refunds are per line item (`items: [{ item_id, amount }]`,
+  where `item_id` is a product or addon id), which this contract's single `amount` cannot
+  address. `refund(paymentId)` with no amount does a full refund and works normally; for a
+  partial one, call Dodo directly with the line you mean.
+- **`createSubscription({ amount })`** and **`{ cycle }`** — the recurring price and the
+  interval belong to the Dodo product.
+- **`createSubscription({ card })`** — there is no tokenized-card input. A merchant of
+  record collects the card on its own checkout.
+- **`updateSubscription({ amount })`** and **`{ description }`** — a Dodo subscription has
+  neither field. See the plan switch below.
+- **`updateCustomer({ taxId })`** — a Dodo customer has no tax id. A tax id belongs to an
+  individual B2B purchase (`tax_id` on the payment), not to the customer record, so
+  accepting it here would drop it silently.
+- **`idempotencyKey`, everywhere.** Dodo documents no request deduplication at all — no
+  `Idempotency-Key` header, no request-id field; its only idempotency guidance is the
+  `webhook-id` header on events it *sends* you. Accepting a key and dropping it would turn
+  a caller's retry guarantee into a second charge, so `charge`, `createCheckout`, `refund`,
+  `createCustomer`, `createSubscription` and `updateSubscription` all refuse one. Persist
+  the key and check it on your side before calling.
+
+## Payment status: `authorized` is not `paid`
+
+Dodo's `requires_capture` maps to `BillingStatus === 'authorized'`: funds are held on the
+card and **nothing has been captured**, so no money has moved — but `pending`, which is
+what it used to report, understated it. There is an authorization there to capture or let
+expire.
+
+`partially_captured` and `partially_captured_and_capturable` deliberately stay `pending`.
+Part of the authorization has already settled, so `authorized` ("nothing captured") would
+be as wrong as `paid`, and the API reference does not say how much arrived.
+
+## Switching plans
+
+Dodo changes what a customer pays through `POST /subscriptions/{id}/change-plan`, which
+needs a product, a quantity and a proration mode. The shared `UpdateSubscriptionInput` has
+no room for that, so it rides in metadata:
+
+```ts
+await payments.driver('dodo').updateSubscription('sub_...', {
+  metadata: {
+    productId: 'pdt_enterprise',
+    quantity: 1,                                  // defaults to 1
+    prorationBillingMode: 'prorated_immediately', // or full_immediately | difference_immediately | do_not_bill
+    effectiveAt: 'immediately',                   // or next_billing_date
+  },
+})
+```
+
+change-plan answers with the payment link for the difference rather than the subscription,
+so the driver reads the subscription back to return it. Any other `metadata` keys, with no
+`productId`, become a plain `PATCH` that stores them on the subscription.
+
+## Cancelling
+
+Dodo has no `DELETE /subscriptions/{id}`; both cancellations are a `PATCH`.
+`cancelSubscription(id)` sends `cancel_at_next_billing_date: true`, which keeps the
+subscription active until the paid period ends. `cancelSubscription(id, { atPeriodEnd:
+false })` sends `status: 'cancelled'`, which ends it now.
+
+Note the spelling: Dodo uses the British `cancelled` everywhere, including the
+`subscription.cancelled` event. The canonical event this library emits is
+`subscription.canceled`.
+
+## Webhook events
+
+Mapped onto the canonical types:
+
+| Dodo event | Normalized |
+| --- | --- |
+| `payment.succeeded` | `payment.succeeded` |
+| `payment.failed`, `payment.cancelled` | `payment.failed` |
+| `payment.processing` | `payment.updated` |
+| `refund.succeeded` | `payment.refunded` |
+| `subscription.active` | `subscription.created` |
+| `subscription.updated`, `.renewed`, `.plan_changed`, `.on_hold`, `.paused`, `.unpaused`, `.update_payment_method` | `subscription.updated` |
+| `subscription.cancelled`, `.expired`, `.failed` | `subscription.canceled` |
+| `dispute.opened` | **`payment.disputed`** |
+| `dispute.won` | `payment.dispute_closed` (`won`) |
+| `dispute.lost`, `dispute.accepted` | `payment.dispute_closed` (`lost`) |
+| `dispute.expired` | `payment.dispute_closed` (`expired`) |
+| `dispute.cancelled` | `payment.dispute_closed` (`canceled`) |
+| `dispute.challenged` | `payment.updated` |
+
+Everything else (`refund.failed`, `license_key.*`, `payout.*`, `credit.*`, `dunning.*`,
+`abandoned_checkout.*`, `entitlement_grant.*`) passes through under its Dodo name, so an
+app handler can subscribe to it directly.
+
+**Paused subscriptions are `paused`, not `active`.** `subscription.paused` and a `paused`
+status from `findSubscription` report `Subscription.status === 'paused'`. It used to report
+`active`, which handed entitlement to a subscriber who is not paying; anything gating access
+on `status === 'active'` will start refusing them, which is the point.
+
+### Disputes: Dodo forwards them, and the clock is yours
+
+Dodo is a merchant of record, so the usual expectation is that the chargeback is Dodo's to
+fight and you hear about it as a line on a payout. **Dodo is the exception**, on both counts,
+and its own dispute reference is explicit:
+
+- **Who fights it?** *You do.* "You have **10 days** to respond after a dispute opens.
+  Evidence gathering and submission must occur within this window **through the Dodo
+  dashboard**." Compare Paddle, whose team contests for you and will not accept your
+  evidence, or Polar and Lemon Squeezy, whose event catalogues have no dispute event at all.
+- **Is the deadline yours?** Yes — and it is short. Ten days from `dispute.opened`, with the
+  same countdown shown on the dispute in the dashboard.
+
+`capabilities.disputes` is nevertheless **`false`**, and the distinction is worth being
+precise about: the capability gates the *API* half — `findDispute` and
+`submitDisputeEvidence`. Dodo's evidence flow is the dashboard, not an endpoint, so there is
+no representment call for this driver to make. Declaring `true` would promise a method that
+cannot exist.
+
+<Callout type="warn" title="The ten-day deadline is not in the payload">
+Dodo sends **no `actionableUntil`**, because it sends no deadline field. The dispute object
+is `dispute_id`, `payment_id`, `business_id`, `amount`, `currency`, `dispute_status`,
+`dispute_stage`, `created_at`, `remarks`, `payment_provider` and `is_resolved_by_rdr` —
+that is all of it.
+
+The driver deliberately does **not** derive one from `created_at + 10 days`. That would put
+a date this library invented into the one field an operator is meant to trust. Compute it
+yourself from `event.raw.data.created_at` if you want a countdown, knowing where the number
+came from — and set an alert on `payment.disputed`, because ten days is not long enough to
+find out from a report.
+</Callout>
+
+`dispute.opened` normalizes to `payment.disputed`, keyed by the **payment** — the row whose
+status has to move to `disputed` — with the disputed amount and currency, plus `disputeId`,
+`reason` (from `remarks`), `disputeStage` and `disputeStatus` on `event.data`. Dodo has sent
+`amount` as both a number and a decimal string; both are read as integer cents.
+
+**There is no `payment.dispute_warning` here, and that is on purpose.** Dodo carries a
+`dispute_stage` that runs `pre_dispute` → `dispute` → `pre_arbitration`, and it is tempting
+to read `pre_dispute` as a Stripe-style inquiry with the money untouched. Dodo's reference
+does not support that: it says "Cardholder initiates dispute; **funds are held**" for
+`dispute.opened`, without qualifying it by stage. So every `dispute.opened` is a
+`payment.disputed` whatever the stage, and the stage travels on `event.data.disputeStage` for
+you to read. Downgrading a `pre_dispute` open to a warning would write nothing to the row and
+leave it saying `paid` over money Dodo says it has already held — the reference would have to
+say otherwise before that changes.
+
+The closing events carry the outcome Dodo names for each:
+
+| Dodo event | `outcome` | Dodo's own gloss |
+| --- | --- | --- |
+| `dispute.won` | `won` | "Resolved in your favor; funds retained" |
+| `dispute.lost` | `lost` | "Resolved for cardholder; funds returned" |
+| `dispute.accepted` | `lost` | "Dispute accepted without contest; funds returned" |
+| `dispute.expired` | `expired` | "Response window closed without resolution" |
+| `dispute.cancelled` | `canceled` | "Dispute withdrawn; no action needed" |
+
+`accepted` is a **loss**, not a cancellation: you chose not to defend, so the cardholder
+keeps the money — the same reading Adyen's `Accepted` gets. `expired` is not folded into
+`lost` even though Dodo's table calls it "typically resolves against you", because nothing
+was decided; the clock ran out. `canceled` does not return the row to `paid` on its own,
+which is deliberate — a withdrawn dispute is not an acquirer returning funds.
+
+Only `dispute.won` moves the payment row back to `paid`. `dispute.challenged` — evidence
+submitted, network reviewing — stays a `payment.updated`: it is movement inside an open
+dispute, not a resolution of it.
+
+**Visa RDR auto-refunds arrive as `dispute.lost`,** flagged `is_resolved_by_rdr: true` on
+the raw payload. The money is gone and the outcome is honest, but it was never contested —
+read the flag off `event.raw.data` if you distinguish the two in reporting.
+
+A `dispute.*` event whose `data.payload_type` is not `Dispute` degrades to `payment.updated`
+rather than a close: the outcome would not be readable, and the processor **throws** on a
+`payment.dispute_closed` carrying none.
+
+**Dodo has no `subscription.created` event.** `subscription.active` is the first one a
+subscription gets, fired once its first payment clears, so that is what maps to the
+canonical `subscription.created`.
+
+**The event id lives in the `webhook-id` header, not the body.** Dodo's payload is
+`{ business_id, type, timestamp, data }` with no id in it, and `data` carries a
+`payload_type` discriminator (`Payment`, `Subscription`, `Refund`, `Dispute`, …) that the
+driver switches on to normalize the event. The driver uses the header, which is what the
+idempotency ledger deduplicates on — the same thing Dodo's own docs tell you to use.
+
+A refund event is keyed by its **payment** id, not the refund id — the payment is the row
+your handler is holding.
+
+<Callout type="warn" title="The webhook secret is base64-decoded">
+Dodo's key derivation is the Standard Webhooks default: strip the `whsec_` prefix,
+base64-decode the rest, and use those bytes as the HMAC key. Dodo's own docs do not spell
+this out — they say only "your webhook secret key from the Dashboard" — but the
+`dodopayments` SDK hands the secret straight to the `standardwebhooks` reference library,
+which does exactly that. Note this is the **opposite** of Polar, which uses the raw secret
+string on the same spec. Verify a real test-mode delivery before you go live; a signature
+that never matches is what a wrong derivation looks like.
+</Callout>

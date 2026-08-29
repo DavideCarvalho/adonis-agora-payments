@@ -1,0 +1,475 @@
+---
+title: Client polling
+description: The browser-facing status endpoint and the React hook that polls it — waiting for a Pix or boleto to settle without hand-writing the loop, and without handing one customer's payment to another.
+icon: RefreshCw
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+A Pix QR code is not paid when you render it. It is paid when the gateway calls your webhook,
+which happens somewhere between two seconds and two days later. Between those two moments the
+browser has to ask.
+
+Every app that takes Pix writes that loop. Most write it with a fixed interval, no stop condition
+and no cleanup, so an abandoned checkout tab asks all night. This page is that loop, plus the
+endpoint it asks — and the third section is how to throw both away and write your own.
+
+<Callout type="warn" title="This is not a card SDK">
+Nothing here wraps a gateway's card fields. Stripe, Mercado Pago and Adyen each ship a React SDK
+for that, maintained alongside their API. Eighteen of those is a surface this package could not
+keep honest, so it does not have one.
+</Callout>
+
+## 1. Mount ours
+
+Two pieces: an endpoint in your AdonisJS app, and a hook in your React app.
+
+```sh
+node ace configure @adonis-agora/payments
+npm i @adonis-agora/payments-react
+```
+
+`configure` registers `@adonis-agora/payments/payments_client_provider` and publishes
+`config/payments_client.ts`. The endpoint is **off** until you say otherwise:
+
+```ts title="config/payments_client.ts"
+import { defineConfig } from '@adonis-agora/payments/client'
+
+export default defineConfig({
+  enabled: true,
+})
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `enabled` | `false` | When `false`, no route is registered at all. |
+| `path` | `'/payments/client'` | Route prefix. The endpoint is `<path>/status`. |
+| `authorize` | a resolved user | Is this request allowed at all. A denial is `401`. |
+| `owner` | `{ type: 'User', id: user.id }` | Who is asking. `null` is a `401`. |
+| `authorizeReference` | the customer registry | May this caller see THIS payment. A denial is `403`. |
+| `resolveReference` | unset | Escape hatch: map a reference that is neither your `externalReference` nor a gateway id. |
+
+<Callout title="Disabled by default, unlike the dashboard">
+The [dashboard](/docs/payments/dashboard) is an operator console behind an admin gate. This
+endpoint is reachable by every logged-in browser in your app, so you turn it on deliberately.
+</Callout>
+
+### The endpoint
+
+```http
+GET /payments/client/status?reference=<reference>
+```
+
+```json
+{ "status": "paid", "amount": 1234500, "currency": "BRL", "paidAt": "2026-08-27T12:00:00.000Z" }
+```
+
+Four fields, and that is the whole contract. Not the payload, not the customer, not the gateway
+ids. Even the rightful owner's browser has no business holding a raw gateway payload, and a body
+this small cannot leak a column somebody adds to `billing_payments` later without thinking.
+
+`amount` is integer minor units, exactly as stored — [format at the edge](/docs/payments/concepts/money).
+
+| Status | Meaning |
+| --- | --- |
+| `400` | No `reference` in the query string, or a blank one. |
+| `401` | No caller could be resolved, or `authorize` said no. |
+| `403` | A caller was resolved and does not own this reference. |
+| `404` | No payment row for that reference — **including a charge whose webhook has not landed yet**. |
+| `503` | The billing layer is off in this deployment. |
+
+The `404` is the one that surprises people: `billing_payments` is written by the **webhook**, so a
+Pix nobody has paid has no row at all. That is the waiting state, not a failure, and the hook keeps
+polling through it.
+
+It is also checked **before** the ownership guard, which is the one thing this endpoint tells a
+caller that it does not strictly have to: a reference that exists but is not yours answers `403`,
+while one that exists nowhere answers `404`. The alternative — `404` for both — would make the
+waiting state indistinguishable from a denial, and the hook has to keep polling through one and
+stop on the other. References are your own ids; if yours are guessable, that difference is worth
+knowing about.
+
+Every answer carries `Cache-Control: no-store`. The read is one indexed row
+(`billing_payments_external_reference_idx`, then the unique `billing_payments.gateway_id` when
+nothing carries that reference) plus, for the default guard, one more over
+`billing_customers_owner_idx`. It never calls a gateway: this URL is polled, and a gateway call per
+poll is a rate-limit incident waiting for its first busy afternoon.
+
+### The reference
+
+`reference` is **your** id for the charge — the `externalReference` you set on it. The gateway
+echoes it back on the webhook and the processor stores it on
+`billing_payments.external_reference`, so the endpoint looks the payment up by it directly, through
+`billing_payments_external_reference_idx`.
+
+If nothing carries that reference, it falls back to reading it as the **gateway payment id**
+(`payment.id` from `charge()`, stored as `gateway_id`). Two callers need that fallback: the Pix
+gateways where the two are literally the same value (Woovi's `correlationID`, Efí's `txid`), and an
+install whose rows predate the `external_reference` column, where it is `null` — the endpoint keeps
+working there exactly as it did before, by gateway id.
+
+Polling with something that is neither — a checkout session id, a hashed token — is what
+`resolveReference` is for. It **replaces** both lookups; see below.
+
+### The hook
+
+```tsx title="app/checkout/PixPanel.tsx"
+import { usePaymentStatus } from '@adonis-agora/payments-react'
+
+export function PixPanel({ reference, pixCode, pixQrCodeImage }: Props) {
+  const { status, isSettled, error } = usePaymentStatus(reference)
+
+  if (error) return <p role="alert">{error.message}</p>
+
+  if (isSettled) {
+    switch (status) {
+      case 'paid':
+        return <OrderConfirmed />
+      case 'failed':
+      case 'canceled':
+        return <p>This charge was cancelled. Start a new one.</p>
+      case 'refunded':
+      case 'disputed':
+        return <p>This payment was reversed.</p>
+    }
+  }
+
+  return (
+    <figure>
+      <img src={`data:image/png;base64,${pixQrCodeImage}`} alt="Pix QR code" />
+      <figcaption>
+        <code>{pixCode}</code>
+      </figcaption>
+      <p>Waiting for the payment…</p>
+    </figure>
+  )
+}
+```
+
+`status` is typed as `PaymentStatus` — the server's `BillingStatus` union restated as a value the
+browser can hold at runtime, with a compile-time assertion on the server that the two lists are
+still the same list. So the `switch` above stays exhaustive: a status added to the library becomes
+a type error in your component rather than a branch that silently falls through.
+
+| Returns | |
+| --- | --- |
+| `status` | `PaymentStatus \| null` — `null` until the endpoint reports one. |
+| `isSettled` | The payment stopped moving. |
+| `isPolling` | Whether a timer is still armed. |
+| `error` | Surfaced, never thrown. |
+| `amount` / `currency` / `paidAt` | The other three fields of the response. |
+| `refresh()` | Poll now and reset the backoff. |
+
+| Option | Default | |
+| --- | --- | --- |
+| `path` / `baseUrl` | `'/payments/client'` / `''` | Where to poll. Point them at your own route. |
+| `enabled` | `true` | `false` holds off entirely — no request, no timer. |
+| `initialDelayMs` / `maxDelayMs` / `backoffFactor` | `2000` / `30000` / `1.5` | The backoff curve. |
+| `headers` / `credentials` | — / `'same-origin'` | Extra headers; how the session cookie travels. |
+| `fetchImpl` | global `fetch` | Injectable, for tests and non-browser hosts. |
+| `onSettled` | — | Called once, when the payment reaches a terminal status. |
+
+**When it stops asking.** All four of these are things a hand-written loop usually misses:
+
+- A **terminal status** — `paid`, `failed`, `refunded`, `canceled`, `disputed`. `pending` and
+  `authorized` are not terminal: an unpaid Pix stays `pending`, and authorized card money is held,
+  not captured.
+- **Unmount.** The timer is cleared and no state is written afterwards.
+- **A hidden tab.** Polling pauses on `visibilitychange` and resumes on focus. A backgrounded
+  checkout tab polling all night is a bill somebody pays.
+- **`401` or `403`.** Retrying an authorization failure is a loop with no exit.
+
+Between reads the gap grows: an immediate first read, then 2s, 3s, 4.5s, 6.75s … capped at 30s.
+
+### The whole Pix flow
+
+Create the charge on the server and hand the reference to the browser:
+
+```ts title="app/controllers/checkout_controller.ts"
+import { inject } from '@adonisjs/core'
+import { LucidBillingStore, ensureCustomer, getPayments } from '@adonis-agora/payments'
+
+@inject()
+export default class CheckoutController {
+  constructor(private store: LucidBillingStore) {}
+
+  async store({ auth, request, response }: HttpContext) {
+    const user = auth.getUserOrFail()
+    const order = await Order.create({ userId: user.id, total: 1_234_500, status: 'awaiting_payment' })
+    const driver = getPayments().driver('pix')
+
+    // Records the owner -> gateway-customer mapping the default `authorizeReference` reads.
+    const customer = await ensureCustomer(
+      driver,
+      user.billingCustomerId,
+      { name: user.fullName, email: user.email, taxId: user.cpfCnpj },
+      { store: this.store, owner: { type: 'User', id: user.id } },
+    )
+    if (customer.id !== user.billingCustomerId) {
+      user.billingCustomerId = customer.id
+      await user.save()
+    }
+
+    const payment = await driver.charge({
+      customerId: customer.id,
+      amount: order.total,
+      description: `Order ${order.id}`,
+      externalReference: order.id,          // how the WEBHOOK finds this order
+      idempotencyKey: `order:${order.id}`,
+    })
+
+    order.gatewayPaymentId = payment.id     // what the BROWSER polls with
+    await order.save()
+
+    return response.json({
+      reference: payment.id,
+      pixCode: payment.pixCode,
+      pixQrCodeImage: payment.pixQrCodeImage,
+    })
+  }
+}
+```
+
+The two ids do different jobs and it is worth keeping them apart: `externalReference` is how your
+[webhook handler](/docs/payments/patterns/reacting-to-payments) routes the gateway's event back to
+the order, and `payment.id` is what the browser polls. Store both.
+
+<Callout title="You still need the webhook">
+The endpoint reads what the webhook wrote. If `POST /payments/webhook/:provider` is unreachable —
+a tunnel that expired, a signature that stopped verifying — the hook polls a `404` forever and the
+order never settles. [Webhooks](/docs/payments/webhooks) is the page that matters when that happens.
+</Callout>
+
+## 2. Mount ours, own the rules
+
+The three hooks are the whole authorization story. Each replaces exactly one decision.
+
+```ts title="config/payments_client.ts"
+import { defineConfig } from '@adonis-agora/payments/client'
+
+export default defineConfig({
+  enabled: true,
+
+  // Is this request allowed at all. `false` -> 401.
+  authorize: async (ctx) => {
+    await ctx.auth.check()
+    return ctx.auth.user !== undefined
+  },
+
+  // Who is asking. `null` -> 401.
+  owner: async (ctx) => {
+    const user = ctx.auth.user
+    return user ? { type: 'User', id: String(user.id) } : null
+  },
+})
+```
+
+### `authorizeReference` — the load-bearing one
+
+The default resolves the owner, looks them up with `findCustomerByOwner`, and allows only when the
+payment's `customerId` is the gateway customer that owner actually holds — per provider, so one
+user's customer at Asaas never authorizes a Woovi payment.
+
+**If your app never adopted the customer registry, that default denies.** It does not fall back to
+"allow": an empty registry means *unknown*, and treating unknown as allowed hands every payment to
+every logged-in user who can guess a reference. You get a `403` and a warning in your logs naming
+the owner and the provider it could not map.
+
+That is the common case, and the fix is to say what ownership means in your schema:
+
+```ts title="config/payments_client.ts"
+import Order from '#models/order'
+
+export default defineConfig({
+  enabled: true,
+
+  authorizeReference: async (ctx, reference) => {
+    const user = ctx.auth.user
+    if (!user) return false
+
+    // Your own table, your own definition of ownership.
+    const order = await Order.query()
+      .where('gateway_payment_id', reference)
+      .where('user_id', user.id)
+      .first()
+
+    return order !== null
+  },
+})
+```
+
+Note what that query does **not** do: it does not look the order up by `reference` and then compare
+`order.userId` afterwards in a way that can be skipped. The caller's id is part of the `where`, so
+the miss and the denial are the same branch.
+
+The hook is never handed the payment. That is deliberate — a hook that received the row it is
+guarding invites `return payment !== null`, which is the bug this endpoint exists to make
+unwritable.
+
+If your browser polls with something the store cannot match on its own — neither the
+`externalReference` recorded on the payment nor the gateway id — map it yourself:
+
+```ts
+resolveReference: async (_ctx, reference) => {
+  const order = await Order.findBy('publicId', reference)
+  return order?.gatewayPaymentId ?? null
+},
+```
+
+Setting it **replaces** the built-in lookup: the endpoint then reads only what your hook returns,
+by gateway id. That is deliberate — an app that says "here is the gateway id" owns the question,
+and quietly falling back to a reference lookup would answer a different one. Most apps no longer
+need this hook at all: set `externalReference` on the charge and poll with it.
+
+`resolveReference` is a lookup, not a guard. `authorizeReference` still runs on whatever it
+resolves.
+
+### With authkit, authz, or a plain guard
+
+The default `authorize` and `owner` read the user **structurally**: `ctx.auth.getUser()` if it is
+there, otherwise `ctx.auth.user`. That is the same technique
+[`@adonis-agora/authz`](/docs/authz) uses in `authorizeByRoles`, and it means this package imports
+neither authkit nor authz nor `@adonisjs/auth`. It works with all three, and with a guard you wrote
+yourself, because it depends on none of them.
+
+Roles compose the way they do everywhere else in Agora:
+
+```ts
+import { authorizeByRoles } from '@adonis-agora/authz'
+
+export default defineConfig({
+  enabled: true,
+  authorize: authorizeByRoles({ roles: ['CUSTOMER', 'ADMIN'] }),
+})
+```
+
+`authorize` answers "may this request exist". It does not answer "may this caller see this
+payment" — that is still `authorizeReference`, and a role check is not an ownership check.
+
+## 3. Build the endpoint from scratch
+
+For maximum control, skip the config and the provider entirely. Everything the built-in endpoint
+uses is exported, so a hand-rolled version is an ordinary controller.
+
+**What the hook needs from you** is small:
+
+- a route that answers `GET <path>/status?reference=<reference>`;
+- a JSON body with `status`, `amount`, `currency` and `paidAt`, where `status` is one of
+  `pending`, `authorized`, `paid`, `failed`, `refunded`, `canceled`, `disputed`;
+- `401`/`403` for refusals — the hook treats both as terminal and stops;
+- `404` while there is no payment yet — the hook keeps polling through it.
+
+Then point the hook at it: `usePaymentStatus(reference, { path: '/checkout' })`.
+
+<Callout type="error" title="The trap">
+Never resolve the payment from an id in the query string alone. Resolve the **caller** first, then
+prove the payment is theirs — otherwise anyone with a reference reads anyone's payment, which is
+the same IDOR that has already bitten a sibling package in this ecosystem.
+</Callout>
+
+```ts title="app/controllers/payment_status_controller.ts"
+import { inject } from '@adonisjs/core'
+import type { HttpContext } from '@adonisjs/core/http'
+import { LucidBillingStore } from '@adonis-agora/payments'
+import Order from '#models/order'
+
+@inject()
+export default class PaymentStatusController {
+  constructor(private store: LucidBillingStore) {}
+
+  async show({ auth, request, response }: HttpContext) {
+    response.header('cache-control', 'no-store')
+
+    // 1. The caller, BEFORE the reference is looked at.
+    const user = auth.user
+    if (!user) return response.status(401).json({ error: 'unauthorized' })
+
+    const reference = request.qs().reference
+    if (typeof reference !== 'string' || reference === '') {
+      return response.status(400).json({ error: 'reference is required' })
+    }
+
+    // 2. Ownership, as a WHERE clause — the caller's id is part of the lookup, so a miss
+    //    and a denial are one branch and there is nothing to forget to check afterwards.
+    const order = await Order.query()
+      .where('gateway_payment_id', reference)
+      .where('user_id', user.id)
+      .first()
+    if (!order) return response.status(403).json({ error: 'forbidden' })
+
+    // 3. Only now, one indexed read. No gateway call: this URL is polled.
+    const payment = await this.store.findPaymentByGatewayId(reference)
+    if (!payment) {
+      // No row yet — the webhook has not landed. The hook keeps polling on a 404.
+      return response.status(404).json({ error: 'unknown reference' })
+    }
+
+    // 4. Four named fields. Never `payment` itself: it carries the raw gateway payload.
+    return response.json({
+      status: payment.status,
+      amount: Number(payment.amount),
+      currency: payment.currency,
+      paidAt: payment.paidAt?.toISO() ?? null,
+    })
+  }
+}
+```
+
+```ts title="start/routes.ts"
+router
+  .get('/checkout/status', [PaymentStatusController, 'show'])
+  .use(middleware.auth())
+```
+
+`Number(payment.amount)` is not decoration: Postgres hands a `bigint` back as a string, and
+`paidAt` arrives as a Luxon `DateTime`. Serializing the model directly ships `"1234500"` and a
+timestamp object — and the payload.
+
+If you use a custom billing store rather than the Lucid one, reach it through the accessor instead
+of injecting the class:
+
+```ts
+import { getBillingStore } from '@adonis-agora/payments/services/main'
+
+const payment = await getBillingStore().findPaymentByGatewayId(reference)
+```
+
+### When you do not know the gateway id
+
+Some flows never record it — a hosted checkout that redirects, an app that only stored its own
+reference. Then resolve the caller's own customer first and scan **their** payments:
+
+```ts
+const customer = await this.store.findCustomerByOwner('User', String(user.id), 'asaas')
+if (!customer) return response.status(403).json({ error: 'forbidden' })
+
+const recent = await this.store.listPayments({ limit: 50 })
+const payment = recent.find((row) => row.customerId === customer.gatewayId && row.status !== 'pending')
+```
+
+That is a scan, not an indexed read, and it is behind a polled URL — cap the `limit`, and prefer
+storing `payment.id` on your order at charge time. It is here because "I never stored the gateway
+id" is a real state, not because it is the good path.
+
+## Testing
+
+The endpoint is a plain function over a store, so it tests without an HTTP server:
+
+```ts
+import { paymentStatus, resolveConfig } from '@adonis-agora/payments/client'
+import { InMemoryBillingStore } from '@adonis-agora/payments/testing'
+
+const store = new InMemoryBillingStore()
+await store.saveCustomer({ gatewayId: 'cus_1', provider: 'asaas', ownerType: 'User', ownerId: '1' })
+await store.savePayment({ gatewayId: 'pay_1', provider: 'asaas', status: 'paid', amount: 100, currency: 'BRL', customerId: 'cus_1' })
+
+const ctx = { auth: { user: { id: 1 } } } as unknown as HttpContext
+const result = await paymentStatus({ store, config: resolveConfig() }, ctx, 'pay_1')
+// { status: 200, body: { status: 'paid', amount: 100, currency: 'BRL', paidAt: null } }
+```
+
+Write the denial cases too, and make sure they fail when you break them: a caller asking for
+someone else's reference, and a caller the app never mapped. Those two are the ones that matter.
+
+On the browser side, pass `fetchImpl` and drive the clock with fake timers — the hook takes no
+context provider and no data-fetching dependency, so there is nothing else to stand up.

@@ -1,0 +1,124 @@
+---
+title: Woovi (OpenPix)
+description: Pix Automático and Pix charges, RSA-SHA256 webhooks, correlationID routing — and the operations its API does not expose.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+- **Methods**: pix, undefined — **Pix only**.
+- **Setup**: `payments.woovi({ appId, webhookPublicKey })` — `WOOVI_APP_ID`.
+- **Webhooks**: two signing schemes. The recommended one is RSA-SHA256 in
+  `x-webhook-signature`, verified against `webhookPublicKey` (the account public key from
+  `GET /api/v1/webhook/public-keys`, PEM or base64-PEM). The deprecated per-webhook HMAC
+  (`X-OpenPix-Signature`, HMAC-SHA1 base64) is supported via `webhookSecret` and takes a
+  back seat when both are set.
+- **`externalReference`**: maps to Woovi's `correlationID` — the id you pass comes back on
+  the charge and its webhook, so it's your routing key.
+- **Subscriptions**: Pix Automático — recurring Pix via webhooks, **no card**. Pass
+  `startDate` to set the monthly charge day (`dayGenerateCharge`). They are **write-once**:
+  the API creates and reads them and nothing else, so both `updateSubscription` and
+  `cancelSubscription` throw instead of pretending. Cancel in the Woovi dashboard and
+  reconcile your own record — the payer can also revoke a Pix Automático authorization at
+  their own bank, which arrives as a webhook. To change an amount, cancel and create a new
+  subscription.
+- **Invoices**: no invoice concept — a charge *is* the billing record; use an invoice
+  provider with `invoice: true` if you need an invoice.
+- **Disputes**: Pix MED, all four events mapped — see
+  [Disputes](#disputes-are-pix-med-not-chargebacks).
+
+```ts title="app/services/checkout_service.ts"
+await payments.driver('pix').charge({
+  customerId: 'your-correlation-id',
+  amount: 1990,
+  externalReference: 'payment_local_1',
+  invoice: true,
+})
+```
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+neither `webhookPublicKey` nor `webhookSecret` is configured (env fallbacks
+`WOOVI_WEBHOOK_PUBLIC_KEY` / `WOOVI_WEBHOOK_SECRET`). Prefer the public key: it is the recommended
+scheme and wins when both are set.
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/woovi` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
+## Disputes are Pix MED, not chargebacks
+
+A Pix cannot be charged back. What Woovi calls a *disputa* is the Banco Central's
+**MED** — *Mecanismo Especial de Devolução* — a payer reporting fraud or a scam, which
+Woovi's own dispute payload types as `"MED" | "CHARGEBACK"`. Four events, and the driver
+maps all four:
+
+| Woovi event | Normalized | The money |
+| --- | --- | --- |
+| `OPENPIX:DISPUTE_CREATED` | **`payment.dispute_warning`** | **blocked**, not taken |
+| `OPENPIX:DISPUTE_REJECTED` | `payment.dispute_closed` (`won`) | stays with you |
+| `OPENPIX:DISPUTE_ACCEPTED` | `payment.dispute_closed` (`lost`) | refunded to the payer |
+| `OPENPIX:DISPUTE_CANCELED` | `payment.dispute_closed` (`canceled`) | withdrawn by the payer or their bank |
+
+`DISPUTE_CREATED` is a **warning**, not a `payment.disputed`, and the distinction is
+Woovi's own: while a dispute is under analysis, "o saldo relacionado a transação será
+bloqueado no saldo da empresa". A block is not a withdrawal — the money is still yours if
+the dispute is rejected — so nothing is written to the payment row. What you get is the
+alert, and Woovi's published window to answer it: **three days** to send evidence, after
+which the bank has up to seven to decide.
+
+`reason` comes from `dispute.disputeReason` (Woovi's example is `"Golpe"`) and `disputeId`
+from `dispute.id` — the id you upload evidence against.
+
+<Callout type="warn" title="A dispute names the Pix, not the charge">
+The dispute payload carries `endToEndId` and nothing else that identifies the payment: no
+`charge`, no `correlationID`. So `event.data.gatewayId` on these four events is the **Pix
+end-to-end id**, not the charge `globalID` your payment row is keyed on, and the built-in
+sync cannot find that row by itself.
+
+Persist the link when the charge is paid: `OPENPIX:CHARGE_COMPLETED` now carries
+`event.data.metadata.endToEndId` for exactly this. Store it beside your payment and a
+dispute joins back to the order it is about.
+</Callout>
+
+<Callout type="warn" title="Where `won` and `lost` come from">
+Woovi's developer reference documents the four events and says nothing about who wins. The
+meanings above are from Woovi's own help centre ("Quais são os status do MED e Disputas na
+plataforma?"): an **accepted** dispute refunds the end customer and closes the case, a
+**rejected** one means the company proved the transaction legitimate and keeps the value.
+That is the ordinary reading of a claim being upheld or denied, but it is not in the API
+reference — so if you act on `outcome` automatically, confirm it against your own account
+first. `event.raw.dispute.status` always carries Woovi's own word for it.
+</Callout>
+
+The dispute events carry **no `actionableUntil`** — the payload has no date field at all,
+and the three-day window is Woovi's policy rather than something it sends, so the driver
+does not compute a deadline it was never given. They carry no `amount` either: the dispute
+payload's `value` is the disputed figure rather than the charge's, and the row the processor
+moves already knows what it was charged. `event.raw.dispute.value` has it if you want it.
+
+<Callout type="warn" title="Money is in centavos here, and it was not">
+OpenPix documents `value` as *"o valor em centavos da cobrança Pix"* — the same integer
+minor unit this package uses everywhere — so nothing is converted at this boundary. The
+driver used to run `toDecimal`/`fromDecimal` over it, which sent a R$19,90 charge as
+`value: 19.9` and created a **20 centavo** charge at the gateway.
+
+This is worth stating because the neighbouring Brazilian drivers are the other way round:
+Asaas and AbacatePay genuinely work in decimal reais and genuinely need the conversion. The
+difference is Woovi's, not an inconsistency here.
+</Callout>
+
+<Callout type="info" title="Woovi prefixes its event names">
+Real payloads say `"event": "OPENPIX:CHARGE_COMPLETED"`, not `"CHARGE_COMPLETED"`. The
+driver now accepts both spellings — before, a live webhook matched none of the mapped names
+and fell through as an unrecognized event, so the payment was ledgered and never synced.
+</Callout>
+
+<Callout type="info" title="`externalReference` is how webhooks find your records">
+Every gateway can echo back a string you choose. Set it to your local payment id
+(`payment.id`, `sub:<subscriptionId>`), and the webhook's normalized
+`event.data.externalReference` routes the confirmation back to the right row — no parsing
+gateway-specific payloads. See [Webhooks → externalReference](/docs/payments/webhooks#routing-payments-back-to-your-records-externalreference).
+</Callout>

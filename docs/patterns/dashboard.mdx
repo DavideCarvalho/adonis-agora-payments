@@ -39,10 +39,11 @@ export default class BillingDashboardController {
 {
   period: { from: Date, to: Date },
   metrics: [
-    { key: 'revenue',              label: 'Revenue (cents)',      value: 1_284_900 },
-    { key: 'active_subscriptions', label: 'Active subscriptions', value: 212 },
-    { key: 'meter:api_calls',      label: 'Usage · api_calls',    value: 481_230 },
-    { key: 'meter:storage_gb',     label: 'Usage · storage_gb',   value: 3_042 },
+    { key: 'revenue',              label: 'Revenue, gross (cents)',           value: 1_284_900 },
+    { key: 'net_revenue',          label: 'Revenue, net of refunds (cents)', value: 1_231_400 },
+    { key: 'active_subscriptions', label: 'Active subscriptions',            value: 212 },
+    { key: 'meter:api_calls',      label: 'Usage · api_calls',               value: 481_230 },
+    { key: 'meter:storage_gb',     label: 'Usage · storage_gb',              value: 3_042 },
   ]
 }
 ```
@@ -52,9 +53,17 @@ usage in the window, keyed `meter:<name>`.
 
 | Metric | Counts |
 | --- | --- |
-| `revenue` | the sum of **paid** payments whose `paidAt` falls in the window, in cents |
+| `revenue` | **gross**: the sum of `amount` on **paid** payments whose `paidAt` falls in the window, in cents |
+| `net_revenue` | the same rows, **net**: `amount - COALESCE(refunded_amount, 0)`, in the same cents |
 | `active_subscriptions` | subscriptions currently `active` **or** `trialing` — not windowed |
 | `meter:<name>` | quantity consumed for that meter in the window |
+
+The two revenue lines are the same query with a different figure summed, and the pair exists because
+a partially refunded charge stays `paid` and keeps its full `amount` — what went back is recorded
+separately, on `billing_payments.refunded_amount`. So the charge counts at full value in `revenue`
+and at its net in `net_revenue`, and **a screen showing one of them has to say which**: a tile
+labelled only "Revenue" over the gross figure is money that came back still being reported as
+earned. Both are integers in minor units; subtract and add freely, divide only at the edge.
 
 Two details worth knowing before you put a number on a screen:
 
@@ -75,11 +84,17 @@ yourself if you bill on converted subscribers:
 
 ## Rendering it
 
-Revenue is cents. Divide once, in the formatter, and never in the arithmetic:
+Revenue is in the currency's **minor units**, and the divisor is not always 100 — JPY has no minor
+unit at all and KWD has three. Shift once, at the edge, using the package's own exponent table
+rather than a hardcoded `/ 100`:
 
 ```tsx title="app/components/billing_overview.tsx"
-const money = (cents: number) =>
-  new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cents / 100)
+import { currencyExponent } from '@adonis-agora/payments'
+
+const money = (minorUnits: number, currency = 'brl') =>
+  new Intl.NumberFormat('pt-BR', { style: 'currency', currency: currency.toUpperCase() }).format(
+    minorUnits / 10 ** currencyExponent(currency),
+  )
 
 export function BillingOverview({ overview }: { overview: BillingOverview }) {
   return (
@@ -88,7 +103,9 @@ export function BillingOverview({ overview }: { overview: BillingOverview }) {
         <div key={metric.key}>
           <dt>{metric.label}</dt>
           <dd>
-            {metric.key === 'revenue'
+            {/* BOTH revenue keys are money. A new money metric rendered as a plain count is
+                the figure wrong by 100×. */}
+            {metric.key === 'revenue' || metric.key === 'net_revenue'
               ? money(metric.value)
               : metric.value.toLocaleString('pt-BR')}
           </dd>
@@ -117,11 +134,42 @@ const stranded = await store.countPayments({ status: 'pending', createdBefore: t
 // Which gateway and which event type is failing
 const breakdown = await store.webhookEventBreakdown({ status: 'failed', createdAfter: yesterday })
 // [{ provider: 'stripe', type: 'payment.succeeded', count: 4 }]
+
+// Chargeback windows closing in the next three days, soonest first — and the unbounded
+// count behind them, because a count read off a capped page saturates at the cap.
+const closing = await store.listDisputesDueWithin({ withinHours: 72, limit: 20 })
+const closingTotal = await store.countDisputesDueWithin({ withinHours: 72 })
+
+// Every dispute, newest first — including the ones that carry no deadline and therefore
+// never appear above. `status` takes any DisputeStatus; OPEN_DISPUTE_STATUSES is the
+// unresolved set.
+const disputes = await store.listDisputes({ status: 'warning', limit: 50 })
+
+// Unanswered disputes, OLDEST first, deadline or no deadline. On a gateway that publishes
+// none, this is the only read that can see a chargeback at all.
+const unanswered = await store.listOpenDisputes({ limit: 20 })
+const unansweredTotal = await store.countOpenDisputes({})
+
+// One payment by YOUR id, and the owner behind a page of them in one read.
+const [payment] = await store.listPayments({ externalReference: 'order-1042' })
+const owners = await store.listCustomersByGatewayIds(rows.map((row) => row.customerId))
+
+// Deliveries the endpoint refused — invisible in the ledger, because they never became one.
+const rejected = await store.listAuditEvents({ action: 'webhook.rejected', limit: 20 })
 ```
 
 The full read API is listed under [Reading the billing tables](/docs/payments/billing#reading-the-billing-tables),
 and [`billingHealth(store)`](/docs/payments/production#health-checks) rolls the operational ones into
-a single report.
+a single report — its six checks plus, on `deadlines`, the closing dispute windows by name and, on
+`openDisputes`, the unanswered ones oldest first.
+
+<Callout type="warn" title="Two dispute fields are nullable and must not render as zero">
+`evidenceDueBy` is `null` when the gateway sent no deadline — eleven of the eighteen never do — and
+`amount` is `null` when the alert named no money (Stripe's early fraud warning carries neither
+amount nor currency). Both mean "we were told nothing". Say so in the cell; a dash reads as slack
+and `R$ 0,00` is a claim about an amount that does not exist. See
+[Disputes](/docs/payments/patterns/disputes).
+</Callout>
 
 <Callout type="warn" title="Do not query the billing tables directly">
 `billing.store` is a configured seam — an app can point it at its own implementation, and one day
@@ -149,7 +197,23 @@ await store.savePayment({
 })
 
 const overview = await billingOverview(store, { from, to })
-const revenue = overview.metrics.find((metric) => metric.key === 'revenue')
+const gross = overview.metrics.find((metric) => metric.key === 'revenue')
+const net = overview.metrics.find((metric) => metric.key === 'net_revenue')
 
-assert.equal(revenue?.value, 1990)
+assert.equal(gross?.value, 1990)
+assert.equal(net?.value, 1990)   // nothing refunded yet — the two only diverge once something is
+
+// Refund R$5 of it: the row stays `paid` at 1990, and only the net figure moves.
+await store.savePayment({
+  gatewayId: 'pi_1',
+  provider: 'stripe',
+  status: 'paid',
+  amount: 1990,
+  currency: 'brl',
+  refundedAmount: 500,
+})
+
+const after = await billingOverview(store, { from, to })
+assert.equal(after.metrics.find((m) => m.key === 'revenue')?.value, 1990)
+assert.equal(after.metrics.find((m) => m.key === 'net_revenue')?.value, 1490)
 ```

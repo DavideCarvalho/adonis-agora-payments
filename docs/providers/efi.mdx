@@ -1,0 +1,264 @@
+---
+title: Efí
+description: Efí's Pix API — the gateway that needs a client certificate before it will even issue you a token, and what that means for how you configure it.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Efí (formerly Gerencianet), through its **Pix API** (`pix.api.efipay.com.br`): immediate
+Pix charges (`cob`), the Pix that settle them, and their refunds (`devolução`).
+
+- **Methods**: pix. Only pix.
+- **Setup**: `payments.efi({ clientId, clientSecret, pixKey, certificate })` —
+  `EFI_CLIENT_ID`, `EFI_CLIENT_SECRET`, `EFI_PIX_KEY`, `EFI_CERTIFICATE`; sandbox
+  (`pix-h.api.efipay.com.br`) defaults to `NODE_ENV !== 'production'`.
+- **Auth**: OAuth2 client credentials (`POST /oauth/token`, Basic) **over mutual TLS** —
+  see below, it is the whole story with this gateway.
+- **Money**: the Pix API wants a decimal string (`"19.90"`). The driver builds it by
+  shifting the digits of your integer, never by dividing, so `1990` cannot leave as
+  `"19.89"`.
+- **`externalReference`**: becomes the **txid** when it fits Efí's charset — see
+  [Routing a webhook back](#routing-a-webhook-back-to-your-record).
+- **Refunds**: yes, `PUT /v2/pix/{e2eid}/devolucao/{id}`.
+- **`idempotencyKey`**: real, and it is the resource id, not a header — see
+  [Idempotency is an id, not a header](#idempotency-is-an-id-not-a-header).
+- **No subscriptions, no customers, no invoice list.** A Pix has no chargeback either —
+  but it can still be taken back, see [MED](#med-the-pix-version-of-a-chargeback).
+
+<Callout type="warn" title="Efí is several APIs, and this driver speaks one of them">
+The **Pix API** (this driver) and the **Cobranças API** (`cobrancas.api.efipay.com.br`) are
+different products with different authentication. Cobranças does boleto, card, carnê and
+native subscriptions, over OAuth **without** a certificate; Pix does Pix, with one. Nothing
+in the Cobranças API is reachable from this driver, and no config flag switches it over —
+that would be a second driver. Asking this one for a boleto throws and says so.
+</Callout>
+
+## The certificate
+
+Efí requires a client certificate on **every** request to the Pix API, including the token
+request itself. This is not an API key with an unusual name: it is mutual TLS, so the
+credential belongs to the TLS handshake, not to a header — which is why it cannot be
+configured the way every other gateway's key is.
+
+Get the `.p12` from the Efí dashboard (*API → Meus Certificados*), keep it out of your
+repository, and point the driver at it:
+
+```ts title="config/payments.ts"
+providers: {
+  efi: payments.efi({
+    clientId: env.get('EFI_CLIENT_ID'),
+    clientSecret: env.get('EFI_CLIENT_SECRET'),
+    pixKey: env.get('EFI_PIX_KEY'),
+    certificate: env.get('EFI_CERTIFICATE'),   // a path, or a Buffer
+  }),
+}
+```
+
+The driver builds a certificate-bearing `fetch` over Node's own `node:https` (which has
+accepted `pfx` forever) and hands it to the package's shared HTTP helper — so Efí gets the
+same error handling as every other driver, with **no extra dependency to install**. A `.pem`
+carrying both halves works too; `certificatePassphrase` is there for a `.p12` you protected
+(Efí's default export has no passphrase).
+
+Miss it and the driver refuses to boot, at boot, with the instructions in the message —
+never at the first charge:
+
+```
+[payments] Efí's Pix API requires mutual TLS and no certificate was configured.
+Generate the .p12 in the Efí dashboard (API → Meus Certificados), then set
+`EFI_CERTIFICATE` to its path or pass `certificate` (a path or a Buffer) to
+`payments.efi()`. If you terminate TLS somewhere else, pass your own `fetch` instead.
+```
+
+An unreadable path fails the same way, naming the path and the OS error. If your deployment
+terminates TLS elsewhere — a proxy holding the certificate, a pooled undici dispatcher —
+pass your own `fetch` and the driver uses it verbatim.
+
+## The token expires
+
+`/oauth/token` returns an access token with an `expires_in` (an hour today). The driver
+caches it against **that** number minus a minute of skew, so the cache can never outlive
+the token; concurrent charges share one token request instead of racing to mint several;
+and a `401` on any call drops the cache and retries once, for the token that was revoked
+before it expired. A cache with a lifetime of its own is how you get a driver that works
+all afternoon and starts failing an hour into the deploy that stayed up.
+
+## Routing a webhook back to your record
+
+Efí's Pix notification contains `endToEndId`, `txid`, `chave`, `valor`, `horario` and
+`infoPagador` (plus a `devolucoes` array once money has gone back — see
+[MED](#med-the-pix-version-of-a-chargeback)). That is the whole list — **the txid is the
+only reference of yours it can carry**.
+
+So the driver uses it: an `externalReference` that fits the txid charset (26–35
+alphanumerics, no punctuation) is sent as the txid, and comes back on the webhook as
+`event.data.externalReference`. One that does not fit is not silently mangled — Efí
+generates the txid instead, and you must persist the returned `gatewayId`:
+
+```ts
+const payment = await payments.driver('pix').charge({
+  amount: 1990,
+  method: 'pix',
+  // fits: 26-35 alphanumerics -> becomes the txid, and routes itself back
+  externalReference: 'order01H8XGJWBWBAQ4TAV0PQGQ01',
+  customer: { name: 'Ana', taxId: '123.456.789-09' },   // Efí's `devedor`, optional
+})
+
+payment.gatewayId   // the txid — persist it either way
+payment.pixCode     // BR Code ("copia e cola")
+payment.pixQrCodeImage  // base64 PNG (the data-URI prefix is stripped for you)
+```
+
+`payment.gatewayId` is the txid everywhere: on the charge, on the webhook, and in the
+billing tables. Refunds take it too — the driver resolves the settled Pix behind it and
+refunds against that `endToEndId`, because a Pix refund is made against the payment, not
+against the charge.
+
+## Webhooks are not authenticated by this driver
+
+Say it plainly: **`parseWebhook` verifies nothing for Efí, and there is nothing for it to
+verify.** The notification carries no signature header. Efí offers two other mechanisms,
+and both live outside what a driver can see:
+
+This driver therefore declares `webhookVerification: 'unsupported'`, not `'unconfigured'`. The
+boot-time refusal that stops an app whose driver *can* verify and was given no credential does not
+apply here: there is no credential to forget, so `allowUnverifiedWebhooks` is not needed for Efí
+either. What the boot check cannot do is tell you whether the two mechanisms below are actually in
+place — that part is still yours.
+
+- **Mutual TLS in reverse** — Efí presents *its* certificate to your endpoint and expects
+  your server to validate it. That is a decision your TLS terminator makes, before the
+  request ever reaches AdonisJS. Efí publishes an nginx setup for it.
+- **An `hmac` query parameter** you bake into the registered URL. It is in the **URL**, and
+  the driver is handed the body and the headers only — so this must be enforced in front
+  of the lib-mounted route, e.g. by a middleware on `/payments/webhook/efi` comparing
+  `request.qs().hmac` against your secret.
+
+Efí also documents that notifications currently originate from a single IP
+(`34.193.116.226`), which is worth an allow-list at the edge but is not authentication on
+its own. Treat the notification as a hint if you want belt and braces: `findPayment(txid)`
+re-reads the charge from Efí over mutual TLS, and that answer cannot be forged.
+
+Registering the URL is a call, not a dashboard toggle, so the driver exposes it:
+
+```ts
+const efi = payments.driver('efi') as EfiDriver
+await efi.registerPixWebhook(
+  'https://app.example.com/payments/webhook/efi?hmac=<secret>&ignorar=',
+  { skipMtls: true },   // sets x-skip-mtls-checking; drop it if you validate mTLS yourself
+)
+```
+
+Efí appends `/pix` to whatever you register unless the URL ends with `?ignorar=` — that
+trailing parameter is why the URL above looks the way it does. Registration also probes the
+URL with a body that has no `pix` array; the driver answers it with an inert event so the
+registration succeeds instead of erroring.
+
+<Callout title="The `pix` array is read in full">
+The payload's `pix` key is an **array**. Efí's reference shows one entry in every example
+and never states a maximum, and one notification carries one Pix in practice — but the shape
+is a list, so the driver returns one `WebhookEvent` per entry, each keyed on its own
+`endToEndId`. The mounted route dispatches them one at a time, so every Pix gets its own
+ledger row: a redelivery re-runs only the entries that have not been processed, and one entry
+failing does not re-grant the ones that succeeded.
+
+If an entry does fail, the route answers `500` rather than `200` — Efí retries a non-2xx up
+to 9 times on a progressive backoff (immediate, then 5 minutes, out to 160), and that
+redelivery is the only thing that gets the failed Pix processed. A `200` would tell Efí it is
+done.
+</Callout>
+
+<Callout type="warn" title="Not yet run against a live account">
+This driver is written against Efí's published Pix API reference (read August 2026) and
+covered by unit tests; it has never presented a real certificate to a real Efí account. Run
+it against homologation (`pix-h`) with your own `.p12` before it touches real money — the
+mutual-TLS handshake in particular is something only a live call can prove.
+</Callout>
+
+## MED: the Pix version of a chargeback
+
+A Pix cannot be charged back. It **can** be taken back: the Banco Central's *Mecanismo
+Especial de Devolução* returns money to a payer who reported fraud or an operational
+failure, and it needs neither your agreement nor a card network. It arrives on the webhook
+you already have, as an ordinary `devolução` inside the Pix notification, and the only
+thing that distinguishes it from a refund you made yourself is its `natureza`:
+
+| `devolucoes[].natureza` | What it is | Normalized |
+| --- | --- | --- |
+| absent, `ORIGINAL`, `RETIRADA` | the refund **you** asked for | `payment.refunded` |
+| `MED_OPERACIONAL`, `MED_FRAUDE`, `MED_PIX_AUTOMATICO` + `status: DEVOLVIDO` | MED took the money | **`payment.disputed`** |
+| the same three + `status: EM_PROCESSAMENTO` | MED is executing the return | **`payment.dispute_warning`** |
+| the same three + `status: NAO_REALIZADO` | the return did not happen (Efí's own example: insufficient balance) | unchanged — nothing left |
+
+Both dispute events carry the devolução's id as `disputeId` and its `natureza` as `reason`
+— BACEN's own vocabulary, where `MED_FRAUDE` is a founded suspicion of fraud and
+`MED_OPERACIONAL` an operational failure. `findPayment` agrees with them: a charge whose
+settled Pix carries a MED return reads back as `disputed`, not `refunded`.
+
+Calling this a refund was the bug. `payment.refunded` says the merchant chose to give the
+money back, which is the one thing that did not happen — and a handler that reverses an
+order on a refund would have treated a fraud claim as ordinary customer service.
+
+<Callout type="warn" title="There is no warning before the debit, and no deadline in the payload">
+Efí's Pix webhook has four notification kinds — Pix received, Pix sent, devolução received,
+devolução sent — and none of them announces that a MED was **opened**. The first you hear
+of one is the return itself, so `payment.dispute_warning` here means "the return is
+executing", not "you have time to defend". The API Pix devolução object carries no deadline
+field of any kind, so the normalized event carries no `actionableUntil` — this driver does
+not compute one from BACEN's published MED timeline, because a deadline a driver invented
+is worse than no deadline at all.
+</Callout>
+
+Each MED event is keyed as `<endToEndId>:med:<devolucaoId>:<status>`, so an
+`EM_PROCESSAMENTO` followed by a `DEVOLVIDO` is two events in the ledger rather than one
+redelivery that gets skipped.
+
+## Idempotency is an id, not a header
+
+Efí has no `Idempotency-Key` header, and it does not need one: the two operations that move
+money are addressed by an id **you choose**, so choosing the same id twice is the
+deduplication.
+
+- **Charges and checkouts** — `charge()` and `createCheckout()` `PUT /v2/cob/{txid}` when
+  the `externalReference` (or, failing that, the `idempotencyKey`) fits the BACEN txid
+  charset. Same txid, same charge. See
+  [Routing a webhook back](#routing-a-webhook-back-to-your-record).
+- **Refunds** — `refund(gatewayId, amount?, { idempotencyKey })` uses the key as the
+  **devolução id** in `PUT /v2/pix/{e2eid}/devolucao/{id}`. A retry with the same key
+  returns the first refund instead of sending the money a second time. Without a key the
+  driver mints a random id, which protects a retry inside one call and nothing across a
+  process restart — so pass one if you retry.
+
+BACEN constrains the devolução id to **1–35 alphanumeric characters**: no dashes, no
+underscores. A key outside that charset **throws** rather than being replaced by a random
+id, because quietly minting one would turn your retry guarantee into a second refund. A
+UUID works with its dashes stripped.
+
+```ts
+await payments.driver('efi').refund('abc123def456ghi789jkl012mn', undefined, {
+  idempotencyKey: crypto.randomUUID().replaceAll('-', ''),
+})
+```
+
+## What it does not do
+
+- **Subscriptions.** Recurring billing at Efí is either the Cobranças API
+  (`/v1/subscription`) or Pix Automático (`/v2/rec`) — different products, different
+  scopes. All four subscription methods throw and name them.
+- **Customers.** The Pix API has no customer resource; the payer (`devedor`) travels on the
+  charge. Pass `customer: { name, taxId }` and the driver sends it — but only when both are
+  present, because Efí rejects a half-filled `devedor`.
+- **Invoices.** `capabilities.invoices` is `false` and **`listInvoices` throws**. Pix
+  charges are indexed by txid and by date range, never by payer, and the API has no invoice
+  resource at all. It used to answer `[]`, which is indistinguishable from "this customer
+  has no invoices" — the reader concludes the customer never bought anything, and nothing
+  in the flow says otherwise. `PaymentsManager.assertCapability` already stops the
+  documented path, so the throw is for whoever reaches the driver directly. Fiscal notes
+  come from an [invoice provider](/docs/payments/invoices); to list charges, call
+  `GET /v2/cob` over a date range yourself.
+- **Dispute endpoints.** There are none to call: no dispute resource, no evidence upload,
+  nothing to contest through the API. Money taken back under MED reaches you as a webhook
+  and nowhere else — see below.
+- **Hosted checkout.** `createCheckout` creates a Pix charge and returns the BR Code with an
+  empty `url`. There is no page for Efí to host.

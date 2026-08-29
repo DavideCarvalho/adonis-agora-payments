@@ -16,23 +16,43 @@ how many webhooks arrive, in which order, or how many times a gateway redelivers
 
 ## The billing tables
 
-The configure command publishes a migration creating four tables:
+**You do not create these tables.** The library does, on first use — the ecosystem convention that
+`@adonis-agora/durable` and `@adonis-agora/authz` follow, and the reason there is no migration to
+publish, run or remember on upgrade. `createBillingTables` is idempotent (`CREATE TABLE IF NOT
+EXISTS`), runs once per process, and carries columns added in later versions to a database that
+already has the tables.
+
+To own the DDL yourself, set `billing: { autoCreateSchema: false }` and run the migration
+`configure` publishes for that case — it calls the same function, so the two paths cannot drift.
+Seven tables:
 
 | Table | Purpose |
 | --- | --- |
-| `billing_customers` | a polymorphic link table for your users' gateway customers — **not written by the library** (see below) |
+| `billing_customers` | the polymorphic mapping between your rows and their gateway customers — **opt-in** (see below) |
 | `billing_subscriptions` | subscriptions — `status`, `plan_id`, `trial_ends_at`, `ends_at` |
-| `billing_payments` | every payment, keyed by **gateway id** |
-| `billing_webhook_events` | the **idempotency ledger**, keyed by gateway event id |
+| `billing_payments` | every payment, keyed by **gateway id**, indexed on `external_reference` — **your** id for the charge — and carrying `refunded_amount` |
+| `billing_webhook_events` | the **idempotency ledger**, keyed by gateway event id, storing the raw payload *and* the normalized event |
+| `billing_disputes` | chargebacks and pre-chargeback alerts, keyed by the **dispute's** gateway id — and `evidence_due_by`, the deadline to answer |
+| `billing_usage_events` | metered consumption, one row per event — the input to [usage-based billing](#usage-based-billing--metered-subscriptions) |
+| `billing_audit_events` | what a human or the endpoint *did*, which no other table keeps — see [The audit trail](#the-audit-trail) |
+
+`createBillingTables` also carries columns added *after* their table shipped, as guarded
+`ALTER`s: `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists, so an
+install upgrading from an earlier version would otherwise keep the old columns and fail on
+the first query naming a new one. `ensureSchema()` is public on `LucidBillingStore` for an
+app that turned `autoCreateSchema` off and wants it in a seeder.
 
 `billing_webhook_events` is the heart: it's what makes every redelivery a no-op instead of a
 double-grant.
 
-`billing_customers` is the exception — the migration creates it, but nothing in the library writes
-to it. The [Billable mixin](#the-billable-model) keeps the gateway customer id on **your** model,
-which is where the library reads it from. The table is there for apps that want a separate
-polymorphic mapping (one user, several gateways); if you do not fill it yourself, it stays empty and
-`payments:sync --all` finds nothing.
+`billing_customers` is the one you have to opt into. The [Billable mixin](#the-billable-model) keeps
+the gateway customer id on **your** model, and that is what a charge reads — so the mapping table is
+not on the critical path and the library will not guess which of your rows owns a gateway customer.
+Pass a store to [`ensureCustomer`](#reusing-a-gateway-customer) and it is written where the id is
+created. Leave it out and the table stays empty, which is fine until you want the two things only it
+can answer: enumerating every gateway customer (what `payments:sync --all` reconciles over), and
+mapping one owner to customers at **several** gateways, which a single column on the user row has
+nowhere to put.
 
 ## Reading the billing tables
 
@@ -41,22 +61,246 @@ at its own implementation — so code that reaches around it into `billing_payme
 someone does. Everything the library records is readable through it:
 
 ```ts
-await store.findPaymentByGatewayId(gatewayId)          // one payment
+await store.findCustomerByGatewayId(gatewayId)         // one customer mapping
+await store.findCustomerByOwner('User', userId, 'stripe')
+await store.listCustomers({ provider: 'stripe', ownerType: 'User', ownerId: '4102' })
+await store.listCustomersByGatewayIds(['cus_1', 'cus_2']) // a page of owners in ONE read
+
+await store.findPaymentByGatewayId(gatewayId)          // one payment, by the GATEWAY's id
+await store.findPaymentByExternalReference('order-1042') // ...or by YOURS
 await store.listPayments({ status: 'failed', limit: 20 })
+await store.listPayments({ externalReference: 'order-1042' }) // exact, never a prefix
+await store.listPayments({ gatewayId: 'pay_1abc' })
+await store.listPayments({ customerId: 'cus_123' })
 await store.countPayments({ status: 'pending', createdBefore: cutoff })
+
+await store.findDisputeByGatewayId('dp_1Nx4')            // one dispute, by the DISPUTE's id
+await store.findOpenDisputeByPayment('pi_3Qx7')         // ...or the open one against a payment
+await store.listDisputes({ status: 'open', limit: 20 })
+await store.countDisputes({ status: 'open' })
+await store.listDisputesDueWithin({ withinHours: 72 })  // the windows closing soonest, first
+await store.countDisputesDueWithin({ withinHours: 72 })
+await store.listOpenDisputes({ limit: 20 })            // unanswered, oldest first — no deadline needed
+await store.countOpenDisputes({})
 
 await store.findWebhookEventByGatewayEventId(eventId)  // one ledger row, with its error
 await store.listWebhookEvents({ status: 'failed' })
+await store.listWebhookEvents({ type: 'payment.refunded' })
+await store.listWebhookEventsForPayment('pay_1abc')    // a payload SUBSTRING scan — read below
 await store.webhookEventBreakdown({ status: 'failed' }) // grouped by provider + type
 
-await store.revenue({ from, to })                       // cents
+await store.recordAuditEvent({ action: 'payment.refunded', actor: 'ana@acme.com' })
+await store.listAuditEvents({ action: 'webhook.rejected', limit: 20 })
+await store.countAuditEvents({ action: 'webhook.rejected', createdAfter: cutoff })
+
+await store.revenue({ from, to })                       // cents, GROSS  — subtracts no refund
+await store.netRevenue({ from, to })                    // cents, NET    — minus refunded_amount
 await store.countActiveSubscriptions()
 await store.usageReport({ subscriptionId, from, to })
 ```
 
+The three payment filters — `externalReference`, `gatewayId`, `customerId` — are **exact**, never
+prefixes or substrings. They are join keys, and a substring match letting `order-4` return
+`order-42` is a wrong answer to a question about money. `listPayments({ externalReference })` differs
+from `findPaymentByExternalReference` in one way that matters: it returns **every** row carrying the
+reference rather than the newest, because an app that reuses a reference across retries is asking
+exactly "which one landed?".
+
+`listCustomersByGatewayIds` is the join a page of payments needs. A payment row carries `cus_…` and
+nothing else; the only thing tying that to an app user is `billing_customers.owner_type`/`owner_id`,
+written by `ensureCustomer`. Resolving it one row at a time would be a query per row of every page.
+
+`findPaymentByExternalReference` is the direction an app actually has at hand: a checkout page
+polls for `order-1042`, not for `pi_3Qx...`. It reads the `external_reference` column — the
+`externalReference` you set on the charge, as the gateway echoed it back — through
+`billing_payments_external_reference_idx`, and `listPayments` carries the same value on every item.
+It answers `null` for a payment whose gateway sent no reference, and for **every** row written
+before the column existed: nothing backfills a reference that was never stored.
+
 Two aggregates sit on top of those: `billingOverview(store, { from, to })` for the KPI row a
 dashboard renders, and [`billingHealth(store)`](/docs/payments/production#health-checks) for the
-three operational checks — both plain functions over the same store.
+six operational checks — both plain functions over the same store.
+
+<Callout type="warn" title="`listWebhookEventsForPayment` is a payload substring scan, and says so">
+`billing_payments` is a single mutable row upserted in place, so it holds a current state and no
+history at all. The ledger *does* have one — every delivery that moved the row is in it — but
+nothing links a ledger row to a payment, because the link lives inside the stored payload.
+
+So this read is a `CAST(payload AS TEXT) LIKE` scan, and all three of its costs are real: it is
+**unindexed**, it can **over-match** (a gateway id that happens to be a substring of some other
+identifier in an unrelated delivery), and it **cannot see** a delivery that never stored the id.
+It is bounded by `limit`, newest first. The dashboard's per-payment view reports
+`events.matchedBy: 'payload-substring'` on the wire and on screen rather than presenting the result
+as a history.
+
+It is offered anyway because the alternative on the table today is nothing at all. The honest fix
+is a `payment_gateway_id` column the **processor** fills on the way in — a write path this does not
+touch.
+</Callout>
+
+### The audit trail
+
+`billing_audit_events` records the things that happened to an install that no other table keeps.
+Each of them used to be a diagnostic and nothing else — a line in a log that has usually rotated
+away by the time somebody asks.
+
+| `AUDIT_ACTIONS` | Written when |
+| --- | --- |
+| `refund` → `'payment.refunded'` | someone issues a refund **from the console**. The payment row moves only when the gateway's webhook lands, and that row names no person |
+| `disputeResolved` → `'dispute.resolved'` | someone records how a dispute ended, on a gateway that will never close it itself |
+| `webhookRejected` → `'webhook.rejected'` | the webhook endpoint answered `400`. **The only trace a rejected delivery leaves anywhere**, since it is refused before a ledger row exists |
+
+`action` is a free string in the column, so an app can record its own. The three above are what this
+package writes.
+
+```ts
+await store.recordAuditEvent({
+  action: 'entitlement.granted',
+  actor: user.email,          // null/absent means "unattributed", never "the system"
+  subjectType: 'payment',
+  subjectId: 'pay_1abc',
+  amount: 4990,               // integer minor units. NEVER divide
+  currency: 'brl',
+  message: 'manual grant after support ticket #812',
+})
+```
+
+Two deliberate tolerances. `recordAuditEvent` returns `null` — and writes nothing — on an install
+whose table is not there yet: the audit row is *additional* to an action that already happened, and
+failing a refund the gateway already accepted because the note could not be filed is the worse
+outcome by a distance. And a refund the gateway **refused** writes nothing at all: an audit of
+refunds that never happened is an audit nobody can trust.
+
+`billing_audit_events` is a new **table**, not a new column, so it needs nothing from the post-ship
+`ALTER` phase — `CREATE TABLE IF NOT EXISTS` carries it to an existing install exactly as well as to
+a fresh one.
+
+### Writing a payment: absent is not `null`
+
+`savePayment` upserts by gateway id, and three of its fields — `externalReference`, `paidAt` and
+`refundedAmount` — are **leave-alone** when omitted. Passing `null` still clears them.
+
+That is not a convenience, it is a money bug that already happened. A refund, a chargeback and a
+dispute close all write this row and none of them carries a settlement date. `paidAt` was written
+through unconditionally, so every one of them set `paid_at = NULL` — and `revenue()` filters on that
+column. Closing a dispute **in your favour** therefore restored `status = 'paid'` with no date, and
+the recovered money left every windowed revenue figure, permanently and silently.
+
+```ts
+await store.savePayment({ gatewayId, provider, status: 'paid', amount, currency })
+// paid_at, external_reference and refunded_amount: untouched
+
+await store.savePayment({ gatewayId, provider, status: 'paid', amount, currency, paidAt: null })
+// paid_at: cleared, deliberately
+```
+
+<Callout type="warn" title="Rows an earlier version already damaged">
+An install that ran a won dispute close or a refund on an older version has rows sitting at
+`status = 'paid'` with `paid_at = NULL`, missing from every monthly revenue figure. The fix is
+backfilling those rows from the gateway — `payments:sync` now takes the gateway's own settlement
+date and never overwrites one already recorded, so running it over the affected customers repairs
+them.
+</Callout>
+
+### `refunded_amount` — what a partial refund needed
+
+A partial refund had nowhere to be recorded. The only two options were overwriting the status with
+`refunded` (writing the whole charge off — a R$10 refund on a R$100 charge erasing R$90 of revenue)
+or dropping the event, and the library dropped it.
+
+`billing_payments.refunded_amount` is integer minor units, the same units as `amount`, `BIGINT` for
+the same reason. **Net revenue for a row is `amount - refundedAmount`** — one subtraction, never a
+division. It is on `BillingPayment`, on the `withPayment()` mixin, and on `PaymentListItem`.
+
+`null` and `0` are different answers and the difference is load-bearing: `null` is "nothing has
+been said about refunds on this row", `0` asserts that nothing has gone back. A driver that sees no
+refunds array sends nothing, and the leave-alone rule keeps whatever is stored.
+
+It arrived after the table shipped, so it is applied as a guarded `ALTER` on the next boot — and
+like every other column added that way, it is **not backfilled**: rows written before it read
+`null`.
+
+### Disputes and their clock
+
+A chargeback is the one webhook that takes revenue **away**, and it comes with a deadline. The three
+dispute events — `payment.dispute_warning`, `payment.disputed`, `payment.dispute_closed` — each
+write a `billing_disputes` row **in addition** to what they already did: a warning still moves no
+money, a chargeback still moves the payment to `disputed`, and a won close still puts it back to
+`paid`.
+
+```ts
+// The work list: open disputes whose window closes in the next three days, soonest first.
+for (const dispute of await store.listDisputesDueWithin({ withinHours: 72 })) {
+  console.log(dispute.gatewayId, dispute.paymentGatewayId, dispute.evidenceDueBy)
+}
+```
+
+Three things worth knowing about that read:
+
+- **A deadline already past stays in the list.** The dispute is still open and still unanswered;
+  dropping it the moment it expires would make an alert go quiet at exactly the moment it became
+  true.
+- **A dispute with no `evidenceDueBy` is never in it.** Plenty of gateways send no deadline, and
+  `null` means "the gateway told us nothing", never "no hurry".
+- **It is ordered by the deadline, not by arrival.** Every other list in the store is newest-first;
+  this one is in the order the work has to be done.
+
+Disputes are keyed on the **dispute's** own gateway id. Where a gateway sends none — several do not
+— the processor keys on `dispute:<provider>:<payment gateway id>` instead, so the later events of the
+same dispute land on the same row rather than accumulating one row per webhook. The cost is that a
+payment disputed twice by such a gateway collapses into one row: a gateway that never names a
+dispute gives nothing to tell the two apart, and a row that could never be closed would alert on its
+deadline forever.
+
+`submitDisputeEvidence` on the driver is how you answer one, and nothing in this library calls it
+for you: whether to fight a dispute or refund it turns on the fee, the evidence your app holds, and
+the chargeback ratio that puts a merchant into a card network's monitoring programme. The table and
+the [health check](/docs/payments/cli#paymentshealth) exist so the decision is never made for you by
+a window closing.
+
+#### The deadline-free read
+
+`listDisputesDueWithin` is blind on most installs, because `evidence_due_by` can only be filled by a
+gateway that publishes a deadline — and several of the eighteen drivers here never receive one. On
+those, the deadline read answers zero forever while a chargeback sits open with the money already
+pulled back.
+
+```ts
+// Every unanswered dispute — warning, open, under_review — deadline or no deadline.
+for (const dispute of await store.listOpenDisputes({ limit: 20 })) {
+  console.log(dispute.gatewayId, dispute.status, dispute.createdAt)
+}
+await store.countOpenDisputes({})              // what the `open_disputes` health check alerts on
+```
+
+**Oldest first**, deliberately: with no deadline to sort on, "how long has nobody answered this" is
+the only priority signal left. `OPEN_DISPUTE_STATUSES` is exported (`['warning', 'open',
+'under_review']`) so an app filtering elsewhere uses the same definition of "still open".
+
+#### Closing one a gateway will never close
+
+Several gateways publish no lost-dispute event at all — Asaas is one, and its driver hardcodes
+`outcome: 'won'` when it closes a dispute. So a dispute that was **lost** sits at `open` forever,
+and every deadline check stays red until nobody reads it any more.
+
+`saveDispute` records the ending, and its absent-fields-are-left-alone rule means the deadline and
+the reason the *opening* event carried survive the write:
+
+```ts
+await store.saveDispute({
+  gatewayId: 'dp_1Nx4',
+  paymentGatewayId: 'pi_3Qx7',
+  provider: 'asaas',
+  status: 'lost',        // a FINISHED status — see the dashboard page for which ones qualify
+  outcome: 'lost',
+  closedAt: new Date(),
+})
+```
+
+Nothing is sent to a gateway by this. The decision was made at the bank; this writes down which way
+it went. The console does the same thing through
+[`POST <dashboard>/api/disputes/:gatewayId/resolve`](/docs/payments/dashboard#recording-how-a-dispute-ended),
+and additionally records **who** said so.
 
 ## The Billable model
 
@@ -89,6 +333,8 @@ user.billingProvider = 'woovi'
 await user.save()
 ```
 
+### Reusing a gateway customer
+
 Getting a gateway customer is so common that the library ships `ensureCustomer` — reuse
 the stored id or create at the gateway, whichever applies:
 
@@ -101,6 +347,41 @@ const customer = await ensureCustomer(driver, user.billingCustomerId, {
 user.billingCustomerId = customer.id
 await user.save()
 ```
+
+Pass the store and the owner, and it also records the mapping in `billing_customers`:
+
+```ts title="app/services/subscribe_service.ts"
+@inject()
+export default class SubscribeService {
+  constructor(private store: LucidBillingStore) {}
+
+  async run(user: User) {
+    const customer = await ensureCustomer(
+      payments.driver('pix'),
+      user.billingCustomerId,
+      { name: user.name, email: user.email, taxId: user.taxId },
+      { store: this.store, owner: { type: 'User', id: user.id } },
+    )
+    user.billingCustomerId = customer.id
+    await user.save()
+  }
+}
+```
+
+It records on the **reuse** branch too, so an id your app has held since before it recorded anything
+gets backfilled the next time the flow runs — no gateway call involved. And a later call that knows
+less (a reconcile holding only the gateway id) does not blank what an earlier one wrote.
+
+Reading it back:
+
+```ts
+await store.findCustomerByOwner('User', String(user.id), 'stripe')
+await store.findCustomerByGatewayId('cus_123')
+await store.listCustomers({ provider: 'stripe', limit: 50 })
+```
+
+`provider` is part of the owner lookup rather than an optional filter: one user may legitimately have
+a customer at every configured gateway, and answering without it would return an arbitrary one.
 
 ## Subscriptions
 
@@ -118,10 +399,10 @@ const subscription = await payments.driver('pix').createSubscription({
 })
 ```
 
-The processor listens for `subscription.created/updated/canceled` and
-`payment.succeeded/failed/refunded` and upserts the local rows automatically — trial
-windows, period ends, cancellations all land in `billing_subscriptions` without you writing
-a single sync query.
+The processor listens for `subscription.created/updated/canceled`,
+`payment.succeeded/failed/refunded/updated` and the three dispute events, and upserts the local rows
+automatically — trial windows, period ends, cancellations all land in `billing_subscriptions`
+without you writing a single sync query.
 
 ## Webhook processing — why it's safe to trust
 
@@ -144,8 +425,10 @@ redundancy. See [Webhooks → The lifecycle](/docs/payments/webhooks#the-lifecyc
 
 <Callout type="info" title="`externalReference` is your routing key">
 Sync keeps the *billing tables* correct, but your business logic needs *your* ids. The
-`externalReference` you set on the charge/subscription comes back on the webhook and routes
-the confirmation to your own `Payment`/`Subscription` rows. See
+`externalReference` you set on the charge/subscription comes back on the webhook, is **stored on
+the payment row** (`billing_payments.external_reference`, indexed), and routes the confirmation to
+your own `Payment`/`Subscription` rows. Look it up with
+`store.findPaymentByExternalReference(reference)`. See
 [Webhooks → externalReference](/docs/payments/webhooks#routing-payments-back-to-your-records-externalreference).
 </Callout>
 
@@ -156,9 +439,8 @@ a crash. `billing.dispatcher` chooses what carries it:
 
 | Value | Behaviour | Survives a restart |
 | --- | --- | --- |
-| `'auto'` (default) | durable when its provider is registered; else `@adonisjs/queue` when installed; else in-process | depends on what it picked |
+| `'auto'` (default) | durable when its provider is registered; otherwise in-process | depends on what it picked |
 | `'durable'` | a durable workflow run — throws when durable is missing | yes |
-| `'queue'` | an `@adonisjs/queue` job — throws when the queue is missing | yes |
 | `'in-process'` | inline, retrying in the background | no |
 
 The in-process fallback retries up to 5 times with exponential backoff (500 ms base, capped at
@@ -175,8 +457,8 @@ falls back to in-process and nothing says so. Setting `dispatcher: 'durable'` tu
 error, which is where you want to find out. See [Production](/docs/payments/production).
 </Callout>
 
-`billing.durable` is the legacy alias — `true` maps to `'durable'`, `false` to `'in-process'` — and
-cannot reach the queue backend.
+`billing.durable` is the legacy alias — `true` maps to `'durable'`, `false` to `'in-process'`.
+Prefer `dispatcher`, which names the backend instead of encoding it as a boolean.
 
 ## Usage-based billing — metered subscriptions
 
@@ -203,8 +485,8 @@ const report = await store.usageReport({
 
 `usageReport` filters by `subscriptionId`, `customerId`, `meter`, and a `from`/`to` window,
 aggregating `quantity` per meter — the input to a usage-based invoice or overage charge.
-The table and model ship in the published migration; the in-memory store mirrors it for
-tests.
+`billing_usage_events` is created with the rest of the schema, so there is nothing to run
+first; the in-memory store mirrors it for tests.
 
 ### Pricing a period — `meteredBill`
 
@@ -254,14 +536,19 @@ export default class BillingDashboardController {
 
 // overview.period  → { from, to }
 // overview.metrics → [
-//   { key: 'revenue',              label: 'Revenue (cents)',      value: 1_284_900 },
-//   { key: 'active_subscriptions', label: 'Active subscriptions', value: 212 },
+//   { key: 'revenue',              label: 'Revenue, gross (cents)',           value: 1_284_900 },
+//   { key: 'net_revenue',          label: 'Revenue, net of refunds (cents)', value: 1_231_400 },
+//   { key: 'active_subscriptions', label: 'Active subscriptions',            value: 212 },
 //   { key: 'meter:api_calls',      label: 'Usage · api_calls',    value: 481_230 },
 // ]
 ```
 
-Revenue is the sum of **paid** payments in the window, in cents — format at the edge, and never
-divide before you have finished adding. See [Money](/docs/payments/concepts/money).
+Revenue arrives **twice**, in cents. `revenue` is gross — the sum of `amount` on **paid** payments
+in the window, subtracting nothing — and `net_revenue` is the same rows minus what came back
+(`amount - COALESCE(refunded_amount, 0)`). A charge that was half refunded counts at full value in
+the first and at its net in the second, so a screen showing one of them has to say which. Format at
+the edge, and never divide before you have finished adding. See
+[Money](/docs/payments/concepts/money).
 
 ## The billing store
 
@@ -278,7 +565,7 @@ export default class UsageService {
 }
 ```
 
-The default is Lucid over the tables the configure command published — that is what makes the
+The default is Lucid over the tables the library creates for itself — that is what makes the
 billing layer work with no configuration at all. Name it only when you want different models behind
 it:
 
@@ -288,7 +575,9 @@ import { billingStores, defineConfig } from '@adonis-agora/payments'
 export default defineConfig({
   // ...
   billing: {
-    store: billingStores.lucid({ models: { usageEventModel: MyUsageEvent } }),
+    store: billingStores.lucid({
+      models: { usageEventModel: MyUsageEvent, disputeModel: MyDispute },
+    }),
   },
 })
 ```
@@ -304,6 +593,10 @@ import { getBillingStore } from '@adonis-agora/payments/services/main'
 
 const store = getBillingStore()
 ```
+
+`getBillingStore()` throws until the provider's `booted()` hook has run, which makes it unsafe in a
+constructor or a field initializer. Use `lazyBillingStore()` there — see
+[`services/main`](/docs/payments/api-reference#servicesmain--the-singletons-eager-and-lazy).
 </Callout>
 
 ## Mixins
@@ -314,6 +607,31 @@ mixins you can stack on other models:
 - `withSubscription` — a model that owns recurring subscriptions.
 - `withPayment` — a model that owns one-off payments.
 
-Each exposes the corresponding billing-store methods off the model instance, so most
-billing code reads as `user.charge(...)`, `user.subscribe(...)` rather than service-layer
-calls.
+Each adds **columns only** — Lucid `@column` declarations and their types. No methods: there is no
+`user.charge(...)` or `user.subscribe(...)`.
+
+| Mixin | Columns it declares |
+| --- | --- |
+| `withBillable()` | `billingCustomerId`, `billingProvider`, `billingTrialEndsAt` |
+| `withSubscription()` | `gatewayId`, `provider`, `status`, `planId`, `customerId`, `trialEndsAt`, `endsAt`, `payload`, `createdAt`, `updatedAt` |
+| `withPayment()` | `gatewayId`, `provider`, `status`, `amount`, `currency`, `customerId`, `subscriptionId`, `externalReference`, `refundedAmount`, `payload`, `createdAt`, `updatedAt`, `paidAt` |
+
+Charging is not on the model. It goes through the manager and the billing store:
+
+```ts
+import { getBillingStore, getPayments } from '@adonis-agora/payments/services/main'
+
+// The model holds the gateway's customer id — the mixin's contribution.
+// The manager resolves a driver; the driver charges.
+const payment = await getPayments().driver('pix').charge({
+  customerId: user.billingCustomerId!,
+  amount: 4990, // integer cents
+  externalReference: order.id,
+})
+
+// Reading and writing the billing rows goes through the store.
+const store = getBillingStore()
+```
+
+See [The billing store](#the-billing-store) above and
+[Getting started → Make your first charge](/docs/payments/getting-started).

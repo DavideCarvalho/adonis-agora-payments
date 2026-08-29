@@ -1,0 +1,263 @@
+---
+title: Mercado Pago
+description: Pix, boleto and card across seven Latin American countries — multi-currency, decimal amounts, and notifications that carry an id and nothing else.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+The largest gateway in Latin America. One API, seven country sites (BR, AR, MX, CL, CO,
+PE, UY), so unlike the BRL-only Brazilian drivers this one is multi-currency and takes a
+required `currency`.
+
+- **Methods**: pix, boleto, credit_card, debit_card. `undefined` is deliberately **not**
+  supported: Mercado Pago requires a `payment_method_id` on every payment, so "let the
+  payer choose" is Checkout Pro (`createCheckout`), not a charge. Reach it by naming the
+  provider — `payments.driver('mercadopago').createCheckout(…)`.
+- **Setup**: `payments.mercadopago({ accessToken, currency, webhookSecret })` —
+  `MERCADOPAGO_ACCESS_TOKEN`, `MERCADOPAGO_WEBHOOK_SECRET`. `currency` is **required**
+  (lowercase ISO 4217) and the driver refuses to boot without one; a gateway that bills in
+  seven currencies has no safe default. There is no sandbox host — you switch environments
+  by switching credentials.
+- **Money**: Mercado Pago takes `transaction_amount` as a **decimal**, so the driver
+  converts at the boundary. The currency travels with the conversion: `clp` has no cents,
+  and dividing a Chilean amount by 100 bills 1% of it — which Mercado Pago accepts without
+  complaint. `cop` is treated as a two-decimal currency because ISO 4217 says so, even
+  though Colombian prices are quoted in whole pesos; verify a COP charge in sandbox before
+  trusting it.
+- **`idempotencyKey`**: sent as the `X-Idempotency-Key` **header** on `charge()` and
+  `refund()` — the two endpoints Mercado Pago documents (and requires) it on. It is a
+  header, not a body field: a key written into the payload deduplicates nothing. When you
+  don't pass one the driver generates a UUID to satisfy the API, and your retry is then a
+  second charge; pass your own key if you want the protection. On `createCustomer`,
+  `createSubscription` and `updateSubscription` an `idempotencyKey` **throws** — see
+  [What it refuses](#what-it-refuses).
+- **Webhooks**: `x-signature` (`ts=…,v1=…`), an HMAC-SHA256 over
+  `id:<data.id>;request-id:<x-request-id>;ts:<ts>;` keyed by the *secret signature* from
+  Your integrations → Webhooks. Absent parts are dropped from the manifest, and the docs
+  ask you to lowercase an alphanumeric `data.id`, so the driver accepts either spelling.
+  Enforced strictly, and `webhookSecret` is required — without it the app refuses to boot rather
+  than accepting anything. For local development without a dashboard webhook, name the provider in
+  `allowUnverifiedWebhooks`.
+- **`externalReference`**: sent as Mercado Pago's `external_reference` — on the payment,
+  on the Checkout Pro preference (from where the gateway copies it onto the resulting
+  payment) and on the preapproval. Mercado Pago restricts it to **64 characters of letters,
+  numbers, hyphens and underscores**; the driver refuses anything else up front rather than
+  letting the gateway return an opaque 400.
+- **Subscriptions**: preapprovals. Pass `amount` (plus `metadata.backUrl`) for a
+  subscription with an inline recurrence, or omit `amount` and pass an existing
+  `preapproval_plan_id` as `planId` and let the plan set the price. `updateSubscription`
+  really updates the gateway (`PUT /preapproval/{id}` with `auto_recurring`), and
+  `description` maps to the payer-visible `reason`.
+- **Invoices**: none for a customer. `listInvoices` throws — see below.
+
+```ts title="app/services/checkout_service.ts"
+const payment = await payments.driver('pix').charge({
+  amount: 1990,
+  method: 'pix',
+  externalReference: 'payment_local_1',
+  idempotencyKey: crypto.randomUUID(),
+  customer: { name: 'Jane Doe', email: 'jane@example.com', taxId: '123.456.789-00' },
+})
+
+payment.pixCode // the BR Code the payer copies
+payment.pixQrCodeImage // base64 PNG
+payment.hostedUrl // Mercado Pago's own payment page
+```
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`webhookSecret` is not configured (env fallback `MERCADOPAGO_WEBHOOK_SECRET`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/mercadopago` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
+## The notification carries an id and nothing else
+
+This is the single most important thing to know about Mercado Pago webhooks. A
+notification looks like this, in full:
+
+```json
+{ "id": 12345, "type": "payment", "action": "payment.updated", "data": { "id": "999999999" } }
+```
+
+No amount. No status. No `external_reference`. Mercado Pago's own docs tell you to fetch
+the resource afterwards, and there is no webhook variant that carries the payment.
+
+So `parseWebhook` verifies the `x-signature` HMAC and then **fetches the resource**:
+`GET /v1/payments/{id}` for the `payment` topic, `GET /preapproval/{id}` for
+`subscription_preapproval`, and for `topic_chargebacks_wh` the payment named by
+`data.payment_id` plus the case itself (see [Chargebacks](#chargebacks-and-mediations)).
+What you get back is a fully populated event — status, amount, currency and your
+`externalReference`:
+
+```ts
+// event.type === 'payment.succeeded'
+// event.data.externalReference === 'payment_local_1'
+```
+
+One extra API call per notification is Mercado Pago's design, not an inefficiency of the
+driver; the mounted `/payments/webhook/mercadopago` route pays it for you. **A failed fetch
+throws**, so the route answers 400 and Mercado Pago retries — reporting a status the
+gateway did not confirm would be worse than a retry.
+
+The one exception is `subscription_authorized_payment`, a subscription's recurring charge.
+It is read from `/authorized_payments/{id}`, whose response shape this driver has not
+verified against the reference, so it is left as `payment.updated` carrying the id rather
+than mapped from guessed field names. Fetch it yourself if you need the charge's status.
+
+<Callout type="warn" title="The signature is computed over the query string">
+Mercado Pago builds the manifest from the `data.id` **query parameter**, and the driver
+contract passes only the body and the headers. The driver reads the same id from the body,
+where Mercado Pago also puts it. Should the two ever disagree for a notification type, the
+signature check will reject a genuine webhook.
+</Callout>
+
+## Chargebacks and mediations
+
+Mercado Pago says everything about a dispute through the **payment**, not through the
+notification: the topic tells you a case changed, and `status` + `status_detail` say what
+that means.
+
+| Payment status | `status_detail` | Normalized | The money |
+| --- | --- | --- | --- |
+| `in_mediation` | — | `payment.disputed` | a claim opened inside Mercado Pago |
+| `charged_back` | `in_process` | `payment.disputed` | chargeback received, awaiting the decision |
+| `charged_back` | `settled` | `payment.dispute_closed` (`lost`) | gone — "decision against the seller" |
+| `charged_back` | `reimbursed` | `payment.dispute_closed` (`won`) | returned to the seller's account |
+
+`settled` and `reimbursed` are Mercado Pago's own words for the outcome — *"decision against
+the seller, money withdrawn from the seller's account"* and *"decision in favor of the
+seller, money refunded to the seller's account"*. Reading them is what turns a dispute that
+ends into one that ends **in the ledger**: a won dispute left sitting at `disputed` writes
+off money that came back, because `revenue()` sums rows that say `paid`. A `charged_back`
+payment whose `status_detail` this driver does not recognize stays `payment.disputed` rather
+than closing on a guess.
+
+`charged_back` used to arrive as `payment.refunded`, which says the seller gave the money
+back voluntarily — indistinguishable from a real refund, and the row read `refunded`
+either way.
+
+Disputes also arrive on their own webhook topic, **`topic_chargebacks_wh`**, which the
+driver handles:
+
+```jsonc
+{
+  "type": "topic_chargebacks_wh",
+  "actions": ["changed_case_status"],
+  "data": { "id": "233000061680860000", "payment_id": "999999999", "checkout": "cho-pro" }
+}
+```
+
+`data.id` there is the **chargeback case** id (`GET /v1/chargebacks/{id}`), *not* a payment
+id — so the driver fetches the payment named by `data.payment_id` and files the dispute
+against that. A notification with no `payment_id` stays `payment.updated` rather than
+writing a row under a case id nothing reconciles. Mercado Pago sends one action string for
+opening *and* for every later status change, so what the event means is decided by the
+payment's status, not by the notification.
+
+### The deadline is on the case, so the chargeback topic fetches it
+
+On `topic_chargebacks_wh` — and only there, because it is the only notification that names a
+case — the driver makes a **second** call, `GET /v1/chargebacks/{data.id}`, for the one field
+that makes a Mercado Pago dispute actionable:
+
+| Chargeback field | Normalized |
+| --- | --- |
+| `date_documentation_deadline` | `actionableUntil` — the date evidence has to be uploaded by |
+| `reason` | `reason` |
+| the case id | `disputeId` |
+
+`date_documentation_deadline` is `null` whenever `documentation_required` is false: there is
+nothing to defend, so there is no clock, and the event carries no `actionableUntil`.
+
+That second call **fails soft**, unlike the payment fetch. By the time it runs the money
+question is already answered by the payment's status; throwing would turn a chargeback the
+driver read correctly into a 400 and a redelivery. A missing deadline costs an operator
+context, a dropped chargeback costs the row.
+
+### No pre-dispute warning exists here
+
+Mercado Pago publishes no TC40/SAFE-style alert and no inquiry event: `topic_chargebacks_wh`
+fires on a case that already exists, so **the first thing you hear is the chargeback**. There
+is nothing for this driver to map onto `payment.dispute_warning`, and it does not invent one.
+
+The nearest thing is `topic_claims_integration_wh` ("creation of refunds and claims"), whose
+`data.id` is a **claim** id with no payment beside it — nothing to file a warning against —
+so it is left unmapped and reaches your handlers under its own name.
+
+## Authorized, not captured
+
+`status: "authorized"` (`status_detail: "pending_capture"`) maps to **`authorized`**: the
+card is held and nothing has moved. It used to collapse into `pending`, which understates a
+hold the issuer already granted — and `paid` would have granted access against money that
+evaporates if the authorization is never captured. The webhook for it is `payment.updated`;
+the contract has no authorization event.
+
+## Paused subscriptions
+
+A preapproval with `status: "paused"` maps to **`paused`** — billing has stopped, the
+subscription is alive and can be reactivated by PUT-ing `status: "authorized"`, and it must
+**not** entitle the payer meanwhile. It used to map to `past_due`, which says a charge
+failed; nothing failed, Mercado Pago was told to stop.
+
+## What it refuses
+
+- **`listInvoices`** throws. `GET /authorized_payments/search` lists the charges of a
+  *subscription* and filters by `payer_id`, which is a Mercado Pago user id — a different
+  identifier space from the `/v1/customers` id. Returning an empty array would say "this
+  customer has no invoices", which is not something the API told us.
+- **`cancelSubscription({ atPeriodEnd: true })`** throws. A preapproval cancel is immediate
+  and, in Mercado Pago's own words, irreversible. Pause it (`status: "paused"`) and cancel
+  at the end of the period, or keep the grace period on your own record.
+- **A subscription `startDate` without an end date** throws. Mercado Pago documents that
+  `start_date` "only works together with the `end_date` parameter" — sent alone it is
+  silently ignored, and a subscription starting on a date nobody chose is worse than an
+  error. Pass `metadata.endDate` alongside it.
+- **A card charge without the brand** throws. Mercado Pago identifies a card payment by its
+  brand (`visa`, `master`, `debvisa`), which the frontend tokenizer returns next to the
+  token; pass it as `metadata.paymentMethodId`.
+- **A charge with no method** throws, pointing you at `createCheckout`.
+- **An `idempotencyKey` on `createCustomer`, `createSubscription` or `updateSubscription`**
+  throws. `X-Idempotency-Key` is documented — and mandatory — on `POST /v1/payments` and
+  `POST /v1/payments/{id}/refunds`; the reference for `/v1/customers` and `/preapproval`
+  lists `Authorization` and nothing else. Sending it there anyway would be harmless and
+  unspecified, which is the worst combination: you would believe your retry is safe. Look a
+  preapproval up by `external_reference` before you retry instead.
+
+## Gaps and things the docs would not settle
+
+- The reference marks `transaction_amount`, `payment_method_id` and `token` as *optional*
+  while its own error table says each "can't be null". Requiredness here follows the errors
+  and the integration guides, not the schema flags.
+- `payment_method_id` for Pix is `Pix` in the API reference's enum and `pix` in every
+  working guide. The driver sends the lowercase form.
+- The payer address sits at `additional_info.payer.address` in the reference and directly
+  under `payer` in the Pix and boleto guides. The driver follows the guides
+  (`metadata.address` → `payer.address`), because those are the examples with a working
+  end-to-end flow.
+- `identification.type` is inferred as CPF/CNPJ from the digit count, which only holds for
+  Brazil. For AR/MX/CL/CO/PE/UY pass the document type yourself.
+- The set of `action` values is not documented — only `payment.created` appears anywhere —
+  so the driver keys off the notification's `type`, which is.
+- The docs never promise that a chargeback also reaches the `payment` topic; they only
+  document it on `topic_chargebacks_wh`. The driver handles both, so subscribe to both.
+- **Whether the funds leave your account when the chargeback opens, or only when it
+  settles, is not stated.** Mercado Pago describes `settled` as the withdrawal, while the
+  payment's top-level status is already `charged_back` from the opening and the guides
+  describe the amount as retained from then on. Because the reference will not settle it,
+  `charged_back`/`in_process` keeps the `payment.disputed` it has always had rather than
+  being downgraded to a warning on a guess. The same goes for `in_mediation`, which the
+  reference describes only as "users have initiated a dispute".
+- `subscription_authorized_payment` (a subscription's recurring charge) is still left as
+  `payment.updated`: it is read from `/authorized_payments/{id}`, whose response shape this
+  driver has not verified against the reference.
+
+<Callout type="warn" title="Not yet exercised against a live account">
+This driver was written against Mercado Pago's published API reference and is covered by
+unit tests, but it has never run against a real Mercado Pago account. Put it through
+sandbox with your own credentials before it takes real money.
+</Callout>

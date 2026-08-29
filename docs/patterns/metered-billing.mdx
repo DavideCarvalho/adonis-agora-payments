@@ -137,7 +137,8 @@ result and only the failure re-executes.
 The in-memory store mirrors the real one, so the whole chain runs with no database:
 
 ```ts title="tests/unit/metered_bill.spec.ts"
-import { InMemoryBillingStore, meteredBillForSubscription } from '@adonis-agora/payments/testing'
+import { meteredBillForSubscription } from '@adonis-agora/payments'
+import { InMemoryBillingStore } from '@adonis-agora/payments/testing'
 
 const store = new InMemoryBillingStore()
 await store.recordUsage({ subscriptionId: 'sub_1', meter: 'api_calls', quantity: 1400 })

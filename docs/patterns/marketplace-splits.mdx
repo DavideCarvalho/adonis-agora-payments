@@ -11,7 +11,21 @@ When the money does not all belong to you — a marketplace, a platform taking a
 paying a venue — the gateway can divide the charge at settlement instead of you moving money
 afterwards.
 
-<Tabs items={['Asaas', 'Woovi']}>
+**Two drivers implement `split` on the charge: Asaas and Pagar.me.** Woovi does it differently, with
+subaccounts created ahead of time. Four more — Adyen, Mollie, Razorpay and Square — accept the field
+in the type and **throw a named error** rather than approximating it, because their own split models
+are not the shape `split` describes:
+
+```text
+[payments] Square does not split a payment across recipients. `app_fee_money` takes a single
+application fee for an OAuth-connected seller, which is not the same thing; pass it as
+`metadata.appFeeAmount` if that is what you want.
+```
+
+That is the honest failure. A `split` silently dropped is a marketplace that keeps the seller's
+money.
+
+<Tabs items={['Asaas', 'Pagar.me', 'Woovi']}>
 <Tab value="Asaas">
 
 Pass `split` on the charge. Each entry names a wallet and its share, by percent, by fixed amount, or
@@ -37,6 +51,35 @@ Whatever is not split stays with the account that owns the API key. The split ap
 so it flows through to a subscription's generated charges too.
 
 </Tab>
+<Tab value="Pagar.me">
+
+The same `split` input, mapped onto Pagar.me's split rules — `walletId` is the **recipient id**:
+
+```ts title="app/services/checkout_service.ts"
+const payment = await getPayments().driver('pix').charge({
+  customerId: buyer.billingCustomerId!,
+  amount: 10_000,
+  description: `Pedido ${order.id}`,
+  externalReference: order.id,
+  split: [
+    { walletId: seller.pagarmeRecipientId, percentualValue: 90 },   // → type: 'percentage'
+    { walletId: partner.pagarmeRecipientId, fixedValue: 500 },      // → type: 'flat', in centavos
+  ],
+})
+```
+
+**One rule carries exactly one type.** An entry that sets both `percentualValue` and `fixedValue`
+has no honest mapping, so the driver refuses rather than silently picking one:
+
+```text
+[payments] Pagar.me split rules are either `percentage` or `flat`, never both. Wallet "rp_123"
+set percentualValue and fixedValue — pick one.
+```
+
+An entry with neither is refused the same way. Pagar.me is centavos throughout, so a `flat` share
+needs no conversion — unlike Asaas, where the driver converts to the decimal the API expects.
+
+</Tab>
 <Tab value="Woovi">
 
 Woovi models recipients as **subaccounts**, created ahead of time and keyed by a Pix key rather than
@@ -58,11 +101,12 @@ await seller.save()
 
 ```ts
 const existing = await driver.findSubAccount(seller.wooviSubAccountId)
+const all = await driver.listSubAccounts()
 ```
 
-The cast is deliberate: `createSubAccount`/`findSubAccount` are Woovi-specific and sit outside the
-shared `PaymentsDriver` contract, because no other gateway has the concept. That is the honest way to
-reach a gateway feature the abstraction does not cover — see
+The cast is deliberate: `createSubAccount`, `findSubAccount` and `listSubAccounts` are
+Woovi-specific and sit outside the shared `PaymentsDriver` contract, because no other gateway has the
+concept. That is the honest way to reach a gateway feature the abstraction does not cover — see
 [Custom providers](/docs/payments/custom-providers) for the other options.
 
 </Tab>
@@ -83,7 +127,8 @@ export function splitAmount(total: Money, shares: number[]): Money[] {
   return parts
 }
 
-splitAmount(1000, [0.333, 0.333, 0.334])   // [334, 333, 333] — sums to exactly 1000
+splitAmount(1000, [0.333, 0.333, 0.334])   // [333, 333, 334] — sums to exactly 1000
+splitAmount(1000, [1 / 3, 1 / 3, 1 / 3])   // [334, 333, 333] — the remainder lands on the first
 ```
 
 <Callout type="warn" title="Never round each share independently">

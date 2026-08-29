@@ -1,0 +1,139 @@
+---
+title: Providers
+description: The gateways with a built-in driver — what each one accepts, how its webhooks are authenticated, what externalReference maps to, and which operations it simply does not expose.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { Cards, Card } from 'fumadocs-ui/components/card';
+
+Every built-in driver speaks the same `PaymentsDriver` contract — `charge`, `refund`,
+`createSubscription`, `parseWebhook`, … — so your services never learn a gateway's shape.
+What the drivers cannot do is make the gateways identical: one settles cards worldwide,
+another only moves Pix; one deduplicates on a header, another on a field in the body; one
+has no subscription-update endpoint at all.
+
+These pages are the per-gateway cheat sheet for exactly those differences.
+
+## What each one does
+
+{/* providers:table:start — generated from the drivers; `driver_registry.spec.ts` fails if it drifts */}
+
+| Gateway | Methods | Charge | Refunds | Subscriptions | Invoices | Disputes | Webhook auth |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [AbacatePay](/docs/payments/providers/abacate) | pix, boleto, any | server | ✅ | ✅ | ✅ | — | ✅ |
+| [Adyen](/docs/payments/providers/adyen) | credit card, any | server | ✅ | — | — | — | ✅ |
+| [Asaas](/docs/payments/providers/asaas) | pix, boleto, credit card, debit card, any | server | ✅ | ✅ | ✅ | — | ✅ |
+| [Dodo Payments](/docs/payments/providers/dodo) | credit card, debit card, pix, upi, wallet, bank transfer, bank debit, bnpl, any | server | ✅ | ✅ | ✅ | — | ✅ |
+| [Efí](/docs/payments/providers/efi) | pix | server | ✅ | — | — | — | — |
+| [InfinitePay](/docs/payments/providers/infinitepay) | pix, credit card | checkout only | — | — | — | — | — |
+| [Lemon Squeezy](/docs/payments/providers/lemonsqueezy) | any | checkout only | ✅ | ✅ | ✅ | — | ✅ |
+| [Mercado Pago](/docs/payments/providers/mercadopago) | pix, boleto, credit card, debit card | server | ✅ | ✅ | — | — | ✅ |
+| [Mollie](/docs/payments/providers/mollie) | credit card, bank transfer, bank debit, wallet, bnpl, voucher, any | server | ✅ | ✅ | — | — | ✅ |
+| [Paddle](/docs/payments/providers/paddle) | any | checkout only | ✅ | ✅ | ✅ | — | ✅ |
+| [Pagar.me](/docs/payments/providers/pagarme) | pix, boleto, credit card, debit card | server | ✅ | ✅ | ✅ | — | ✅ |
+| [PagBank](/docs/payments/providers/pagbank) | pix, credit card, debit card, boleto | server | ✅ | — | — | — | ✅ |
+| [PayPal](/docs/payments/providers/paypal) | wallet, any | server | ✅ | ✅ | — | — | ✅ |
+| [Polar](/docs/payments/providers/polar) | credit card, any | checkout only | ✅ | ✅ | ✅ | — | ✅ |
+| [Razorpay](/docs/payments/providers/razorpay) | any | server | ✅ | ✅ | ✅ | — | ✅ |
+| [Square](/docs/payments/providers/square) | credit card, debit card, wallet, bank debit, bnpl, any | server | ✅ | ✅ | ✅ | — | ✅ |
+| [Stripe](/docs/payments/providers/stripe) | pix, credit card, boleto, any | server | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [Woovi (OpenPix)](/docs/payments/providers/woovi) | pix, any | server | — | ✅ | — | — | ✅ |
+
+{/* providers:table:end */}
+
+"Any" means the gateway decides at its own checkout — set `method` on the charge only when the
+driver lists a specific one. A dash is not a missing feature to add later: it is an endpoint the
+gateway does not expose, and the driver refuses the call rather than reporting a change that never
+happened.
+
+**Charge** is the column to read first. `server` means you can create a payment from your own
+backend; `checkout only` means the gateway collects through its own hosted page and `charge()`
+throws — every other column on that row is reached through `createCheckout()` instead.
+
+## When it is a dash
+
+A refusal is not a dead end. Each gap has a way through it that does not involve forking the
+driver, and the error the driver throws names it — these are the same routes, collected:
+
+| Gap | Gateways | What happens if you call it | What to do instead |
+| --- | --- | --- | --- |
+| **Server-side charge** | InfinitePay, Lemon Squeezy, Paddle, Polar | `charge()` throws — as merchants of record (or, for InfinitePay, a payment-link product) they collect through their own hosted page | `createCheckout()` and redirect the payer; the payment still reaches you as a webhook, and the billing tables fill from it the same way. There is no server-side charge for `invoice: true` to attach to |
+| **Refunds** | InfinitePay, Woovi | `refund()` throws — neither gateway exposes one | Move the money out-of-band (a Pix transfer, the gateway's own app), then record it and revoke access in your tables: no webhook is coming. See [Recovering](/docs/payments/patterns/recovering) |
+| **Subscriptions** | Adyen, Efí, InfinitePay, PagBank | `createSubscription()` throws, naming that gateway's reason | Charge each cycle from your own scheduler — Adyen tokenizes (`storePaymentMethod: true`, then `charge({ paymentMethodId })`); or name a different provider for that one call. See [Subscriptions](/docs/payments/patterns/subscriptions) |
+| **Invoices** | Adyen, Efí, InfinitePay, Mercado Pago, Mollie, PagBank, PayPal, Woovi | listing the gateway's invoices throws — most have no invoice resource at all, and Mollie's *is* one, for the fees it bills **you** | Nothing to work around — this column is about the gateway's own invoice resource, not about emitting one. `invoice: true` on a charge goes through the configured **invoice provider**, and works on every gateway that charges server-side — dash in this column included. See [Invoices](/docs/payments/invoices) |
+| **Disputes** | every gateway but Stripe | `findDispute` / `submitDisputeEvidence` are omitted from the driver — so the call site writes `?.` — except Adyen, which defines both and throws with the reason | No dispute events will arrive — a chargeback reaches you as an email from the gateway. Reconcile from its console, and keep the money-out path (revoke, refund) independent of the dispute one. See [Disputes](/docs/payments/patterns/disputes) |
+| **Webhook auth** | Efí, InfinitePay | nothing — these gateways sign nothing, so the driver declares `'unsupported'` and there is no boot refusal to satisfy | Put the authenticity in front of the app: an IP allowlist, mTLS, or a secret in the path. The endpoint is otherwise open to anyone who knows the URL. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal) |
+
+<Callout title="The gateway is a per-call argument, not a deployment decision">
+`getPayments().driver('stripe')` names a provider for one call, and the routing map binds a
+*method* to a provider — so "this gateway cannot do subscriptions" costs you one argument, not a
+migration. Keeping Pix on Asaas and cards on Stripe is the ordinary configuration, not an advanced
+one.
+
+What that does **not** do is move a payment between gateways after the fact: a subscription created
+at one gateway is updated and cancelled at that same gateway, and its webhooks arrive from there.
+</Callout>
+
+If none of the routes above fit, the driver contract is the last one: extend a bundled driver or
+write your own as a config factory — [Custom providers](/docs/payments/custom-providers).
+
+## Picking one
+
+Three questions decide it, in this order:
+
+1. **Which methods must you accept?** A driver declares `supportedMethods`, and routing a
+   method a gateway does not support fails at the manager rather than at the gateway. A
+   Pix-only provider will refuse a card before a request leaves your process.
+2. **Who is the merchant of record?** Paddle, Lemon Squeezy, Polar and Dodo Payments sell
+   on your behalf and handle sales tax; Stripe, Adyen and the Brazilian gateways leave that
+   to you. This is a business decision the library cannot make and does not model — it only
+   changes which driver you configure.
+3. **What does it not do?** The gap that hurts is never the feature list; it is the
+   operation the API does not expose. Those are named on each page, and the driver throws
+   rather than reporting a change the gateway never saw.
+
+<Callout title="Routing picks the provider AND the method">
+`payments.driver('pix')` resolves which gateway handles Pix in your config, and hands back
+that driver **bound to `pix`** — so a charge made through it is created as Pix without
+repeating yourself. An explicit `method` on the charge still wins; routing is a default, not
+an override.
+
+It did not always. Until recently the method reached the driver only when the caller set it
+twice, so a charge routed as Pix was created with whatever the gateway's dashboard defaults
+are — and could come back a card. If you have `method: 'pix'` on charges that already route
+by method, it is now redundant rather than load-bearing.
+
+`driver()` with **no** argument consults the routing map too. One method routed to the default
+provider is bound; several is ambiguous, and `charge()`/`createSubscription()` refuse rather than
+guessing which one you meant. See [Routing](/docs/payments/concepts/routing).
+</Callout>
+
+<Callout type="warn" title="Every one of these needs its webhook credential before it boots">
+Sixteen of the eighteen can authenticate a webhook delivery, and each declares whether it was given
+what it needs to. A driver that **can** verify and has nothing configured refuses the boot: an empty
+credential slot used to mean "skip verification", which made
+`POST /payments/webhook/<provider>` accept any body anyone posted to it.
+
+Efí and InfinitePay are the two exceptions — their gateways sign nothing at all, so they declare
+`'unsupported'` and there is no credential to forget. Each page names the config key and the env
+fallback; [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal)
+has the opt-out for a deployment that terminates verification upstream.
+</Callout>
+
+## Nothing here is region-locked
+
+The contract has no notion of a country: money is an integer in the currency's smallest
+unit, a payment method is a name a driver either supports or refuses, and a webhook is a
+signature to verify and an event to normalize. A euro-area card charge and a Brazilian Pix
+charge differ in which driver you route to — not in the code that calls it.
+
+Multi-currency gateways take a **required** `currency`; the single-currency ones take no
+such option, because there is nothing to choose. See [Money](/docs/payments/concepts/money).
+
+## Adding one that is not here
+
+A driver is a config factory, not a fork: implement `PaymentsDriver`, hand it to
+`defineConfig`, and every part of the library — routing, the billing layer, the webhook
+ledger, the dashboard — works with it unchanged. See
+[Custom providers](/docs/payments/custom-providers).

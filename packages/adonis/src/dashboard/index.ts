@@ -8,9 +8,45 @@ export type {
   ResolvedPaymentsDashboardConfig,
 } from './define_config.js';
 
-export { overview, payments, webhookEvents, ok } from './handlers.js';
-export { PAYMENT_STATUSES, WEBHOOK_EVENT_STATUSES } from './handlers.js';
-export type { ApiRequest, ApiResponse, Deps } from './handlers.js';
+export {
+  overview,
+  health,
+  payments,
+  paymentDetail,
+  customers,
+  auditEvents,
+  disputes,
+  subscriptions,
+  webhookEvents,
+  providers,
+  refundPayment,
+  resolveDispute,
+  retryWebhookEvent,
+  ok,
+} from './handlers.js';
+export {
+  PAYMENT_STATUSES,
+  SUBSCRIPTION_STATUSES,
+  SUBSCRIPTION_DEFAULT_STATUS,
+  WEBHOOK_EVENT_STATUSES,
+  DISPUTE_STATUSES,
+  DISPUTE_RESOLUTION_STATUSES,
+  AUDIT_ACTION_FILTERS,
+  DISPUTE_DEFAULT_DUE_WITHIN_HOURS,
+  PROVIDER_SCAN_CAP,
+} from './handlers.js';
+export type { ApiRequest, ApiResponse, DashboardActions, Deps } from './handlers.js';
+
+// The two WRITE actions (refund + webhook retry), as framework-light ports.
+export { createRefundAction, createReplayAction } from './actions.js';
+export type {
+  RefundAction,
+  RefundCapableDriver,
+  RefundOutcome,
+  ReplayAction,
+  ReplayOutcome,
+  ReplayableWebhookEvent,
+} from './actions.js';
 
 export { resolvePeriod, PERIOD_PRESETS, DEFAULT_PERIOD } from './period.js';
 export type { Period, PeriodPreset } from './period.js';

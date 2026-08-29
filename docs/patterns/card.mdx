@@ -27,7 +27,7 @@ await driver.charge({ amount: 4990, card: { token: cardTokenFromFrontend } })
 ## The shape that is the same everywhere
 
 ```ts title="app/services/checkout_service.ts"
-import { getPayments } from '@adonis-agora/payments'
+import { getPayments } from '@adonis-agora/payments/services/main'
 
 export async function chargeCard(user: User, plan: Plan, cardToken: string, ip: string) {
   const driver = getPayments().driver('credit_card')
@@ -115,8 +115,8 @@ normalize to `pending` either. Confirm the intent in your Stripe.js flow, and le
 the same rule as everywhere else in this library; cards just make it easier to get wrong.
 </Callout>
 
-**Currency** defaults to the driver's configured currency (`brl` unless you set it), so pass
-`currency` explicitly if this gateway serves more than one.
+**Currency** falls back to the driver's configured currency, which Stripe requires you to set — pass
+`currency` on the charge when a single app bills in more than one.
 
 </Tab>
 <Tab value="Asaas">
@@ -221,7 +221,7 @@ config:
 export default defineConfig({
   default: 'asaas',
   providers: {
-    stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY') }),
+    stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY'), currency: 'brl' }),
     asaas: payments.asaas({ apiKey: env.get('ASAAS_API_KEY') }),
     woovi: payments.woovi({ appId: env.get('WOOVI_APP_ID') }),
   },
@@ -238,9 +238,26 @@ export default defineConfig({
 getPayments().driver('credit_card')   // → whichever provider methods.credit_card names
 ```
 
-**Two of the four gateways have no cards at all.** Woovi/OpenPix is Pix-only, and AbacatePay does
-Pix and boleto. Pointing `credit_card` at either is a config error, and the manager catches it when
-you ask for the driver — before a single byte reaches the gateway:
+### Which gateways `credit_card` can be routed to
+
+Cards are the majority now. **Eleven of the eighteen drivers name `credit_card` in
+`supportedMethods`** and can be routed it directly: Stripe, Adyen, Square, Mollie, Dodo, Polar,
+Asaas, Pagar.me, PagBank, Mercado Pago and InfinitePay.
+
+Two groups cannot, for different reasons:
+
+**Four have no cards.** Woovi/OpenPix is Pix-only, AbacatePay does Pix and boleto, Efí is Pix only,
+and PayPal's driver declares `wallet`. Routing `credit_card` to any of them is a config error the
+manager catches when you ask for the driver, before a byte reaches the gateway.
+
+**Three take cards but refuse to promise one.** Paddle, Lemon Squeezy and Razorpay declare
+`supportedMethods` of `['undefined']` only. That is not an omission: on a merchant-of-record
+checkout or a Razorpay Order, nothing in the API can promise the payer will choose a card rather
+than PayPal or UPI, so the driver will not claim it. Route `undefined` to them and read the method
+the payer actually chose off the webhook — `payment.method` on Razorpay, the equivalent field on the
+others.
+
+The refusal looks the same either way:
 
 ```ts
 // methods: { credit_card: 'woovi' }
@@ -264,10 +281,18 @@ Supported methods: pix, boleto, undefined.
 Route "credit_card" to a different provider in config.methods.
 ```
 
-<Callout title="Naming the gateway skips the check">
+<Callout title="Naming the gateway skips the check — and skips the method">
 The guard fires only when you route a **method**. `getPayments().driver('woovi')` hands you the
 Woovi driver with no method to validate, and the failure moves to the gateway's own error later.
-Ask for `'credit_card'`, not for a provider name — see [Routing](/docs/payments/concepts/routing).
+
+`driver('credit_card')` does one more thing a provider name does not: it returns the driver
+**bound** to that method, so `charge()` and `createSubscription()` get `method: 'credit_card'`
+filled in without you repeating it. That matters here, because every driver that varies by method
+reads it off the charge — Stripe's `payment_method_types`, Asaas' `billingType` — and without it the
+charge falls back to whatever the gateway's dashboard defaults are. A method you pass explicitly
+still wins — unless `config.methods` routes it somewhere else, in which case the call is refused
+rather than sent to the wrong gateway. Routing is a default, not an override, and never a
+contradiction. See [Routing](/docs/payments/concepts/routing).
 </Callout>
 
 Forgetting the routing entry altogether is its own error, and it lists what is available:
@@ -287,12 +312,14 @@ back as `payment.failed`, exactly like every other outcome in this library:
 export default class PaymentFailedHandler {
   static readonly eventType = 'payment.failed'
 
-  async handle(event: WebhookEvent): Promise<void> {
-    const data = event.data as { externalReference?: string; reason?: string }
+  async handle(event: WebhookEventFor<'payment.failed'>): Promise<void> {
+    const data = event.data          // PaymentWebhookData — no cast
     const order = await Order.findBy('id', data.externalReference)
     if (!order) return
 
     await order.merge({ status: 'payment_failed' }).save()
+    // `reason` is optional and usually absent — only the Adyen driver normalizes one.
+    // The decline code is on `event.raw` under the gateway's own field name.
     await this.mail.send(new CardDeclined(order, data.reason))
   }
 }
@@ -303,11 +330,17 @@ resets tomorrow — retry with escalation instead. The dunning ladder lives in
 [Recovering](/docs/payments/patterns/recovering), and where handlers belong is
 [Reacting to payments](/docs/payments/patterns/reacting-to-payments).
 
+A decline is not the card failure that costs the most. That one is the **chargeback**, which arrives
+weeks after the charge settled and takes the money back — and on the gateways that send a
+pre-dispute alert, there is a window where refunding stops it being filed at all. See
+[Disputes](/docs/payments/patterns/disputes).
+
 ## Refunds
 
-Both card gateways support refunds, but the code that offers the button should not assume it —
-capability-check first, so a later routing change to a gateway without refunds fails loudly at your
-boundary instead of at the gateway:
+Most card gateways support refunds — but not all, and the code that offers the button must not
+assume. **InfinitePay declares `refunds: false`** while happily taking `credit_card`, so a routing
+change from Stripe to InfinitePay turns a working refund button into a gateway error. Capability-
+check first, at your own boundary:
 
 ```ts title="app/services/refund_service.ts"
 const payments = getPayments()

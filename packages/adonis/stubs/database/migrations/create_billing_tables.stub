@@ -2,89 +2,47 @@
   exports({ to: app.migrationsPath(`${new Date().getTime()}_create_billing_tables.ts`) })
 }}}
 import { BaseSchema } from '@adonisjs/lucid/schema'
+import { createBillingTables, dropBillingTables } from '@adonis-agora/payments'
 
+/**
+ * The billing tables, for an app that would rather run DDL explicitly than have the library
+ * do it.
+ *
+ * **You may not need this file.** `@adonis-agora/payments` creates its own tables on first
+ * use, the same way `@adonis-agora/durable` and `@adonis-agora/authz` do — that is the
+ * ecosystem convention, and it is on by default. This migration exists for the case where
+ * that is not wanted: a shared database you do not own, a team that reviews every DDL, a
+ * deploy that runs migrations as a separate step.
+ *
+ * If you keep it, turn the automatic path off so there is one owner:
+ *
+ *     // config/payments.ts
+ *     billing: { autoCreateSchema: false }
+ *
+ * Leaving both on is harmless — the DDL is idempotent, so whichever runs second does
+ * nothing — but "who creates this table" should have one answer.
+ *
+ * Both paths call the SAME `createBillingTables`, which is the point: a schema defined twice
+ * is a schema that drifts, and this package spent a release finding the consequences of two
+ * things that were supposed to agree and did not.
+ *
+ * `this.defer` is how a Lucid migration hands over the query client.
+ *
+ * `createBillingTables` is idempotent in both directions: it creates what is missing AND
+ * applies the guarded `ALTER`s for columns the library added after a table shipped. So
+ * re-running this migration after upgrading the package carries those columns — which is
+ * why running it twice is safe and why there is no second file.
+ */
 export default class extends BaseSchema {
-  protected tableName = 'billing_customers'
-
   async up() {
-    this.schema.createTable('billing_customers', (table) => {
-      table.uuid('id').primary()
-      table.string('owner_type')
-      table.string('owner_id')
-      table.string('gateway_id').unique()
-      table.string('provider')
-      table.string('email').nullable()
-      table.string('name').nullable()
-      table.string('tax_id').nullable()
-      table.jsonb('metadata').nullable()
-      table.timestamp('created_at', { useTz: true }).notNullable()
-      table.timestamp('updated_at', { useTz: true }).notNullable()
-      table.index(['owner_type', 'owner_id'], 'billing_customers_owner_idx')
-    })
-
-    this.schema.createTable('billing_subscriptions', (table) => {
-      table.uuid('id').primary()
-      table.string('gateway_id').unique()
-      table.string('provider')
-      table.string('status')
-      table.string('plan_id')
-      table.string('customer_id').nullable()
-      table.timestamp('trial_ends_at', { useTz: true }).nullable()
-      table.timestamp('ends_at', { useTz: true }).nullable()
-      table.jsonb('payload').nullable()
-      table.timestamp('created_at', { useTz: true }).notNullable()
-      table.timestamp('updated_at', { useTz: true }).notNullable()
-      table.index(['customer_id'], 'billing_subscriptions_customer_idx')
-    })
-
-    this.schema.createTable('billing_payments', (table) => {
-      table.uuid('id').primary()
-      table.string('gateway_id').unique()
-      table.string('provider')
-      table.string('status')
-      table.bigInteger('amount')
-      table.string('currency', 3)
-      table.string('customer_id').nullable()
-      table.string('subscription_id').nullable()
-      table.jsonb('payload').nullable()
-      table.timestamp('paid_at', { useTz: true }).nullable()
-      table.timestamp('created_at', { useTz: true }).notNullable()
-      table.timestamp('updated_at', { useTz: true }).notNullable()
-      table.index(['customer_id'], 'billing_payments_customer_idx')
-      table.index(['subscription_id'], 'billing_payments_subscription_idx')
-    })
-
-    this.schema.createTable('billing_webhook_events', (table) => {
-      table.uuid('id').primary()
-      table.string('gateway_event_id').unique()
-      table.string('provider')
-      table.string('type')
-      table.string('status')
-      table.jsonb('payload').nullable()
-      table.text('error').nullable()
-      table.timestamp('created_at', { useTz: true }).notNullable()
-      table.timestamp('updated_at', { useTz: true }).notNullable()
-    })
-
-    this.schema.createTable('billing_usage_events', (table) => {
-      table.uuid('id').primary()
-      table.string('subscription_id').nullable()
-      table.string('customer_id').nullable()
-      table.string('meter')
-      table.integer('quantity').defaultTo(1)
-      table.jsonb('metadata').nullable()
-      table.timestamp('recorded_at', { useTz: true }).notNullable()
-      table.timestamp('updated_at', { useTz: true }).notNullable()
-      table.index(['subscription_id', 'meter'], 'billing_usage_subscription_meter_idx')
-      table.index(['customer_id', 'meter'], 'billing_usage_customer_meter_idx')
+    this.defer(async (db) => {
+      await createBillingTables(db)
     })
   }
 
   async down() {
-    this.schema.dropTable('billing_customers')
-    this.schema.dropTable('billing_subscriptions')
-    this.schema.dropTable('billing_payments')
-    this.schema.dropTable('billing_webhook_events')
-    this.schema.dropTable('billing_usage_events')
+    this.defer(async (db) => {
+      await dropBillingTables(db)
+    })
   }
 }

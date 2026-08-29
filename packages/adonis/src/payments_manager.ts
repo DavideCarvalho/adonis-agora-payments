@@ -1,6 +1,7 @@
 import type { PaymentsConfig } from './define_config.js';
 import type { PaymentsDriver } from './driver.js';
 import type { InvoiceManager } from './invoice/invoice_manager.js';
+import { PAYMENT_METHOD_NAMES } from './types.js';
 import type { PaymentMethodName } from './types.js';
 
 export interface PaymentsManagerOptions {
@@ -17,6 +18,13 @@ export class PaymentsManager {
   #invoices: InvoiceManager | undefined;
   #methods: Partial<Record<PaymentMethodName, string>>;
   #defaultName: string;
+  /**
+   * Method-bound driver proxies, so repeated `driver('pix')` calls return the same object.
+   * Keyed by `name:method`, not method alone: the proxy closes over the name the routing
+   * check compares against, so caching by method would hand a second provider the first
+   * one's identity.
+   */
+  #boundDrivers = new Map<string, PaymentsDriver>();
 
   constructor(options: PaymentsManagerOptions) {
     this.#drivers = options.drivers;
@@ -30,6 +38,16 @@ export class PaymentsManager {
   }
 
   /**
+   * Every configured driver, by the name it was configured under.
+   *
+   * Read-only, and there for the checks that have to look at all of them at once — the
+   * boot-time webhook-verification refusal is the one that needed it.
+   */
+  get drivers(): ReadonlyMap<string, PaymentsDriver> {
+    return this.#drivers;
+  }
+
+  /**
    * Resolve a driver by payment method (e.g. `'pix'`), by provider name, or by the
    * configured default when nothing is given.
    *
@@ -40,7 +58,7 @@ export class PaymentsManager {
    * ```
    */
   driver(methodOrName?: PaymentMethodName | string): PaymentsDriver {
-    const { name: resolved, method } = this.#resolveName(methodOrName);
+    const { name: resolved, method, unrouted } = this.#resolveName(methodOrName);
     const driver = this.#drivers.get(resolved);
     if (!driver) {
       throw new Error(
@@ -57,7 +75,125 @@ export class PaymentsManager {
           `Route "${method}" to a different provider in config.methods.`,
       );
     }
+    // Routing picked the provider; it must also reach the charge. Without this the method
+    // is only ever set when the CALLER repeats it — `driver('pix').charge({ method: 'pix' })`
+    // — and every driver that varies by method (Stripe's `payment_method_types`, Asaas' and
+    // AbacatePay's `billingType`) silently fell back to the gateway's dashboard default. A
+    // charge routed as Pix could come back a card.
+    // `resolved` is the CONFIG KEY, not `driver.provider` — `config.methods` is written in
+    // terms of the keys under `config.providers`, and the two differ whenever an app names a
+    // provider something of its own (`providers: { primary: payments.stripe(…) }`). Passing
+    // the driver's own name here made the routing check compare "stripe" against "primary"
+    // and refuse a charge that was routed exactly right.
+    if (method !== undefined) return this.#bound(driver, method, resolved);
+    // `driver()` with no argument used to skip `config.methods` entirely, which is the same
+    // trap one level up: an app that configured pix/credit_card/boleto routing and then
+    // calls `driver()` got a driver bound to NOTHING, and every charge fell back to the
+    // gateway's dashboard default unless the caller happened to repeat `method:`.
+    if (unrouted !== undefined) return this.#unrouted(driver, resolved, unrouted);
+    // (`method === undefined` and no routing map entry: nothing to bind, nothing to check.)
     return driver;
+  }
+
+  /**
+   * The default driver when `config.methods` is configured but this call named no method.
+   *
+   * Three cases, and only the first can be answered silently:
+   *
+   * - **Exactly one method routes here.** The routing is unambiguous, so it is applied — the
+   *   same binding `driver('pix')` would have produced.
+   * - **Several methods route here.** There is no honest answer: `methods` says this provider
+   *   takes pix AND boleto AND card, and picking one would be inventing the charge's payment
+   *   method. The charge is refused with the two ways to say what you meant. It refuses at
+   *   `charge`/`createSubscription` rather than at `driver()`, so the app that already passes
+   *   `method:` on every call — which is what makes this correct today — keeps working
+   *   unchanged.
+   * - **A method is passed that `methods` routes ELSEWHERE.** The routing map and the call
+   *   disagree about where the money goes; that is a config error either way, and running it
+   *   would send a card charge to the provider configured for Pix.
+   */
+  #unrouted(
+    driver: PaymentsDriver,
+    name: string,
+    candidates: readonly PaymentMethodName[],
+  ): PaymentsDriver {
+    if (candidates.length === 1) {
+      return this.#bound(driver, candidates[0] as PaymentMethodName, name);
+    }
+    return new Proxy(driver, {
+      get: (target, property, _receiver) => {
+        const value = Reflect.get(target, property, target) as unknown;
+        if (typeof value !== 'function') return value;
+        if (property !== 'charge' && property !== 'createSubscription') {
+          return (value as (...args: unknown[]) => unknown).bind(target);
+        }
+        // `async`, so the refusal below is a rejected promise rather than a synchronous
+        // throw: every caller of `charge` awaits it, and a sync throw out of an awaited call
+        // skips a `.catch()` the caller reasonably attached.
+        return async (input: { method?: PaymentMethodName }, ...rest: unknown[]) => {
+          const method = input?.method;
+          if (method === undefined) {
+            throw new Error(
+              [
+                `[payments] driver() resolved "${name}", and config.methods routes`,
+                `${candidates.join(', ')} to it — so this ${String(property)} has no payment`,
+                'method and would fall back to whatever the gateway dashboard defaults to.',
+                `Name it: driver('${candidates[0]}') or`,
+                `${String(property)}({ method: '${candidates[0]}' }).`,
+              ].join(' '),
+            );
+          }
+          this.#assertRoutedHere(method, name, String(property));
+          return (value as (...args: unknown[]) => unknown).call(target, input, ...rest);
+        };
+      },
+    });
+  }
+
+  /**
+   * The driver, with the routed method filled in on the inputs that carry one.
+   *
+   * A Proxy rather than a hand-written wrapper for one reason: the driver contract has
+   * optional members (`findDispute`, `submitDisputeEvidence`, `capabilities`), and callers
+   * test for them with `typeof driver.x === 'function'`. A wrapper that defines every method
+   * turns "this gateway cannot do that" into "it can, until you call it" — which is the class
+   * of bug this package keeps finding. A Proxy passes absence through as absence.
+   *
+   * Cached per method so `driver('pix') === driver('pix')` still holds. Note that a driver
+   * resolved by NAME is returned untouched: `driver('stripe')` routed nothing, so there is no
+   * method to thread and no reason to wrap.
+   */
+  #bound(driver: PaymentsDriver, method: PaymentMethodName, name?: string): PaymentsDriver {
+    const cacheKey = `${name ?? driver.provider}:${method}`;
+    const cached = this.#boundDrivers.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const bound = new Proxy(driver, {
+      // An arrow, so `this` is still the manager: the routing check below is its business.
+      get: (target, property, _receiver) => {
+        // Bound to `target`, never to the proxy: driver methods read `#private` fields, and
+        // a proxy is not the instance those belong to.
+        const value = Reflect.get(target, property, target) as unknown;
+        if (typeof value !== 'function') return value;
+        if (property !== 'charge' && property !== 'createSubscription') {
+          return (value as (...args: unknown[]) => unknown).bind(target);
+        }
+        return async (input: { method?: PaymentMethodName }, ...rest: unknown[]) => {
+          // An explicit method on the input wins. Routing is a default, not an override:
+          // `driver('pix')` picks the provider, and a caller who then names a method meant it
+          // — as long as the routing map does not send that method somewhere else.
+          const chosen = input?.method ?? method;
+          this.#assertRoutedHere(chosen, name ?? driver.provider, String(property));
+          return (value as (...args: unknown[]) => unknown).call(
+            target,
+            { ...input, method: chosen },
+            ...rest,
+          );
+        };
+      },
+    });
+    this.#boundDrivers.set(cacheKey, bound);
+    return bound;
   }
 
   /**
@@ -79,15 +215,21 @@ export class PaymentsManager {
    */
   assertCapability(
     driver: PaymentsDriver,
-    capability: 'refunds' | 'invoices' | 'subscriptions',
+    capability: 'refunds' | 'invoices' | 'subscriptions' | 'disputes',
   ): void {
     if (
       driver.capabilities?.[capability] === false ||
       driver.capabilities?.[capability] === undefined
     ) {
+      // Only the capabilities actually set to `true`. Listing every KEY meant a driver that
+      // spells out `{ invoices: false }` — as the newer ones do — had the capability it was
+      // just refused named back to it as supported.
+      const supported = Object.entries(driver.capabilities ?? {})
+        .filter(([, enabled]) => enabled === true)
+        .map(([name]) => name);
       throw new Error(
         `[payments] Driver "${driver.provider}" does not support ${capability}. ` +
-          `Supported capabilities: ${Object.keys(driver.capabilities ?? {}).join(', ') || '(none)'}.`,
+          `Supported capabilities: ${supported.join(', ') || '(none)'}.`,
       );
     }
   }
@@ -95,9 +237,18 @@ export class PaymentsManager {
   #resolveName(methodOrName?: PaymentMethodName | string): {
     name: string;
     method?: PaymentMethodName;
+    /** Methods `config.methods` routes to this provider, when the call named none. */
+    unrouted?: readonly PaymentMethodName[];
   } {
-    if (methodOrName === undefined) return { name: this.#defaultName };
-    // If it names a configured provider, use it directly.
+    if (methodOrName === undefined) {
+      const candidates = this.#methodsRoutedTo(this.#defaultName);
+      return candidates.length > 0
+        ? { name: this.#defaultName, unrouted: candidates }
+        : { name: this.#defaultName };
+    }
+    // If it names a configured provider, use it directly. Naming the provider is an
+    // explicit choice, so `config.methods` is deliberately not consulted — it says which
+    // provider a METHOD goes to, and this call already answered that question.
     if (this.#drivers.has(methodOrName)) return { name: methodOrName };
     // Otherwise treat it as a payment method and route via config.methods.
     const method = methodOrName as PaymentMethodName;
@@ -106,8 +257,34 @@ export class PaymentsManager {
     // Unknown method/name: throw a helpful error pointing at the routing config.
     const providers = [...this.#drivers.keys()].join(', ') || '(none)';
     throw new Error(
-      `[payments] "${methodOrName}" is neither a configured provider nor a method routed in config.methods. Configured providers: ${providers}. Known methods: pix, credit_card, debit_card, boleto, undefined.`,
+      `[payments] "${methodOrName}" is neither a configured provider nor a method routed in config.methods. Configured providers: ${providers}. Known methods: ${PAYMENT_METHOD_NAMES.join(', ')}.`,
     );
+  }
+
+  /**
+   * Refuse a call whose payment method `config.methods` routes to a DIFFERENT provider.
+   *
+   * The routing map and the call disagree about where the money goes. Running it anyway sends
+   * a card charge to the provider configured for Pix — the same class of silence as an
+   * unbound driver, one level up.
+   */
+  #assertRoutedHere(method: PaymentMethodName, name: string, operation: string): void {
+    const routed = this.#methods[method];
+    if (routed === undefined || routed === name) return;
+    throw new Error(
+      [
+        `[payments] config.methods routes "${method}" to "${routed}", but this ${operation} is`,
+        `going to "${name}". Call driver('${method}') to use the routed provider, or name the`,
+        `provider explicitly (driver('${name}')) if the override is deliberate.`,
+      ].join(' '),
+    );
+  }
+
+  /** Which payment methods `config.methods` routes to a given provider. */
+  #methodsRoutedTo(name: string): PaymentMethodName[] {
+    return Object.entries(this.#methods)
+      .filter(([, provider]) => provider === name)
+      .map(([method]) => method as PaymentMethodName);
   }
 }
 

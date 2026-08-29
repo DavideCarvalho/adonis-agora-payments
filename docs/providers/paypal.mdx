@@ -1,0 +1,292 @@
+---
+title: PayPal
+description: Orders v2 and Subscriptions v1 over OAuth2 — a wallet, so checkout is the entry point, and webhook verification is a round trip to PayPal.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+PayPal over plain REST: Orders v2 for money in, Payments v2 for refunds, Subscriptions v1
+for recurring billing. No SDK.
+
+Two facts about PayPal shape this driver more than anything else. It is a **wallet** — the
+payer approves the payment on paypal.com, so `createCheckout` is the entry point and
+`charge` only works against a payment method they already saved. And its webhook signature
+is verified by **calling PayPal**, not by an HMAC you can compute locally.
+
+- **Methods**: `wallet` and `undefined`, and which one depends on the call —
+  [see below](#payment-methods). `credit_card` is still absent: the driver never sends card
+  data, so routing a card charge here would reach a driver that cannot make one.
+- **Setup**: `payments.paypal({ clientId, clientSecret, currency, sandbox, webhookId })` —
+  `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID`. `currency` is
+  **required** (lowercase ISO 4217) and the driver refuses to boot without one. `sandbox`
+  defaults to `NODE_ENV !== 'production'` and picks `api-m.sandbox.paypal.com` over
+  `api-m.paypal.com`.
+- **Auth**: OAuth2 client credentials. The token is cached for exactly as long as PayPal's
+  own `expires_in` says, minus a minute — never for a period of our choosing, which is how
+  a deploy works fine for an hour and then 401s on every charge.
+- **Money**: PayPal wants a decimal **string** plus a currency code. The driver formats it
+  per currency, so ¥1990 goes out as `"1990"` and $19.90 as `"19.90"`. HUF and TWD are
+  special: PayPal rejects decimals for them although ISO 4217 gives them two minor units,
+  so a HUF or TWD amount that is not a whole unit is refused here rather than at the
+  gateway.
+- **Webhooks**: verified by `POST /v1/notifications/verify-webhook-signature`, using the
+  `PAYPAL-TRANSMISSION-*`, `PAYPAL-CERT-URL` and `PAYPAL-AUTH-ALGO` headers plus your
+  `webhookId`. **Verification therefore costs a round trip to PayPal per event** (plus the
+  OAuth call when the token has expired). That is PayPal's scheme; there is no offline HMAC
+  to substitute.
+- **`externalReference`**: sent as `purchase_units[].custom_id` on orders and `custom_id` on
+  subscriptions. `custom_id` and not `reference_id`, because the capture PayPal sends on
+  the webhook carries `custom_id` while `reference_id` stays behind on the purchase unit.
+  It is read back onto `event.data.externalReference` — from `custom_id` on
+  `PAYMENT.CAPTURE.*` events and from `custom` on the `PAYMENT.SALE.*` events a
+  subscription's recurring charges arrive as.
+- **Subscriptions**: `planId` is a PayPal plan (`P-…`) that must already exist. The payer
+  still has to approve it, so `createCheckout({ planId })` — which hands back the approval
+  URL — is usually what you want. `updateSubscription` really reprices the plan at the
+  gateway; see below.
+- **Invoices**: `listInvoices` throws — see below.
+
+```ts title="app/services/checkout_service.ts"
+const session = await payments.driver('paypal').createCheckout({
+  amount: 1990,
+  successUrl: 'https://example.com/paypal/return',
+  cancelUrl: 'https://example.com/cart',
+  externalReference: 'order_42',
+})
+
+return response.redirect(session.url) // paypal.com/checkoutnow?token=…
+```
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`webhookId` is not configured (env fallback `PAYPAL_WEBHOOK_ID`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/paypal` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
+## Every webhook costs a round trip
+
+`parseWebhook` verifies by calling PayPal, so each event it handles is one
+`POST /v1/notifications/verify-webhook-signature` — plus an OAuth call whenever the cached
+token has expired. That is a real operational property of the mounted
+`/payments/webhook/paypal` route, not a detail: at a thousand events an hour it is a
+thousand extra calls to PayPal. There is no offline HMAC to substitute for it.
+
+```ts
+// event.type === 'payment.succeeded'
+// event.data.externalReference === 'order_42'
+```
+
+With no `webhookId` configured there is nothing to verify against at all — so the driver reports
+`webhookVerification: 'unconfigured'` and the app refuses to boot rather than parsing an unverified
+event. For local development without a dashboard webhook, name the provider in
+`allowUnverifiedWebhooks`; the parse path then behaves as it always did and returns the event
+unverified.
+
+Event types are mapped as PayPal spells them: `PAYMENT.CAPTURE.COMPLETED` and
+`PAYMENT.SALE.COMPLETED` → `payment.succeeded`; `PAYMENT.CAPTURE.DECLINED` (there is no
+`DENIED` on captures) and `PAYMENT.SALE.DENIED` → `payment.failed`; the `REFUNDED` and
+`REVERSED` pairs → `payment.refunded`; `CHECKOUT.ORDER.APPROVED` and the `PENDING` events →
+`payment.updated`; and the `BILLING.SUBSCRIPTION.*` family onto the subscription events.
+
+## Charging without the payer present
+
+`charge()` needs a **vaulted** payment method — PayPal's "single shot" flow, an order
+carrying `payment_source.paypal.vault_id`. Pass the vault token id as `paymentMethodId`
+(or `metadata.vaultId`), plus an `idempotencyKey`, which becomes the `PayPal-Request-Id`
+header PayPal documents as mandatory for single-step orders:
+
+```ts
+await payments.driver('paypal').charge({
+  amount: 1990,
+  paymentMethodId: '2w915838hr181240m', // a Vault v3 payment-token id
+  idempotencyKey: 'charge_order_42',
+  externalReference: 'order_42',
+})
+```
+
+Getting that vault id in the first place still needs a one-time approval by the payer
+(`POST /v3/vault/setup-tokens` → approval → `POST /v3/vault/payment-tokens`). There is no
+way to charge a payer PayPal has never met, and `charge()` throws rather than pretend
+otherwise.
+
+## What it refuses
+
+- **`charge()` with no vaulted method** throws and points at `createCheckout`. A wallet
+  payment nobody approved is not a payment.
+- **`charge()` with no `idempotencyKey`** throws. Minting one here would defeat the point:
+  a retry would generate a new key and charge twice.
+- **`createCustomer` / `findCustomer` / `updateCustomer`** all throw. PayPal has no customer
+  resource — a customer id is one *you* choose, and it only exists as a side effect of
+  vaulting a payment method. Keep customers on your own records.
+- **`listInvoices`** throws. `GET /v2/invoicing/invoices` takes only paging, and
+  `POST /v2/invoicing/search-invoices` filters by recipient *email*, not by a customer id.
+  An empty array would claim the customer has no invoices, which nothing told us.
+- **`createSubscription` with `amount`, `cycle` or `trialDays`** throws. All three live on
+  the PayPal plan; accepting them would report a price the gateway never charges. Create a
+  plan (`POST /v1/billing/plans`) and pass its id.
+- **`cancelSubscription({ atPeriodEnd: true })`** throws — PayPal cancels immediately and
+  has no period-end flag. Suspend it instead, or hold the grace period yourself.
+- **`updateSubscription({ description })`** throws. A PayPal subscription has no
+  description; the text belongs to the catalog product behind the plan.
+
+`updateSubscription({ amount })` does work, as a JSON Patch against the plan's pricing
+scheme. The driver reads the subscription first to find the **REGULAR** billing cycle's
+sequence, because patching sequence 1 blindly rewrites the *trial* price on any plan that
+has a trial. PayPal notes that a price change does not affect billing cycles within the
+next 10 days for PayPal-funded subscriptions.
+
+## Gaps and things the docs would not settle
+
+- PayPal returns the approval link as `rel: "approve"` on a classic order and
+  `rel: "payer-action"` when the order carries an `experience_context`. The driver accepts
+  either.
+- `PayPal-Request-Id` retention is documented as 6 hours on the Orders spec and 45 days on
+  the general requests page. Don't rely on a long window.
+- The verify-webhook-signature endpoint takes `webhook_event` as a **JSON object**, so the
+  body is parsed and re-serialized on the way there. PayPal's docs show exactly that, but
+  it does mean the bytes you received are not the bytes it sees.
+- `PARTIALLY_REFUNDED` captures map to `paid`: the canonical status set has no partial
+  state, and the money did settle. The refund shows up as a `Refund` of its own.
+
+<Callout type="warn" title="Not yet exercised against a live account">
+This driver was written against PayPal's published API reference and is covered by unit
+tests, but it has never run against a real PayPal account. Put it through the sandbox with
+your own credentials before it takes real money.
+</Callout>
+
+## Payment methods
+
+`createCheckout()` hands the payer to PayPal, who picks the funding source on their own page
+— a card, a bank, a local method — so `undefined` ("let the customer choose") is the only
+promise that call can keep.
+
+`charge()` is different. It charges `payment_source.paypal.vault_id` and nothing else: a
+PayPal account the payer already vaulted, which is a stored-balance wallet by definition. So
+`supportedMethods` includes `wallet`, the resulting `Payment.method` is `wallet`, and a
+charge routed as anything else throws rather than pretending it chose the instrument:
+
+```
+[payments] PayPal charges the vaulted PayPal account behind the token and nothing else, so
+"credit_card" is a promise this call cannot keep — the funding source is whatever the payer
+has attached to that account. Drop `method`, or route the charge as `wallet`.
+```
+
+When PayPal echoes `payment_source` back on the order, the driver reads it rather than
+assuming: `paypal`/`venmo`/`apple_pay`/`google_pay` → `wallet`, `card` → `card`, and the
+European local methods (`ideal`, `bancontact`, `eps`, `giropay`, `p24`, `sofort`, `blik`,
+`trustly`, `multibanco`, `mybank`) → `bank_transfer`.
+
+## Disputes
+
+A PayPal dispute is **not** a card-scheme chargeback. It has a lifecycle of its own —
+`INQUIRY` → `CHARGEBACK` → `PRE_ARBITRATION` → `ARBITRATION` — and PayPal, not a card
+network, decides it. There are only three webhooks for the whole thing, so the interesting
+information is not in the event name but in `dispute_life_cycle_stage`.
+
+| PayPal event | Stage / outcome | Normalized |
+| --- | --- | --- |
+| `CUSTOMER.DISPUTE.CREATED` | `INQUIRY` | `payment.dispute_warning` |
+| `CUSTOMER.DISPUTE.CREATED` | `CHARGEBACK`, `PRE_ARBITRATION`, `ARBITRATION`, or no stage | `payment.disputed` |
+| `RISK.DISPUTE.CREATED` (deprecated spelling) | same rule | same |
+| `CUSTOMER.DISPUTE.UPDATED` | past `INQUIRY`, not yet `RESOLVED` | `payment.disputed` |
+| `CUSTOMER.DISPUTE.UPDATED` | still `INQUIRY`, or already `RESOLVED` | `payment.updated` |
+| `CUSTOMER.DISPUTE.RESOLVED` | `RESOLVED_SELLER_FAVOUR` | `payment.dispute_closed` (`won`) |
+| `CUSTOMER.DISPUTE.RESOLVED` | `RESOLVED_BUYER_FAVOUR` | `payment.dispute_closed` (`lost`) |
+| `CUSTOMER.DISPUTE.RESOLVED` | `CANCELED_BY_BUYER` | `payment.dispute_closed` (`canceled`) |
+| `CUSTOMER.DISPUTE.RESOLVED` | anything else | `payment.updated` |
+
+**`CUSTOMER.DISPUTE.CREATED` fires at two different points in the lifecycle.** PayPal's own
+sandbox guide makes this explicit: one test has you assert the stage is `INQUIRY` on the
+webhook you just received, the next has you assert it is `CHARGEBACK`. An inquiry is
+PayPal's words for "a customer and merchant interact in an attempt to resolve a dispute
+without escalation to PayPal" — a 20-day window in the Resolution Center where nothing has
+been adjudicated and a refund closes the case. Calling it `payment.disputed` moves a paid row
+over money still in the account, and hides the one window where the whole thing can still be
+made to go away cheaply.
+
+**`CUSTOMER.DISPUTE.UPDATED` is where an escalation lands.** PayPal sends no dedicated
+"escalated to a claim" event, so an `UPDATED` carrying a stage past `INQUIRY` is the only
+notice a row that opened as a warning ever gets that the money is now at stake. An `UPDATED`
+still in the inquiry (a message, an offer, evidence) or on an already-`RESOLVED` dispute
+moves nothing.
+
+**The deadline is `seller_response_due_date`**, and it comes through as `actionableUntil` on
+every dispute event that carries one. PayPal's own description is the reason it matters: "if
+the merchant does not respond by this date and time, the dispute is closed in the customer's
+favor."
+
+**Only three of PayPal's seven outcome codes name who kept the money.** The other four stay
+`payment.updated` rather than inventing a result:
+
+| Code | Why not |
+| --- | --- |
+| `RESOLVED_WITH_PAYOUT` | "PayPal provided the merchant **or customer** with protection" — it does not say which |
+| `ACCEPTED`, `DENIED` | deprecated in PayPal's current schema, and their descriptions name the *dispute* rather than the party |
+| `NONE` | a previous dispute "closed without any decision" — the definition of no outcome |
+
+<Callout title="What the reference will not tell you">
+PayPal documents the lifecycle stages and the fund holds in different places and never in the
+same sentence. The dispute guide says PayPal "holds the disputed payment until resolution"
+for internal disputes; its own sandbox matrix enumerates both "Dispute **NO HOLD**" and
+"Dispute **WITH HOLD**" scenarios; and the only place it says "PayPal debits the merchant's
+account" is a case resolved in the buyer's favour. So the reference does **not** state that a
+`CHARGEBACK`-stage dispute has already taken the money — only that PayPal is deciding, and
+that losing debits the account. The split above follows the stage PayPal itself uses to
+separate "you and the buyer are talking" from "PayPal is deciding", which is the line an
+operator can act on. `event.raw` always carries the whole dispute if you need more.
+</Callout>
+
+`RISK.DISPUTE.CREATED` is handled too: PayPal's reference says `CUSTOMER.DISPUTE.CREATED`
+supersedes it, and an account still subscribed to the old one should not silently miss the
+dispute.
+
+Every one of these is keyed on `disputed_transactions[0].seller_transaction_id` — the
+**capture** id this driver keys payments on. `buyer_transaction_id` is the buyer's view of the
+same money and would find no row here. The money is `dispute_amount`, and `event.data` also
+carries `disputeId`, `reason` and `disputeStage`; a dispute covering several transactions
+leaves the rest on `event.raw`.
+
+## Authorization
+
+`charge()` and `createCheckout()` both create `intent: 'CAPTURE'` orders, so nothing here
+produces a held authorization on its own. If your account also runs `intent: 'AUTHORIZE'`
+orders, their webhooks are recognized:
+
+- `PAYMENT.AUTHORIZATION.CREATED` and `PAYMENT.AUTHORIZATION.VOIDED` → `payment.updated`,
+  with `status: 'authorized'` on `event.data`. Money is **held**, not moved: PayPal reserves
+  it for about 29 days and voids it if nobody captures. There is deliberately no canonical
+  `payment.authorized` event for it to become.
+- `CHECKOUT.ORDER.APPROVED` stays `payment.updated` too — the payer approved, and the
+  capture is a separate call.
+
+## Paused subscriptions
+
+`SUSPENDED` used to map to `past_due`, which said the subscriber owed money. It is `paused`
+now: nothing is owed, nothing bills today, `POST /v1/billing/subscriptions/{id}/activate`
+restarts it — and this driver's own `cancelSubscription` points at suspend as the way to hold
+a subscription open. Either way it entitles nobody.
+
+## `idempotencyKey`
+
+PayPal deduplicates on the `PayPal-Request-Id` header. Its guidance recommends a UUID
+"because it meets the 38 single-byte character limit", so the driver caps the key at 38 —
+the length that survives every endpoint — and throws on a longer one.
+
+| Call | `PayPal-Request-Id` |
+| --- | --- |
+| `charge` | **required** — a vaulted server-side charge without one would retry into a second charge |
+| `createCheckout` | sent when given |
+| `refund` | sent when given (`POST /v2/payments/captures/{id}/refund` documents it) |
+| `createSubscription` | sent when given; PayPal holds the key for 72 hours |
+| `createCustomer` | n/a — the call already throws, PayPal has no customer resource |
+| `updateSubscription` | **throws** |
+
+`updateSubscription` refuses a key because `PATCH /v1/billing/subscriptions/{id}` documents
+no `PayPal-Request-Id`, unlike the create call. The patch is a price replacement, so a repeat
+is harmless in itself — but accepting a key the API never sees would promise a guarantee
+nothing enforces.

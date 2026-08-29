@@ -1,6 +1,6 @@
 ---
 title: Diagnostics
-description: Every payments milestone on the @adonis-agora/diagnostics bus — the gateway-action vs business event layers, the structural emit slot, and watching in Telescope.
+description: Every payments event on the @adonis-agora/diagnostics bus — the gateway-action, business and debug layers, the structural emit slot, and debugging one payment in Telescope.
 icon: Activity
 ---
 
@@ -12,17 +12,29 @@ never imports the package — so when diagnostics isn't installed the emits are 
 no-ops, and when it is, everything downstream (Telescope, OTel, custom watchers) lights up
 at once.
 
-## Two layers of events
+## Three layers of events
 
-The catalog spans two layers, and the distinction matters for how you react:
+The catalog spans three layers, and the distinction matters for how you react:
 
 - **Gateway-action** events fire when *your code calls the gateway* — `charge.created` when
   a charge is created, `charge.refunded`, `subscription.created`/`canceled`,
-  `invoice.emitted`. They describe what the app *did*.
+  `invoice.emitted`, `invoice.failed`. They describe what the app *did*.
+
+  `invoice.failed` is the one to subscribe to on day one if you emit fiscal invoices. A
+  failing invoice provider no longer rejects `charge()` — that reported a failure over money
+  the gateway had already taken, and the obvious response to a failed charge is to charge
+  again. The charge succeeds, the invoice does not, and this event is the only thing that
+  says so. In Brazil an NFS-e is a legal obligation, so a human has to act on it.
 - **Business** events fire when a *webhook confirms a state change* — `payment.succeeded`,
-  `payment.failed`, `payment.refunded`, `payment.updated`, `subscription.updated`. They
-  describe what the gateway *says happened*. These are the ones webhook handlers and
-  notification flows react to.
+  `payment.failed`, `payment.refunded`, `payment.disputed`, `payment.dispute_warning`,
+  `payment.dispute_closed`, `payment.updated`, `subscription.updated`. They describe what the
+  gateway *says happened*. These are the ones webhook handlers and notification flows react
+  to.
+- **Debug** events exist for the developer holding one broken payment, not for a
+  dashboard — `gateway.request`/`gateway.request.failed` (what was actually sent to the
+  gateway, what came back, how long it took) and `webhook.verification` (whether the
+  signature verified, and under which scheme). Nobody subscribes to these in business
+  code; you open them in Telescope when something has already gone wrong.
 
 | Event | Layer | When | Payload highlights |
 | --- | --- | --- | --- |
@@ -34,11 +46,18 @@ The catalog spans two layers, and the distinction matters for how you react:
 | `payment.succeeded` | business | a webhook confirmed a payment | gatewayId, provider, amount, currency, externalReference |
 | `payment.failed` | business | a webhook confirmed a failed payment | gatewayId, provider, amount, currency, reason, externalReference |
 | `payment.refunded` | business | a webhook confirmed a refund | gatewayId, provider, amount, currency |
+| `payment.disputed` | business | a chargeback was filed — the money is going back | gatewayId, provider, amount, currency |
+| `payment.dispute_warning` | business | a pre-dispute alert; **no money has moved yet** | gatewayId, provider, reason, actionableUntil |
+| `payment.dispute_closed` | business | a dispute reached its outcome | gatewayId, provider, disputeId, outcome, amount, currency |
 | `payment.updated` | business | a webhook reported a payment update | gatewayId, provider, status |
 | `invoice.emitted` | gateway-action | an invoice was emitted | gatewayId, provider, number, url |
+| `invoice.failed` | gateway-action | **the charge went through and the invoice did not** | gatewayId, provider, error |
 | `webhook.received` | lifecycle | a gateway webhook arrived | id, provider, type |
+| `webhook.verification` | debug | a delivery was authenticated (or was not) | provider, outcome, scheme, reason, durationMs |
 | `webhook.processed` | lifecycle | a webhook finished processing | id, provider, type |
 | `webhook.failed` | lifecycle | a webhook handler threw | id, provider, type, error |
+| `gateway.request` | debug | an outbound gateway call returned 2xx | provider, method, host, path, query, status, durationMs |
+| `gateway.request.failed` | debug | it timed out, failed to connect, or returned non-2xx | the same, plus outcome, error, status |
 
 The runtime catalog is exported as `PAYMENTS_DIAGNOSTIC_EVENTS` — a single source of truth
 for watchers and tools that iterate the full list.
@@ -60,7 +79,7 @@ onDiagnostic('payments', 'payment.succeeded', ({ payload }) => {
 <Callout type="warn" title="Events are fire-and-forget">
 A throwing subscriber does not fail the webhook — the event was already ledgered. For work
 that must not be lost, use the webhook handlers (which mark failed + retry) or dispatch a
-durable workflow. See [Webhooks → Running your business logic](/docs/payments/webhooks#running-your-business-logic-four-options).
+durable workflow. See [Webhooks → Running your business logic](/docs/payments/webhooks#running-your-business-logic--four-options).
 </Callout>
 
 ## How emission works — the structural slot
@@ -86,25 +105,177 @@ entries with the payload preserved.
 
 ### The typed `payments` watcher
 
-For richer, typed `payments` entries instead of the generic `diagnostic` ones, use the
-ship-with watcher:
+**You do not wire this, and there is nothing to configure.** If `@adonis-agora/telescope` is
+registered in the app, the payments provider registers the typed watcher and releases it on
+shutdown. No import, no `start/telescope.ts`, no option.
 
-```ts title="start/telescope.ts"
-import app from '@adonisjs/core/services/app'
-import { TelescopeService } from '@adonis-agora/telescope'
-import { PaymentsWatcher } from '@adonis-agora/payments/telescope'
+Two things could have been options and are detected instead:
 
-app.booted(async () => {
-  const store = (await app.container.make(TelescopeService)).telescopeStore
-  new PaymentsWatcher().register({
-    record: (entry) => void store.record(entry).catch(() => {}),
-  })
-})
+- **"I wire my own."** A watcher claims the payments channels when it registers, so an app
+  that already has one — the way this page used to tell you to — has claimed them before the
+  provider looks, and the provider stands down. Nothing is recorded twice. This is why the
+  registration happens in the provider's `ready()` rather than `boot()`: `start/` files run
+  first, so your wiring always wins the race.
+- **"I do not use telescope."** Then it is not in the app, and nothing happens. An app
+  without observability is a normal app, not a misconfigured one — it should not fail to boot
+  and it should not be told about it on every start.
+
+<Callout title="Why this used to be your job">
+It was six lines every app copied into `start/telescope.ts`, and until someone copied them a
+payments timeline showed generic `diagnostic` entries with the payload buried instead of
+typed `payments` ones. The wiring never varied — read the store off the container, hand
+`record` to the watcher — so it belongs in the provider.
+
+If you have those six lines today, **delete them**. The claim check means keeping them is not
+harmful — yours registers first and the provider stands down, so nothing records twice — but they
+are dead weight now.
+</Callout>
+
+A write to the telescope store that fails is swallowed. Recording is observability, and
+`record` runs synchronously inside the charge that published the event — a store that is
+full, locked or briefly unreachable must not take a payment webhook down with it.
+
+`PaymentsWatcher` and `registerPaymentsWatcher` are exported from
+`@adonis-agora/payments/telescope` if you need to drive one yourself against a second store.
+
+The entry content is **shaped**, not spread blindly: `event`, then the correlation id,
+then the fields you scan a timeline by (`provider`, `gatewayId`, `id`, `type`, `method`,
+`host`, `path`, `status`, `outcome`, `scheme`, `amount`, `currency`, `durationMs`,
+`error`, `reason`), then whatever else the payload carried, then `ts`.
+
+## Debugging one payment
+
+The events above tell you a payment succeeded. The two below tell you why one didn't.
+
+### What was actually sent to the gateway
+
+Every call made through the shared HTTP transport publishes `gateway.request`, or
+`gateway.request.failed` when it timed out, could not connect, or came back non-2xx:
+
+```json
+{
+  "event": "gateway.request.failed",
+  "traceId": "0f1c…",
+  "provider": "asaas",
+  "method": "POST",
+  "host": "api.asaas.com",
+  "path": "/v3/payments",
+  "query": "?access_token=[redacted]",
+  "status": 422,
+  "outcome": "http_error",
+  "durationMs": 143,
+  "error": "HTTP 422"
+}
 ```
 
-On `register()` it claims every payments channel via `claimPaymentsDiagnostics` (the
-reference-counted claims registry), so the generic `DiagnosticsWatcher` skips them — no
-event is recorded twice. `dispose()` releases the claims and detaches every subscription.
+A timeout and a 422 are the two outcomes worth having, and neither left a trace anywhere
+before this.
+
+<Callout type="warn" title="Credentials are never recorded">
+Request headers are **never** recorded at all — not `Authorization`, not `X-Api-Key`, not
+Asaas's `access_token`. Query parameters keep their names (that is what makes a call
+identifiable) but any value under a credential-shaped key is replaced with `[redacted]`.
+The recorded `error` is built here rather than reused from the thrown one, because that
+message quotes the full URL, query string included. The entry is meant to be safe to paste
+into a bug report.
+</Callout>
+
+### Bodies are opt-in, and off by default
+
+A charge body carries the cardholder's PAN and the payer's CPF/CNPJ, so bodies are not
+recorded unless you ask:
+
+```ts title="start/payments.ts"
+import { configurePaymentsDiagnostics } from '@adonis-agora/payments'
+
+// Debugging one integration — not a standing production setting.
+configurePaymentsDiagnostics({ recordHttpBodies: true })
+```
+
+Turning it on adds `requestBody` and `responseBody` to the `gateway.request*` entries,
+with every value under a credential, card or tax-document key replaced, long strings
+truncated and long arrays cut short. Redaction is a key-name heuristic, not a guarantee —
+turn it on to answer a question, then turn it off.
+
+It is a module-level switch rather than a `config/payments.ts` key because the HTTP
+transport that reads it has no access to the app config, and because it is a debugging
+toggle rather than a deployment setting.
+
+<Callout type="info" title="Which calls appear — and which do not">
+`gateway.request*` is published by the shared `httpRequest` transport, so it covers every
+driver that goes through it: Asaas, AbacatePay, PagBank, Adyen, Mollie, Paddle, Polar,
+Pagar.me, InfinitePay, Mercado Pago, Razorpay, Square, Dodo, and Efí (whose mutual-TLS
+calls pass their own certificate-bearing `fetch` *into* `httpRequest`, so they are
+recorded like any other).
+
+Three known holes, so they are not discovered later:
+
+- **Lemon Squeezy** — every one of its API calls uses a private `fetch` wrapper of its
+  own, so none of them appear.
+- **PayPal** — most calls are recorded, but the OAuth token exchange and the two calls
+  PayPal answers with `204 No Content` (cancel, JSON Patch) bypass the shared transport.
+- **Stripe** and **Woovi** are SDK-based and never touch this transport at all. Their
+  SDKs carry their own instrumentation hooks.
+
+`provider` is present when the driver passes it; `host` always identifies the gateway
+either way.
+</Callout>
+
+### Whether the webhook signature actually verified
+
+`webhook.received` says a delivery arrived. `webhook.verification` says what authenticated
+it:
+
+| `outcome` | Meaning |
+| --- | --- |
+| `verified` | a shared verification helper ran and the signature matched. `scheme` names it — `hmac-sha256`, `standard-webhooks`, `rsa-sha256`, `sha256-token-prefix`, `shared-token`. |
+| `failed` | the driver rejected the delivery. `reason` carries its message — bad signature, missing header, stale timestamp, unparsable body. |
+| `unreported` | the delivery was accepted, but **nothing verified it through the shared helpers**. |
+
+That last row is the one to read carefully. `unreported` means one of three things, and the entry
+deliberately does not guess which:
+
+1. the driver verified inside its own SDK (Stripe's `constructEvent` does),
+2. the gateway signs nothing at all and there is nothing to verify — Efí and InfinitePay, which
+   declare `webhookVerification: 'unsupported'`, or
+3. **no webhook credential is configured**, which now requires the provider to be named in
+   `allowUnverifiedWebhooks` — an app that has not said that would have refused to boot.
+
+The third case used to be the silent default, and this row was the only place it showed. It is a
+boot error now, which is why the drift here is worth less than it was: `unreported` plus a driver
+that is not SDK-based and not one of the two unsigned gateways means somebody wrote an opt-out.
+
+<Callout type="warn" title="A known gap">
+The outcome is derived from what the shared `webhook_security` helpers report, so a
+driver that verifies through its own SDK cannot be told apart from one that skipped the
+check. Closing that needs the drivers themselves to call `reportWebhookVerification()`
+(exported for exactly this), which is a separate change.
+</Callout>
+
+### Reading one delivery as one chain
+
+Each webhook delivery attempt gets a `traceId`, established by the lib-mounted webhook
+route. Everything the delivery reaches inside that async context carries it —
+`webhook.received` → `webhook.verification` → the business event the built-in handler
+published → any gateway call your handler made → `webhook.processed` or `webhook.failed`.
+Filter the Telescope timeline by that one id and you have the whole story for that one
+event, in order.
+
+A redelivery gets its own id, which is what you want when the question is why the retry
+behaved differently.
+
+Two limits worth knowing, rather than discovering:
+
+- **Payments cannot set the envelope's `traceId`.** The structural emit slot is
+  `(lib, event, payload)`, so the id rides on the *payload*. It should stay that way:
+  `@adonis-agora/diagnostics` fills `DiagnosticEvent.traceId` from your app's own
+  request-context accessor, and overwriting that would break correlation with every other
+  Agora library. The watcher merges both, envelope first.
+- **The chain stops at a process boundary.** With `dispatcher: 'durable'`
+  (or a split `role: 'api'` / `'worker'` deployment) the event is handed to another
+  process, and the trace id is not part of the dispatched job — `WebhookEvent` has no
+  field for it. The `webhook.received`/`verification` half is traced; the processing half
+  is not.
 
 ## Custom watcher / subscriber
 

@@ -16,21 +16,24 @@ interface RegisteredRoute {
   method: 'get' | 'post';
   pattern: string;
   name?: string;
+  /** The route's own handler, so a test can drive it with a fake context. */
+  handler?: (ctx: unknown) => Promise<unknown>;
 }
 
 /** A router stand-in recording every registration, with the `.as()` chain the provider uses. */
 function fakeRouter(): { routes: RegisteredRoute[]; router: never } {
   const routes: RegisteredRoute[] = [];
-  const register = (method: 'get' | 'post') => (pattern: string) => {
-    const route: RegisteredRoute = { method, pattern };
-    routes.push(route);
-    return {
-      as(name: string) {
-        route.name = name;
-        return this;
-      },
+  const register =
+    (method: 'get' | 'post') => (pattern: string, handler?: (ctx: unknown) => Promise<unknown>) => {
+      const route: RegisteredRoute = { method, pattern, ...(handler ? { handler } : {}) };
+      routes.push(route);
+      return {
+        as(name: string) {
+          route.name = name;
+          return this;
+        },
+      };
     };
-  };
   return {
     routes,
     router: { get: register('get'), post: register('post') } as never,
@@ -61,37 +64,89 @@ describe('PaymentsDashboardProvider route registration', () => {
     expect(await bootWith({ enabled: false })).toEqual([]);
   });
 
-  it('registers the SPA and the three read endpoints by default', async () => {
+  it('registers the SPA, the read endpoints and the two actions by default', async () => {
     const routes = await bootWith({});
     expect(routes.map((r) => `${r.method.toUpperCase()} ${r.pattern}`)).toEqual([
-      'GET /payments-dashboard',
-      'GET /payments-dashboard/assets/:file',
-      'GET /payments-dashboard/api/overview',
-      'GET /payments-dashboard/api/payments',
-      'GET /payments-dashboard/api/webhook-events',
+      'GET /payments',
+      'GET /payments/assets/:file',
+      'GET /payments/api/health',
+      'GET /payments/api/overview',
+      'GET /payments/api/payments',
+      'GET /payments/api/payments/:gatewayId',
+      'GET /payments/api/customers',
+      'GET /payments/api/audit',
+      'GET /payments/api/disputes',
+      'GET /payments/api/subscriptions',
+      'GET /payments/api/webhook-events',
+      'GET /payments/api/providers',
+      'POST /payments/api/payments/:gatewayId/refund',
+      'POST /payments/api/webhook-events/:gatewayEventId/retry',
+      'POST /payments/api/disputes/:gatewayId/resolve',
     ]);
   });
 
-  it('registers no control actions — this console only reads', async () => {
+  it('exposes disputes as a read plus exactly one write, and that write is a POST', async () => {
+    // Still no accept, no fight, no "submit evidence": whether to ANSWER a chargeback or refund
+    // it is a business rule that stays in the app's code, and none of those routes exist. The
+    // one write is `resolve`, which sends nothing to a gateway — it records how a dispute ended,
+    // because several gateways publish no lost-dispute event and would otherwise leave the row
+    // open forever, holding the health check red until nobody reads it.
     const routes = await bootWith({});
-    expect(routes.filter((r) => r.method === 'post')).toEqual([]);
+    const dispute = routes.filter((r) => r.pattern.includes('/disputes'));
+    expect(dispute.map((r) => `${r.method} ${r.pattern}`)).toEqual([
+      'get /payments/api/disputes',
+      'post /payments/api/disputes/:gatewayId/resolve',
+    ]);
   });
 
-  it("does not collide with the package's own POST /payments/webhook/:provider", async () => {
-    // The default mount is `/payments-dashboard` precisely so a dashboard guard can never end
-    // up in front of a gateway's delivery endpoint.
+  it('registers the refund and the retry as POST ONLY — never reachable by URL', async () => {
+    // A refund behind a `GET` is a refund a crawler, a prefetcher or a pasted link can trigger.
+    const routes = await bootWith({});
+    const actions = routes.filter(
+      (r) => r.pattern.includes('/refund') || r.pattern.includes('/retry'),
+    );
+    expect(actions).toHaveLength(2);
+    expect(actions.every((r) => r.method === 'post')).toBe(true);
+    expect(routes.some((r) => r.method === 'get' && r.pattern.includes('/refund'))).toBe(false);
+    expect(routes.some((r) => r.method === 'get' && r.pattern.includes('/retry'))).toBe(false);
+  });
+
+  it("cannot shadow the package's own machine endpoints", async () => {
+    // The dashboard mounts at `/payments`, the same prefix as `POST
+    // /payments/webhook/:provider` and `GET /payments/client/status`. That is safe for one
+    // reason and one reason only: every route here is an EXACT path, so the dashboard's
+    // `enforce` guard cannot reach a delivery it was never routed. A webhook 403'd by a
+    // console looks exactly like a gateway outage from the outside, and would be found by
+    // reading someone else's retry logs.
     const patterns = (await bootWith({})).map((r) => r.pattern);
-    expect(patterns.some((p) => p === '/payments' || p.startsWith('/payments/'))).toBe(false);
+
+    expect(patterns).not.toContain('/payments/webhook/:provider');
+    expect(patterns).not.toContain('/payments/client/status');
+    // The real invariant: no catch-all. A wildcard under this prefix would swallow both.
+    expect(patterns.filter((p) => p.includes('*'))).toEqual([]);
+    // And nothing dynamic directly under the prefix, which `:provider` and `client` would
+    // both match.
+    expect(patterns.filter((p) => /^\/payments\/:[^/]+$/.test(p))).toEqual([]);
   });
 
-  it('honors a custom mount path everywhere, including the API', async () => {
+  it('honors a custom mount path everywhere, including the API and the actions', async () => {
     const routes = await bootWith({ path: 'ops/billing/' });
     expect(routes.map((r) => r.pattern)).toEqual([
       '/ops/billing',
       '/ops/billing/assets/:file',
+      '/ops/billing/api/health',
       '/ops/billing/api/overview',
       '/ops/billing/api/payments',
+      '/ops/billing/api/payments/:gatewayId',
+      '/ops/billing/api/customers',
+      '/ops/billing/api/audit',
+      '/ops/billing/api/disputes',
+      '/ops/billing/api/subscriptions',
       '/ops/billing/api/webhook-events',
+      '/ops/billing/api/providers',
+      '/ops/billing/api/payments/:gatewayId/refund',
+      '/ops/billing/api/webhook-events/:gatewayEventId/retry',
+      '/ops/billing/api/disputes/:gatewayId/resolve',
     ]);
   });
 
@@ -100,10 +155,26 @@ describe('PaymentsDashboardProvider route registration', () => {
     expect(routes.map((r) => r.pattern)).toEqual([
       '/',
       '/assets/:file',
+      '/api/health',
       '/api/overview',
       '/api/payments',
+      '/api/payments/:gatewayId',
+      '/api/customers',
+      '/api/audit',
+      '/api/disputes',
+      '/api/subscriptions',
       '/api/webhook-events',
+      '/api/providers',
+      '/api/payments/:gatewayId/refund',
+      '/api/webhook-events/:gatewayEventId/retry',
+      '/api/disputes/:gatewayId/resolve',
     ]);
+  });
+
+  it('leaves the actions absent along with everything else when disabled', async () => {
+    // "Registered but 403ing" is not the same as absent: the endpoint still answers, and a write
+    // endpoint that answers is a write endpoint someone can probe.
+    expect(await bootWith({ enabled: false })).toEqual([]);
   });
 
   it('adds no auth routes when dashboardAuth is unconfigured', async () => {
@@ -117,11 +188,11 @@ describe('PaymentsDashboardProvider route registration', () => {
       dashboardAuth: { secret: 's'.repeat(32), login: () => null },
     });
     const named = routes.map((r) => `${r.method.toUpperCase()} ${r.pattern}`);
-    expect(named).toContain('GET /payments-dashboard/login');
-    expect(named).toContain('POST /payments-dashboard/login');
-    expect(named).toContain('GET /payments-dashboard/logout');
+    expect(named).toContain('GET /payments/login');
+    expect(named).toContain('POST /payments/login');
+    expect(named).toContain('GET /payments/logout');
     // Mode B alone must not mount the host-session mint endpoint.
-    expect(named).not.toContain('POST /payments-dashboard/session');
+    expect(named).not.toContain('POST /payments/session');
   });
 
   it('adds the session mint (and no login page) for Mode A alone', async () => {
@@ -129,9 +200,9 @@ describe('PaymentsDashboardProvider route registration', () => {
       dashboardAuth: { secret: 's'.repeat(32), session: () => null },
     });
     const named = routes.map((r) => `${r.method.toUpperCase()} ${r.pattern}`);
-    expect(named).toContain('POST /payments-dashboard/session');
-    expect(named).toContain('GET /payments-dashboard/logout');
-    expect(named).not.toContain('GET /payments-dashboard/login');
+    expect(named).toContain('POST /payments/session');
+    expect(named).toContain('GET /payments/logout');
+    expect(named).not.toContain('GET /payments/login');
   });
 
   it('registers no auth routes at all when disabled, even with dashboardAuth set', async () => {
@@ -147,4 +218,93 @@ describe('PaymentsDashboardProvider route registration', () => {
     const routes = await bootWith({});
     expect(routes.every((r) => r.name?.startsWith('payments_dashboard.'))).toBe(true);
   });
+});
+
+/**
+ * The guards on the WRITE routes.
+ *
+ * These are the first endpoints this console has ever had that CHANGE something, so "the actions
+ * go through the same guard as the reads" is verified here rather than assumed from the fact that
+ * they share a helper. The route's real handler is driven with a stand-in context.
+ */
+describe('action routes are guarded', () => {
+  interface Recorded {
+    status?: number;
+    body?: unknown;
+  }
+
+  /** A minimal `HttpContext` stand-in: enough for `enforce` plus the JSON reply. */
+  function fakeCtx(recorded: Recorded, cookie?: string) {
+    const response = {
+      getHeader: () => undefined,
+      status(code: number) {
+        recorded.status = code;
+        return this;
+      },
+      json(body: unknown) {
+        recorded.body = body;
+        return this;
+      },
+      redirect: () => ({ withQs: () => ({ toPath: () => undefined }) }),
+      header() {
+        return this;
+      },
+      send: () => undefined,
+    };
+    return {
+      response,
+      params: { gatewayId: 'pi_1', gatewayEventId: 'evt_1' },
+      request: {
+        qs: () => ({}),
+        body: () => ({}),
+        url: () => '/payments',
+        plainCookie: () => cookie,
+        secure: () => false,
+        headers: () => ({}),
+      },
+    };
+  }
+
+  async function routeHandler(config: PaymentsDashboardConfig, pattern: string) {
+    const routes = await bootWith(config);
+    const route = routes.find((r) => r.pattern === pattern && r.method === 'post');
+    expect(route?.handler).toBeTypeOf('function');
+    return route?.handler as (ctx: unknown) => Promise<unknown>;
+  }
+
+  const REFUND = '/payments/api/payments/:gatewayId/refund';
+  const RETRY = '/payments/api/webhook-events/:gatewayEventId/retry';
+
+  for (const [name, pattern] of [
+    ['refund', REFUND],
+    ['retry', RETRY],
+  ] as const) {
+    it(`403s the ${name} action when authorize denies`, async () => {
+      const recorded: Recorded = {};
+      const handler = await routeHandler({ authorize: () => false }, pattern);
+      await handler(fakeCtx(recorded));
+      expect(recorded.status).toBe(403);
+      expect(recorded.body).toEqual({ error: 'forbidden' });
+    });
+
+    it(`401s the ${name} action when dashboardAuth is on and there is no session`, async () => {
+      const recorded: Recorded = {};
+      const handler = await routeHandler(
+        { dashboardAuth: { secret: 's'.repeat(32), login: () => null } },
+        pattern,
+      );
+      await handler(fakeCtx(recorded));
+      expect(recorded.status).toBe(401);
+      expect(recorded.body).toMatchObject({ error: 'unauthorized' });
+    });
+
+    it(`lets the ${name} action past the guard only to hit the missing billing store`, async () => {
+      // Proves the ordering: the guard runs FIRST, and what stops an authorized request here is
+      // the store being absent in this test app — a 503, not a 403.
+      const recorded: Recorded = {};
+      const handler = await routeHandler({ authorize: () => true }, pattern);
+      await handler(fakeCtx(recorded));
+      expect(recorded.status).toBe(503);
+    });
+  }
 });

@@ -14,12 +14,14 @@ rewriting it.
 
 ## The `PaymentsDriver` contract
 
-A driver implements one interface. The methods fall into four groups:
+A driver implements one interface. The methods fall into five groups:
 
 - **Customers** — `createCustomer`, `findCustomer`, `updateCustomer`.
 - **Payments** — `charge`, `findPayment`, `refund`.
 - **Checkout & subscriptions** — `createCheckout`, `createSubscription`,
   `cancelSubscription`, `updateSubscription`, `findSubscription`, `listInvoices`.
+- **Disputes** — `findDispute?`, `submitDisputeEvidence?`. Both **optional**, and the only
+  optional methods on the contract; see [Disputes](#disputes--the-two-optional-methods).
 - **Webhooks** — `parseWebhook(rawBody, headers)` (validate + normalize).
 
 Plus three read-only declarations that drive routing:
@@ -27,13 +29,51 @@ Plus three read-only declarations that drive routing:
 ```ts
 readonly provider: string                    // e.g. 'my_gateway'
 readonly supportedMethods: readonly PaymentMethodName[]  // which methods routing may send here
-readonly capabilities?: { refunds?: boolean; invoices?: boolean; subscriptions?: boolean }
+readonly capabilities?: {
+  disputes?: boolean
+  refunds?: boolean
+  invoices?: boolean
+  subscriptions?: boolean
+}
+readonly webhookVerification?: 'configured' | 'unconfigured' | 'unsupported'
 ```
 
 `capabilities` is what the manager checks **before** delegating, so an app discovers a
-limitation early (e.g. a Pix-only gateway with no refunds) instead of at the gateway. A
-driver that lacks a capability still implements the method — it just throws a clear error;
-the manager's `assertCapability` surfaces that before the call.
+limitation early (e.g. a Pix-only gateway with no refunds) instead of at the gateway. For
+the four required-method groups a driver that lacks a capability still implements the
+method — it just throws a clear error; the manager's `assertCapability` surfaces that
+before the call.
+
+### `webhookVerification` — declare it, or be treated as unable
+
+The provider mounts `POST /payments/webhook/:provider` for every configured driver, and that route
+is reachable from the public internet. A driver whose credential slot is empty verifies nothing, so
+anyone who knows the URL can post a body that marks a payment paid — and nothing used to say so.
+
+```ts
+get webhookVerification(): WebhookVerificationState {
+  return this.#webhookSecret !== undefined ? 'configured' : 'unconfigured'
+}
+```
+
+| Value | Meaning | At boot |
+| --- | --- | --- |
+| `'configured'` | it can verify and it has the credential | route mounts |
+| `'unconfigured'` | it *can* verify and nothing was configured | **throws**, unless the provider is in `allowUnverifiedWebhooks` |
+| `'unsupported'` | the gateway signs nothing — there is nothing to configure | route mounts |
+
+It is **optional**, so a driver written against an older version keeps compiling — and **absent is
+read as `'unsupported'`**, because a driver that never opted in cannot be assumed to verify.
+Declaring `'unsupported'` when your gateway *does* sign is the one dishonest answer available here;
+it turns the boot check off for your driver and nothing else will notice.
+
+### `idempotencyKey` is a promise, not a hint
+
+`CreateCustomerInput`, `ChargeInput`, `CheckoutInput`, `UpdateSubscriptionInput`,
+`CreateSubscriptionInput` and `refund()` all carry an optional `idempotencyKey`. A gateway
+with no deduplication mechanism must make your driver **refuse** it — throw — rather than
+accept and ignore it. Accepting it silently turns a caller's retry guarantee into a second
+charge, a second refund or a second subscription, and the caller has no way to find out.
 
 ## A custom payment gateway
 
@@ -54,7 +94,9 @@ import {
 export class MyGatewayDriver implements PaymentsDriver {
   readonly provider = 'my_gateway'
   readonly supportedMethods = ['pix', 'credit_card'] as const
-  readonly capabilities = { refunds: true }
+  // Say what is true. `disputes: false` + no findDispute/submitDisputeEvidence is a
+  // complete, honest answer for a gateway that only emails you about a chargeback.
+  readonly capabilities = { refunds: true, disputes: false }
 
   #invoiceCtx: EmitInvoiceContext
   #baseUrl = 'https://api.mygateway.com/v1'
@@ -137,6 +179,121 @@ The exported building blocks make the common work trivial:
   `verifyRsaSha256Signature`, `requireMatchingCredential` for signature validation in
   `parseWebhook`.
 
+## Webhooks — one event, or several
+
+`parseWebhook` returns `WebhookEvent | WebhookEvent[] | Promise<WebhookEvent | WebhookEvent[]>`.
+
+**One event is still the normal answer.** The array half exists for the two gateways whose
+envelope carries a list — Adyen's `notificationItems`, Efí's `pix` — and the union is a
+widening, not a migration. If your gateway sends one event per request, return one: an
+array of length one adds nothing and reads as if batching were possible.
+
+If it can send several, three rules are not optional:
+
+- **Every event needs an id of its own.** The idempotency ledger keys on `WebhookEvent.id`,
+  so reusing one id across a batch makes the second event look like a redelivery of the
+  first and it is silently skipped, with the money already moved.
+
+  The same rule bites outside a batch, and it caught this package: an id built from the event
+  **name** and the payment id is a (payment, event-type) identity, not an event identity, so the
+  second update about one payment is discarded as a replay of the first. Use the gateway's own
+  event id where there is one. Where there is not, hash the raw body — deterministic, so a genuine
+  redelivery still deduplicates, while two different notifications differ. Never `Math.random()`:
+  that turns deduplication off and every retry of a failing delivery looks new.
+- **You must have authenticated all of them.** Where the gateway signs per event, verifying
+  the first and trusting the rest is a forgery hole — an attacker replays one genuine item
+  and appends whatever they like. Verify every item in one pass, map in a second, and keep
+  the two separate so no later edit can reorder its way into building events from unverified
+  items. One bad signature rejects the whole delivery: a partly-forged body is a forged
+  request.
+- **Throwing rejects the whole delivery.** A throw out of `parseWebhook` answers `400` and
+  none of the events in that body are processed, however many of them were fine. Throw for a
+  bad signature or an unparsable body — a partly-forged batch is a forged request. Never
+  throw for an event you merely did not recognize: map it to `payment.updated`, or return it
+  unmapped and let the processor pass it through.
+
+  A rejected delivery leaves no ledger row — it is refused before an event exists — so the route
+  files a `webhook.rejected` audit row instead. That row and the `rejected_deliveries` health check
+  are the only places a refused delivery is visible.
+
+An unmapped event should be passed through **lowercased as the gateway spells it**
+(`PAYMENT_ANTICIPATED` → `payment_anticipated`). Do not invent a `payment.something` name for it:
+that namespace is the library's own, and the boot-time handler check treats an unknown type inside
+it as a typo. `payment.updated` is the right target only when the event really does mean "this
+payment changed" — and note that it now carries a built-in sync, so its `data` should include the
+payment's current `status`, `paidAt` and `refundedAmount` where the gateway states them.
+
+The return may be a promise, and one driver needs that: Mollie's webhook is a bare payment
+id with no status and no signature, so the only way to learn what happened — or that the
+call is genuine at all — is an authenticated fetch of that payment. The mounted route
+awaits `parseWebhook`.
+
+## Disputes — the two optional methods
+
+`findDispute` and `submitDisputeEvidence` are the only optional members of the contract,
+and they are optional for a real reason: a gateway can settle money perfectly and give you
+nothing but an email when a chargeback is filed. Declare what is true:
+
+```ts
+readonly capabilities = { disputes: false }
+// ...and simply omit findDispute / submitDisputeEvidence.
+```
+
+Do not stub them to return an invented `Dispute`. The whole point of the dispute vocabulary
+is that a deadline nobody guessed is the only deadline worth alerting on, and a fabricated
+`evidenceDueBy` is worse than none. Of the eighteen bundled gateways, several genuinely
+have no dispute API, and their pages say so.
+
+A driver with no dispute API can still report disputes over the **webhook**, and should.
+What `capabilities.disputes = false` means is "you cannot read or answer one over the API",
+not "chargebacks do not happen here". Map what the gateway sends onto the three canonical
+events, on one question — **has the gateway taken the money yet**:
+
+| Event | Meaning | The row |
+| --- | --- | --- |
+| `payment.dispute_warning` | a pre-chargeback alert; no money has moved | stays `paid` |
+| `payment.disputed` | the funds have been withdrawn | moves to `disputed` |
+| `payment.dispute_closed` | resolved; carries `outcome` | `won` restores `paid`; the rest stay |
+
+`payment.dispute_closed` **must** carry an `outcome` (`won`/`lost`/`canceled`/`expired`) —
+the processor throws on a close without one rather than defaulting, because defaulting
+would report a result the gateway never sent. If your gateway's close event does not say
+which way it went, emit `payment.updated` instead.
+
+The dispute event's `data` is `DisputeWebhookData`: `gatewayId` is the **payment's** id,
+with the dispute's own id in `disputeId`, plus the optional `reason`, `actionableUntil`
+(the deadline), `outcome`, `amount` and `currency`. It is deliberately looser than a
+payment event's data — a Stripe early fraud warning names a charge and a fraud type and no
+money at all, and refusing it for that would throw away the earliest warning available.
+
+If the gateway *does* expose a dispute API, implement both:
+
+```ts
+readonly capabilities = { disputes: true, refunds: true }
+
+async findDispute(disputeGatewayId: string): Promise<Dispute | null> { /* ... */ }
+
+async submitDisputeEvidence(
+  disputeGatewayId: string,
+  evidence: DisputeEvidence,
+): Promise<Dispute> { /* ... */ }
+```
+
+Two constraints on the second one. **Most gateways accept evidence once**, so a driver must
+never retry it on its own. And `DisputeEvidence.documents` addresses each file by what it
+proves (`receipt`, `shipping`, `terms`, …) rather than as a bare list of ids, because that
+is how every gateway files them — Stripe has nine separate evidence fields, Adyen a
+`defenseDocumentTypeCode`, and neither can be reached with "here are some files". The
+documents are gateway **file ids**, never URLs: the banks reviewing a dispute do not follow
+links.
+
+<Callout type="warn" title="A driver that cannot read a dispute back should refuse">
+`submitDisputeEvidence` returns a `Dispute`. If the gateway's API has no endpoint that
+reads one back — Adyen's v30 is the case in this package — the returned object would be
+invented, so the method throws instead. Refusing is the honest answer; the alternative is
+an app that believes it filed a defense it cannot see.
+</Callout>
+
 ## Reusing a gateway customer
 
 Every charge/subscription flow needs a gateway customer id; `ensureCustomer` does the
@@ -157,31 +314,35 @@ await user.save()
 
 ## A custom invoice provider
 
+Check the [built-ins](/docs/payments/invoices#invoice-providers) first — Focus, eNotas,
+PlugNotas, Tecnospeed and Asaas all ship. What follows is for a municipal API none of them
+covers.
+
 The `InvoiceProvider` contract is even smaller — `emit(input)` and `find(id)`:
 
-```ts title="app/services/invoices/tecnospeed_driver.ts"
+```ts title="app/services/invoices/prefeitura_driver.ts"
 import { type InvoiceProvider, type InvoiceEmitInput, type Invoice, httpRequest } from '@adonis-agora/payments'
 
-export class TecnospeedDriver implements InvoiceProvider {
-  readonly provider = 'tecnospeed'
+export class PrefeituraDriver implements InvoiceProvider {
+  readonly provider = 'prefeitura'
 
   async emit(input: InvoiceEmitInput): Promise<Invoice> {
     const data = await httpRequest<{ numero: string; link: string }>('/nfse', {
-      baseUrl: 'https://api.tecnospeed.com.br/v1',
+      baseUrl: 'https://nfse.minhacidade.gov.br/v1',
       method: 'POST',
       body: {
         tomador: { cpf_cnpj: input.customer.taxId, nome: input.customer.name },
         valor: input.amount / 100,
         descricao: input.service.description,
       },
-      bearerToken: process.env.TECNOSPEED_TOKEN!,
+      bearerToken: process.env.PREFEITURA_TOKEN!,
     })
     return {
       id: data.numero,
       gatewayId: data.numero,
       provider: this.provider,
       number: data.numero,
-      url: data.link,
+      hostedPdfUrl: data.link, // the field is `hostedPdfUrl`, not `url`
       status: 'issued',
       amount: { amount: input.amount, currency: input.currency },
       createdAt: new Date().toISOString(),
@@ -197,9 +358,9 @@ export class TecnospeedDriver implements InvoiceProvider {
 
 ```ts title="config/payments.ts"
 invoice: {
-  default: 'tecnospeed',
+  default: 'prefeitura',
   providers: {
-    tecnospeed: () => import('#services/invoices/tecnospeed_driver').then((m) => new m.TecnospeedDriver()),
+    prefeitura: () => import('#services/invoices/prefeitura_driver').then((m) => new m.PrefeituraDriver()),
   },
 }
 ```

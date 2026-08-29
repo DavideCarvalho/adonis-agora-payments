@@ -10,7 +10,7 @@ import {
 import { signSessionCookie, verifySessionCookie } from '../../src/dashboard/session_cookie.js';
 
 const SECRET = 'controller-spec-secret-key-0123456789';
-const BASE_PATH = '/payments-dashboard';
+const BASE_PATH = '/payments';
 
 describe('resolveDashboardAuth', () => {
   it('returns null when dashboardAuth is not configured (absent-option)', () => {
@@ -67,9 +67,7 @@ describe('resolveDashboardAuth', () => {
 
 describe('sanitizeReturnTo (open-redirect guard)', () => {
   it('keeps a same-origin, root-relative path', () => {
-    expect(sanitizeReturnTo('/payments-dashboard/runs/1', BASE_PATH)).toBe(
-      '/payments-dashboard/runs/1',
-    );
+    expect(sanitizeReturnTo('/payments/runs/1', BASE_PATH)).toBe('/payments/runs/1');
   });
 
   it('rejects protocol-relative, absolute, and non-string targets', () => {
@@ -91,12 +89,12 @@ describe('performLogin', () => {
   it('mints a cookie the session verifier accepts on a successful login', async () => {
     const outcome = await performLogin(
       auth,
-      { username: 'ops', password: 'correct-horse', returnTo: '/payments-dashboard/runs/1' },
+      { username: 'ops', password: 'correct-horse', returnTo: '/payments/runs/1' },
       BASE_PATH,
     );
     expect(outcome.kind).toBe('ok');
     if (outcome.kind !== 'ok') return;
-    expect(outcome.redirectTo).toBe('/payments-dashboard/runs/1');
+    expect(outcome.redirectTo).toBe('/payments/runs/1');
     const session = verifySessionCookie(outcome.cookieValue, { secret: SECRET });
     expect(session).toMatchObject({ sub: 'ops', roles: ['admin'] });
   });

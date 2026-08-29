@@ -1,6 +1,6 @@
 ---
 title: Testing
-description: Test the billing layer without a gateway or a database — FakePaymentsDriver records every call, InMemoryBillingStore mirrors the Lucid models, MutableClock drives time.
+description: Test the billing layer without a gateway or a database — FakePaymentsDriver records every call, InMemoryBillingStore mirrors the Lucid models, MutableClock drives time — and the integration suite that runs the real schema against a real Postgres.
 icon: FlaskConical
 ---
 
@@ -10,6 +10,10 @@ The package ships a testing kit under `@adonis-agora/payments/testing` — no te
 dependency, so it works with Japa or Vitest. The point is to exercise the billing layer
 **without a gateway or a database**: fake the driver, use an in-memory store, and drive
 time deterministically.
+
+That covers your app. This page also documents how the package tests **itself**, because
+the two things the kit structurally cannot prove — that the SQL is valid, and that a test
+would fail if the code were wrong — are the two that have caught the worst bugs here.
 
 ## FakePaymentsDriver
 
@@ -23,8 +27,18 @@ import { WebhookProcessor } from '@adonis-agora/payments'
 const driver = new FakePaymentsDriver({ provider: 'stripe' })
 const payment = await driver.charge({ amount: 1990 })
 expect(driver.chargeCalls).toHaveLength(1)
-expect(driver.chargeCalls[0]).toMatchObject({ amount: 1990 })
+expect(driver.chargeCalls[0].input).toMatchObject({ amount: 1990 })
 ```
+
+Seven call lists, and they do **not** all have the same entry shape — check before you
+assert:
+
+| List | Entry |
+| --- | --- |
+| `createCustomerCalls`, `chargeCalls`, `createCheckoutCalls`, `createSubscriptionCalls` | `{ input }` |
+| `updateSubscriptionCalls` | `{ id, input }` |
+| `cancelSubscriptionCalls` | `{ id, options? }` |
+| `refundCalls` | `{ paymentGatewayId, amount? }` — no `input` wrapper |
 
 It also queues webhook events for `parseWebhook`, so you can drive the full
 webhook → processor flow without a real gateway:
@@ -41,6 +55,95 @@ const driver = new FakePaymentsDriver({
 })
 const event = driver.parseWebhook('{}', {})
 ```
+
+Events come off that queue in order, one per call, and an empty queue throws rather than
+returning `undefined` — a webhook test that silently ran on nothing is a test that proves
+nothing.
+
+<Callout title="What the fake deliberately is not">
+It is a stand-in for a gateway call, not for the driver contract's edges:
+
+- It declares **no `capabilities`**, so it cannot exercise a path that branches on
+  `capabilities.refunds` or `capabilities.disputes`, and the manager's capability refusal
+  never fires against it.
+- It implements **no `findDispute` / `submitDisputeEvidence`**. Dispute flows are tested
+  through the processor and the store, not through this driver.
+- `parseWebhook` always returns **one** event, synchronously. The real contract is
+  `WebhookEvent | WebhookEvent[] | Promise<…>` (see
+  [one delivery, several events](/docs/payments/webhooks#one-delivery-several-events)), so a
+  batch or an async parse needs a hand-written stub.
+
+For those, implement the two or three methods you need on an object literal cast to
+`PaymentsDriver` — that is what this package's own specs do.
+</Callout>
+
+## `fakePayments()` — a real manager over the fake driver
+
+The kit shipped the fake **driver** and no way to wrap it, so every app wrote the same line:
+
+```ts
+setPayments({ driver: () => fake } as never)   // don't
+```
+
+`as never` is the tell. That object is not a manager: it has no `invoice()` and no
+`assertCapability()`, so a charge with `invoice: true` and a refund against a gateway that cannot
+refund both took a path the test could not exercise — the cast erased exactly the two methods whose
+absence would have been caught.
+
+```ts title="tests/billing/checkout.spec.ts"
+import { FakePaymentsDriver, fakePayments, swapPayments } from '@adonis-agora/payments/testing'
+
+const fake = new FakePaymentsDriver({ provider: 'asaas' })
+const restore = swapPayments(fakePayments(fake))
+afterEach(restore)
+```
+
+`fakePayments(driver?)` returns a real `PaymentsManager`. No `methods` routing is configured on
+purpose: with one driver and no routing, `driver()` returns it unbound, which is what a test wants.
+Route explicitly if the test is *about* routing.
+
+`swapPayments(manager)` and `swapBillingStore(store)` install on the `services/main` singletons and
+hand back the restore. The restore works when **nothing** was set — the normal case in a test that
+never booted a provider, and the case a hand-rolled save/restore could not express, because saving
+meant calling a `getPayments()` that throws when nothing is set.
+
+## `flushWebhooks()` — awaiting a dispatched webhook
+
+With `billing.dispatcher: 'durable'` the delivery resolves when the event is **accepted**, not
+processed. So `await client.post(...)` returns before anything has happened, and a *negative*
+assertion could only be written as a timed sleep — slow when it passes and wrong when the machine is
+busy.
+
+```ts title="tests/functional/webhook.spec.ts"
+import { flushWebhooks } from '@adonis-agora/payments/testing'
+
+await client.post('/payments/webhook/asaas').json(payload)
+await flushWebhooks()
+expect(await grants.count()).toBe(0)   // an assertion, not a sleep
+```
+
+It resolves when the accepted work has actually run, background in-process retries included. It is a
+no-op when the billing layer is off, and it **throws on timeout** (`{ timeoutMs }`) rather than
+hanging — including the honest case where a separate worker process runs the events and no
+in-process wait can ever see them.
+
+## Emptying the tables between groups
+
+```ts
+import { truncateBillingTables } from '@adonis-agora/payments'
+
+afterEach(() => truncateBillingTables(db))
+```
+
+Leaving the rows in place means one test's webhook ledger deduplicates the next test's event — the
+library's own idempotency working perfectly, against the suite. `truncateBillingTables` empties them
+in reverse creation order (so a foreign key never blocks a delete), with `DELETE FROM`, and skips a
+table that was never created rather than raising.
+
+Do **not** reach for `dropBillingTables` between groups. `LucidBillingStore` memoizes "the schema
+exists", so a store built before the drop used to go on believing the tables were there and every
+following query failed on a missing relation. The drop now tells live stores to forget — but
+truncating is what a suite actually needs.
 
 ## InMemoryBillingStore
 
@@ -61,6 +164,39 @@ const second = await processor.process(event)
 expect(second).toBe(false)
 ```
 
+`process()` returns `true` when it did the work, `false` when the ledger recognized a
+redelivery, and **throws** when a handler throws — after marking the ledger row `failed`.
+
+It implements the whole SPI, disputes included, so the dispute reads a health check or a
+console is built on can be driven here too:
+
+```ts
+await store.saveDispute({
+  gatewayId: 'dp_1', paymentGatewayId: 'pi_1', provider: 'stripe',
+  status: 'open', evidenceDueBy: new Date('2026-09-01T00:00:00Z'),
+})
+await store.listDisputesDueWithin({ withinHours: 72, now: new Date('2026-08-30T00:00:00Z') })
+await store.countDisputesDueWithin({ withinHours: 72, now: new Date('2026-08-30T00:00:00Z') })
+
+// The deadline-free reads, for a gateway that publishes none.
+await store.listOpenDisputes({ limit: 20 })
+await store.countOpenDisputes({})
+
+// And the audit trail, including what the endpoint refused.
+await store.recordAuditEvent({ action: 'webhook.rejected', provider: 'asaas', message: '...' })
+await store.countAuditEvents({ action: 'webhook.rejected', createdAfter: cutoff })
+```
+
+Both deadline reads take an explicit `now`, so a boundary is asserted against a fixed instant
+rather than against whenever the suite happened to run.
+
+<Callout type="warn" title="The in-memory store was hiding a real bug, once">
+It counted a payment with no `paid_at` as in-window, so the `revenue()` regression that dropped
+recovered dispute money out of every windowed figure stayed green in the unit suite. That is fixed —
+and it is the reason this page ends where it does: a store that reimplements the contract can agree
+with a caller that is wrong.
+</Callout>
+
 This is the cheapest way to prove the properties that matter in production: a redelivered
 webhook doesn't double-sync, a throwing handler marks the ledger `failed`, and the built-in
 sync writes the right rows.
@@ -73,8 +209,10 @@ windows, period boundaries:
 ```ts title="tests/billing/subscription.spec.ts"
 import { MutableClock } from '@adonis-agora/payments/testing'
 
-const clock = new MutableClock()
-clock.advance(1000 * 60 * 60 * 24) // +1 day
+const clock = new MutableClock()             // starts at 2026-01-01T00:00:00.000Z
+clock.now()                                  // → Date
+clock.advance(1000 * 60 * 60 * 24)           // +1 day
+clock.set(new Date('2026-03-01T00:00:00Z'))  // or jump outright
 ```
 
 ## Putting it together — the full webhook flow
@@ -95,7 +233,11 @@ test('a confirmed payment syncs the store and runs the handler', async () => {
   const processor = new WebhookProcessor({
     store,
     driver,
-    handlers: { 'payment.succeeded': (event) => { handled.push((event.data as any).gatewayId) } },
+    handlers: {
+      'payment.succeeded': defineWebhookHandler('payment.succeeded', (event) => {
+        handled.push(event.data.gatewayId)   // typed — no cast
+      }),
+    },
   })
 
   const event = driver.parseWebhook('{}', {})
@@ -112,3 +254,85 @@ The testing kit proves the library's contracts in isolation. For your app's mone
 (grant credits, activate a subscription), still add functional tests against a real
 ephemeral database — the kit and those tests cover different layers.
 </Callout>
+
+## How the package tests itself
+
+Two suites, split because they need different things:
+
+| Suite | Command | Needs | Covers |
+| --- | --- | --- | --- |
+| Unit | `pnpm test` | nothing | drivers, processor, dispatcher, handlers, config — 1,250-plus tests |
+| Integration | `pnpm test:integration` | Docker | the Lucid store and the schema against a real Postgres — 100-plus tests |
+
+The split is not tidiness. The unit suite drives everything through
+`InMemoryBillingStore`, and that store is a **hand-written reimplementation** of the
+contract: it can prove the callers are right and nothing about whether the SQL the Lucid
+store emits is valid, or lands where the code reads it. Three bugs got through exactly
+there — `revenue()` and `countActiveSubscriptions()` returning a silent zero (a Lucid
+aggregate lands in `$extras`, not on the model), and `billing_payments.amount` coming back
+as the **string** `'1990'`, because the column is `BIGINT` and node-postgres will not guess
+past 2^53. Adding a fee to that concatenated. Every unit test was green throughout.
+
+### What the integration harness actually runs
+
+`test/integration/global_setup.ts` starts **one** `postgres:16-alpine` container for the
+whole run (vitest's `forks` pool gives every spec file its own process, so a per-file
+container would be minutes of churn) and hands the URL down through the environment.
+
+`createIntegrationDatabase(schemaName)` then gives each spec its own Postgres **schema**
+via `searchPath`, so files running in parallel cannot see each other's rows — "count every
+failed event in the last hour" is only a meaningful assertion when the table holds nothing
+but this test's rows. Teardown drops the schema.
+
+The load-bearing part is what creates the tables. The harness reads the **published
+migration stub** — the file `node ace configure` copies into a consumer app — strips its
+`{{{ exports(…) }}}` header, rewrites the one import that cannot resolve from inside the
+package, and runs what is left. Nothing in the suite re-declares a table. Re-declaring
+them would keep the suite green while the stub drifted, which is precisely the failure it
+exists to catch.
+
+<Callout title="One stub, not three">
+There used to be three published migrations, and the harness ran all three in order. The
+library now [owns its schema](/docs/payments/billing#the-billing-tables): one stub,
+`create_billing_tables`, calling the same `createBillingTables` the store calls at boot.
+A test written against the old three-file list is out of date, not broken.
+</Callout>
+
+Pass `{ migrate: false }` for a schema with **nothing** in it:
+
+```ts
+const database = await createIntegrationDatabase('schema_test', { migrate: false })
+```
+
+That is what the schema spec needs. `createBillingTables` is the thing under test there,
+and running the migration first — which calls it — would make every assertion pass before
+the test began.
+
+The first run of that spec against a real Postgres failed immediately, on two orderings
+that every unit assertion had accepted: an `ALTER TABLE` two statements above its own
+`CREATE TABLE`, and an index on a column an older install does not have yet. Either one
+fails the whole call, so the schema is half-built on every boot and the only symptom is a
+query error somewhere else entirely.
+
+## A test that passes before the fix measures nothing
+
+This is the convention the rest of the page rests on, and it is worth stating plainly:
+**break the code on purpose and watch the test go red, before you believe it.**
+
+A regression test written after a fix has never been observed failing. It may assert the
+right thing; it may also assert something the code did before the bug was found, in which
+case it is a green light with no bulb behind it. The only way to tell is to reintroduce
+the bug and check.
+
+Concretely, for each fix in this package: revert the change (or hand-edit the branch back
+to the old behaviour), run the new test, confirm it fails **for the reason you expect**,
+then restore the fix. One mutation per behaviour the test claims to protect — if a test
+guards four things, four mutations.
+
+It is not ceremony. The Woovi bug — a charge created at 1/100 of its amount — survived
+review because the driver converted centavos and its tests asserted the converted number.
+Both halves agreed with each other. A mutation would have shown the assertion moving in
+lockstep with the code instead of pinning it.
+
+The same discipline is what lets these pages state defaults, statuses and orderings as
+fact rather than as intent.

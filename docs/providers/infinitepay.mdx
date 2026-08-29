@@ -1,0 +1,189 @@
+---
+title: InfinitePay
+description: CloudWalk's Brazilian checkout — a redirect-only driver, because the payment link API is the only one InfinitePay documents. charge(), refunds, customers and subscriptions throw.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+CloudWalk's Brazilian payments product. **This driver does checkout links and nothing
+else**, because that is all InfinitePay documents.
+
+<Callout type="warn" title="Read this before you configure it">
+InfinitePay's only currently documented developer API is the **Checkout / Payment Link API**.
+There is no documented server-side charge API, no refund endpoint, no customer resource, no
+subscription API, and no list or search endpoint of any kind. So `charge()`, `refund()`,
+`createCustomer()`, `findPayment()`, `listInvoices()` and every subscription method **throw**
+— they do not silently return an empty result and they do not call an endpoint that is not
+there. A v2 transactions API did exist and is still referenced by CloudWalk's abandoned
+WooCommerce and Magento plugins, but its documentation host is gone and its credentials were
+handed out by email; the driver deliberately does not build on it.
+</Callout>
+
+- **Methods**: pix, credit_card — what the hosted page settles with (`capture_method` comes
+  back as one of the two). **No boleto.** These are the methods a *link* accepts; routing a
+  charge here still fails, because there is no charge API.
+- **Setup**: `payments.infinitepay({ handle, webhookUrl })` — `INFINITEPAY_HANDLE`.
+- **Credential**: a **`handle`** (your InfiniteTag), not a secret key. The checkout endpoint
+  is public and takes no credentials at all; the handle is what identifies the merchant.
+  Enable *Vendas → Checkout → Configurações → Habilitar Checkout Integrado* in the
+  InfinitePay app first, or link creation is refused.
+- **Money**: integer centavos, on both sides. No conversion.
+- **Capabilities**: `{ refunds: false, invoices: false, subscriptions: false }`.
+
+<Callout type="warn" title="Not yet run against a live account">
+This driver was written against InfinitePay's published checkout documentation and is covered
+by unit tests that stub the HTTP layer. Nothing here has been exercised against a real
+InfinitePay account. Create a link and pay it yourself before you take real money with it —
+and because the webhook cannot be authenticated, verify the `checkPayment()` confirmation step
+works end to end while you are there.
+</Callout>
+
+```ts title="config/payments.ts"
+import { defineConfig, payments } from '@adonis-agora/payments'
+import env from '#start/env'
+
+export default defineConfig({
+  default: 'infinitepay',
+  providers: {
+    infinitepay: payments.infinitepay({
+      handle: env.get('INFINITEPAY_HANDLE'),
+      webhookUrl: env.get('INFINITEPAY_WEBHOOK_URL'),
+    }),
+  },
+})
+```
+
+## Checkout
+
+```ts
+const session = await payments.driver('infinitepay').createCheckout({
+  amount: 1500,                                   // centavos
+  description: 'Curso de Vendas Online',
+  successUrl: 'https://app.example.com/obrigado',
+  externalReference: 'order:42',                  // becomes order_nsu
+})
+return response.redirect(session.url)
+```
+
+The gateway answers with `{ "url": … }` and **nothing else** — no link id, no session id — so
+`session.id` and `session.gatewayId` are the **`order_nsu`** the call sent. That is also the
+only id the webhook and `checkPayment()` speak in, which makes it the right thing to store
+against your local order.
+
+**`order_nsu` is where `externalReference` goes**, because it is the only field InfinitePay
+echoes back — on the webhook and on the redirect. It comes back out on
+`event.data.externalReference`, and a session opened without it produces a confirmation your
+handler cannot route to an order, with the money already taken. Set it. (It otherwise falls
+back to `metadata.orderNsu`, then `idempotencyKey`, then a generated UUID.)
+
+`cancelUrl` is ignored: a link has one `redirect_url`, used on success, and the API has no
+cancel destination. `planId`/`trialDays` are refused outright.
+
+`metadata` carries the rest of the link payload: `items` (a real cart, whose lines must add up
+to `amount` — a mismatch throws rather than charging a different number), `customer`
+(`{ name, email, phone_number }`) and `address` (`{ cep, street, neighborhood, number,
+complement }`). Both are write-only: nothing reads them back.
+
+<Callout title="idempotencyKey does not deduplicate here">
+InfinitePay documents no idempotency mechanism. `idempotencyKey` is only a last-resort source
+for `order_nsu` when no `externalReference` was given — calling `createCheckout` twice with the
+same key creates two links, not one.
+</Callout>
+
+## Webhooks — unauthenticated, so confirm before you credit
+
+InfinitePay POSTs a webhook to the link's `webhook_url` **only when a payment is approved**.
+There is no failure event and no refund event, so `parseWebhook` always normalizes to
+`payment.succeeded`.
+
+**It verifies nothing, because there is nothing to verify.** InfinitePay documents no
+signature, no HMAC and no shared token for the checkout webhook — its own security advice is
+to re-check the payment instead. So this driver declares
+`webhookVerification: 'unsupported'`: the boot-time refusal that stops an app whose driver *can*
+verify and was given no credential does not apply, because there is nothing to configure — and
+`allowUnverifiedWebhooks` is not needed for InfinitePay either. An event out of `parseWebhook` therefore means *somebody
+claimed a payment happened*, not *a payment happened*.
+
+Two things to do about that:
+
+1. **Confirm with `checkPayment()`** before you credit anything. `event.raw` carries the three
+   ids it needs.
+2. **Put an unguessable segment in `webhookUrl`**, so the endpoint is at least not trivially
+   discoverable. `webhook_url` is sent **per link** — there is no global webhook registration
+   in the dashboard — so without `webhookUrl` (or `INFINITEPAY_WEBHOOK_URL`) configured, no
+   webhook ever arrives.
+
+```ts title="app/payments/handlers/payment_succeeded.ts"
+export default async function onPaymentSucceeded(event) {
+  if (event.provider !== 'infinitepay') return
+
+  const raw = event.raw as { order_nsu: string; transaction_nsu: string; invoice_slug: string }
+  const driver = payments.driver('infinitepay') as InfinitePayDriver
+  const confirmed = await driver.checkPayment({
+    orderNsu: raw.order_nsu,
+    transactionNsu: raw.transaction_nsu,
+    slug: raw.invoice_slug,
+  })
+
+  if (confirmed?.status !== 'paid') return // the webhook lied, or the payment moved
+  await fulfil(raw.order_nsu)
+}
+```
+
+## Disputes: there is no dispute vocabulary here at all
+
+InfinitePay's checkout reference documents two endpoints (`POST /links`, `POST
+/payment_check`) and one notification, *"quando o pagamento for aprovado"*. There is **no
+chargeback webhook, no pre-dispute alert, no dispute resource and no defense deadline** —
+nothing this driver could map onto `payment.dispute_warning`, `payment.disputed` or
+`payment.dispute_closed`, and it does not invent one.
+
+That is not the same as saying InfinitePay has no chargebacks. It is a card acquirer, so real
+scheme chargebacks happen; they are simply handled entirely inside the InfinitePay app, which
+is also the only place defense documents can be uploaded. **The first your integration learns
+of one is the debit on the statement**, and the payment row will still read `paid`.
+
+If disputed volume matters to you, that is a reason to route cards through a gateway that
+notifies them — every card acquirer on the [Providers](/docs/payments/providers) page except
+this one does — or to reconcile against the app on a schedule. It is a gap in the gateway,
+not one this driver can paper over.
+
+## `checkPayment` — and why `findPayment` throws
+
+`POST /payment_check` is the only status lookup InfinitePay documents, and it needs **all
+three** of `order_nsu`, `transaction_nsu` and `slug`. The last two come into existence only
+when the payment does — they arrive on the webhook and on the redirect query string — so
+there is **no way to poll a link that has not been paid**. A pending link is invisible to the
+API.
+
+That is why `findPayment(id)` throws: the contract hands it one id, and one id is not enough.
+`checkPayment()` is the honest replacement, and it is a driver-specific method — reach it by
+narrowing the driver:
+
+```ts
+import type { InfinitePayDriver } from '@adonis-agora/payments/drivers/infinitepay'
+
+const driver = payments.driver('infinitepay') as InfinitePayDriver
+const payment = await driver.checkPayment({ orderNsu, transactionNsu, slug })
+// null when the gateway does not know it; status 'pending' when it knows it and it is unpaid
+```
+
+## Pairing it
+
+Because the driver stops at checkout, most apps route the rest elsewhere — the library is
+built for exactly that:
+
+```ts
+export default defineConfig({
+  default: 'asaas',
+  providers: {
+    infinitepay: payments.infinitepay({ handle: env.get('INFINITEPAY_HANDLE') }),
+    asaas: payments.asaas(),
+  },
+  methods: {
+    boleto: 'asaas',       // InfinitePay's checkout has no boleto
+    credit_card: 'asaas',  // and no server-side charge at all
+  },
+})
+```

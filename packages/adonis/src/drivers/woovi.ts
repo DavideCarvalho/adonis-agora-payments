@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createClient } from '@woovi/node-sdk';
 import type { WooviDriverConfig } from '../define_config.js';
 import { publishPaymentDiagnostics, publishSubscriptionDiagnostics } from '../diagnostics.js';
@@ -9,11 +10,11 @@ import type {
   PaymentsDriver,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
+  WebhookVerificationState,
 } from '../driver.js';
 import { headerValue } from '../http.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
 import type { EmitInvoiceContext } from '../invoice/emit_invoice.js';
-import { fromDecimal, toDecimal } from '../money.js';
 import type {
   CheckoutSession,
   Customer,
@@ -125,7 +126,13 @@ export class WooviDriver implements PaymentsDriver {
       // handlers read. Prefer the explicit `externalReference`, fall back to the
       // idempotency key (legacy behavior).
       correlationID: input.externalReference ?? input.idempotencyKey ?? `charge_${Date.now()}`,
-      value: toDecimal(input.amount),
+      // Centavos, straight through. OpenPix documents `value` as "o valor em centavos da
+      // cobrança Pix" — the same integer minor unit this package uses — so there is no
+      // conversion to do. This driver used to send `toDecimal(amount)`, which turned a
+      // R$19,90 charge into `value: 19.9` and created a **20 centavo** charge at the
+      // gateway. The neighbouring Asaas and AbacatePay drivers DO work in decimal reais;
+      // the difference is Woovi's, not an oversight here.
+      value: input.amount,
       ...(input.description !== undefined ? { comment: input.description } : {}),
       ...(input.customerId !== undefined ? { customer: input.customerId } : {}),
     });
@@ -185,7 +192,7 @@ export class WooviDriver implements PaymentsDriver {
   async createCheckout(input: CheckoutInput): Promise<CheckoutSession> {
     const data = await this.#client.charge.create({
       correlationID: input.idempotencyKey ?? `checkout_${Date.now()}`,
-      value: toDecimal(input.amount),
+      value: input.amount,
       ...(input.description !== undefined ? { comment: input.description } : {}),
     });
     const charge = data as {
@@ -212,7 +219,7 @@ export class WooviDriver implements PaymentsDriver {
     const customer = await this.#resolveSubscriptionCustomer(input);
     const body: Record<string, unknown> = {
       customer,
-      value: toDecimal(input.amount ?? 0),
+      value: input.amount ?? 0,
       dayGenerateCharge: this.#dayOfMonth(input.startDate) ?? 1,
       ...(input.cycle !== undefined ? { frequency: this.#mapFrequency(input.cycle) } : {}),
       // Pix Automático journey 3 (pay-on-approval): `DYNAMIC` generates each charge and
@@ -276,13 +283,19 @@ export class WooviDriver implements PaymentsDriver {
   }
 
   async cancelSubscription(
-    subscriptionGatewayId: string,
+    _subscriptionGatewayId: string,
     _options?: { atPeriodEnd?: boolean },
   ): Promise<Subscription> {
-    const data = await this.#client.subscription.get({ id: subscriptionGatewayId });
-    const subscription = this.#mapSubscription({ ...data, status: 'INACTIVE' });
-    publishSubscriptionDiagnostics(subscription, 'subscription.canceled');
-    return subscription;
+    // The SDK's subscription client exposes only `create` and `get` — there is no cancel,
+    // and there is no delete. This used to fetch the subscription, flip `status` to
+    // INACTIVE on the local copy, PUBLISH `subscription.canceled`, and return it: the
+    // billing row went to canceled, the app stopped entitling the customer, and Woovi
+    // carried on charging them. Both halves wrong, from one call that reported success.
+    throw new Error(
+      '[payments] Woovi/OpenPix does not support canceling a subscription via API. ' +
+        'Cancel it in the Woovi dashboard, then reconcile your own record — a Pix Automático ' +
+        'authorization can also be revoked by the payer at their bank.',
+    );
   }
 
   async findSubscription(gatewayId: string): Promise<Subscription | null> {
@@ -295,19 +308,16 @@ export class WooviDriver implements PaymentsDriver {
   }
 
   async updateSubscription(
-    subscriptionGatewayId: string,
-    input: UpdateSubscriptionInput,
+    _subscriptionGatewayId: string,
+    _input: UpdateSubscriptionInput,
   ): Promise<Subscription> {
-    // OpenPix subscriptions are immutable — best-effort: fetch and return with the new
-    // amount/description applied locally (the change takes effect on the next cycle by
-    // recreating the subscription in a real integration).
-    const data = await this.#client.subscription.get({ id: subscriptionGatewayId });
-    const updated: Record<string, unknown> = {
-      ...data,
-      ...(input.amount !== undefined ? { value: toDecimal(input.amount) } : {}),
-      ...(input.description !== undefined ? { comment: input.description } : {}),
-    };
-    return this.#mapSubscription(updated);
+    // OpenPix subscriptions are immutable: the API (and the SDK's subscription client)
+    // exposes only create and get. Returning a locally patched object would report
+    // success on a change the gateway never saw, while it keeps charging the old value.
+    throw new Error(
+      '[payments] Woovi/OpenPix does not support updating a subscription via API. ' +
+        'Cancel it and create a new one with the new amount, or keep the change on your own record.',
+    );
   }
 
   // ── Invoices ─────────────────────────────────────────────────────────────────────────
@@ -318,6 +328,18 @@ export class WooviDriver implements PaymentsDriver {
   }
 
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * Woovi accepts either the RSA public key (recommended) or the shared secret; with neither,
+   * `parseWebhook` verifies nothing.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#webhookPublicKey !== undefined || this.#webhookSecret !== undefined
+      ? 'configured'
+      : 'unconfigured';
+  }
 
   parseWebhook(
     rawBody: string,
@@ -345,13 +367,72 @@ export class WooviDriver implements PaymentsDriver {
     }
     const payload = JSON.parse(rawBody) as Record<string, unknown>;
     const event = String(payload.event ?? 'unknown');
+    // The dispute family is normalized from `payload.dispute`, and ONLY when that object
+    // names the Pix it is about: a dispute the driver cannot key keeps its Woovi name
+    // rather than reaching a built-in handler that throws on a payload with no id — a throw
+    // in the webhook route is a 500 Woovi retries.
+    const dispute = this.#disputeEvent(event, payload);
+    const type = dispute?.type ?? this.#mapWebhookType(event);
     return {
-      id: String(payload.id ?? payload.globalID ?? `${event}-${Math.random()}`),
+      // A CONTENT hash, never a random id. A payload with no id used to get a fresh
+      // `Math.random()` on every delivery, so the ledger saw each redelivery as a new
+      // event and processed it again — the exact double-grant the ledger exists to stop.
+      id: String(
+        payload.id ??
+          payload.globalID ??
+          `${event}-${createHash('sha256').update(rawBody, 'utf8').digest('hex').slice(0, 32)}`,
+      ),
       provider: this.provider,
-      type: this.#mapWebhookType(event),
+      type,
       createdAt: new Date().toISOString(),
-      data: payload,
+      data: dispute?.data ?? this.#mapWebhookData(payload, type),
       raw: payload,
+    };
+  }
+
+  /**
+   * The normalized shape the built-in sync needs (`gatewayId`, `amount`, `currency`).
+   *
+   * This used to hand the processor Woovi's raw body, which its shape guard rejected — so
+   * every Woovi webhook was ledgered, threw `Malformed`, and was retried forever while the
+   * billing tables never learned the payment was paid. `raw` still carries the original.
+   */
+  #mapWebhookData(payload: Record<string, unknown>, type: string): Record<string, unknown> {
+    // Woovi nests the subject under `charge`/`pix` on charge events and inlines it on
+    // subscription ones.
+    const subject = (payload.charge ?? payload.pix ?? payload) as Record<string, unknown>;
+    const gatewayId = String(subject.globalID ?? subject.id ?? payload.globalID ?? '');
+    if (gatewayId === '') return payload;
+
+    if (type.startsWith('subscription.')) {
+      const subscription = this.#mapSubscription(subject);
+      return {
+        gatewayId: subscription.gatewayId,
+        status: subscription.status,
+        planId: subscription.planId,
+        ...(subscription.customerId !== undefined ? { customerId: subscription.customerId } : {}),
+        ...(typeof subject.correlationID === 'string'
+          ? { externalReference: subject.correlationID }
+          : {}),
+      };
+    }
+
+    const payment = this.#mapPayment(subject);
+    // The Pix's `endToEndId`, carried through as metadata because it is the ONLY key a
+    // dispute arrives under: Woovi's MED payload names the Pix and never the charge, so an
+    // app that did not persist this cannot join the two. See `#disputeEvent`.
+    const endToEndId =
+      (payload.pix as { endToEndId?: unknown } | undefined)?.endToEndId ?? subject.endToEndId;
+    return {
+      gatewayId: payment.gatewayId,
+      amount: payment.amount.amount,
+      currency: payment.amount.currency,
+      ...(payment.customerId !== undefined ? { customerId: payment.customerId } : {}),
+      // `correlationID` is what an app sets as its own reference on a Woovi charge.
+      ...(typeof subject.correlationID === 'string'
+        ? { externalReference: subject.correlationID }
+        : {}),
+      ...(typeof endToEndId === 'string' ? { metadata: { endToEndId } } : {}),
     };
   }
 
@@ -377,7 +458,7 @@ export class WooviDriver implements PaymentsDriver {
       id: String(data.id ?? data.globalID ?? ''),
       gatewayId: String(data.globalID ?? data.id ?? ''),
       provider: this.provider,
-      amount: { amount: fromDecimal(value), currency: 'brl' },
+      amount: { amount: Math.round(value), currency: 'brl' },
       status:
         status === 'COMPLETED' || status === 'PAID'
           ? 'paid'
@@ -411,14 +492,80 @@ export class WooviDriver implements PaymentsDriver {
       planId: String(
         (data.pixRecurring as { recurrencyId?: string } | undefined)?.recurrencyId ?? '',
       ),
-      amount: { amount: fromDecimal(value), currency: 'brl' },
+      amount: { amount: Math.round(value), currency: 'brl' },
       payload: data,
       createdAt: typeof data.createdAt === 'string' ? data.createdAt : new Date().toISOString(),
     };
   }
 
+  /**
+   * Woovi's dispute family → the canonical dispute events, or `undefined` when this is not
+   * one (or is one the driver cannot key).
+   *
+   * **What a Woovi dispute is.** Not a card chargeback: a Pix cannot be charged back. It is
+   * the Banco Central's MED — a payer who reports fraud or a scam opens a claim, and
+   * Woovi's own `GET` dispute payload types it as `"MED" | "CHARGEBACK"`. While it is under
+   * analysis Woovi documents that "o saldo relacionado a transacao será bloqueado no saldo
+   * da empresa": the money is **blocked, not taken**, which is why `DISPUTE_CREATED` is a
+   * warning and not a `payment.disputed`. Woovi's own MED page: it notifies immediately,
+   * you have three days to send evidence, the bank has up to seven to decide.
+   *
+   * **The outcomes.** Woovi's developer reference documents the four events and nothing
+   * about who wins; its help centre ("Quais são os status do MED e Disputas na
+   * plataforma?") is where the meaning is written down — a dispute *aceita* refunds the end
+   * customer and closes the case (the merchant LOST), a *rejeitada* one means the company
+   * proved the transaction legitimate and keeps the money (WON), and a *cancelada* one was
+   * withdrawn by the customer or by the bank that opened it. The provenance is worth
+   * knowing before you act on `outcome`, so it is on the docs page too.
+   *
+   * **`gatewayId` is the Pix `endToEndId`, not the charge id** — the dispute payload
+   * carries nothing else: no `charge`, no `correlationID`. Woovi charges are stored under
+   * `charge.globalID`, so this event does NOT find the row by itself, and that is why
+   * nothing here writes one. Persist `event.data.metadata.endToEndId` from the paid webhook
+   * and the two join.
+   */
+  #disputeEvent(
+    event: string,
+    payload: Record<string, unknown>,
+  ): { type: string; data: Record<string, unknown> } | undefined {
+    const name = event.startsWith('OPENPIX:') ? event.slice('OPENPIX:'.length) : event;
+    if (!name.startsWith('DISPUTE_')) return undefined;
+    const outcome = {
+      DISPUTE_ACCEPTED: 'lost',
+      DISPUTE_REJECTED: 'won',
+      DISPUTE_CANCELED: 'canceled',
+    }[name];
+    if (name !== 'DISPUTE_CREATED' && outcome === undefined) return undefined;
+
+    const dispute = payload.dispute as Record<string, unknown> | undefined;
+    const endToEndId = dispute?.endToEndId;
+    if (typeof endToEndId !== 'string' || endToEndId === '') return undefined;
+
+    return {
+      type: outcome === undefined ? 'payment.dispute_warning' : 'payment.dispute_closed',
+      data: {
+        gatewayId: endToEndId,
+        ...(outcome !== undefined ? { outcome } : {}),
+        ...(typeof dispute?.id === 'string' ? { disputeId: dispute.id } : {}),
+        ...(typeof dispute?.disputeReason === 'string' ? { reason: dispute.disputeReason } : {}),
+        // No `actionableUntil`: the payload carries no date at all. The three days to
+        // answer are Woovi's published policy, not a field, and a deadline this driver
+        // computed itself would be a deadline it invented.
+        //
+        // No `amount` either, and that is deliberate: Woovi documents `dispute.value` in
+        // centavos while every other amount in this driver is read as reais (see
+        // `#mapPayment`), and a dispute event is the wrong place to settle that
+        // disagreement. `event.raw.dispute.value` has the untouched figure.
+      },
+    };
+  }
+
   #mapWebhookType(event: string): string {
-    switch (event) {
+    // Woovi sends every event prefixed — `OPENPIX:CHARGE_COMPLETED`, not
+    // `CHARGE_COMPLETED` — and the map below was written against the bare names, so a real
+    // payload matched nothing and fell through to the passthrough branch. Both forms are
+    // accepted; an unknown event still keeps its original name.
+    switch (event.startsWith('OPENPIX:') ? event.slice('OPENPIX:'.length) : event) {
       case 'PIX_AUTOMATIC_APPROVED':
         return 'subscription.created';
       case 'PIX_AUTOMATIC_REJECTED':

@@ -30,11 +30,56 @@ getPayments().driver()           // → config.default
 
 `driver(methodOrName?)` answers in this order:
 
-1. **No argument** → the provider named by `config.default`, or the first configured one.
+1. **No argument** → the provider named by `config.default`, or the first configured one — **and
+   `config.methods` is still consulted**, see below.
 2. **A configured provider name** → that driver, directly. No method check applies, because you did
-   not route a method.
+   not route a method, and the routing map is deliberately not read: naming the provider already
+   answered the question the map answers.
 3. **Otherwise, a payment method** → the provider `config.methods` routes it to, **and** a check that
-   the provider actually supports that method.
+   the provider actually supports that method, **and** the method itself, threaded into the charge.
+
+The third part of rule 3 matters more than it looks. Routing picks the provider; it also has to tell
+the provider what it routed. `driver('pix')` hands back the driver **bound to `pix`**, so a charge
+made through it is created as Pix without you repeating yourself:
+
+```ts
+getPayments().driver('pix').charge({ amount: 1990 })
+// reaches the driver as { amount: 1990, method: 'pix' }
+```
+
+Every driver that varies by method reads it off the charge — Stripe's `payment_method_types`, Asaas'
+and AbacatePay's `billingType` — so before this, a charge routed as Pix was created with whatever the
+gateway's dashboard defaults are. It read as working and could come back a card.
+
+An explicit method on the charge still wins, **unless the routing map sends that method somewhere
+else**, in which case the call is refused rather than put through the wrong gateway. Routing is a
+default, not an override, and never a contradiction. A driver resolved by **name** comes back
+untouched — `driver('stripe')` routed nothing, so there is nothing to thread.
+
+### `driver()` with no argument
+
+The bare call used to skip `config.methods` entirely, and that is the same trap one level up: an app
+that configured pix/credit_card/boleto routing and then called `driver()` got a driver bound to
+**nothing**, so every charge fell back to the gateway dashboard's default unless the caller happened
+to repeat `method:`. Three cases now:
+
+- **Exactly one method routes to the default provider** → it is applied, the same binding
+  `driver('pix')` would have produced.
+- **Several do** → there is no honest answer. `methods` says this provider takes pix *and* boleto
+  *and* card, and picking one would be inventing the charge's payment method. `charge()` and
+  `createSubscription()` refuse, naming the two ways to say what you meant:
+
+  ```text
+  [payments] driver() resolved "asaas", and config.methods routes pix, boleto to it —
+  so this charge has no payment method and would fall back to whatever the gateway
+  dashboard defaults to. Name it: driver('pix') or charge({ method: 'pix' }).
+  ```
+
+- **No method routes there at all** → nothing to bind, nothing to check, driver returned as-is.
+
+The refusal is at `charge`/`createSubscription`, not at `driver()`, on purpose: an app that already
+passes `method:` on every call — which is what makes it correct today — keeps working unchanged, and
+so does every other method on the driver.
 
 Anything that matches none of the three throws immediately, naming what *is* configured:
 
@@ -54,7 +99,15 @@ someone else's API.
 interface PaymentsDriver {
   readonly provider: string
   readonly supportedMethods: readonly PaymentMethodName[]
-  readonly capabilities?: { refunds?: boolean; invoices?: boolean; subscriptions?: boolean }
+  readonly capabilities?: {
+    disputes?: boolean
+    refunds?: boolean
+    invoices?: boolean
+    subscriptions?: boolean
+  }
+  // Whether this driver can authenticate a webhook delivery, and whether it was given what
+  // it needs to. 'unconfigured' refuses the boot; absent reads as 'unsupported'.
+  readonly webhookVerification?: 'configured' | 'unconfigured' | 'unsupported'
 
   createCustomer(input): Promise<Customer>
   findCustomer(customerId): Promise<Customer | null>
@@ -62,7 +115,7 @@ interface PaymentsDriver {
 
   charge(input): Promise<Payment>
   findPayment(gatewayId): Promise<Payment | null>
-  refund(paymentGatewayId, amount?): Promise<Refund>
+  refund(paymentGatewayId, amount?, options?: { idempotencyKey?: string }): Promise<Refund>
 
   createCheckout(input): Promise<CheckoutSession>
 
@@ -73,18 +126,32 @@ interface PaymentsDriver {
 
   listInvoices(customerId): Promise<Invoice[]>
 
-  parseWebhook(rawBody, headers): WebhookEvent
+  // Optional — a gateway can settle money perfectly and give you nothing but an email
+  // when a chargeback lands. Gated by `capabilities.disputes`.
+  findDispute?(disputeGatewayId): Promise<Dispute | null>
+  submitDisputeEvidence?(disputeGatewayId, evidence): Promise<Dispute>
+
+  parseWebhook(rawBody, headers):
+    | WebhookEvent
+    | WebhookEvent[]
+    | Promise<WebhookEvent | WebhookEvent[]>
 }
 ```
+
+Three details in `parseWebhook` are worth naming, because they are each a bug somebody shipped: it
+may return **several** events (Adyen's `notificationItems`, Efí's `pix`), it may be **async** (a
+Mollie callback is a bare payment id, and the fetch that resolves it is also what authenticates it),
+and every event it returns must carry an **id of its own** — the ledger keys on that id, so a batch
+that reuses one makes the second event look like a redelivery of the first.
 
 Every method returns a **normalized domain type** — `Payment`, `Subscription`, `Invoice` — with the
 gateway's untouched response tucked into `payload`. Application code reads the normalized fields;
 `payload` is the escape hatch for the one gateway-specific field you occasionally need.
 
-## Two declarations that fail early
+## Three declarations that fail early
 
-`supportedMethods` and `capabilities` exist so a limitation is discovered at the boundary rather
-than at the gateway.
+`supportedMethods`, `capabilities` and `webhookVerification` exist so a limitation is discovered at
+the boundary rather than at the gateway.
 
 **`supportedMethods`** is checked when routing resolves a method:
 
@@ -94,7 +161,8 @@ Supported methods: pix, boleto, undefined.
 Route "credit_card" to a different provider in config.methods.
 ```
 
-**`capabilities`** is checked before delegating an operation that not every gateway has:
+**`capabilities`** is checked before delegating an operation that not every gateway has —
+`'refunds'`, `'invoices'`, `'subscriptions'` or `'disputes'`:
 
 ```ts
 const driver = payments.driver('pix')
@@ -102,14 +170,28 @@ payments.assertCapability(driver, 'refunds')   // throws on Woovi/OpenPix — no
 await driver.refund(payment.gatewayId)
 ```
 
-A driver missing a capability still *implements* the method — the interface demands it — and throws
-a clear "not supported" error. `assertCapability` surfaces that one step earlier, which is what
-`payments:sync` and `payments:webhook` use to avoid advertising events a gateway will never send.
+For the three core capabilities a driver missing one still *implements* the method — the interface
+demands it — and throws a clear "not supported" error. `assertCapability` surfaces that one step
+earlier, which is what `payments:sync` and `payments:webhook` use to avoid advertising events a
+gateway will never send.
+
+`disputes` is the exception, and deliberately: `findDispute` and `submitDisputeEvidence` are
+**optional members**, so a gateway with no dispute API omits them rather than implementing a throw.
+Test for them the way you would any optional member — `typeof driver.findDispute === 'function'` —
+and note that this is why a method-bound driver is a Proxy rather than a wrapper object: a wrapper
+that defined every method would turn "this gateway cannot do that" into "it can, until you call
+it".
 
 <Callout title="Capabilities are opt-in, so check rather than assume">
 A driver that declares no `capabilities` object is treated as supporting none of them. That is
 deliberately conservative: an undeclared capability is an unproven one.
 </Callout>
+
+**`webhookVerification`** is checked once, at boot, before the webhook route goes up. A driver
+reporting `'unconfigured'` — it can authenticate a delivery and was given no credential — throws,
+unless the provider is named in `allowUnverifiedWebhooks`. The same conservatism applies: the field
+is optional so a driver outside this package keeps compiling, and **absent reads as
+`'unsupported'`**, because a driver that never opted in cannot be assumed to verify.
 
 ## Providers are lazy factories
 
@@ -117,7 +199,7 @@ deliberately conservative: an undeclared capability is an unproven one.
 
 ```ts
 providers: {
-  stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY') }),
+  stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY'), currency: 'brl' }),
   woovi:  payments.woovi({ appId: env.get('WOOVI_APP_ID') }),
 }
 ```
@@ -139,7 +221,7 @@ export default defineConfig({
   default: 'asaas',
   providers: {
     woovi: payments.woovi({ appId: env.get('WOOVI_APP_ID') }),
-    stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY') }),
+    stripe: payments.stripe({ apiKey: env.get('STRIPE_KEY'), currency: 'brl' }),
     asaas: payments.asaas({ apiKey: env.get('ASAAS_API_KEY') }),
   },
   methods: {
@@ -159,5 +241,7 @@ const payment = await getPayments()
   .driver(order.method)      // 'pix' | 'credit_card' | 'boleto'
   .charge({ customerId, amount: order.total, externalReference: order.id })
 ```
+
+Note what is **not** there: `method: order.method` repeated on the charge. Routing carries it.
 
 Moving Pix from Woovi to Asaas is one line of config, and this service does not change.

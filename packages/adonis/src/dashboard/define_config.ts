@@ -24,12 +24,16 @@ export interface PaymentsDashboardConfig {
    */
   enabled?: boolean;
   /**
-   * URL prefix the dashboard + its API mount under. Defaults to `/payments-dashboard`.
-   * The HTML is served at the prefix root; the JSON API lives under `<path>/api`.
+   * URL prefix the dashboard + its API mount under. Defaults to `/payments`. The HTML is
+   * served at the prefix root; the JSON API lives under `<path>/api`.
    *
-   * NOTE the default is NOT `/payments`: `@adonis-agora/payments`'s own provider already
-   * owns `POST /payments/webhook/:provider`, and mounting a console over a gateway's
-   * delivery endpoint is how a webhook ends up 403'd by a dashboard guard.
+   * It shares that prefix with the machine endpoints — `POST /payments/webhook/:provider`
+   * and `GET /payments/client/status` — and does so safely, because every route this
+   * provider registers is an EXACT path (`/payments`, `/payments/assets/:file`,
+   * `/payments/api/…`, login/session/logout). There is no SPA catch-all, so the dashboard's
+   * `enforce` guard cannot reach a delivery it was never routed. If you ever add one, the
+   * webhook route is what it would swallow, and a 403'd webhook looks exactly like a gateway
+   * outage from the outside.
    */
   path?: string;
   /**
@@ -130,7 +134,7 @@ export function defaultAuthorize(ctx: HttpContext): boolean {
 export function resolveConfig(
   config: PaymentsDashboardConfig = {},
 ): ResolvedPaymentsDashboardConfig {
-  const rawPath = config.path ?? '/payments-dashboard';
+  const rawPath = config.path ?? '/payments';
   // Normalize: ensure a single leading slash and no trailing slash (root stays '/').
   const trimmed = `/${rawPath.replace(/^\/+/, '').replace(/\/+$/, '')}`;
   return {

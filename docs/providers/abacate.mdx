@@ -1,0 +1,85 @@
+---
+title: AbacatePay
+description: Pix and boleto, no card. HMAC-SHA256 webhooks and a BRL-only, decimal-reais API.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+- **Methods**: pix, boleto, undefined — **no credit card** (routing `credit_card` here
+  throws at the manager, not at the gateway).
+- **Setup**: `payments.abacate({ apiKey, webhookSecret })` — `ABACATE_API_KEY` /
+  `ABACATE_PUBLIC_KEY`.
+- **Webhooks**: HMAC-SHA256 (base64) over the raw body in `x-webhook-signature`, verified
+  timing-safe against `webhookSecret` (the dashboard's "public key"). Events
+  `checkout.completed`, `checkout.refunded`, `checkout.disputed`, the matching
+  `transparent.*` trio, and `subscription.completed/renewed/cancelled`.
+- **Idempotency**: AbacatePay has none — `refund`, `createCustomer`, `createSubscription`
+  and `updateSubscription` throw on an `idempotencyKey` rather than dropping it.
+- **Subscriptions**: recurring — no transparent checkout for the recurring charge yet.
+- **Transparent checkout**: `charge` uses `POST /v2/transparents/create` — PIX and Boleto
+  inline, no redirect. The response carries the QR (`brCodeBase64` → `pixQrCodeImage`,
+  `brCode` → `pixCode`) or the barcode (`url` → `hostedUrl`). Needs the payer's
+  `name` + `taxId` — pass them via the charge's `customer` block or create the gateway
+  customer with them.
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+neither `webhookSecret` nor `publicKey` is configured (env fallback `ABACATE_PUBLIC_KEY`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/abacate` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
+## Chargebacks
+
+`checkout.disputed` and `transparent.disputed` — "Disputa/chargeback aberta em um
+checkout" and "…em um pagamento transparente", one per charge flow — normalize to
+**`payment.disputed`**. They used to arrive as `payment.failed`, which files a chargeback
+as a payment that never went through: the row stopped saying `paid`, but it said the wrong
+thing, and the account whose access has to be reconsidered was never flagged.
+
+Those two events are AbacatePay's **entire** dispute vocabulary. The published event list —
+`checkout.*`, `transparent.*`, `subscription.*`, `transfer.*`, `payout.*` — has nothing
+before a dispute and nothing after it, so this driver emits neither
+`payment.dispute_warning` nor `payment.dispute_closed` here, and a test keeps a later edit
+from inventing one.
+
+<Callout type="warn" title="Opened is the only dispute signal AbacatePay sends">
+There is no fraud alert, no retrieval request and no "a chargeback is incoming"
+notification, so nothing warns you while a refund would still stop the chargeback being
+filed. And there is no `*.dispute_won` / `*.dispute_lost` event and no dispute value in the
+billing status enum, so the outcome never reaches you as a webhook either. Both ends are
+reconciliation work.
+</Callout>
+
+<Callout type="warn" title="Two things AbacatePay's reference does not answer">
+It does not say **whether the funds are withdrawn** when `*.disputed` fires — the event
+list gives one line per event and there is no payload example for these two — and it
+publishes **no response deadline** anywhere, so the normalized event carries no
+`actionableUntil`. The mapping stays at `payment.disputed` rather than being demoted to a
+warning on a guess: a filed dispute is what that event names. If you need to know where the
+money is, read `event.raw.data` and the billing's own status.
+</Callout>
+
+## Idempotency: AbacatePay has none
+
+No endpoint documents an idempotency header or field — the only request header on any of
+them is `Authorization`, and AbacatePay's own guidance mentions idempotency solely for
+consuming webhooks (dedupe on the event `id`). So `refund`, `createCustomer`,
+`createSubscription` and `updateSubscription` **throw** when handed an `idempotencyKey`:
+silently dropping it would turn a caller's retry guarantee into a second refund.
+
+`charge()` still accepts one, as it always has, but not as deduplication — it is a legacy
+fallback for `externalReference`, sent as the transparent checkout's `externalId`.
+
+```ts title="app/services/checkout_service.ts"
+await payments.driver('pix').charge({
+  customerId: 'cus_123',
+  amount: 1990,
+  customer: { name: 'Jane Doe', taxId: '123.456.789-00' },
+  invoice: true,
+})
+```

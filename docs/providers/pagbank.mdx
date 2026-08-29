@@ -1,0 +1,192 @@
+---
+title: PagBank
+description: PagSeguro's Orders API v4 — Pix, card and boleto in integer centavos, one order id to reconcile on, and a webhook check that is not an HMAC.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+PagBank (PagSeguro) through the **Orders API v4** (`api.pagseguro.com/orders`): Pix, credit
+and debit card, and boleto, authenticated with a Bearer token.
+
+- **Methods**: pix, credit_card, debit_card, boleto. No `undefined` — the Orders API makes
+  you choose up front, so there is no "let the payer decide" order to create.
+- **Setup**: `payments.pagbank({ token, sandbox, notificationUrls })` — `PAGBANK_TOKEN`;
+  sandbox defaults to `NODE_ENV !== 'production'` (`sandbox.api.pagseguro.com`).
+- **Money**: integer **centavos**, end to end. PagBank's `amount.value` is the same unit
+  this library uses, so nothing is divided or multiplied anywhere in the driver —
+  R$ 19,90 is `1990` in your code and `1990` on the wire.
+- **`externalReference`**: sent as the order's `reference_id` and echoed on every webhook.
+- **Idempotency**: `idempotencyKey` becomes the `x-idempotency-key` header, which PagBank
+  honours for 48 hours — a retried charge returns the original order instead of a second
+  one. `refund(id, amount, { idempotencyKey })` sends it too.
+- **Refunds**: `POST /charges/{id}/cancel`. Partial refunds leave the charge `PAID` with a
+  non-zero `refunded` summary; a full one flips it to `CANCELED`.
+- **Statuses**: `AUTHORIZED` maps to **`authorized`** — PagBank's own word is
+  "pré-autorizada": the money is held and nothing is captured until
+  `POST /charges/{id}/capture`. It is not `pending` (which understates a hold the acquirer
+  granted) and not `paid` (which would grant access against money that evaporates).
+- **No subscriptions, no customers, no invoice list, and no dispute event** — see below.
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`verifyWebhooks` is off, which is what an unset `webhookToken` (and unset `PAGBANK_WEBHOOK_TOKEN`,
+and no API token to fall back on) leaves you with.
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/pagbank` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
+## One order, two ids — and which one this driver uses
+
+PagBank gives the same money two identifiers: the order (`ORDE_…`) and the charge inside it
+(`CHAR_…`). Every payment is a `charges[]` entry — Pix too, since PagBank moved it into the
+charge (`payment_method.type: 'PIX'`, BR Code on `charges[].qr_code.text`); the driver still
+reads the older order-level `qr_codes` shape when one turns up.
+
+**This driver uses the order id as `gatewayId`, always.** The webhook delivers the order, so
+keying on the charge id would file the charge you created and the webhook that confirms it
+under two different ids, and nothing would reconcile. `refund()` accepts either id and
+resolves the charge itself; `findPayment()` does too.
+
+```ts
+const payment = await payments.driver('pix').charge({
+  amount: 1990,                       // centavos, straight through
+  method: 'pix',
+  description: 'Plano Pro',
+  externalReference: 'pay:local_1',
+  customer: { name: 'Ana', email: 'ana@example.com', taxId: '123.456.789-09' },
+})
+
+payment.gatewayId   // 'ORDE_…' — the id the webhook will carry
+payment.pixCode     // the BR Code ("copia e cola")
+```
+
+<Callout type="warn" title="The QR image is a link, not base64">
+PagBank returns `links` pointing at the rendered PNG (`QRCODE.PNG`, `QRCODE.BASE64`), not
+the image bytes. `pixQrCodeImage` is documented as base64 content, so the driver leaves it
+unset rather than filling it with a URL — read `payment.payload.charges[0].links` if you
+want PagBank to render it for you, or generate the image yourself from `pixCode`.
+</Callout>
+
+## Webhook authenticity — read this before you rely on it
+
+PagBank sends an `x-authenticity-token` header with each Orders API notification. It is:
+
+```
+sha256( "<your API token>" + "-" + "<the exact raw body>" )     // hex
+```
+
+The driver verifies it, timing-safe, on every webhook, and rejects the request when it is
+missing or wrong. Three things about that mechanism deserve to be said plainly rather than
+implied:
+
+1. **It is not an HMAC.** It is a secret *prefix* hashed with SHA-256, which is the textbook
+   setup for a length-extension forgery: someone who has seen one valid `(body, token)` pair
+   can compute a valid token for that body plus a suffix without knowing the secret. What
+   saves it here is that the forged body is the original followed by binary padding and
+   `JSON.parse` rejects that — the forgery has to get past the parser, not just the hash. It
+   is a weaker construction than the HMAC every other gateway on these pages uses.
+2. **The secret is your API token.** There is no separate webhook signing secret to
+   configure or rotate. Anything that leaks your webhook secret has leaked your API
+   credential, and rotating one rotates the other.
+3. **The body must be byte-identical.** Re-serializing the JSON before verifying breaks the
+   hash. The lib-mounted route passes the raw body, so this only bites you if you verify it
+   yourself somewhere else.
+
+Set `webhookToken` when the account's webhook is configured with a token other than the API
+one. `verifyWebhooks: false` exists for one reason — PagBank's **sandbox** does not always
+send the header — and turning it off leaves the endpoint accepting anything that reaches it.
+
+Turning it off is no longer silent: the driver then reports `webhookVerification: 'unconfigured'`
+and the app refuses to boot unless you also name `pagbank` in `allowUnverifiedWebhooks`. Two
+deliberate statements instead of one flag nobody re-reads.
+
+```ts
+providers: {
+  pagbank: payments.pagbank({
+    token: env.get('PAGBANK_TOKEN'),
+    notificationUrls: [`${env.get('APP_URL')}/payments/webhook/pagbank`],
+  }),
+}
+```
+
+<Callout type="warn" title="No PagBank webhook maps to payment.disputed">
+The Orders API has **no chargeback status and no chargeback event**. A PagBank chargeback
+arrives as a legacy post-transaction notification — form-encoded
+`notificationCode=…&notificationType=transaction`, delivered to the same
+`notification_urls`, with **no authenticity token at all** — which you then resolve by
+calling the v3 XML endpoint
+(`GET ws.pagseguro.uol.com.br/v3/transactions/notifications/{code}`) with your account
+email and `token_api`. The chargeback is the legacy transaction status **9, "Retenção
+temporária"** ("o comprador abriu uma solicitação de chargeback junto à operadora"); status
+**5, "Em disputa"** is the earlier in-PagBank dispute.
+
+That is a different API, a different format and different credentials, so this driver
+rejects those bodies with a clear error rather than half-parsing them. If you take cards
+through PagBank you need a second route for them; until then a chargeback here will not
+move a payment row to `disputed`.
+
+It follows that PagBank sends this driver **no pre-dispute alert and no defense deadline**
+either: there is no fraud-notification event, no retrieval request, and nothing in the
+legacy notification that names a date by which to respond. A contested PagBank sale is
+answered in the PagBank panel. So none of `payment.dispute_warning`, `payment.disputed` or
+`payment.dispute_closed` is ever emitted here — an honest gap, pinned by a test.
+</Callout>
+
+<Callout type="warn" title="Not yet run against a live account">
+This driver is written against PagBank's published API reference (Orders API v4, read
+August 2026) and covered by unit tests; it has never talked to a real PagBank account. Run
+it in the sandbox against your own credentials before it touches real money.
+</Callout>
+
+## What it does not do
+
+- **Subscriptions.** PagBank's recurring billing is the *Assinaturas* API — a different
+  product with a different base URL. `createSubscription`, `findSubscription` and friends
+  throw and name it, rather than returning something the gateway never created.
+- **Customers.** The Orders API has no customer resource; the payer travels inline on every
+  order, and **`customer: { name, email, taxId }` is required on every charge** (PagBank
+  refuses an order without a CPF/CNPJ). `createCustomer` throws — keep the mapping between
+  your users and their fiscal data in your own table.
+- **Hosted checkout.** `createCheckout` creates a Pix charge and gives you a BR Code with an
+  empty `url`; PagBank's redirect-style checkout is the separate Checkout API.
+- **Invoice listing.** `listInvoices` **throws**. The Orders API has no invoice resource
+  and no per-customer index — `GET /orders` accepts only `charge_id`, so you cannot recover
+  a customer's history from PagBank at all and must keep the mapping yourself. It used to
+  return `[]`, which is indistinguishable from "this customer has no invoices" — something
+  PagBank never told us. Fiscal notes come from an
+  [invoice provider](/docs/payments/invoices).
+
+## Card and boleto
+
+Card charges take the blob from PagBank's card-encryption SDK (the number never touches
+your server), or a stored `CARD_…` id:
+
+```ts
+await payments.driver('credit_card').charge({
+  amount: 1990,
+  method: 'credit_card',
+  card: { token: encryptedCardFromFrontend, holder: { name: 'Ana', /* … */ } },
+  metadata: { installments: 3, capture: true },
+})
+```
+
+Boleto needs the payer's address, because PagBank prints it:
+
+```ts
+await payments.driver('boleto').charge({
+  amount: 1990,
+  method: 'boleto',
+  customer: { name: 'Ana', email: 'ana@example.com', taxId: '12345678909' },
+  metadata: {
+    dueDate: '2026-09-10',
+    address: {
+      street: 'Av. Brigadeiro Faria Lima', number: '1384', locality: 'Pinheiros',
+      city: 'São Paulo', region_code: 'SP', country: 'BRA', postal_code: '01452002',
+    },
+  },
+})
+```

@@ -77,14 +77,30 @@ describe('driver → processor contract', () => {
 
     const store = new InMemoryBillingStore();
     const processor = new WebhookProcessor({ store, driver });
-    // AbacatePay's webhook data is the raw payload (no normalized gatewayId) — the
-    // processor must reject it instead of writing a garbage row.
-    await expect(processor.process(event)).rejects.toThrow(/Malformed/);
-    const ledger = [...store.webhookEvents.values()][0]!;
-    expect(ledger.status).toBe('failed');
+    await processor.process(event);
+
+    // This used to hand the processor AbacatePay's RAW body, which the shape guard
+    // rejected — so every AbacatePay webhook was ledgered, threw `Malformed`, and was
+    // retried forever while the billing tables never learned the payment was paid.
+    const payment = await store.findPaymentByGatewayId('bill_1');
+    expect(payment?.status).toBe('paid');
+    expect([...store.webhookEvents.values()][0]?.status).toBe('processed');
   });
 
-  it('Woovi PIX_AUTOMATIC_APPROVED maps but raw payload is rejected by the shape guard', async () => {
+  it('AbacatePay derives a stable event id from the body when the payload has none', async () => {
+    const driver = new AbacateDriver({ config: () => ({}) }, { apiKey: 'test' });
+    const raw = JSON.stringify({ event: 'checkout.completed', data: { id: 'bill_2' } });
+
+    // No `id` in the payload. It used to fall back to `Math.random()`, so every
+    // redelivery looked like a NEW event to the ledger and was processed again — the
+    // exact double-grant the ledger exists to prevent.
+    const first = driver.parseWebhook(raw, {});
+    const second = driver.parseWebhook(raw, {});
+    expect(first.id).toBe(second.id);
+    expect(first.id).not.toMatch(/0\./);
+  });
+
+  it('Woovi PIX_AUTOMATIC_APPROVED syncs the subscription', async () => {
     const driver = new WooviDriver({ config: () => ({}) }, { appId: 'test' });
     const raw = JSON.stringify({
       event: 'PIX_AUTOMATIC_APPROVED',
@@ -97,8 +113,124 @@ describe('driver → processor contract', () => {
 
     const store = new InMemoryBillingStore();
     const processor = new WebhookProcessor({ store, driver });
-    await expect(processor.process(event)).rejects.toThrow(/Malformed/);
-    const ledger = [...store.webhookEvents.values()][0]!;
-    expect(ledger.status).toBe('failed');
+    await processor.process(event);
+
+    // This used to hand the processor Woovi's RAW body, which the shape guard rejected —
+    // so every Woovi webhook was ledgered, threw `Malformed`, and was retried forever
+    // while the billing tables never learned anything had happened.
+    expect(await store.findSubscriptionByGatewayId('sub_1')).not.toBeNull();
+    expect([...store.webhookEvents.values()][0]?.status).toBe('processed');
+  });
+
+  it('Woovi PIX_AUTOMATIC_COBR_COMPLETED syncs a paid payment row', async () => {
+    const driver = new WooviDriver({ config: () => ({}) }, { appId: 'test' });
+    const raw = JSON.stringify({
+      event: 'PIX_AUTOMATIC_COBR_COMPLETED',
+      charge: {
+        globalID: 'chg_1',
+        correlationID: 'order_local_1',
+        value: 1990,
+        status: 'COMPLETED',
+      },
+    });
+    const event = driver.parseWebhook(raw, {});
+
+    const store = new InMemoryBillingStore();
+    const processor = new WebhookProcessor({ store, driver });
+    await processor.process(event);
+
+    const payment = await store.findPaymentByGatewayId('chg_1');
+    expect(payment?.status).toBe('paid');
+    // Woovi's `correlationID` is what an app sets as its own reference — it has to survive
+    // onto the normalized event or the handler cannot route the payment to an order.
+    expect(event.data).toMatchObject({ externalReference: 'order_local_1' });
+  });
+
+  it('Woovi derives a stable event id from the body when the payload has none', async () => {
+    const driver = new WooviDriver({ config: () => ({}) }, { appId: 'test' });
+    const raw = JSON.stringify({ event: 'PIX_AUTOMATIC_COBR_COMPLETED', charge: { value: 10 } });
+
+    const first = driver.parseWebhook(raw, {});
+    const second = driver.parseWebhook(raw, {});
+    expect(first.id).toBe(second.id);
+  });
+});
+
+/**
+ * The same contract for the two gateways whose ids are the least obvious: PagBank hands
+ * out an order id and a charge id for the same money, and Efí hands out a txid and an
+ * endToEndId. Both drivers pick one and stick to it — these tests are what says so.
+ */
+describe('driver → processor contract (PagBank, Efí)', () => {
+  it('PagBank PAID order syncs a paid payment row under the ORDER id', async () => {
+    const { PagBankDriver } = await import('../src/drivers/pagbank.js');
+    const { createHash } = await import('node:crypto');
+    const driver = new PagBankDriver(
+      { config: () => ({}) },
+      { token: 'test-token', sandbox: true },
+    );
+    const raw = JSON.stringify({
+      id: 'ORDE_1',
+      reference_id: 'payment_abc',
+      charges: [
+        {
+          id: 'CHAR_1',
+          status: 'PAID',
+          amount: { value: 1990, currency: 'BRL', summary: { paid: 1990, refunded: 0 } },
+          payment_method: { type: 'CREDIT_CARD' },
+        },
+      ],
+    });
+    const event = driver.parseWebhook(raw, {
+      'x-authenticity-token': createHash('sha256')
+        .update(`test-token-${raw}`, 'utf8')
+        .digest('hex'),
+    });
+
+    const store = new InMemoryBillingStore();
+    await new WebhookProcessor({ store, driver }).process(event);
+
+    const row = await store.findPaymentByGatewayId('ORDE_1');
+    expect(row?.status).toBe('paid');
+    // Centavos, unconverted — the same integer the charge was created with.
+    expect(row?.amount).toBe(1990);
+    expect(row?.currency).toBe('brl');
+    // And nothing was written under the charge id.
+    expect(await store.findPaymentByGatewayId('CHAR_1')).toBeNull();
+  });
+
+  it('Efí pix notification syncs a paid payment row under the txid', async () => {
+    const { EfiDriver } = await import('../src/drivers/efi.js');
+    const driver = new EfiDriver(
+      { config: () => ({}) },
+      {
+        clientId: 'id',
+        clientSecret: 'secret',
+        pixKey: 'key',
+        sandbox: true,
+        fetch: (async () => {
+          throw new Error('no network in this test');
+        }) as unknown as typeof globalThis.fetch,
+      },
+    );
+    const raw = JSON.stringify({
+      pix: [
+        {
+          endToEndId: 'E00038166201907261559y6j6mt1u0f6',
+          txid: 'abc123def456ghi789jkl012mn',
+          valor: '19.90',
+          horario: '2026-08-01T10:05:00.000Z',
+        },
+      ],
+    });
+    const event = driver.parseWebhook(raw, {});
+
+    const store = new InMemoryBillingStore();
+    await new WebhookProcessor({ store, driver }).process(event);
+
+    const row = await store.findPaymentByGatewayId('abc123def456ghi789jkl012mn');
+    expect(row?.status).toBe('paid');
+    expect(row?.amount).toBe(1990);
+    expect(row?.currency).toBe('brl');
   });
 });

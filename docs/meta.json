@@ -8,6 +8,7 @@
     "configuration",
     "providers",
     "webhooks",
+    "client",
     "billing",
     "invoices",
     "---Extending---",
@@ -26,6 +27,6 @@
     "roadmap"
   ],
   "root": true,
-  "description": "Multi-gateway payments and Cashier-style billing for AdonisJS — Stripe, AbacatePay, Asaas and Woovi (Pix), with invoice emission and method-based routing.",
+  "description": "Multi-gateway payments and Cashier-style billing for AdonisJS \u2014 18 gateways behind one driver contract, with invoice emission and method-based routing.",
   "icon": "CreditCard"
 }

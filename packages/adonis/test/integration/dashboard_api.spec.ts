@@ -1,7 +1,22 @@
+import type { ApplicationService } from '@adonisjs/core/types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import DashboardProvider from '../../providers/dashboard_provider.js';
 import { LucidBillingStore } from '../../src/billing/lucid_billing_store.js';
+import type { RefundAction, ReplayAction } from '../../src/dashboard/actions.js';
+import type { PaymentsDashboardConfig } from '../../src/dashboard/define_config.js';
 import type { ApiRequest, Deps } from '../../src/dashboard/handlers.js';
-import { overview, payments, webhookEvents } from '../../src/dashboard/handlers.js';
+import {
+  disputes,
+  health,
+  overview,
+  payments,
+  providers,
+  refundPayment,
+  retryWebhookEvent,
+  subscriptions,
+  webhookEvents,
+} from '../../src/dashboard/handlers.js';
+import { setBillingStore } from '../../src/services/main.js';
 import { type IntegrationDatabase, createIntegrationDatabase } from './harness.js';
 
 /**
@@ -21,7 +36,8 @@ describe('payments dashboard API (integration)', () => {
   let database: IntegrationDatabase;
   let store: LucidBillingStore;
 
-  const HOUR = 60 * 60 * 1000;
+  const MINUTE = 60 * 1000;
+  const HOUR = 60 * MINUTE;
   const DAY = 24 * HOUR;
   const NOW = new Date('2026-08-27T12:00:00.000Z');
   const ago = (ms: number) => new Date(NOW.getTime() - ms);
@@ -32,6 +48,14 @@ describe('payments dashboard API (integration)', () => {
 
   function deps(currency = 'BRL'): Deps {
     return { store, currency, now: () => NOW };
+  }
+
+  /** Lucid stamps `created_at` itself, so backdating a row is a deliberate second write. */
+  async function backdate(table: string, column: string, key: string, when: Date): Promise<void> {
+    await database.db.rawQuery(`update ${table} set created_at = ? where ${column} = ?`, [
+      when.toISOString(),
+      key,
+    ]);
   }
 
   beforeAll(async () => {
@@ -72,19 +96,36 @@ describe('payments dashboard API (integration)', () => {
       amount: 4200,
       currency: 'BRL',
     });
+    // Created five hours ago and never confirmed — what a webhook endpoint that stopped being
+    // reachable looks like from the inside. Nothing else in the system errors on this.
+    await store.savePayment({
+      gatewayId: 'pi_unconfirmed',
+      provider: 'asaas',
+      status: 'pending',
+      amount: 7700,
+      currency: 'BRL',
+      customerId: 'cus_2',
+    });
+    await backdate('billing_payments', 'gateway_id', 'pi_unconfirmed', ago(5 * HOUR));
 
     // ── Subscriptions. `countActiveSubscriptions` counts active AND trialing. ──
-    for (const [gatewayId, status] of [
-      ['sub_active', 'active'],
-      ['sub_trial', 'trialing'],
-      ['sub_dead', 'canceled'],
+    for (const [gatewayId, status, provider] of [
+      ['sub_active', 'active', 'stripe'],
+      ['sub_trial', 'trialing', 'stripe'],
+      ['sub_dead', 'canceled', 'stripe'],
+      // The two an operator actually opens this screen for.
+      ['sub_late', 'past_due', 'stripe'],
+      ['sub_late_2', 'past_due', 'asaas'],
+      ['sub_paused', 'paused', 'stripe'],
     ] as const) {
       await store.saveSubscription({
         gatewayId,
-        provider: 'stripe',
-        customerId: 'cus_1',
+        provider,
+        customerId: `cus_${gatewayId}`,
         status,
         planId: 'pro',
+        trialEndsAt: status === 'trialing' ? new Date(NOW.getTime() + DAY) : null,
+        endsAt: new Date(NOW.getTime() + 7 * DAY),
       });
     }
 
@@ -126,6 +167,11 @@ describe('payments dashboard API (integration)', () => {
       type: 'charge.paid',
       payload: { id: 'evt_inflight' },
     });
+    // Claimed 40 minutes ago and never finished: the dispatcher's consumer is not running.
+    await backdate('billing_webhook_events', 'gateway_event_id', 'evt_inflight', ago(40 * MINUTE));
+
+    // The dashboard provider reads the store through `services/main`, not through a parameter.
+    setBillingStore(store);
   });
 
   afterAll(async () => {
@@ -187,7 +233,7 @@ describe('payments dashboard API (integration)', () => {
         }>;
         page: { limit: number; offset: number; count: number };
       };
-      expect(body.page.count).toBe(4);
+      expect(body.page.count).toBe(5);
       const recent = body.payments.find((p) => p.gatewayId === 'pi_recent');
       expect(recent?.amount).toBe(123456);
       expect(recent?.currency).toBe('BRL');
@@ -205,13 +251,13 @@ describe('payments dashboard API (integration)', () => {
     });
 
     it('pages with limit/offset without repeating or skipping a row', async () => {
-      const first = await payments(deps(), req({ limit: '2', offset: '0' }));
-      const second = await payments(deps(), req({ limit: '2', offset: '2' }));
+      const first = await payments(deps(), req({ limit: '3', offset: '0' }));
+      const second = await payments(deps(), req({ limit: '3', offset: '3' }));
       const ids = (res: { body: unknown }) =>
         (res.body as { payments: Array<{ gatewayId: string }> }).payments.map((p) => p.gatewayId);
       const all = [...ids(first), ...ids(second)];
-      expect(all).toHaveLength(4);
-      expect(new Set(all).size).toBe(4);
+      expect(all).toHaveLength(5);
+      expect(new Set(all).size).toBe(5);
     });
   });
 
@@ -252,6 +298,447 @@ describe('payments dashboard API (integration)', () => {
       const res = await webhookEvents(deps(), req({ status: 'received' }));
       const body = res.body as { events: Array<{ gatewayEventId: string }> };
       expect(body.events.map((e) => e.gatewayEventId)).toEqual(['evt_inflight']);
+    });
+  });
+  describe('GET /api/disputes', () => {
+    // Seeded in this block rather than in the shared `beforeAll`, so the rows belong to the
+    // tests that assert on them and no other block has to know they exist.
+    beforeAll(async () => {
+      await store.saveDispute({
+        gatewayId: 'dp_open',
+        paymentGatewayId: 'pi_recent',
+        provider: 'stripe',
+        status: 'open',
+        reason: 'fraudulent',
+        amount: 123456,
+        currency: 'BRL',
+        evidenceDueBy: new Date(NOW.getTime() + 10 * HOUR),
+      });
+      await store.saveDispute({
+        gatewayId: 'dp_warning',
+        paymentGatewayId: 'pi_cent',
+        provider: 'asaas',
+        status: 'warning',
+        evidenceDueBy: new Date(NOW.getTime() + 3 * HOUR),
+      });
+      await store.saveDispute({
+        gatewayId: 'dp_won',
+        paymentGatewayId: 'pi_ancient',
+        provider: 'stripe',
+        status: 'won',
+        outcome: 'won',
+        evidenceDueBy: new Date(NOW.getTime() + HOUR),
+      });
+    });
+
+    it('lists real rows with the amount in integer cents and ISO timestamps', async () => {
+      const res = await disputes(deps(), req({ status: 'open' }));
+      expect(res.status).toBe(200);
+      const body = res.body as {
+        disputes: Array<{
+          gatewayId: string;
+          paymentGatewayId: string;
+          amount: number | null;
+          evidenceDueBy: string | null;
+          reason: string | null;
+        }>;
+      };
+      // `bigint` arrives from pg as a STRING; a panel that renders "123456" as a string is a
+      // panel that cannot format money.
+      expect(body.disputes).toEqual([
+        expect.objectContaining({
+          gatewayId: 'dp_open',
+          paymentGatewayId: 'pi_recent',
+          amount: 123456,
+          reason: 'fraudulent',
+          evidenceDueBy: new Date(NOW.getTime() + 10 * HOUR).toISOString(),
+        }),
+      ]);
+    });
+
+    it('answers the work list through a real ORDER BY, soonest window first', async () => {
+      const res = await disputes(deps(), req({ dueWithin: '24' }));
+      const body = res.body as {
+        disputes: Array<{ gatewayId: string }>;
+        dueWithin: { hours: number; total: number };
+      };
+      // The won dispute is due in an hour and must not appear: nobody has to answer it.
+      expect(body.disputes.map((row) => row.gatewayId)).toEqual(['dp_warning', 'dp_open']);
+      expect(body.dueWithin.total).toBe(2);
+    });
+
+    it('reports the full total even when the page holds one row', async () => {
+      const res = await disputes(deps(), req({ dueWithin: '24', limit: '1' }));
+      const body = res.body as {
+        disputes: unknown[];
+        dueWithin: { total: number };
+      };
+      // The count is a separate `count(*)`, and a Lucid aggregate that lands in `$extras`
+      // rather than on the row is exactly how this reads a silent zero.
+      expect(body.disputes).toHaveLength(1);
+      expect(body.dueWithin.total).toBe(2);
+    });
+
+    it('narrows to one gateway through real SQL', async () => {
+      const res = await disputes(deps(), req({ provider: 'asaas' }));
+      const body = res.body as { disputes: Array<{ gatewayId: string }> };
+      expect(body.disputes.map((row) => row.gatewayId)).toEqual(['dp_warning']);
+    });
+  });
+
+  describe('GET /api/health', () => {
+    it('names the three silent failures against real rows', async () => {
+      const res = await health(deps(), req());
+      expect(res.status).toBe(200);
+      const body = res.body as {
+        healthy: boolean;
+        checks: Array<{ key: string; count: number; healthy: boolean }>;
+      };
+      const count = (key: string) => body.checks.find((c) => c.key === key)?.count;
+      expect(body.healthy).toBe(false);
+      // Claimed 40 min ago, never finished.
+      expect(count('stuck_webhooks')).toBe(1);
+      // The one failure, inside the 24h window.
+      expect(count('failed_webhooks')).toBe(1);
+      // Created 5 h ago and still pending.
+      expect(count('unconfirmed_payments')).toBe(1);
+    });
+
+    it('groups the failures by provider and type through a real GROUP BY', async () => {
+      // A `group by` over a filtered ledger has returned an empty set before; a health panel that
+      // says "1 failure" and cannot name it sends the operator nowhere.
+      const res = await health(deps(), req());
+      const failures = (
+        res.body as { failures: Array<{ provider: string; type: string; count: number }> }
+      ).failures;
+      expect(failures).toEqual([{ provider: 'stripe', type: 'invoice.payment_failed', count: 1 }]);
+    });
+  });
+
+  describe('GET /api/subscriptions', () => {
+    it('lists real rows with plan, customer and both boundary dates as ISO strings', async () => {
+      const res = await subscriptions(deps(), req({ status: 'trialing' }));
+      expect(res.status).toBe(200);
+      const body = res.body as {
+        subscriptions: Array<{
+          gatewayId: string;
+          planId: string;
+          customerId: string | null;
+          trialEndsAt: string | null;
+          endsAt: string | null;
+        }>;
+      };
+      expect(body.subscriptions).toHaveLength(1);
+      expect(body.subscriptions[0]).toMatchObject({
+        gatewayId: 'sub_trial',
+        planId: 'pro',
+        customerId: 'cus_sub_trial',
+        trialEndsAt: new Date(NOW.getTime() + DAY).toISOString(),
+        endsAt: new Date(NOW.getTime() + 7 * DAY).toISOString(),
+      });
+    });
+
+    it('filters past_due through real SQL — the rows that cost money today', async () => {
+      const res = await subscriptions(deps(), req({ status: 'past_due' }));
+      const body = res.body as { subscriptions: Array<{ gatewayId: string }> };
+      expect(body.subscriptions.map((sub) => sub.gatewayId).sort()).toEqual([
+        'sub_late',
+        'sub_late_2',
+      ]);
+    });
+
+    it('keeps paused out of active, and counts past_due over the WHOLE table', async () => {
+      const res = await subscriptions(deps(), req({ status: 'active', limit: '1' }));
+      const body = res.body as {
+        subscriptions: Array<{ gatewayId: string }>;
+        counts: { past_due: number };
+      };
+      expect(body.subscriptions.map((sub) => sub.gatewayId)).toEqual(['sub_active']);
+      expect(body.counts.past_due).toBe(2);
+    });
+  });
+
+  describe('provider filter + discovery', () => {
+    it('narrows real payment rows to one gateway', async () => {
+      const res = await payments(deps(), req({ provider: 'asaas' }));
+      const body = res.body as {
+        payments: Array<{ gatewayId: string; provider: string }>;
+        page: { truncated: boolean };
+      };
+      expect(body.payments.map((p) => p.gatewayId).sort()).toEqual([
+        'pi_ancient',
+        'pi_unconfirmed',
+      ]);
+      expect(body.payments.every((p) => p.provider === 'asaas')).toBe(true);
+      expect(body.page.truncated).toBe(false);
+    });
+
+    it('narrows real subscription rows to one gateway', async () => {
+      const res = await subscriptions(deps(), req({ provider: 'asaas' }));
+      const body = res.body as { subscriptions: Array<{ gatewayId: string }> };
+      expect(body.subscriptions.map((sub) => sub.gatewayId)).toEqual(['sub_late_2']);
+    });
+
+    it('narrows the real ledger to one gateway', async () => {
+      const res = await webhookEvents(deps(), req({ provider: 'woovi' }));
+      const body = res.body as { events: Array<{ gatewayEventId: string }> };
+      expect(body.events.map((e) => e.gatewayEventId)).toEqual(['evt_inflight']);
+    });
+
+    it('reports the gateways this install actually has data for', async () => {
+      const res = await providers(deps(), req());
+      expect((res.body as { providers: string[] }).providers).toEqual(['asaas', 'stripe', 'woovi']);
+    });
+  });
+
+  describe('POST /api/payments/:gatewayId/refund', () => {
+    /** A refund port that records what it was handed instead of calling a gateway. */
+    function spyRefund() {
+      const calls: Array<{ provider: string; gatewayId: string; amount?: number }> = [];
+      const action: RefundAction = async (input) => {
+        calls.push(input);
+        return {
+          kind: 'ok',
+          refund: {
+            gatewayId: 're_1',
+            amount: input.amount ?? 123456,
+            currency: 'BRL',
+            status: 'succeeded',
+          },
+        };
+      };
+      return { calls, action };
+    }
+
+    function body(gatewayId: string, payload?: unknown): ApiRequest {
+      return {
+        params: { gatewayId },
+        query: {},
+        ...(payload !== undefined ? { body: payload } : {}),
+      };
+    }
+
+    it('reads the real row and refunds through THAT row’s gateway', async () => {
+      const spy = spyRefund();
+      const res = await refundPayment(
+        { ...deps(), actions: { refund: spy.action } },
+        body('pi_recent'),
+      );
+      expect(res.status).toBe(200);
+      // `pi_recent` is a Stripe charge and `pi_ancient` an Asaas one. Each has to be refunded at
+      // ITS OWN gateway — the provider comes off the row, never from the request or a default.
+      await refundPayment({ ...deps(), actions: { refund: spy.action } }, body('pi_ancient'));
+      expect(spy.calls).toEqual([
+        { provider: 'stripe', gatewayId: 'pi_recent' },
+        { provider: 'asaas', gatewayId: 'pi_ancient' },
+      ]);
+    });
+
+    it('reads the amount off the real numeric column when validating a partial', async () => {
+      // Postgres hands `numeric` back as a STRING. Comparing a partial against `'123456'` instead
+      // of `123456` either rejects every refund or accepts one bigger than the payment.
+      const spy = spyRefund();
+      const tooBig = await refundPayment(
+        { ...deps(), actions: { refund: spy.action } },
+        body('pi_recent', { amount: 123457 }),
+      );
+      expect(tooBig.status).toBe(400);
+      const okRes = await refundPayment(
+        { ...deps(), actions: { refund: spy.action } },
+        body('pi_recent', { amount: 123456 }),
+      );
+      expect(okRes.status).toBe(200);
+      expect(spy.calls).toEqual([{ provider: 'stripe', gatewayId: 'pi_recent', amount: 123456 }]);
+    });
+
+    it('refuses a real row that is not paid, without touching the gateway', async () => {
+      const spy = spyRefund();
+      const res = await refundPayment(
+        { ...deps(), actions: { refund: spy.action } },
+        body('pi_unconfirmed'),
+      );
+      expect(res.status).toBe(409);
+      expect(spy.calls).toEqual([]);
+    });
+
+    it('leaves the real row alone — the gateway’s webhook is what updates it', async () => {
+      await refundPayment(
+        { ...deps(), actions: { refund: spyRefund().action } },
+        body('pi_recent'),
+      );
+      const row = await store.findPaymentByGatewayId('pi_recent');
+      expect(row?.status).toBe('paid');
+    });
+  });
+
+  describe('POST /api/webhook-events/:gatewayEventId/retry', () => {
+    function spyReplay() {
+      const calls: Array<{ gatewayEventId: string; previousError: string | null }> = [];
+      const action: ReplayAction = async (input) => {
+        calls.push(input);
+        return { kind: 'processed' };
+      };
+      return { calls, action };
+    }
+
+    function target(gatewayEventId: string): ApiRequest {
+      return { params: { gatewayEventId }, query: {} };
+    }
+
+    it('replays a real failed row, handing the port the error it actually carried', async () => {
+      const spy = spyReplay();
+      const res = await retryWebhookEvent(
+        { ...deps(), actions: { replayWebhook: spy.action } },
+        target('evt_failed'),
+      );
+      expect(res.status).toBe(200);
+      expect(spy.calls[0]?.previousError).toContain('Cannot read properties of null');
+    });
+
+    it('refuses a real row that is processed or in flight', async () => {
+      const spy = spyReplay();
+      for (const id of ['evt_done', 'evt_inflight']) {
+        const res = await retryWebhookEvent(
+          { ...deps(), actions: { replayWebhook: spy.action } },
+          target(id),
+        );
+        expect(res.status).toBe(409);
+      }
+      expect(spy.calls).toEqual([]);
+    });
+  });
+
+  /**
+   * The routes as the app actually mounts them, over the real store.
+   *
+   * The handler tests above prove the SQL; these prove the two things a handler cannot: that an
+   * unauthorized request never reaches one, and that a refund is not reachable by `GET`.
+   */
+  describe('mounted routes (guard + method)', () => {
+    interface RegisteredRoute {
+      method: 'get' | 'post';
+      pattern: string;
+      handler?: (ctx: unknown) => Promise<unknown>;
+    }
+
+    async function boot(config: PaymentsDashboardConfig): Promise<RegisteredRoute[]> {
+      const routes: RegisteredRoute[] = [];
+      const register =
+        (method: 'get' | 'post') =>
+        (pattern: string, handler?: (ctx: unknown) => Promise<unknown>) => {
+          routes.push({ method, pattern, ...(handler ? { handler } : {}) });
+          return { as: () => undefined };
+        };
+      const router = { get: register('get'), post: register('post') };
+      const app = {
+        config: { get: (key: string) => (key === 'payments_dashboard' ? config : {}) },
+        booted: async (callback: () => Promise<void>) => {
+          await callback();
+        },
+        container: {
+          make: async (token: unknown) => {
+            if (token === 'router') return router;
+            // No PaymentsManager in this test app: the actions are absent and the endpoints say
+            // so, which is a different answer from "denied".
+            throw new Error('not bound');
+          },
+        },
+        makePath: (segment: string) => `/nonexistent/${segment}`,
+      } as unknown as ApplicationService;
+      await new DashboardProvider(app).boot();
+      return routes;
+    }
+
+    interface Recorded {
+      status?: number;
+      body?: unknown;
+    }
+
+    function fakeCtx(recorded: Recorded) {
+      const response = {
+        getHeader: () => undefined,
+        status(code: number) {
+          recorded.status = code;
+          return this;
+        },
+        json(value: unknown) {
+          recorded.body = value;
+          return this;
+        },
+        redirect: () => ({ withQs: () => ({ toPath: () => undefined }) }),
+        header() {
+          return this;
+        },
+        send: () => undefined,
+      };
+      return {
+        response,
+        params: { gatewayId: 'pi_recent', gatewayEventId: 'evt_failed' },
+        request: {
+          qs: () => ({}),
+          body: () => ({}),
+          url: () => '/payments',
+          plainCookie: () => undefined,
+          secure: () => false,
+          headers: () => ({}),
+        },
+      };
+    }
+
+    const REFUND = '/payments/api/payments/:gatewayId/refund';
+    const RETRY = '/payments/api/webhook-events/:gatewayEventId/retry';
+
+    it('mounts the refund and the retry as POST and NEVER as GET', async () => {
+      const routes = await boot({});
+      const gets = routes.filter((r) => r.method === 'get').map((r) => r.pattern);
+      expect(gets).not.toContain(REFUND);
+      expect(gets).not.toContain(RETRY);
+      const posts = routes.filter((r) => r.method === 'post').map((r) => r.pattern);
+      expect(posts).toEqual([REFUND, RETRY, '/payments/api/disputes/:gatewayId/resolve']);
+    });
+
+    it('refuses an unauthorized refund before it can read a single row', async () => {
+      const routes = await boot({ authorize: () => false });
+      const route = routes.find((r) => r.pattern === REFUND);
+      const recorded: Recorded = {};
+      await route?.handler?.(fakeCtx(recorded));
+      expect(recorded.status).toBe(403);
+      expect(recorded.body).toEqual({ error: 'forbidden' });
+    });
+
+    it('refuses an unauthorized retry the same way', async () => {
+      const routes = await boot({ authorize: () => false });
+      const route = routes.find((r) => r.pattern === RETRY);
+      const recorded: Recorded = {};
+      await route?.handler?.(fakeCtx(recorded));
+      expect(recorded.status).toBe(403);
+    });
+
+    it('refuses an unauthorized READ too — the guard is not action-only', async () => {
+      const routes = await boot({ authorize: () => false });
+      const route = routes.find((r) => r.pattern === '/payments/api/health');
+      const recorded: Recorded = {};
+      await route?.handler?.(fakeCtx(recorded));
+      expect(recorded.status).toBe(403);
+    });
+
+    it('serves an AUTHORIZED read off the real store once past the guard', async () => {
+      // Proves the guard is what stopped the requests above, not a missing store.
+      const routes = await boot({ authorize: () => true });
+      const route = routes.find((r) => r.pattern === '/payments/api/health');
+      const recorded: Recorded = {};
+      await route?.handler?.(fakeCtx(recorded));
+      expect(recorded.status).toBe(200);
+      expect(recorded.body).toMatchObject({ healthy: false });
+    });
+
+    it('answers an authorized refund with 503 when no payments manager is wired', async () => {
+      const routes = await boot({ authorize: () => true });
+      const route = routes.find((r) => r.pattern === REFUND);
+      const recorded: Recorded = {};
+      await route?.handler?.(fakeCtx(recorded));
+      expect(recorded.status).toBe(503);
+      expect(recorded.body).toMatchObject({ error: expect.stringContaining('payments manager') });
     });
   });
 });

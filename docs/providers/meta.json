@@ -1,0 +1,28 @@
+{
+  "title": "Providers",
+  "icon": "Landmark",
+  "pages": [
+    "index",
+    "---Brazil & LatAm---",
+    "asaas",
+    "abacate",
+    "woovi",
+    "pagarme",
+    "pagbank",
+    "efi",
+    "infinitepay",
+    "mercadopago",
+    "---Global---",
+    "stripe",
+    "adyen",
+    "paypal",
+    "mollie",
+    "razorpay",
+    "square",
+    "---SaaS & merchant of record---",
+    "paddle",
+    "lemonsqueezy",
+    "polar",
+    "dodo"
+  ]
+}

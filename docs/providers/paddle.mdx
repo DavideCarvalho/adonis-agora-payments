@@ -1,0 +1,284 @@
+---
+title: Paddle
+description: Merchant of record on the Billing (v2) API — hosted checkout only, string-cents money, and subscriptions Paddle creates for you.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Paddle is a **merchant of record**. It is the seller of record on your customer's card
+statement, it calculates and remits sales tax and VAT worldwide, and it pays you out on a
+schedule. You are not taking the customer's money — Paddle is, and then it sends you
+yours. That shapes what this driver can and cannot do far more than any API detail.
+
+This driver targets **Paddle Billing**, the v2 API on `api.paddle.com`. The older Paddle
+Classic vendors API is deliberately not supported: it is a different product with a
+different data model, and mixing the two in one driver would produce a config where half
+the options silently do nothing.
+
+<Callout type="warn">
+This driver is written against Paddle's published Billing API reference and is covered by
+unit tests. Nobody has yet pointed it at a live Paddle account. Run it through the sandbox
+(`sandbox: true`) against real webhooks before you let it take real money.
+</Callout>
+
+- **Methods**: `undefined` only. Paddle Checkout decides which methods to offer from the
+  buyer's country and your account settings, and the transaction API takes no
+  payment-method argument — so the driver cannot promise a charge will be a card. Routing
+  `credit_card: 'paddle'` in `config.methods` is refused by the manager, which is the
+  correct answer rather than a bug. Route `undefined: 'paddle'`, or name the provider
+  directly with `payments.driver('paddle')`.
+- **Setup**: `payments.paddle({ apiKey, currency, sandbox, productId, webhookSecret })`.
+  `apiKey` defaults to `PADDLE_API_KEY` (`pdl_live_apikey_…` / `pdl_sdbx_apikey_…`);
+  `sandbox` defaults to `NODE_ENV !== 'production'` and switches the host to
+  `sandbox-api.paddle.com`. Requests pin `Paddle-Version: 1` so a future default-version
+  bump on your account cannot change what the driver sees.
+- **`currency` is required** (lowercase ISO 4217) and the driver refuses to boot without
+  it. Paddle bills in whatever currency the transaction names, so a default here would be
+  a guess at which country you sell in — and a wrong guess charges instead of failing.
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+`webhookSecret` is not configured (env fallback `PADDLE_WEBHOOK_SECRET`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/paddle` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
+### There is no server-side charge
+
+`charge()` **throws**. Paddle has no endpoint that takes money: every payment is collected
+by Paddle Checkout or by a Paddle-issued invoice. The closest thing, `POST /transactions`,
+creates an *unpaid* record whose only route to payment is the checkout URL it returns —
+which is exactly what `createCheckout()` does. Two methods doing the same thing, where one
+of them implies a capture that never happened, is the kind of quiet lie this package
+refuses to ship.
+
+```ts title="app/services/checkout_service.ts"
+const session = await payments.driver('paddle').createCheckout({
+  amount: 1990,
+  planId: 'pri_01h...',           // a Paddle price id
+  successUrl: 'https://app.example/billing',
+  externalReference: 'order:42',   // the only thing tying the webhook back to your row
+})
+
+return response.redirect(session.url)
+```
+
+- **`planId`** is a Paddle **price** id and sells a catalog item. Without one the driver
+  builds a *non-catalog* price against the `productId` you configured
+  (`PADDLE_PRODUCT_ID`), so nothing is written to your catalog per checkout. Pass neither
+  and it throws rather than inventing a product.
+- **`successUrl` is not a post-payment redirect.** Paddle's `checkout.url` is the page
+  that *opens* the checkout — your own page hosting Paddle.js — and Paddle returns it with
+  `?_ptxn=<transaction id>` appended. `successUrl` is the only URL slot the shared input
+  has, so it is used for that. If those are different pages in your app, name the hosting
+  one explicitly with `metadata.checkoutUrl`. `cancelUrl` has no Paddle equivalent and is
+  ignored.
+- **`trialDays` throws.** A Paddle trial lives on the price (`trial_period`), not on a
+  checkout. Accepting the option would bill a customer who was promised a trial, so the
+  driver refuses and points you at the price.
+- **`idempotencyKey` throws.** The Paddle API has no idempotency mechanism at all — no
+  header, no request-id body field, nothing on a transaction or an adjustment. It used to
+  be accepted and dropped here, which turned a caller's retry guarantee into a second
+  refund; every entry point that takes a key (`createCheckout`, `refund`, `createCustomer`,
+  `updateSubscription`) now refuses it and says so. Deduplicate on your side — persist the
+  key and check it before calling.
+
+### Money is a string of the smallest unit
+
+Paddle sends and receives amounts as **strings** in the currency's lowest denomination,
+with the currency named separately: `"1990"` plus `"USD"` is $19.90. This package works in
+integer cents, so the conversion is `String(amount)` outbound and `Number(...)` inbound,
+and it happens only at the driver boundary. Nothing divides by 100 anywhere.
+
+A transaction's `details.totals` also carries `grand_total`, which differs from `total`
+once credits or a customer balance are involved. `Payment.amount` reports `total` — what
+the transaction is worth; `grand_total` stays available on `payment.payload`.
+
+### Webhooks
+
+`Paddle-Signature: ts=<unix>;h1=<hex>`, verified as HMAC-SHA256 over `` `${ts}:${rawBody}` ``
+keyed by the notification setting's secret (`pdl_ntfset_…`, `PADDLE_WEBHOOK_SECRET`),
+compared timing-safe. Paddle **always** signs, so there is no unsigned mode to fall back
+to: without a configured secret the driver refuses to parse rather than trusting the body.
+
+The timestamp is only checked when you ask for it, via `webhookMaxAgeSeconds`. Paddle
+documents that check as optional and its own SDK rejects anything older than five seconds
+— a window that tight would discard real money events on a delivery retry or a skewed
+clock, and the billing layer already deduplicates on the event id. Set it if you want
+replay protection on top of the HMAC.
+
+Normalized event types:
+
+| Paddle | canonical |
+| --- | --- |
+| `transaction.completed`, `transaction.paid` | `payment.succeeded` |
+| `transaction.payment_failed` | `payment.failed` |
+| `transaction.created/updated/ready/billed/canceled/past_due/revised` | `payment.updated` |
+| `adjustment.created/updated` with `action: 'refund'` | `payment.refunded` |
+| `adjustment.created` with `action: 'chargeback'` or `'chargeback_warning'` | **`payment.disputed`** |
+| `adjustment.created` with `action: 'chargeback_reverse'` or `'chargeback_warning_reverse'` | `payment.dispute_closed` (`won`) |
+| `adjustment.*` with any other action (credits), and `adjustment.updated` on a chargeback | `payment.updated` |
+| `subscription.created`, `subscription.imported` | `subscription.created` |
+| `subscription.activated/updated/trialing/past_due/paused/resumed` | `subscription.updated` |
+| `subscription.canceled` | `subscription.canceled` |
+
+`event.id` is Paddle's own `event_id`, so the idempotency ledger dedupes on a gateway id
+rather than a derived one.
+
+#### Chargebacks
+
+**Paddle does not fight your disputes. Paddle fights its own.** As merchant of record
+Paddle is the seller on the cardholder's statement, so the chargeback is legally Paddle's,
+and Paddle's risk-prevention page is unusually blunt about what that means for you: "The
+Paddle team contests chargebacks for you", and the defense "is fully automated, and
+additional evidence submitted by sellers is **not required or accepted**."
+
+That answers both questions this section exists to answer:
+
+- **Who fights it?** Paddle, alone. `capabilities.disputes` is `false` and there is no
+  `submitDisputeEvidence` — not because the driver is incomplete, but because there is no
+  endpoint and no evidence Paddle would take.
+- **Is the deadline yours?** No. The normalized events carry **no `actionableUntil`**,
+  because no adjustment field holds one and no response window belongs to you. Every other
+  gateway page in these docs tells you where the clock is; this one tells you there isn't
+  one you can act on.
+
+What still matters is the *money*, and Paddle reports that as an **adjustment**. There is no
+`dispute.*` event in Paddle Billing — the entire dispute vocabulary is the `action` field on
+an adjustment. (`developer.paddle.com/webhook-reference/risk-dispute-alerts/*` is
+Paddle **Classic**; this driver is Paddle Billing.)
+
+| `action` | Normalized | Funds |
+| --- | --- | --- |
+| `chargeback` | **`payment.disputed`** | withdrawn — the amount and the fee come off your balance |
+| `chargeback_warning` | **`payment.disputed`** | withdrawn — see below |
+| `chargeback_reverse` | `payment.dispute_closed` (`won`) | returned |
+| `chargeback_warning_reverse` | `payment.dispute_closed` (`won`) | returned |
+| `credit`, `credit_reverse` | `payment.updated` | not a dispute |
+
+<Callout title="`chargeback_warning` is not a warning in the sense the other pages mean">
+This is the one place Paddle runs **opposite** to Stripe and Adyen. Their pre-dispute
+alerts — an inquiry, a `NOTIFICATION_OF_CHARGEBACK` — leave the money in the account, which
+is exactly why they normalize to `payment.dispute_warning` and write nothing.
+
+Paddle's does not, because Paddle is the merchant of record and acts on the alert instead of
+forwarding it to you: "If an early-stage dispute is detected, a `chargeback_warning`
+adjustment is created. **The disputed amount is refunded**, and a service fee is applied,
+preventing the dispute from affecting your chargeback rate." An adjustment *is* a money
+movement — Paddle describes `chargeback_reverse` as returning "the amount **held**".
+
+So this driver maps it to `payment.disputed`. Calling it `payment.dispute_warning` writes
+nothing to the payment row, which would leave a stored payment saying `paid` over money
+Paddle has already handed back to the buyer.
+
+The consequence is worth stating plainly: **Paddle sends no funds-untouched pre-dispute
+notification at all**, so there is nothing here to refund before a chargeback is filed — by
+the time you hear about it, Paddle has already done that for you. This driver does not
+invent a warning to fill the gap.
+</Callout>
+
+Both reversals close the dispute as **`won`**, carrying `outcome: 'won'` on `event.data`, and
+the processor moves the row back from `disputed` to `paid`. Paddle spells the funds
+direction out for `chargeback_reverse` ("Where a chargeback is contested successfully,
+Paddle creates an adjustment with the type `chargeback_reverse` to return the amount held");
+for `chargeback_warning_reverse` the reference says only "Reversal of a chargeback warning",
+so `won` is read from the reversal symmetry Paddle's own naming sets up — every `*_reverse`
+action undoes its counterpart. Both put the amount back, and leaving the row at `disputed`
+would write off money that returned.
+
+Only `adjustment.created` is a dispute moment. `adjustment.updated` fires for the approval
+lifecycle of an adjustment that already exists, so it stays `payment.updated` — a second
+`payment.disputed` for the same chargeback is noise.
+
+Every dispute event is keyed by the **transaction** (`transaction_id`) — the row whose status
+has to move — and carries the adjustment id as `disputeId`, plus the adjustment's `reason`
+when Paddle sets one. Paddle has no separate dispute resource; the adjustment *is* the
+dispute.
+
+#### Payment methods
+
+Paddle's `payments[].method_details.type` is reported back on `payment.method` as the
+contract's **category**, so a payment collected through anything other than a card finally
+has a name:
+
+| Paddle `method_details.type` | `payment.method` |
+| --- | --- |
+| `card`, `korea_local`, `south_korea_local_card` | `card` |
+| `paypal`, `apple_pay`, `google_pay`, `samsung_pay`, `alipay`, `wechat_pay`, `kakao_pay`, `naver_pay`, `payco` | `wallet` |
+| `ideal`, `bancontact`, `blik`, `mb_way`, `wire_transfer` | `bank_transfer` |
+| `pix` | `pix` |
+| `upi` | `upi` |
+| `offline`, `unknown`, anything new | left unset |
+
+Paddle spells the same value hyphenated on some events (`apple-pay`) and underscored on
+others; both are normalized. Note this is only what Paddle *reports*: `supportedMethods`
+stays `undefined` only, because the transaction API still takes no payment-method argument
+and the driver cannot promise which one the buyer will use.
+
+### `externalReference`
+
+Sent as **`custom_data.external_reference`** on the transaction, and read back out of
+`data.custom_data` on every webhook — transactions and subscriptions both carry
+`custom_data` — onto `event.data.externalReference`.
+
+Pass it as `externalReference` on the checkout. It matters more here than on a gateway with
+a server-side charge: the hosted session is the *only* way a purchase starts on Paddle, so
+a session opened without a reference produces a `transaction.completed` your handler cannot
+route back to an order. `metadata.externalReference` is still honoured as a fallback for
+code written before the field existed. Everything else in `metadata` goes into `custom_data`
+untouched, minus the `checkoutUrl` key the driver consumes.
+
+### Subscriptions
+
+Paddle **creates** subscriptions; you cannot. There is no create-subscription endpoint —
+a subscription exists once a customer completes a checkout (or a manually-collected
+invoice) for a recurring price. `createSubscription()` therefore throws and tells you to
+call `createCheckout({ planId })` and read the id off the `subscription.created` webhook.
+
+What does work:
+
+- **`cancelSubscription(id)`** cancels at the end of the billing period;
+  `{ atPeriodEnd: false }` cancels immediately (`effective_from: 'immediately'`).
+- **`findSubscription(id)`** maps `current_billing_period` onto `currentPeriodStart` /
+  `currentPeriodEnd`, `trial_dates.ends_at` onto `trialEndsAt`, and the first item's
+  `price.unit_price` onto `amount`.
+- **`updateSubscription(id, { metadata })`** writes `custom_data`. That is all it writes.
+  `amount` **throws** — Paddle has no editable amount on a subscription; you change what a
+  customer pays by swapping `items[].price_id` with a `proration_billing_mode`, which the
+  shared input has no room for. `description` **throws** too: Paddle subscriptions have no
+  such field, and dropping it would report a change the gateway never saw.
+- **Paddle's `paused` status is reported as `paused`.** It used to be reported as `active`,
+  which handed entitlement to a subscriber who is not paying: a paused subscription exists
+  and will bill again, but it is not billing *now*. Anything gating access on
+  `status === 'active'` will start refusing paused subscribers, which is the point. The raw
+  value is still on `subscription.payload.status`.
+
+### Refunds
+
+Refunds are **adjustments** (`POST /adjustments`, `action: 'refund'`). `refund(id)` with no
+amount sends `type: 'full'` and needs no line items. A **partial** refund is expressed per
+transaction line item, which an `amount` alone cannot address — so the driver fetches the
+transaction and only proceeds when it has exactly one line item, and throws otherwise
+rather than refunding the wrong line. Create the adjustment yourself when you need to pick
+items.
+
+On a live account most refunds come back `pending_approval` until Paddle reviews them, so
+`Refund.status === 'pending'` is normal and not a failure. In sandbox they are approved
+automatically every ten minutes.
+
+### Invoices, tax, and customers
+
+- **`listInvoices(customerId)`** lists the customer's `billed` and `completed`
+  transactions. Paddle has no invoice-list endpoint because a billed transaction *is* the
+  invoice — it carries the `invoice_number` that is the legal record, mapped onto
+  `Invoice.number`.
+- **Tax is Paddle's job**, not yours and not this driver's. The amounts you send are what
+  Paddle charges before it works out the buyer's VAT/sales tax; `details.totals.tax` on
+  the transaction is what it added.
+- **`createCustomer`** needs an email. A `taxId` **throws**: Paddle keeps tax identifiers
+  on a customer's *business* (`/customers/{id}/businesses`), a separate resource, so
+  writing one onto the customer would silently vanish.

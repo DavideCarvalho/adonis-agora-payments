@@ -1,12 +1,40 @@
 ---
 title: Troubleshooting
-description: The symptoms that actually happen — webhooks returning 400, handlers that never run, double grants, routing errors, missing invoices — and how to tell the causes apart quickly.
+description: The symptoms that actually happen — webhooks returning 400 or 500, handlers that never run, double grants, routing errors, missing invoices, a schema that upgraded halfway — and how to tell the causes apart quickly.
 icon: LifeBuoy
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
 
 Sorted by how often they come up.
+
+## The app will not boot after an upgrade
+
+Four boot refusals were added deliberately, each closing a failure that was previously silent. All
+four name the fix in the message.
+
+**`The "asaas" driver can verify webhook deliveries but has no credential configured`** — the empty
+slot used to mean "skip verification", so `POST /payments/webhook/asaas` accepted any body anyone
+posted, including one that marks a payment paid. Set the credential, or, only when verification
+genuinely happens upstream, `allowUnverifiedWebhooks: ['asaas']`. Efí and InfinitePay never trip
+this: their gateways sign nothing, so they report `'unsupported'`.
+
+**`Webhook handler (…) is registered for "payment.suceeded", which is not a normalized event
+type`** — a typo in an `eventType` or a `billing.handlers` key. It used to register a handler
+nothing ever called while the ledger recorded the delivery as **processed** and the route answered
+`200`. The rule is namespace-based: `payment.*`/`subscription.*` is the library's own, so a type
+there must be canonical. A gateway type a driver could not map arrives lowercased without a dot
+(`payment_anticipated`) and is accepted as-is; for the rare one spelled *with* a dot, list it in
+`billing.passthroughEvents`.
+
+**`Two webhook handlers claim "payment.succeeded"`** — registration is a map keyed by event type, so
+the second used to silently replace the first. Keep one handler per type (call the other from it) or
+give them different types. The message names both files.
+
+**`driver() resolved "asaas", and config.methods routes pix, boleto to it`** — thrown from
+`charge()`/`createSubscription()`, not from `driver()`. `driver()` with no argument now consults
+`config.methods`, and several methods routed to one provider has no honest answer. Name the method:
+`driver('pix')` or `charge({ method: 'pix' })`.
 
 ## The webhook returns `400`
 
@@ -22,8 +50,45 @@ Signature validation failed. In order of likelihood:
    `webhookSecret` is ignored. Setting only the deprecated HMAC while the gateway sends
    `x-webhook-signature` fails every time.
 
-Confirm which by pointing the gateway at a staging endpoint with verification unconfigured. If it
-passes there, it is the credential or the body — not the payload.
+Confirm which by pointing the gateway at a staging endpoint whose provider is listed in
+`allowUnverifiedWebhooks`. If it passes there, it is the credential or the body — not the payload.
+
+Every `400` writes a `webhook.rejected` row into `billing_audit_events`, which is the only trace it
+leaves: a rejected delivery is refused before an event exists, so it never becomes a ledger row.
+`store.listAuditEvents({ action: 'webhook.rejected' })` shows the refusal reason and the provider,
+and the `rejected_deliveries` health check counts them over 24 h. Before that existed, a rotated
+webhook token looked exactly like a quiet week — zero events, zero failures, every check green.
+
+## The webhook route started returning `500`
+
+This is the fix, not a regression. A delivery whose handler threw used to answer `200`; it answers
+`500` now.
+
+A 2xx tells the gateway it never has to send that delivery again. Answering it over an event that
+failed is how a payment is lost for good — the effect never happened, the gateway never retries, and
+the in-process retry that was supposed to cover it dies with the next deploy. Adyen queues a failed
+delivery for up to 30 days of retries and Efí makes nine attempts; neither starts on a 2xx. So the
+`500` was always the truth, and the gateway's delivery log was already showing it as a failure at the
+gateway's end.
+
+The body says what actually landed:
+
+```json
+{ "received": true, "processed": 3, "failed": ["evt_4"], "error": "Order 1042 not found" }
+```
+
+`error` is the first failed handler's message and is the thing to read first. Then treat it exactly
+like a `failed` ledger row — same cause, same fix. The redelivery is cheap: the three that succeeded
+are already `processed` in the ledger, so the claim skips them and only `evt_4` re-runs.
+
+A `400` is a different animal and did not change: the delivery was rejected before any handler ran —
+a bad signature, an unparsable body, an unknown provider — and redelivering it would fail
+identically.
+
+<Callout type="warn" title="Your 5xx alert will fire where it used to be silent">
+If you page on 5xx from `/payments/webhook/*`, expect it. Nothing new is breaking; the failure is
+just visible on your side now instead of only in the gateway's dashboard.
+</Callout>
 
 ## The webhook returns `200` but nothing happened
 
@@ -36,9 +101,11 @@ Work through this order:
    only if one is registered for that **normalized** type. A handler keyed on `PAYMENT_RECEIVED`
    never fires; the normalized name is `payment.succeeded`.
 3. **Does the file export what discovery looks for?** A handler is found only when its **default
-   export** is a class with `static eventType` and a `handle` method, or an object `{ type, handle }`.
-   A named export, a missing `eventType`, or a typo in the event name are all silent — the file is
-   imported and skipped.
+   export** is a class with `static eventType` and a `handle` method, an object `{ type, handle }`,
+   or a `defineWebhookHandler(...)` value (which is both). A named export or a missing `eventType`
+   is still silent — the file is imported and skipped. A **typo** in the event name no longer is: a
+   type in the `payment.*`/`subscription.*` namespace that is not canonical throws at boot, naming
+   the file.
 
    Discovery itself needs no wiring: the provider reads the generated barrel when the Assembler hook
    is registered (`node ace add` does that), and falls back to scanning `app/payment_handlers/` when
@@ -173,11 +240,145 @@ Something passed reais where cents were expected. `1990` is R$ 19,90; `19.90` is
 rounded. `toDecimal`/`fromDecimal` are for driver implementations only — application code should
 never call them. See [Money](/docs/payments/concepts/money).
 
+If the gateway is **Woovi/OpenPix** and the charge at the gateway is a hundredth of what you asked
+for — `charge({ amount: 1990 })` creating a 20-centavo charge — that was a bug in the driver, not in
+your call, and it is fixed. OpenPix documents `value` in **centavos**, which is the unit this package
+already works in, and the driver converted anyway. Upgrade; nothing in your code changes. Charges
+already created at the wrong amount have to be cancelled and recreated — the gateway has them at the
+value it was sent.
+
+The reason it survived review: the charge path and the webhook path agreed with each other, and the
+tests agreed with both. Nothing was inconsistent, only wrong.
+
+## A dispute was won but the payment still reads `disputed`
+
+A chargeback moves the payment row to `disputed`, and on an older version nothing ever moved it back.
+`revenue()` sums rows that are `paid`, so a dispute you **won** — money already returned to the
+account — stayed written off permanently. `payment.dispute_warning` and `payment.dispute_closed` were
+declared on the bus and published by nobody: the processor's switch had no case for them and they
+fell through to the no-op branch.
+
+Fixed: a `payment.dispute_closed` carrying `outcome: 'won'` puts a `disputed` row back to `paid`.
+`lost` and `expired` deliberately leave it alone, because that money is gone, and so does `canceled` —
+on Stripe a withdrawn dispute still has to be closed in your favour with evidence, so booking it would
+count revenue the acquirer has not returned. Understating is the safe direction.
+
+**Upgrading does not repair the rows you already have.** Those `dispute_closed` events are in
+`billing_webhook_events` as `processed`, so replaying them from the gateway dashboard is a no-op —
+the ledger deduplicates on the gateway event id, which is exactly what it is for. Find them and fix
+them directly:
+
+```ts
+const stuck = await store.listDisputes({ status: 'won', limit: 200 })
+// then, for each, confirm at the gateway and put the payment row back:
+//   await store.savePayment({ ...existing fields..., status: 'paid' })
+```
+
+Omitting `paidAt` there is now correct: absent means "not stated" and the stored settlement date is
+left alone. On an older version that same write **blanked** `paid_at`, which dropped the recovered
+money out of every windowed revenue figure — see
+[Revenue dropped, and nothing was refunded](#revenue-dropped-and-nothing-was-refunded).
+
+A close that carries **no** outcome throws rather than defaulting to one. That is deliberate: a
+driver that cannot read the outcome is required to emit `payment.updated` instead, and defaulting
+here would report a result the gateway never sent. See
+[Disputes](/docs/payments/patterns/disputes).
+
+## Revenue dropped, and nothing was refunded
+
+Check for rows sitting at `status = 'paid'` with `paid_at = NULL`. `revenue()` windows on `paid_at`,
+so those rows are missing from every monthly figure while looking perfectly healthy in a list.
+
+The cause was `savePayment` writing `paidAt` through unconditionally. A refund, a chargeback and a
+dispute close all write the payment row and none of them carries a settlement date — so closing a
+dispute **in your favour** restored `status = 'paid'` with no date and the recovered money left the
+books permanently. `paidAt`, `externalReference` and `refundedAmount` are all leave-alone now;
+`null` still clears.
+
+Upgrading does not repair the rows. `payments:sync` does, because it now takes the gateway's own
+settlement date and never overwrites one already recorded:
+
+```sh
+node ace payments:sync --customer=cus_123
+```
+
+## A partial refund did not change anything
+
+That is what it used to do. Six Asaas events map to `payment.updated`, which had no built-in sync at
+all, so the money came back, the ledger row went to `processed`, and the payment row stayed `paid` at
+the full amount forever with no screen disagreeing.
+
+Two things had to change together, and both are in place: `billing_payments` gained
+`refunded_amount`, and `payment.updated` gained a handler that writes it. If a partial refund still
+does nothing, check in this order:
+
+1. **The column exists.** With `autoCreateSchema: false`, it arrives only when a new migration calls
+   `createBillingTables` again — and the store *skips* the column rather than failing, so nothing
+   raises. Restart afterwards; the probe is cached per process.
+2. **The event arrived.** `store.listWebhookEvents({ type: 'payment.updated' })`.
+3. **The gateway said the refund settled.** Only refunds Asaas reports as `DONE` are counted. A
+   `PENDING` refund, one awaiting approval, and a denied one are all money still in the account, so
+   the driver sends no `refundedAmount` at all and the stored figure is left alone.
+
+Remember that the row **stays `paid`** and keeps its full `amount`, so a partial refund is invisible
+in a gross figure by design. `revenue()` is gross; `netRevenue()` — and the `net_revenue` metric on
+`billingOverview`, shown as **Revenue (net)** in the console — is the one that subtracts it. If the
+refund is recorded on the row and the number you are reading has not moved, check which of the two
+you are reading.
+
 ## Durable is installed but webhooks run in-process
 
 `dispatcher: 'auto'` falls back silently when durable's provider is not **registered in the app** —
 installing the package is not enough. Set `dispatcher: 'durable'` to make the fallback a boot error
 instead of a surprise. See [Production](/docs/payments/production).
+
+## `column ... does not exist`, or a table the library seems to ignore
+
+You are running with `billing.autoCreateSchema: false` and the schema has not caught up with the
+package. The library creates its own tables by default and carries later columns onto a database
+that already has them; turning that off moves both halves to you.
+
+`createBillingTables` is idempotent and does apply the columns added after a table shipped — but a
+migration you already ran does not run again. So an upgrade needs a **new** migration calling it once
+more, shipped in the same deploy as the code:
+
+```ts
+import { BaseSchema } from '@adonisjs/lucid/schema'
+import { createBillingTables } from '@adonis-agora/payments'
+
+export default class extends BaseSchema {
+  async up() {
+    this.defer(async (db) => { await createBillingTables(db) })
+  }
+}
+```
+
+The harder half of this is that skipping it does not always fail loudly. Three things are probed
+before use and **skipped when absent**, because failing every gateway delivery over a missing column
+is worse than recording less:
+
+| Missing | What you see instead of an error |
+| --- | --- |
+| `billing_payments.external_reference` | references are never stored, `findPaymentByExternalReference` always answers `null`, and handlers that route on it hit their silent `return` |
+| `billing_payments.refunded_amount` | partial refunds are recorded nowhere; the row keeps its full amount, and `netRevenue()` answers exactly what `revenue()` does — there is nothing recorded to subtract |
+| `billing_webhook_events.normalized` | the dashboard's retry cannot rebuild the event and answers `422` on any signed gateway |
+| the `billing_disputes` table | disputes are never recorded, and `payments:health` reports a healthy **zero** closing windows over a table that does not exist |
+| the `billing_audit_events` table | console refunds, dispute resolutions and **rejected deliveries** are recorded nowhere; `rejected_deliveries` reports a healthy zero and the Activity screen is empty |
+
+Anything else — a table that was never created at all — does raise `relation ... does not exist` or
+`column ... does not exist` on the first query that touches it.
+
+<Callout type="warn" title="Restart after running the DDL">
+Each probe runs once per process and the answer is cached for the life of it. Running the migration
+against a live process does not change its mind: it keeps skipping the column it decided was absent.
+</Callout>
+
+`autoCreateSchema: false` **does** reach a Lucid store you built yourself with `billing.store` —
+including `billingStores.lucid({ models })`. The provider turns auto-creation off on it after your
+factory returns, so no DDL runs against the database the flag was set to protect. It only ever turns
+the flag *off*: a store you constructed with `autoCreateSchema: false` of your own stays that way
+even when the config says `true`, and a store that is not a `LucidBillingStore` is left alone
+entirely.
 
 ## Events stuck in `failed`
 

@@ -1,0 +1,264 @@
+---
+title: Pagar.me
+description: Stone's Brazilian gateway on the v5 Core API — orders and charges over Pix, boleto and card, native subscriptions, and integer centavos end to end.
+icon: Landmark
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+Stone's Brazilian gateway, on the **Core API v5** (`https://api.pagar.me/core/v5`). Pix,
+boleto, credit and debit card, native subscriptions, payment links, marketplace splits.
+
+<Callout type="warn" title="Not yet run against a live account">
+This driver was written against Pagar.me's published v5 API reference and is covered by unit
+tests that stub the HTTP layer. Nothing here has been exercised against a real Pagar.me
+account. Run your flow in test mode (an `sk_test_…` key) before you take real money with it.
+</Callout>
+
+- **Methods**: pix, boleto, credit_card, debit_card. **No `undefined`** — an order must name
+  its `payment_method`, so "let the customer choose" exists only on a payment link
+  (`createCheckout`), never on a charge.
+- **Setup**: `payments.pagarme({ secretKey, webhookUser, webhookPassword, pixExpiresIn })` —
+  `PAGARME_SECRET_KEY`. There is no sandbox host: the same URL serves both, and a
+  `sk_test_…` key puts the account in test mode.
+- **Auth**: HTTP Basic with the secret key as the **username and an empty password**.
+- **Webhooks**: authenticated by the HTTP Basic credentials you set on the webhook endpoint in
+  the dashboard — Pagar.me signs nothing, and there is no HMAC to verify. Set
+  `webhookUser`/`webhookPassword` (or `PAGARME_WEBHOOK_USER` / `PAGARME_WEBHOOK_PASSWORD`) and the
+  driver rejects any request that does not carry them. They are **optional at Pagar.me and required
+  here**: with neither set the driver reports `'unconfigured'` and the app refuses to boot, because
+  nothing else about a Pagar.me delivery is authenticated.
+- **`externalReference`**: on a **charge**, sent as the order's `code` **and** as
+  `metadata.external_reference` — order metadata is repeated on every charge the order
+  generates, which is what makes the reference survive into the `charge.*` webhooks. On a
+  **checkout**, sent as the payment link's `order_code`, which Pagar.me stamps as the `code`
+  of every order the link produces. Either way it comes back out on
+  `event.data.externalReference`.
+- **Subscriptions**: native. `createSubscription` picks the API shape from `planId` — see
+  below.
+- **Invoices**: `listInvoices` reads the gateway's own subscription invoices
+  (`GET /invoices`). For an **NFS-e**, configure a separate `invoice.providers` entry and
+  pass `invoice: true`; Pagar.me does not emit fiscal notes.
+- **Splits**: pass `split` on the charge. Each rule maps to a Pagar.me `recipient_id`.
+
+<Callout title="Money is already centavos here">
+Asaas, AbacatePay and Woovi speak decimal reais, so their drivers divide by 100. Pagar.me's
+`amount` fields are integer centavos — the same unit as this library's `Money` — and the
+driver does **no conversion at all**. R$ 19,90 is `1990` on both sides. The same is true of a
+`fixedValue` split share.
+</Callout>
+
+```ts title="config/payments.ts"
+import { defineConfig, payments } from '@adonis-agora/payments'
+import env from '#start/env'
+
+export default defineConfig({
+  default: 'pagarme',
+  providers: {
+    pagarme: payments.pagarme({
+      secretKey: env.get('PAGARME_SECRET_KEY'),
+      webhookUser: env.get('PAGARME_WEBHOOK_USER'),
+      webhookPassword: env.get('PAGARME_WEBHOOK_PASSWORD'),
+    }),
+  },
+})
+```
+
+<Callout type="warn" title="Webhook verification is required at boot">
+This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
+neither `webhookUser` nor `webhookPassword` is configured (env fallbacks `PAGARME_WEBHOOK_USER` /
+`PAGARME_WEBHOOK_PASSWORD`).
+Set it before you deploy, or — only when verification genuinely happens upstream — name this
+provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
+running without it: the empty slot used to mean "skip verification", so
+`POST /payments/webhook/pagarme` accepted any body anyone posted, including one that marks a
+payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+</Callout>
+
+## Charging
+
+A charge is an **order carrying one payment**: the driver posts `POST /orders` with a single
+`items[]` line and one `payments[]` entry, and returns the first charge the gateway created.
+That charge id (`ch_…`) is what `findPayment` reads (`GET /charges/{id}`) and what the
+`charge.*` webhooks talk about.
+
+```ts
+// Pix — the driver always sends the mandatory `expires_in`.
+const payment = await payments.driver('pagarme').charge({
+  customerId: 'cus_123',
+  amount: 1990,
+  method: 'pix',
+  description: 'Plano Pro',
+  externalReference: 'order:42',
+})
+payment.pixCode        // the BR Code the payer copies
+payment.pixQrCodeImage // URL of the QR image
+```
+
+```ts
+// Card — tokenize in the frontend, charge with the token.
+await payments.driver('pagarme').charge({
+  customerId: 'cus_123',
+  amount: 4990,
+  method: 'credit_card',
+  card: { token: cardTokenFromFrontend },
+  metadata: { installments: 3, statementDescriptor: 'MINHALOJA' },
+})
+```
+
+A charge with no `method` is refused rather than left to the account's defaults — the one
+exception is a call that hands over a card, which can only mean `credit_card`. `metadata`
+carries the fields the contract has no home for: `installments`, `statementDescriptor`,
+`expiresIn` (Pix, seconds) and `dueDate` (boleto).
+
+Without a `customerId`, the order needs an inline payer: pass at least `customer.name` on the
+charge (`customer.taxId` and `card.holder` are used when present).
+
+## Subscriptions
+
+`createSubscription` reads `planId` and picks the API shape it names:
+
+- **`plan_…`** — a subscription from that Pagar.me plan. The plan owns the interval and the
+  price, so `amount` and `cycle` are ignored.
+- **anything else** — a plan-less ("avulsa") subscription built from `amount` and `cycle`,
+  with your `planId` kept as the subscription's `code`. `amount` is required here: there is
+  no plan to read a price from, and the driver refuses rather than guessing one.
+
+`cycle` maps onto Pagar.me's `interval` + `interval_count` pair — `QUARTERLY` is
+`month`/`3`, `BIWEEKLY` is `week`/`2`, and so on.
+
+```ts
+await payments.driver('pagarme').createSubscription({
+  customerId: 'cus_123',
+  planId: 'pro',            // not a plan_… id → plan-less subscription
+  amount: 4990,
+  cycle: 'MONTHLY',
+  method: 'credit_card',
+  card: { token: cardTokenFromFrontend },
+  externalReference: 'sub:7',
+})
+```
+
+### What it will not do
+
+**`updateSubscription` throws.** A Pagar.me subscription has no amount or description of its
+own — the price lives on its *items*, each with a `pricing_scheme`, changed through the
+subscription-item sub-resource rather than through the subscription. No single request means
+what the contract's `{ amount, description }` means, so the driver refuses instead of
+returning a subscription the gateway never changed. Cancel and recreate, or edit the item in
+the dashboard.
+
+**`cancelSubscription` cancels immediately.** There is no period-end flag in the API, so
+`atPeriodEnd` cannot keep a subscription running. What it does control is the invoices already
+issued for the current cycle: `atPeriodEnd: true` sends `cancel_pending_invoices: false`,
+leaving them payable; the default cancels them too.
+
+## Checkout
+
+`createCheckout` creates a **payment link** (`POST /paymentlinks`) and returns its hosted
+URL. `flow_settings.success_url` is the one redirect the API has — **`cancelUrl` is ignored**,
+because there is no cancel destination to map it onto.
+
+Pass `planId` and the link becomes a subscription link, which Pagar.me only accepts with
+`credit_card`; `trialDays` becomes the recurrence's `start_in`. `metadata.methods` narrows
+which methods the page offers (default: card, Pix and boleto).
+
+Set `externalReference` on the session: it becomes the link's `order_code`, and every order
+the link generates carries it as its `code` — the value your `order.paid` handler reads off
+`event.data.externalReference`. Without it, a purchase that started at a hosted page arrives
+as a confirmation with nothing to route it to.
+
+## Webhooks
+
+Events arrive in the envelope `{ id, account, type, created_at, data }` and normalize like
+this:
+
+| Pagar.me | Normalized |
+| --- | --- |
+| `charge.paid`, `order.paid`, `invoice.paid` | `payment.succeeded` |
+| `charge.payment_failed`, `order.payment_failed`, `invoice.payment_failed` | `payment.failed` |
+| `charge.refunded`, `charge.partial_canceled` | `payment.refunded` |
+| `charge.created/pending/processing/updated/underpaid/overpaid`, `order.created/updated/closed` | `payment.updated` |
+| `charge.chargedback` | **`payment.disputed`** |
+| `chargeback.received` | *unmapped* — passed through under its own name ([why](#chargebacks)) |
+| `order.canceled`, `invoice.canceled` | `payment.updated` |
+| `subscription.created` / `.updated` / `.canceled` | `subscription.created` / `.updated` / `.canceled` |
+
+`order.*` events deliver the order with its `charges[]`; `charge.*` deliver the charge
+itself. Both normalize onto the charge, which is what a payment row tracks.
+
+### Chargebacks
+
+`charge.chargedback` — note the spelling, `chargedback` with the `d` in the middle, which
+Pagar.me's own docs call out because everyone gets it wrong — normalizes to
+**`payment.disputed`**, and the payment row moves to `disputed`. A chargeback changes only
+the **charge's** status; Pagar.me leaves the order's alone, which is why the driver keys
+payments on the charge.
+
+`order.canceled` is not a dispute — an order that never went through is not money taken
+back — so it stays `payment.updated`.
+
+**There is no pre-dispute alert and no response deadline on the webhook.** Pagar.me
+publishes no fraud-alert or inquiry event, so the first thing an integration hears is the
+chargeback itself, and the charge payload carries no defense window. The deadline exists —
+it is `responseDeadline` on the **Disputes API** — but that is a separate resource this
+driver does not read; `charge.chargedback` therefore carries no `actionableUntil`, and the
+driver does not invent one. (`charge.antifraud_reproved` and its siblings are antifraud
+decisions taken *before* the money moves, not dispute warnings, and stay unmapped.)
+
+The dispute *lifecycle* lives entirely in that Disputes API — `GET /v1/disputes`,
+`GET /v1/disputes/{id}`, `POST /v1/disputes/{id}/evidences`, now documented on Pagar.me's
+own reference — which is not on the driver contract. A dispute there is
+`{ disputeId, transactionId, chargeId, responseDeadline, chargebackAmount, status, reason,
+stage, network }` with `status` one of `WAITING_MERCHANT_EVIDENCES`,
+`WAITING_ACQUIRER_ANALYSIS`, `WAITING_ISSUER`, `MERCHANT_EVIDENCE_DEADLINE_EXPIRED`,
+`DEADLINE_EXPIRED`, `WON`, `LOST`, `REVERSED`. **None of it arrives as a webhook today**, so
+this driver emits no `payment.dispute_warning` and no `payment.dispute_closed` for Pagar.me:
+a won dispute has to be reconciled from that API or the dashboard.
+
+<Callout type="warn" title="charge.chargedback is deprecated — migrate by 2026-09-30">
+Pagar.me's event list marks `charge.chargedback` "será descontinuado", to be replaced by
+**`chargeback.received`**, with a migration deadline of **30/09/2026**.
+
+Re-checked in August 2026: `chargeback.received` now exists in that list, described as *"o
+evento enviado quando um chargeback é criado"* — and that one sentence is the **entire**
+public specification. No payload, no example, no field list, on any Pagar.me page. So the
+driver still does **not** map it. Its `data` may well be a dispute object keyed on
+`disputeId`, and filing `payment.disputed` against the dispute's id rather than the charge's
+would move a paid row over an id nothing reconciles — worse than the event landing in the
+webhook ledger as an unknown type, where it is at least visible.
+
+What the driver does do is pass it through **untouched**: `event.type` stays
+`chargeback.received` and `event.data` is exactly the body Pagar.me sent, not a
+`{ gatewayId, amount, currency }` fabricated by a charge mapper that cannot read a dispute.
+Register a handler for it, log one real payload, and the mapping can be closed in an
+afternoon. Until then, keep `charge.chargedback` subscribed.
+</Callout>
+
+### Authorized, not captured
+
+Pagar.me has **no `authorized` charge status**. A card taken with `operation_type:
+"auth_only"` leaves the charge at `pending` — exactly like a boleto nobody has paid — and
+only `last_transaction.status` says `authorized_pending_capture` (or `waiting_capture`).
+The driver reads both and reports **`authorized`**, so a granted hold is not collapsed into
+"may never pay". `pending` from this driver now really does mean waiting on the payer.
+
+The driver's own `charge()` always sends `operation_type: 'auth_and_capture'`, so this
+matters for charges created elsewhere (a payment link, the dashboard) that you then read
+through `findPayment` or a webhook.
+
+### Idempotency
+
+Pagar.me documents `Idempotency-key` for **order creation and nothing else**:
+
+- `charge()` sends it (`POST /orders`). Two footguns from Pagar.me's own docs — the bodies
+  are **not** compared, so the same key with a different payload still returns the first
+  order; and the key lives 24h in production but only **5 minutes** in sandbox. Concurrent
+  requests with the same key get a `409`.
+- `refund()`, `createCustomer()` and `createSubscription()` **throw** when given an
+  `idempotencyKey`. The reference for `DELETE /charges/{id}`, `POST /customers` and
+  `POST /subscriptions` documents no header but `Authorization`; forwarding a key anyway
+  would hand back a retry guarantee the gateway never made.
+
+`idempotencyKey` still doubles as the order `code` when no `externalReference` is given —
+that is routing, not deduplication, and the two are now genuinely separate on a charge.

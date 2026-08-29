@@ -1,7 +1,7 @@
 {
   "name": "@adonis-agora/payments",
   "version": "0.2.0",
-  "description": "Billing library for AdonisJS — multi-gateway payments (Stripe, AbacatePay, Asaas, Woovi) with a Cashier-style subscription billing layer: Billable mixin, Lucid stores, idempotent webhook processing and an optional Durable-backed dispatcher. Part of the Agora ecosystem.",
+  "description": "Billing library for AdonisJS — 18 payment gateways behind one driver contract, with a Cashier-style subscription billing layer: Billable mixin, Lucid stores, idempotent webhook processing and an optional Durable-backed dispatcher. Part of the Agora ecosystem.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -33,6 +33,11 @@
       "import": "./dist/providers/dashboard_provider.js",
       "default": "./dist/providers/dashboard_provider.js"
     },
+    "./payments_client_provider": {
+      "types": "./dist/providers/payments_client_provider.d.ts",
+      "import": "./dist/providers/payments_client_provider.js",
+      "default": "./dist/providers/payments_client_provider.js"
+    },
     "./configure": {
       "types": "./dist/configure.d.ts",
       "import": "./dist/configure.js",
@@ -63,26 +68,6 @@
       "import": "./dist/src/telescope/index.js",
       "default": "./dist/src/telescope/index.js"
     },
-    "./drivers/asaas": {
-      "types": "./dist/src/drivers/asaas.d.ts",
-      "import": "./dist/src/drivers/asaas.js",
-      "default": "./dist/src/drivers/asaas.js"
-    },
-    "./drivers/stripe": {
-      "types": "./dist/src/drivers/stripe.d.ts",
-      "import": "./dist/src/drivers/stripe.js",
-      "default": "./dist/src/drivers/stripe.js"
-    },
-    "./drivers/abacate": {
-      "types": "./dist/src/drivers/abacate.d.ts",
-      "import": "./dist/src/drivers/abacate.js",
-      "default": "./dist/src/drivers/abacate.js"
-    },
-    "./drivers/woovi": {
-      "types": "./dist/src/drivers/woovi.d.ts",
-      "import": "./dist/src/drivers/woovi.js",
-      "default": "./dist/src/drivers/woovi.js"
-    },
     "./types": {
       "types": "./dist/src/types.d.ts",
       "import": "./dist/src/types.js",
@@ -92,6 +77,21 @@
       "types": "./dist/src/dashboard/index.d.ts",
       "import": "./dist/src/dashboard/index.js",
       "default": "./dist/src/dashboard/index.js"
+    },
+    "./client": {
+      "types": "./dist/src/client/index.d.ts",
+      "import": "./dist/src/client/index.js",
+      "default": "./dist/src/client/index.js"
+    },
+    "./drivers/*": {
+      "types": "./dist/src/drivers/*.d.ts",
+      "import": "./dist/src/drivers/*.js",
+      "default": "./dist/src/drivers/*.js"
+    },
+    "./webhook_security": {
+      "types": "./dist/src/webhook_security.d.ts",
+      "import": "./dist/src/webhook_security.js",
+      "default": "./dist/src/webhook_security.js"
     }
   },
   "files": ["dist/", "README.md", "CHANGELOG.md"],
@@ -153,11 +153,28 @@
     "billing",
     "subscriptions",
     "stripe",
+    "adyen",
+    "paypal",
+    "mollie",
+    "razorpay",
+    "square",
+    "paddle",
+    "lemonsqueezy",
+    "polar",
+    "dodo",
     "abacatepay",
     "asaas",
     "woovi",
     "openpix",
+    "pagarme",
+    "infinitepay",
+    "pagbank",
+    "pagseguro",
+    "efi",
+    "gerencianet",
+    "mercadopago",
     "pix",
+    "boleto",
     "dashboard",
     "agora"
   ]

@@ -56,7 +56,10 @@ durable — would short-circuit on the claim and silently do nothing, which look
 webhook that was never delivered.
 
 So a throwing handler is not a lost event: it marks the ledger `failed`, and the dispatcher's retry
-picks it back up. Errors surface instead of being swallowed.
+picks it back up. The route also answers `500`, so the **gateway** redelivers as well — and that
+redelivery is cheap for exactly this reason: the events that already succeeded answer "processed"
+at the claim and skip, and only the `failed` row is claimed again. Errors surface instead of being
+swallowed.
 
 ## What the ledger does not guarantee
 
@@ -65,6 +68,14 @@ It is the **outer** defence, and it is not the only one you need.
 - **It does not protect against two different event ids for the same fact.** A gateway that sends
   `PAYMENT_RECEIVED` and later `PAYMENT_CONFIRMED` for one payment sends two distinct ids, and both
   are legitimately new.
+- **It is only as good as the id the driver declares.** The key has to be an *event* identity. The
+  Asaas driver used to synthesize `${event}-${paymentId}`, which is a (payment, event-type) identity
+  — so the **second** `PAYMENT_UPDATED` about a payment was discarded as a replay of the first, and
+  a partial refund arrives as exactly that type. It reads Asaas' own top-level `id` now, and falls
+  back to a deterministic hash of the raw body (a redelivery of the same notification hashes to the
+  same key; two different notifications do not) rather than to the `Math.random()` that had been
+  disabling deduplication outright for any payload naming neither a payment nor a subscription.
+  Writing a driver? Give every event an id of its own, from the gateway where there is one.
 - **It does not protect a handler with side effects outside your database.** An email sent before a
   later step throws is sent again on the retry.
 - **It does not make your grant idempotent.** It makes the *event* processed once, which is not the
@@ -115,6 +126,78 @@ Derive it from something stable, not from a timestamp or a random value — a ke
 retry protects nothing. And keep it distinct from `externalReference`: one guards against duplicate
 charges, the other routes webhooks back to your record. See
 [The payment lifecycle](/docs/payments/concepts/lifecycle).
+
+It rides on six operations, which is every driver call that creates something:
+
+| Where | On what |
+| --- | --- |
+| `ChargeInput.idempotencyKey` | `charge()` |
+| `CheckoutInput.idempotencyKey` | `createCheckout()` |
+| `CreateCustomerInput.idempotencyKey` | `createCustomer()` |
+| `CreateSubscriptionInput.idempotencyKey` | `createSubscription()` |
+| `UpdateSubscriptionInput.idempotencyKey` | `updateSubscription()` |
+| `refund(id, amount?, { idempotencyKey })` | `refund()` |
+
+### A driver either honours it or refuses it
+
+There is no third behaviour, and that is the design. Accepting a key and dropping it is the worst
+option available: the caller believes their retry is safe, and the retry is a second charge, a
+second refund or a second subscription. So a driver whose gateway documents no deduplication for an
+operation **throws**, naming the endpoint and telling you to deduplicate on your side.
+
+Where it is honoured, it goes wherever that gateway put it — and no two agree:
+
+- **A request header.** Stripe, Adyen, Mollie and Polar take `Idempotency-Key`; Mercado Pago spells
+  it `X-Idempotency-Key`, Pagar.me `Idempotency-key`, PagBank `x-idempotency-key`, PayPal
+  `PayPal-Request-Id`, and Razorpay — on refunds and nothing else — `X-Refund-Idempotency`.
+- **A body field.** Square's `idempotency_key` is in the payload, not the headers, and it is
+  mandatory on the create calls.
+- **The id in the URL.** An Efí refund is a `PUT` to `/v2/pix/{e2eid}/devolucao/{id}`, so the id you
+  choose *is* the deduplication. Omit the key and the driver mints a random one, which protects a
+  retry inside one call and nothing across a restart.
+
+The gateway's own limits are enforced here rather than at the gateway: Adyen caps the key's length,
+Square caps it, Razorpay requires at least ten characters of a restricted charset, and Efí requires
+BACEN's 1–35 alphanumerics. Each throws with the limit in the message, because a key the gateway
+rejects is a key that does not deduplicate.
+
+Partial support is common and is refused per operation, not per driver. Mercado Pago documents the
+header for payments and refunds only; Pagar.me for order creation only; Razorpay for refunds only;
+Mollie for `POST` only, so `updateSubscription` — a `PATCH` — refuses; Square has no
+`idempotency_key` on a subscription update, so that one refuses too. AbacatePay, Dodo, Lemon Squeezy
+and Paddle document no mechanism anywhere and refuse on every operation they implement.
+
+### Asaas `charge()` — the lookup, done for you
+
+Asaas documents no idempotency header and no idempotency body field on any endpoint; it tells you to
+deduplicate on your side. So `AsaasDriver.charge()` **does that lookup**, and it is the one place in
+this package where the third behaviour would have been the wrong call.
+
+The key travels as the charge's `externalReference` — the only handle Asaas echoes back *and*
+accepts as a query filter — and a `GET /payments` scoped to that reference and that customer runs
+**before** the `POST`. A hit returns the charge that already exists, enriched with its Pix code so
+the caller gets a usable payment, and re-runs neither side effect: no second fiscal invoice (an
+NFS-e is a legal document, not a retryable write) and no `charge.created` diagnostic for a charge
+that was not created.
+
+The guarantee is **at most one Asaas charge per key, scoped to the customer**. What it is not is a
+lock: two concurrent calls with the same key can both miss the lookup and both create, and Asaas
+offers nothing to prevent that. It closes the retry case, which is the one that actually happens.
+
+Every other method on the Asaas driver still refuses loudly — an accepted-and-dropped key on
+`refund()` is a second refund, and there is no equivalent lookup to invent.
+
+<Callout type="warn" title="Three places the key is still not deduplication">
+On AbacatePay, Woovi and Efí, a `charge()` with no `externalReference` uses the `idempotencyKey`
+**as** the reference — legacy behaviour, kept because removing it would silently stop routing
+webhooks for anyone relying on it. It is routing, not deduplication. (Efí's `refund()` is different
+and genuinely deduplicates: the key becomes the devolução id in the URL.)
+
+InfinitePay is the one gateway that neither honours nor refuses it. Its only creating operation is
+`createCheckout`, its API documents no idempotency at all, and the key is used there as the last
+fallback for `order_nsu` — the field it echoes back. A repeated call makes a second payment link.
+Deduplicate before you call it.
+</Callout>
 
 ## Testing it
 

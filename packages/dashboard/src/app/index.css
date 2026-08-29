@@ -92,6 +92,61 @@ body {
 .s-canceled {
   color: #71717a;
 }
+.s-authorized {
+  /* Funds HELD on the card and nothing moved. Amber: it is not money yet. */
+  color: var(--warn);
+}
+.s-disputed {
+  /* A chargeback — money already pulled back. Distinct from `failed`: this one was paid once. */
+  color: #fb7185;
+}
+
+/* Subscription statuses. `paused` gets its OWN hue and never green: a paused subscriber is not
+   paying, and rendering it like `active` is how a non-paying subscriber keeps their access. */
+.s-active {
+  color: var(--good);
+}
+.s-trialing {
+  color: var(--live);
+}
+.s-past_due {
+  color: var(--bad);
+}
+.s-paused {
+  color: var(--warn);
+}
+.s-incomplete {
+  color: var(--warn);
+}
+.s-ended {
+  color: #71717a;
+}
+
+/* Dispute statuses. `warning` is the load-bearing one: a pre-chargeback alert where NOTHING has
+   been pulled back yet and a refund still prevents the debit. It takes amber — the same hue as
+   `authorized`, and for the same reason: this is not money that moved. */
+.s-warning {
+  color: var(--warn);
+}
+.s-open {
+  /* Filed, funds withdrawn, evidence clock running. */
+  color: var(--bad);
+}
+.s-under_review {
+  /* Answered; waiting on the network. In flight, like a claimed webhook event. */
+  color: var(--live);
+}
+.s-won {
+  color: var(--good);
+}
+.s-lost {
+  color: #fb7185;
+}
+/* `expired` shares the `lost` hue deliberately: the window shut, so the money is gone by default
+   rather than on the merits. The two differ in HOW, not in what is left to do — nothing. */
+.s-expired {
+  color: #fb7185;
+}
 
 /* Webhook-ledger statuses. */
 .s-received {

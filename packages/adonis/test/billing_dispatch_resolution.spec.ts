@@ -7,8 +7,8 @@ import {
 
 /**
  * `billing.dispatcher` is the only option able to name every backend — the
- * boolean `durable` alias cannot express `'queue'`. Reading the alias first
- * would make `dispatcher: 'queue'` a silent no-op.
+ * boolean `durable` alias can only say durable or not. Reading the alias first would make an
+ * explicit `dispatcher` a silent no-op.
  */
 describe('resolveDispatchMode', () => {
   it('defaults to auto', () => {
@@ -16,14 +16,25 @@ describe('resolveDispatchMode', () => {
     expect(resolveDispatchMode({ billing: {} })).toBe('auto');
   });
 
-  it('reads billing.dispatcher, including queue', () => {
-    expect(resolveDispatchMode({ billing: { dispatcher: 'queue' } })).toBe('queue');
+  it('refuses the queue dispatcher, which was never implemented', () => {
+    // It was in the type, in the config docs and in the dispatcher's own comments, and
+    // `queueDispatch` was never read — so the mode fell through and silently ran
+    // durable-or-in-process. Boot is the only place this can be honest.
+    expect(() => resolveDispatchMode({ billing: { dispatcher: 'queue' } } as never)).toThrow(
+      /is not implemented/,
+    );
+  });
+
+  it('reads billing.dispatcher', () => {
+    expect(resolveDispatchMode({ billing: { dispatcher: 'durable' } })).toBe('durable');
     expect(resolveDispatchMode({ billing: { dispatcher: 'durable' } })).toBe('durable');
     expect(resolveDispatchMode({ billing: { dispatcher: 'in-process' } })).toBe('in-process');
   });
 
   it('prefers dispatcher over the legacy alias when both are set', () => {
-    expect(resolveDispatchMode({ billing: { dispatcher: 'queue', durable: true } })).toBe('queue');
+    expect(resolveDispatchMode({ billing: { dispatcher: 'in-process', durable: true } })).toBe(
+      'in-process',
+    );
   });
 
   it('still honours the legacy durable alias on its own', () => {
@@ -47,7 +58,9 @@ describe('resolveRole', () => {
 describe('assertRoleIsDispatchable', () => {
   it('allows a split over a dispatcher that has a channel', () => {
     expect(() => assertRoleIsDispatchable('api', 'durable')).not.toThrow();
-    expect(() => assertRoleIsDispatchable('worker', 'queue')).not.toThrow();
+    // Durable is the only one with a channel. `'queue'` used to be allowed here, which
+    // produced an api process doing all the work and a worker sitting idle.
+    expect(() => assertRoleIsDispatchable('worker', 'in-process')).toThrow();
   });
 
   it('never constrains the single-process default', () => {
@@ -65,8 +78,6 @@ describe('assertRoleIsDispatchable', () => {
   });
 
   it('names the fix in the error', () => {
-    expect(() => assertRoleIsDispatchable('worker', 'auto')).toThrow(
-      /Set dispatcher to "durable" or "queue"/,
-    );
+    expect(() => assertRoleIsDispatchable('worker', 'auto')).toThrow(/Set dispatcher to "durable"/);
   });
 });

@@ -1,0 +1,937 @@
+import { createHmac } from 'node:crypto';
+import { publishPaymentDiagnostics, publishRefundDiagnostics } from '../diagnostics.js';
+import type {
+  ChargeInput,
+  CheckoutInput,
+  CreateCustomerInput,
+  CreateSubscriptionInput,
+  PaymentsDriver,
+  UpdateCustomerInput,
+  UpdateSubscriptionInput,
+  WebhookVerificationState,
+} from '../driver.js';
+import { httpRequest } from '../http.js';
+import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
+import type { EmitInvoiceContext } from '../invoice/emit_invoice.js';
+import type {
+  CheckoutSession,
+  Customer,
+  Dispute,
+  DisputeEvidence,
+  Invoice,
+  Money,
+  Payment,
+  Refund,
+  Subscription,
+  WebhookEvent,
+} from '../types.js';
+import { safeCompare } from '../webhook_security.js';
+import { requireCredential, requireCurrency } from './shared.js';
+
+/** Config for `payments.adyen()`. Multi-currency and merchant-scoped, so both are required. */
+export interface AdyenDriverConfig {
+  /** Adyen API key, sent as `X-API-Key`. Defaults to `env.get('ADYEN_API_KEY')`. */
+  apiKey?: string;
+  /**
+   * The merchant account every Checkout call is scoped to (Customer Area → the account
+   * code, not the company account). Defaults to `env.get('ADYEN_MERCHANT_ACCOUNT')`.
+   */
+  merchantAccount?: string;
+  /**
+   * Currency for calls that don't name one (lowercase ISO 4217). **Required** — Adyen
+   * charges whatever currency you send it, so a default would be a guess at the country
+   * the app bills in, and the wrong guess still takes money.
+   */
+  currency: string;
+  /**
+   * The webhook HMAC key generated in the Customer Area — a **hex** string. Defaults to
+   * `env.get('ADYEN_HMAC_KEY')`. When set, a webhook without a valid
+   * `additionalData.hmacSignature` is rejected.
+   */
+  hmacKey?: string;
+  /**
+   * Live only: your account's URL prefix (Customer Area → Developers → API URLs), the
+   * `{prefix}` in `https://{prefix}-checkout-live.adyenpayments.com`. Defaults to
+   * `env.get('ADYEN_LIVE_URL_PREFIX')`.
+   */
+  liveUrlPrefix?: string;
+  /** Which Adyen environment to talk to. Defaults to test unless `NODE_ENV=production`. */
+  environment?: 'test' | 'live';
+  /**
+   * Whether the merchant account captures automatically (Adyen's default) or waits for a
+   * capture request. Defaults to `'automatic'`, which is what a fresh Adyen account does.
+   *
+   * This has to be configuration because the Checkout API will not tell you: `captureDelay`
+   * lives on the **Management** API (`GET /merchants/{merchantId}`), which this driver does
+   * not talk to, and the `/payments` response is identical in both modes. It changes what
+   * `Authorised` means — settled money, or a hold that expires — so the driver asks rather
+   * than guessing, and the wrong guess is the expensive kind: a hold read as revenue.
+   */
+  captureMode?: 'automatic' | 'manual';
+}
+
+/** Adyen documents `Idempotency-Key` as at most this many characters, and recommends a UUID. */
+const IDEMPOTENCY_MAX_LENGTH = 64;
+
+interface AdyenAmount {
+  value: number;
+  currency: string;
+}
+
+interface AdyenPaymentResponse {
+  pspReference?: string;
+  resultCode: string;
+  merchantReference?: string;
+  amount?: AdyenAmount;
+  refusalReason?: string;
+  additionalData?: Record<string, string>;
+  action?: Record<string, unknown>;
+}
+
+interface AdyenRefundResponse {
+  pspReference: string;
+  paymentPspReference: string;
+  reference?: string;
+  amount: AdyenAmount;
+  status: string;
+  merchantAccount: string;
+}
+
+interface AdyenPaymentLinkResponse {
+  id: string;
+  url: string;
+  status: string;
+  amount: AdyenAmount;
+  reference: string;
+  expiresAt?: string;
+  shopperReference?: string;
+}
+
+interface AdyenNotificationRequestItem {
+  eventCode: string;
+  success: string;
+  eventDate?: string;
+  pspReference?: string;
+  originalReference?: string;
+  merchantAccountCode?: string;
+  merchantReference?: string;
+  amount?: AdyenAmount;
+  paymentMethod?: string;
+  reason?: string;
+  additionalData?: Record<string, string>;
+}
+
+interface AdyenNotification {
+  live?: string;
+  notificationItems?: Array<{ NotificationRequestItem: AdyenNotificationRequestItem }>;
+}
+
+/**
+ * Adyen driver — Checkout API v71, `X-API-Key` auth, merchant-account scoped.
+ *
+ * Adyen is a processor, not a billing system, and this driver refuses rather than
+ * pretends where the two disagree: there is no customer resource (a `shopperReference` is
+ * a string you invent), no endpoint that reads a payment back by its `pspReference`, and
+ * no subscription object at all — recurring billing at Adyen is you charging a stored
+ * token on your own schedule. Money is already an integer in minor units
+ * (`{ "value": 1990, "currency": "EUR" }`), so nothing here converts it.
+ */
+export class AdyenDriver implements PaymentsDriver {
+  readonly provider = 'adyen';
+  /**
+   * `charge()` sends a stored card token (`paymentMethod.type: 'scheme'`), and
+   * `createCheckout()` opens a Pay by Link page where the shopper picks. Adyen's other
+   * ~100 local methods only reach a shopper through Drop-in/Components, which this driver
+   * does not front, and the `PaymentMethodName` union has no name for them anyway.
+   */
+  readonly supportedMethods = ['credit_card', 'undefined'] as const;
+  /**
+   * No invoice resource in the Checkout API, and no subscription resource anywhere.
+   *
+   * `disputes: false` is deliberate and is NOT "Adyen has no dispute API" — it has one,
+   * Defend Disputes v30, and this driver cannot honestly drive it through the shared
+   * contract: v30 has no endpoint that reads a dispute back, and a defense is a
+   * scheme-specific `defenseReasonCode` plus base64 documents, none of which
+   * `DisputeEvidence` can carry. `findDispute` and `submitDisputeEvidence` below say so
+   * in full rather than leaving a caller with a missing method.
+   */
+  readonly capabilities = {
+    disputes: false,
+    refunds: true,
+    invoices: false,
+    subscriptions: false,
+  };
+
+  #baseUrl: string;
+  #apiKey: string;
+  #merchantAccount: string;
+  #currency: string;
+  #hmacKey: string | undefined;
+  #captureMode: 'automatic' | 'manual';
+  #invoiceCtx: EmitInvoiceContext;
+
+  constructor(ctx: EmitInvoiceContext, config: AdyenDriverConfig) {
+    this.#invoiceCtx = ctx;
+    this.#apiKey = requireCredential({
+      driver: 'adyen',
+      option: 'apiKey',
+      env: 'ADYEN_API_KEY',
+      value: config.apiKey,
+    });
+    this.#merchantAccount = requireCredential({
+      driver: 'adyen',
+      option: 'merchantAccount',
+      env: 'ADYEN_MERCHANT_ACCOUNT',
+      value: config.merchantAccount,
+    });
+    this.#currency = requireCurrency('adyen', config.currency);
+    this.#hmacKey = config.hmacKey ?? process.env.ADYEN_HMAC_KEY;
+    this.#captureMode = config.captureMode ?? 'automatic';
+
+    const environment =
+      config.environment ?? (process.env.NODE_ENV === 'production' ? 'live' : 'test');
+    if (environment === 'live') {
+      // Live traffic goes to a per-customer host; the generic live domain does not exist,
+      // so this has to fail at boot rather than as a DNS error on the first charge.
+      const prefix = requireCredential({
+        driver: 'adyen',
+        option: 'liveUrlPrefix',
+        env: 'ADYEN_LIVE_URL_PREFIX',
+        value: config.liveUrlPrefix,
+      });
+      this.#baseUrl = `https://${prefix}-checkout-live.adyenpayments.com/checkout/v71`;
+    } else {
+      this.#baseUrl = 'https://checkout-test.adyen.com/v71';
+    }
+  }
+
+  // ── Customers ────────────────────────────────────────────────────────────────────────
+
+  async createCustomer(_input: CreateCustomerInput): Promise<Customer> {
+    throw new Error(
+      '[payments] Adyen has no customer resource to create. Its `shopperReference` is a ' +
+        'string you choose (your own user id) and it exists only on the payments that carry ' +
+        'it — pass yours as `customerId` on `charge`/`createCheckout`.',
+    );
+  }
+
+  async findCustomer(_customerId: string): Promise<Customer | null> {
+    throw new Error(
+      '[payments] Adyen has no customer resource to look up. Use ' +
+        '`GET /v71/storedPaymentMethods?shopperReference=…` if you need the tokens saved ' +
+        'for a shopper.',
+    );
+  }
+
+  async updateCustomer(_customerId: string, _input: UpdateCustomerInput): Promise<Customer> {
+    throw new Error(
+      '[payments] Adyen has no customer resource to update — `shopperReference` is a plain ' +
+        'string on each payment, and shopper details live in your own database.',
+    );
+  }
+
+  // ── Payments ─────────────────────────────────────────────────────────────────────────
+
+  async charge(input: ChargeInput): Promise<Payment> {
+    if (input.split !== undefined && input.split.length > 0) {
+      throw new Error(
+        '[payments] Adyen splits with absolute amounts against balance accounts ' +
+          '(`splits[].account`), which the percent-based `split` input cannot express. ' +
+          'Build the `splits` array yourself against the Adyen Checkout API.',
+      );
+    }
+    // Adyen's Checkout API has no server-side way to charge without a payment method: a
+    // fresh card arrives through Drop-in/Components, and a saved one is a token.
+    const token = input.card?.token ?? input.paymentMethodId;
+    if (token === undefined) {
+      throw new Error(
+        '[payments] Adyen needs a payment method on every charge. Pass a stored token as ' +
+          '`paymentMethodId` (or `card.token`), or send the shopper to ' +
+          '`createCheckout()` (Pay by Link).',
+      );
+    }
+    // `reference` is mandatory at Adyen and comes back as `merchantReference` on every
+    // webhook — the only thing tying a notification to a local row.
+    if (input.externalReference === undefined) {
+      throw new Error(
+        '[payments] Adyen requires `externalReference` on a charge: it becomes the ' +
+          'payment `reference`, which the webhook echoes as `merchantReference`.',
+      );
+    }
+
+    const extra = this.#passthrough(input.metadata);
+    const data = await this.#request<AdyenPaymentResponse>('/payments', {
+      method: 'POST',
+      body: {
+        merchantAccount: this.#merchantAccount,
+        amount: this.#amount(input.amount, input.currency),
+        reference: input.externalReference,
+        paymentMethod: {
+          type: extra.paymentMethodType ?? 'scheme',
+          storedPaymentMethodId: token,
+        },
+        ...(input.customerId !== undefined ? { shopperReference: input.customerId } : {}),
+        ...(input.customer?.email !== undefined ? { shopperEmail: input.customer.email } : {}),
+        // Adyen decides scheme/mandate rules from these two, and the right values are a
+        // business decision (is the shopper present? is this a subscription?), so the
+        // driver forwards yours and never invents one.
+        ...(extra.shopperInteraction !== undefined
+          ? { shopperInteraction: extra.shopperInteraction }
+          : {}),
+        ...(extra.recurringProcessingModel !== undefined
+          ? { recurringProcessingModel: extra.recurringProcessingModel }
+          : {}),
+        ...(extra.returnUrl !== undefined ? { returnUrl: extra.returnUrl } : {}),
+        ...(Object.keys(extra.rest).length > 0 ? { metadata: extra.rest } : {}),
+      },
+      ...this.#idempotency(input.idempotencyKey),
+    });
+
+    const payment = this.#mapPayment(
+      data,
+      input.amount,
+      input.currency,
+      input.customerId,
+      extra.paymentMethodType ?? 'scheme',
+    );
+    await emitInvoiceIfRequested(this.#invoiceCtx, input, payment, this);
+    publishPaymentDiagnostics(payment);
+    return payment;
+  }
+
+  async findPayment(_gatewayId: string): Promise<Payment | null> {
+    throw new Error(
+      '[payments] Adyen Checkout v71 has no endpoint that reads a payment back by its ' +
+        'pspReference — the payment state reaches you through webhooks (AUTHORISATION, ' +
+        'CAPTURE, REFUND). Read your own `billing_payments` row, kept in sync by them.',
+    );
+  }
+
+  async refund(
+    paymentGatewayId: string,
+    amount?: Money,
+    options?: { idempotencyKey?: string },
+  ): Promise<Refund> {
+    if (amount === undefined) {
+      // Adyen requires the amount and gives the driver no way to read the payment's own,
+      // so "full refund" cannot be inferred here without inventing a number.
+      throw new Error(
+        '[payments] Adyen requires the refund amount, and its Checkout API cannot read the ' +
+          'payment back to infer a full refund. Pass the amount explicitly.',
+      );
+    }
+    const data = await this.#request<AdyenRefundResponse>(`/payments/${paymentGatewayId}/refunds`, {
+      method: 'POST',
+      body: {
+        merchantAccount: this.#merchantAccount,
+        amount: this.#amount(amount, undefined),
+      },
+      // The refunds endpoint takes the same `Idempotency-Key` header the payments one does,
+      // and it is the only thing standing between a retried job and a second refund.
+      ...this.#idempotency(options?.idempotencyKey),
+    });
+    const status = data.status.toLowerCase();
+    const refund: Refund = {
+      id: data.pspReference,
+      gatewayId: data.pspReference,
+      provider: this.provider,
+      amount: { amount: data.amount.value, currency: data.amount.currency.toLowerCase() },
+      // Adyen answers a refund request, not the refund itself: the outcome arrives later in
+      // a REFUND webhook, so anything short of `authorised` is still pending here.
+      status: status === 'authorised' ? 'succeeded' : status === 'refused' ? 'failed' : 'pending',
+      createdAt: new Date().toISOString(),
+    };
+    publishRefundDiagnostics(refund);
+    return refund;
+  }
+
+  // ── Checkout ─────────────────────────────────────────────────────────────────────────
+
+  async createCheckout(input: CheckoutInput): Promise<CheckoutSession> {
+    if (input.planId !== undefined || input.trialDays !== undefined) {
+      throw new Error(
+        '[payments] Adyen has no subscription checkout: it has no plan or subscription ' +
+          'resource. Tokenize the card (`storePaymentMethod: true`) and charge it on your ' +
+          'own schedule.',
+      );
+    }
+    const extra = this.#passthrough(input.metadata);
+    if (input.externalReference === undefined) {
+      throw new Error(
+        '[payments] Adyen requires `externalReference` on a payment link: it becomes the ' +
+          'link `reference`, which the webhook echoes as `merchantReference`.',
+      );
+    }
+
+    const data = await this.#request<AdyenPaymentLinkResponse>('/paymentLinks', {
+      method: 'POST',
+      body: {
+        merchantAccount: this.#merchantAccount,
+        amount: this.#amount(input.amount, input.currency),
+        reference: input.externalReference,
+        returnUrl: input.successUrl,
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        ...(input.customerId !== undefined ? { shopperReference: input.customerId } : {}),
+        ...(Object.keys(extra.rest).length > 0 ? { metadata: extra.rest } : {}),
+      },
+      ...this.#idempotency(input.idempotencyKey),
+    });
+
+    const status = data.status.toLowerCase();
+    return {
+      id: data.id,
+      gatewayId: data.id,
+      provider: this.provider,
+      url: data.url,
+      status:
+        status === 'completed' || status === 'paid'
+          ? 'complete'
+          : status === 'expired'
+            ? 'expired'
+            : 'open',
+      amount: { amount: data.amount.value, currency: data.amount.currency.toLowerCase() },
+      ...(data.shopperReference !== undefined ? { customerId: data.shopperReference } : {}),
+    };
+  }
+
+  // ── Subscriptions ────────────────────────────────────────────────────────────────────
+
+  async createSubscription(_input: CreateSubscriptionInput): Promise<Subscription> {
+    throw new Error(
+      '[payments] Adyen has no subscription resource: recurring billing is you charging a ' +
+        'stored token on your own schedule. Tokenize with `storePaymentMethod: true`, then ' +
+        'call `charge({ paymentMethodId })` each cycle from your own scheduler.',
+    );
+  }
+
+  async cancelSubscription(
+    _subscriptionGatewayId: string,
+    _options?: { atPeriodEnd?: boolean },
+  ): Promise<Subscription> {
+    throw new Error(
+      '[payments] Adyen has no subscription to cancel — nothing is scheduled at the ' +
+        'gateway. Stop charging the token, and delete it with ' +
+        '`DELETE /v71/storedPaymentMethods/{id}` if the shopper asked you to.',
+    );
+  }
+
+  async updateSubscription(
+    _subscriptionGatewayId: string,
+    _input: UpdateSubscriptionInput,
+  ): Promise<Subscription> {
+    throw new Error(
+      '[payments] Adyen has no subscription to update — the amount of the next charge is ' +
+        'whatever your scheduler sends to `charge()`.',
+    );
+  }
+
+  async findSubscription(_gatewayId: string): Promise<Subscription | null> {
+    throw new Error(
+      '[payments] Adyen has no subscription resource to look up. The recurring state you ' +
+        'have is the stored token plus your own billing rows.',
+    );
+  }
+
+  // ── Invoices ─────────────────────────────────────────────────────────────────────────
+
+  async listInvoices(_customerId: string): Promise<Invoice[]> {
+    throw new Error(
+      '[payments] Adyen Checkout has no invoice resource. Configure an `invoice` provider ' +
+        'and pass `invoice: true` on the charge if you need a fiscal document.',
+    );
+  }
+
+  // ── Disputes ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Adyen has no endpoint that reads a dispute back, so this refuses instead of inventing
+   * one.
+   *
+   * Defend Disputes v30 is five POSTs — `retrieveApplicableDefenseReasons`,
+   * `supplyDefenseDocument`, `defendDispute`, `acceptDispute`,
+   * `deleteDisputeDefenseDocument` — and every one of them is an action. None returns the
+   * dispute's status, amount, reason or deadline, which means a `Dispute` built here would
+   * have those fields invented.
+   */
+  async findDispute(_disputeGatewayId: string): Promise<Dispute | null> {
+    throw new Error(
+      '[payments] Adyen has no endpoint that reads a dispute back. Defend Disputes v30 ' +
+        'exposes only actions (retrieveApplicableDefenseReasons, supplyDefenseDocument, ' +
+        'defendDispute, acceptDispute, deleteDisputeDefenseDocument) — none of them ' +
+        'returns the dispute — so its status, amount and deadline would be invented here. ' +
+        'The dispute you have is the webhook: NOTIFICATION_OF_CHARGEBACK carries the ' +
+        'reason, the amount and `additionalData.defensePeriodEndsAt`, which this driver ' +
+        'already surfaces as `payment.dispute_warning` with `actionableUntil`. Store that ' +
+        'row; the Customer Area dispute report is the only other source.',
+    );
+  }
+
+  /**
+   * A defense at Adyen cannot be expressed as a {@link DisputeEvidence}, so this refuses
+   * and says what to call instead.
+   *
+   * Adyen's flow is `retrieveApplicableDefenseReasons` → `supplyDefenseDocument` (once per
+   * document) → `defendDispute`, and it turns on a **`defenseReasonCode`** the scheme
+   * defines per reason code — there is no free-text evidence object anywhere in it. The
+   * shared shape has no field for that code, no way to carry a document's bytes
+   * (`documentIds` are ids Adyen never issues; v30 takes base64 `content` plus
+   * `contentType` and `defenseDocumentTypeCode` inline), and no home at all for
+   * `explanation`, `receiptUrl` or the customer fields. Mapping it anyway would drop the
+   * defense reason, which is the entire defense.
+   *
+   * Two more things a mapping would have to paper over, both real: the API lives on a
+   * different host from Checkout v71 (`ca-{test,live}.adyen.com/ca/services/DisputeService
+   * /v30`, which this driver's `#request` does not reach), and it needs an API credential
+   * with the "API dispute management" role, which the Checkout key usually is not.
+   */
+  async submitDisputeEvidence(
+    _disputeGatewayId: string,
+    _evidence: DisputeEvidence,
+  ): Promise<Dispute> {
+    throw new Error(
+      '[payments] Adyen cannot be sent a `DisputeEvidence`. Defending a dispute there is ' +
+        'three POSTs to https://ca-test.adyen.com/ca/services/DisputeService/v30 ' +
+        '(`ca-live` in production): retrieveApplicableDefenseReasons, then ' +
+        'supplyDefenseDocument for each required document, then defendDispute. It requires ' +
+        'a scheme-specific `defenseReasonCode` and documents as base64 `content` + ' +
+        '`contentType` + `defenseDocumentTypeCode`, and it has no free-text evidence field ' +
+        'at all — so any mapping from `DisputeEvidence` would drop the defense reason and ' +
+        'submit a defense the scheme rejects. Call the Disputes API directly, with an API ' +
+        'credential holding the "API dispute management" role.',
+    );
+  }
+
+  // ── Webhooks ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Verify Adyen's HMAC and normalize the delivery into one event per notification item.
+   *
+   * The signature covers eight fields of the notification item, colon-joined in a fixed
+   * order with empty strings for the absent ones, HMAC-SHA256 under the **hex-decoded**
+   * Customer Area key, base64-encoded, and delivered inside the item's `additionalData`.
+   * Adyen's own Node, PHP, Java and Python libraries all join those fields *without*
+   * escaping — the `\` → `\\`, `:` → `\:` rule belongs to the classic HPP/dictionary
+   * signature, not to this one — so this does the same, and a merchant reference
+   * containing a colon signs identically here and at Adyen.
+   *
+   * **The signature is PER ITEM, not per request.** Adyen's reference is explicit that for
+   * standard webhooks the signature is provided inside each notification's `additionalData`
+   * (only some other webhook families sign the request as a whole, in a header), and its own
+   * PHP sample loops the array calling `isValidNotificationHMAC` on every item. Nothing
+   * signs the envelope, so an attacker holding one genuine item can append any items they
+   * like beside it — verifying the first and trusting the rest would accept every one of
+   * them. Every item is verified, before any of them is mapped, and one bad signature
+   * rejects the whole delivery: mapping is pointless work once the body is known to be
+   * partly forged, and a 400 is the honest answer to a request that was tampered with.
+   *
+   * **Batches.** Adyen documents that JSON and HTTP POST webhooks carry a single
+   * notification item, and that only the legacy SOAP transport may batch (up to six items
+   * when events land in rapid succession). This driver speaks JSON, so the array is one item
+   * in practice — but it is an array in the schema, so the driver reads all of it and
+   * returns one {@link WebhookEvent} per item. A single item still returns a single event,
+   * not an array of one.
+   */
+  /**
+   * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
+   *
+   * Without the HMAC key every `notificationItem` is taken on trust.
+   */
+  get webhookVerification(): WebhookVerificationState {
+    return this.#hmacKey !== undefined ? 'configured' : 'unconfigured';
+  }
+
+  parseWebhook(
+    rawBody: string,
+    _headers: Record<string, string | string[] | undefined>,
+  ): WebhookEvent | WebhookEvent[] {
+    const payload = JSON.parse(rawBody) as AdyenNotification;
+    const items = payload.notificationItems ?? [];
+    if (items.length === 0) {
+      throw new Error('[payments] Adyen webhook carried no notificationItems.');
+    }
+
+    // Pass one: authenticate everything. Kept separate from the mapping below so that no
+    // future edit can reorder its way into building events out of unverified items.
+    if (this.#hmacKey !== undefined) {
+      for (const entry of items) {
+        this.#verifyHmac(entry.NotificationRequestItem, this.#hmacKey);
+      }
+    }
+
+    // Pass two: normalize. Each item becomes an event with its own id, so the ledger gives
+    // each one its own row and a redelivery re-runs only what has not been processed.
+    const events = items.map((entry) =>
+      this.#mapNotification(entry.NotificationRequestItem, payload),
+    );
+    return events.length === 1 ? events[0]! : events;
+  }
+
+  /** One `NotificationRequestItem` → one normalized event. Assumes it has been verified. */
+  #mapNotification(item: AdyenNotificationRequestItem, payload: AdyenNotification): WebhookEvent {
+    // A modification (CAPTURE, REFUND, CANCELLATION) carries its own pspReference and
+    // names the payment in `originalReference` — the payment is what the ledger routes on.
+    const paymentReference = item.originalReference ?? item.pspReference ?? '';
+    const success = item.success === 'true';
+    const type = this.#mapWebhookType(item.eventCode, success, item.additionalData);
+    return {
+      id: `adyen:${item.eventCode}:${item.pspReference ?? paymentReference}`,
+      provider: this.provider,
+      type,
+      ...(item.eventDate !== undefined ? { createdAt: item.eventDate } : {}),
+      data: {
+        gatewayId: paymentReference,
+        ...(item.amount !== undefined
+          ? { amount: item.amount.value, currency: item.amount.currency.toLowerCase() }
+          : {}),
+        ...(item.merchantReference !== undefined
+          ? { externalReference: item.merchantReference }
+          : {}),
+        ...(item.reason !== undefined && item.reason !== '' ? { reason: item.reason } : {}),
+        ...this.#disputeExtras(item, type),
+      },
+      // The envelope narrowed to THIS item, rather than the whole delivery. The ledger
+      // stores `raw` per event, and a row holding all four notifications could not say
+      // which one it is about — while this shape is still a valid Adyen payload, so the
+      // dashboard can replay the row. Identical to the delivery body for a single item.
+      raw: {
+        ...payload,
+        notificationItems: [{ NotificationRequestItem: item }],
+      } as unknown as Record<string, unknown>,
+    };
+  }
+
+  // ── Mappers ──────────────────────────────────────────────────────────────────────────
+
+  #mapPayment(
+    data: AdyenPaymentResponse,
+    requested: Money,
+    currency: string | undefined,
+    customerId: string | undefined,
+    requestedMethodType: string,
+  ): Payment {
+    const result: Payment = {
+      id: data.pspReference ?? '',
+      gatewayId: data.pspReference ?? '',
+      provider: this.provider,
+      amount: data.amount
+        ? { amount: data.amount.value, currency: data.amount.currency.toLowerCase() }
+        : { amount: requested, currency: (currency ?? this.#currency).toLowerCase() },
+      status: this.#mapResultCode(data.resultCode),
+      // Adyen echoes the settled instrument as `additionalData.paymentMethod` ('visa',
+      // 'ideal', 'sepadirectdebit'); when it does not, the type the request asked for is
+      // the next best truth. Hardcoding `card` here labelled a SEPA mandate or an iDEAL
+      // transfer a card payment, which the ledger cannot tell apart from a real one.
+      method: this.#mapPaymentMethodType(data.additionalData?.paymentMethod ?? requestedMethodType),
+      payload: data as unknown as Record<string, unknown>,
+      // Adyen's payment response has no timestamp of its own.
+      createdAt: new Date().toISOString(),
+    };
+    if (customerId !== undefined) result.customerId = customerId;
+    return result;
+  }
+
+  /**
+   * An Adyen payment-method type or brand → the canonical {@link PaymentMethodType}.
+   *
+   * By category, not by brand. Adyen fronts something like a hundred local methods and
+   * adds more every quarter; `PaymentMethodType` is a closed union precisely so a routing
+   * typo fails at the manager, and it can only stay closed if it names categories. The
+   * brand survives verbatim on `payment.payload.additionalData.paymentMethod`.
+   */
+  #mapPaymentMethodType(type: string): NonNullable<Payment['method']> {
+    const name = type.toLowerCase();
+    // `scheme` is Adyen's word for "a card"; the brands are what `additionalData` echoes.
+    if (
+      name === 'scheme' ||
+      ['visa', 'mc', 'amex', 'discover', 'diners', 'jcb', 'maestro', 'cup', 'elo'].includes(name)
+    ) {
+      return name === 'maestro' ? 'debit_card' : 'card';
+    }
+    if (name.includes('directdebit') || name === 'ach' || name === 'sepadirectdebit') {
+      return 'bank_debit';
+    }
+    if (
+      ['ideal', 'bcmc', 'eps', 'trustly', 'multibanco', 'mbway', 'blik', 'przelewy24'].includes(
+        name,
+      ) ||
+      name.startsWith('onlinebanking') ||
+      name.startsWith('directebanking')
+    ) {
+      return 'bank_transfer';
+    }
+    if (
+      ['paypal', 'applepay', 'googlepay', 'paywithgoogle', 'alipay', 'twint', 'vipps'].includes(
+        name,
+      ) ||
+      name.startsWith('wechatpay')
+    ) {
+      return 'wallet';
+    }
+    if (name.startsWith('klarna') || name.startsWith('afterpay') || name === 'clearpay') {
+      return 'bnpl';
+    }
+    if (name === 'paysafecard' || name === 'econtext_stores') return 'voucher';
+    return 'unknown';
+  }
+
+  /**
+   * What `Authorised` means depends on the account, and the Checkout API will not say.
+   *
+   * On an automatic-capture account (Adyen's default) the capture follows the
+   * authorization on its own and no CAPTURE webhook is sent, so `Authorised` is the last
+   * word the driver will ever get about that money: it reads as `paid`. On a
+   * **manual-capture** account it is a hold that expires unless you capture it, and the
+   * CAPTURE webhook is what settles it — so it reads as `authorized`, the state that says
+   * "the funds are reserved and nothing has moved".
+   *
+   * `captureMode` is configuration for exactly that reason: `captureDelay` is a Management
+   * API field, not a Checkout one, and both modes answer `/payments` identically.
+   */
+  #mapResultCode(resultCode: string): Payment['status'] {
+    switch (resultCode) {
+      case 'Authorised':
+        return this.#captureMode === 'manual' ? 'authorized' : 'paid';
+      case 'Refused':
+      case 'Error':
+        return 'failed';
+      case 'Cancelled':
+        return 'canceled';
+      default:
+        return 'pending';
+    }
+  }
+
+  /**
+   * An Adyen `eventCode` → the canonical event type.
+   *
+   * AUTHORISATION is the money event on an automatic-capture account: the capture happens
+   * on its own and Adyen sends **no** CAPTURE webhook, so treating the authorization as
+   * "still pending" would leave every payment on such an account unsettled forever. On a
+   * manual-capture account it is only a hold, and CAPTURE is the settlement — so which of
+   * the two means `payment.succeeded` follows `captureMode`, the same knob
+   * {@link AdyenDriver.#mapResultCode} reads.
+   */
+  #mapWebhookType(
+    eventCode: string,
+    success: boolean,
+    additional: Record<string, string> | undefined,
+  ): string {
+    switch (eventCode) {
+      case 'AUTHORISATION':
+        if (!success) return 'payment.failed';
+        // Manual capture: the funds are held, not taken. There is deliberately no
+        // `payment.authorized` event, so this is an update until CAPTURE arrives.
+        return this.#captureMode === 'manual' ? 'payment.updated' : 'payment.succeeded';
+      case 'CAPTURE':
+        return success ? 'payment.succeeded' : 'payment.failed';
+      case 'AUTHORISATION_ADJUSTMENT':
+      case 'CAPTURE_FAILED':
+        return success ? 'payment.updated' : 'payment.failed';
+      case 'REFUND':
+        // A failed refund left the payment where it was; only a successful one refunds it.
+        return success ? 'payment.refunded' : 'payment.updated';
+      // ── The dispute family ───────────────────────────────────────────────────────────
+      // Three notifications where Adyen has withdrawn NOTHING yet. A NOTIFICATION_OF_FRAUD
+      // is the issuer's TC40/SAFE alert, a REQUEST_FOR_INFORMATION is the scheme asking a
+      // question, and a NOTIFICATION_OF_CHARGEBACK is a chargeback announced but not yet
+      // taken — Adyen's own table lists "funds withdrawn: no" for all three. Calling any of
+      // them `payment.disputed` moves a paid row over money that is still in the account.
+      //
+      // NOTIFICATION_OF_CHARGEBACK is also where `defensePeriodEndsAt` arrives, and that
+      // deadline is the only thing that makes a dispute actionable: flattening it into an
+      // event with no room for a deadline threw away the field the operator needs.
+      case 'NOTIFICATION_OF_FRAUD':
+      case 'REQUEST_FOR_INFORMATION':
+      case 'NOTIFICATION_OF_CHARGEBACK':
+        return 'payment.dispute_warning';
+      // The money is gone. NOTIFICATION_OF_CHARGEBACK does not always precede it — an ACH
+      // return goes straight here with no notification and cannot be defended at all — so
+      // this stands alone rather than assuming a warning arrived first.
+      case 'CHARGEBACK':
+        return 'payment.disputed';
+      // Defended and the amount returned. Adyen does not call this final, because
+      // pre-arbitration can still follow with a second close carrying the opposite
+      // outcome — but the alternative is emitting nothing for the outcome operators care
+      // about most.
+      case 'CHARGEBACK_REVERSED':
+      case 'PREARBITRATION_WON':
+        return 'payment.dispute_closed';
+      // The issuing bank declined the material submitted during defense, and pre-arbitration
+      // declined. Both are final and both leave the money with the cardholder.
+      case 'SECOND_CHARGEBACK':
+      case 'PREARBITRATION_LOST':
+        return 'payment.dispute_closed';
+      // "Defense period expired or liability accepted" — the outcome is in `disputeStatus`,
+      // not in the event code. Without a status this driver will not guess which, so it
+      // stays an update rather than reporting a loss that might be a win.
+      case 'DISPUTE_DEFENSE_PERIOD_ENDED':
+        return this.#disputeOutcome(additional) === undefined
+          ? 'payment.updated'
+          : 'payment.dispute_closed';
+      case 'REFUND_FAILED':
+      case 'REFUNDED_REVERSED':
+      case 'CANCELLATION':
+      case 'CANCEL_OR_REFUND':
+      // Defense documents uploaded, or Adyen auto-defended. Movement inside an open
+      // dispute, not a resolution of it.
+      case 'INFORMATION_SUPPLIED':
+        return 'payment.updated';
+      default:
+        return eventCode.toLowerCase();
+    }
+  }
+
+  /**
+   * Adyen reports the result of a dispute in `additionalData.disputeStatus`, not in the
+   * event code, for the one event that can mean either — `DISPUTE_DEFENSE_PERIOD_ENDED` is
+   * "expired or liability accepted". `Accepted` and `Undefended` are losses: you did not
+   * defend, so the cardholder keeps the money. Anything unrecognized returns `undefined`
+   * and the caller stays on `payment.updated` rather than reporting a result.
+   */
+  #disputeOutcome(
+    additional: Record<string, string> | undefined,
+  ): 'won' | 'lost' | 'expired' | undefined {
+    switch (additional?.disputeStatus) {
+      case 'Won':
+        return 'won';
+      case 'Lost':
+      case 'Accepted':
+      case 'Undefended':
+        return 'lost';
+      case 'Expired':
+        return 'expired';
+      default:
+        return undefined;
+    }
+  }
+
+  /**
+   * The fields that make a dispute event actionable, added only to the two types that have
+   * room for them. On a dispute notification Adyen's `pspReference` is the DISPUTE's
+   * reference and `originalReference` is the payment's — which is why `gatewayId` above
+   * reads the latter and the dispute id reads the former.
+   */
+  #disputeExtras(item: AdyenNotificationRequestItem, type: string): Record<string, unknown> {
+    if (type === 'payment.dispute_warning') {
+      const endsAt = item.additionalData?.defensePeriodEndsAt;
+      return {
+        ...(item.pspReference !== undefined ? { disputeId: item.pspReference } : {}),
+        // The whole value of the alert. Adyen sends it as ISO 8601 with an offset.
+        ...(endsAt !== undefined ? { actionableUntil: endsAt } : {}),
+      };
+    }
+    if (type === 'payment.dispute_closed') {
+      const outcome = this.#closedOutcome(item);
+      return {
+        ...(item.pspReference !== undefined ? { disputeId: item.pspReference } : {}),
+        ...(outcome !== undefined ? { outcome } : {}),
+      };
+    }
+    return {};
+  }
+
+  /** The event code names the outcome, except for the one that does not. */
+  #closedOutcome(item: AdyenNotificationRequestItem): 'won' | 'lost' | 'expired' | undefined {
+    switch (item.eventCode) {
+      case 'CHARGEBACK_REVERSED':
+      case 'PREARBITRATION_WON':
+        return 'won';
+      case 'SECOND_CHARGEBACK':
+      case 'PREARBITRATION_LOST':
+        return 'lost';
+      default:
+        return this.#disputeOutcome(item.additionalData);
+    }
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Adyen's `amount.value` is already an integer in the currency's minor units — the same
+   * unit this package uses — so it passes straight through. The neighbouring Mollie driver
+   * converts to a decimal string; the difference is Adyen's, not an oversight here.
+   */
+  #amount(amount: Money, currency: string | undefined): AdyenAmount {
+    return { value: amount, currency: (currency ?? this.#currency).toUpperCase() };
+  }
+
+  #verifyHmac(item: AdyenNotificationRequestItem, hmacKey: string): void {
+    const received = item.additionalData?.hmacSignature;
+    if (received === undefined || received === '') {
+      throw new Error('[payments] Missing hmacSignature on Adyen webhook notification.');
+    }
+    const signedData = [
+      item.pspReference,
+      item.originalReference,
+      item.merchantAccountCode,
+      item.merchantReference,
+      item.amount?.value,
+      item.amount?.currency,
+      item.eventCode,
+      item.success,
+    ]
+      .map((value) => (value === undefined || value === null ? '' : String(value)))
+      .join(':');
+    // The Customer Area key is hex; signing with its characters instead of its bytes is
+    // the classic way to get a signature that never matches.
+    const expected = createHmac('sha256', Buffer.from(hmacKey, 'hex'))
+      .update(signedData, 'utf8')
+      .digest('base64');
+    if (!safeCompare(received, expected)) {
+      throw new Error('[payments] Invalid Adyen webhook HMAC signature.');
+    }
+  }
+
+  /**
+   * Adyen deduplicates on the `Idempotency-Key` request header and nowhere else; it never
+   * echoes the key back on the response, so this header is the whole mechanism. Adyen's
+   * reference recommends a UUID and caps it at 64 characters.
+   */
+  #idempotency(key: string | undefined): { headers?: Record<string, string> } {
+    if (key === undefined) return {};
+    if (key.length > IDEMPOTENCY_MAX_LENGTH) {
+      // Adyen rejects the request outright rather than ignoring the header, so failing here
+      // costs a round trip and names the real limit instead of a 422 about a header.
+      throw new Error(
+        `[payments] Adyen caps \`Idempotency-Key\` at ${IDEMPOTENCY_MAX_LENGTH} characters; got ${key.length}.`,
+      );
+    }
+    return { headers: { 'Idempotency-Key': key } };
+  }
+
+  /** Split the Adyen-specific knobs out of `metadata`; the rest is echoed as metadata. */
+  #passthrough(metadata: Record<string, unknown> | undefined): {
+    paymentMethodType?: string;
+    shopperInteraction?: string;
+    recurringProcessingModel?: string;
+    returnUrl?: string;
+    rest: Record<string, unknown>;
+  } {
+    const { paymentMethodType, shopperInteraction, recurringProcessingModel, returnUrl, ...rest } =
+      metadata ?? {};
+    return {
+      ...(typeof paymentMethodType === 'string' ? { paymentMethodType } : {}),
+      ...(typeof shopperInteraction === 'string' ? { shopperInteraction } : {}),
+      ...(typeof recurringProcessingModel === 'string' ? { recurringProcessingModel } : {}),
+      ...(typeof returnUrl === 'string' ? { returnUrl } : {}),
+      rest,
+    };
+  }
+
+  async #request<T>(
+    path: string,
+    options: {
+      method?: string;
+      body?: Record<string, unknown>;
+      headers?: Record<string, string>;
+    } = {},
+  ): Promise<T> {
+    return httpRequest<T>(path, {
+      baseUrl: this.#baseUrl,
+      ...(options.method !== undefined ? { method: options.method } : {}),
+      ...(options.body !== undefined ? { body: options.body } : {}),
+      ...(options.headers !== undefined ? { headers: options.headers } : {}),
+      authHeader: { name: 'X-API-Key', value: this.#apiKey },
+    });
+  }
+}

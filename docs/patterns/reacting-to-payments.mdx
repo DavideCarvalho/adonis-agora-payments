@@ -15,8 +15,8 @@ lives** and, much more importantly, **what happens when it throws**.
 
 | | Declared in | On throw | Reach for it when |
 | --- | --- | --- | --- |
-| Convention folder | `app/payment_handlers/<event>.ts` | ledger `failed` → retried | the default; one file per event |
-| `billing.handlers` | `config/payments.ts` | ledger `failed` → retried | you want the wiring visible in one place |
+| Convention folder | `app/payment_handlers/<event>.ts` | ledger `failed` → **the gateway redelivers** (see below) | the default; one file per event |
+| `billing.handlers` | `config/payments.ts` | ledger `failed` → **the gateway redelivers** (see below) | you want the wiring visible in one place |
 | Diagnostics subscriber | `start/payments.ts` | **swallowed** | decoupled reactions you can afford to lose |
 | Durable workflow | `app/workflows/` | checkpointed → resumed | the grant is multi-step, slow, or must survive a deploy |
 
@@ -24,6 +24,38 @@ lives** and, much more importantly, **what happens when it throws**.
 A throwing `onDiagnostic` subscriber does **not** fail the webhook. By the time the event is
 published it is already ledgered and the route has moved on, so nothing retries it. Use events for
 analytics, notifications and side reactions — never for the grant itself.
+</Callout>
+
+## What actually retries a failed handler
+
+"Retried" is not one thing, and which mechanism catches your throw depends entirely on
+`billing.dispatcher`. Worth getting straight, because only one of them survives the process dying.
+
+**The route answers `500` when a handler threw.** It used to answer `200`, and that was the bug: a
+2xx promises the gateway it never has to send that delivery again, which over a failed event is the
+payment lost for good. A rejected delivery — bad signature, unparsable body — stays `400`, because
+redelivering it would fail identically.
+
+| `billing.dispatcher` | On a handler throw | What retries it |
+| --- | --- | --- |
+| `'in-process'` | route answers `500` | **both**: an in-process background retry (5 attempts, exponential backoff, dies with the process) *and* the gateway's own redelivery |
+| `'durable'` | route already answered `200` — dispatch only enqueues | durable's retries, in `durable:work` |
+| `'auto'` (default) | whichever of the two above it resolved to | the same |
+
+Adyen retries a non-2xx for up to 30 days and Efí makes nine attempts; neither starts on a 2xx. The
+redelivery is cheap, because the ledger claim means only the *failed* event re-runs — the events in
+the same delivery that succeeded are already `processed` and skip.
+
+<Callout type="warn" title="Anyone alerting on 5xx from the webhook route will now see it fire">
+That is the honest signal. It was firing at the gateway all along, invisibly, as a delivery the
+gateway believed had succeeded.
+</Callout>
+
+<Callout type="warn" title="One delivery can carry several events">
+Adyen's `notificationItems` and Efí's `pix` are lists. They run **sequentially** — two events in one
+envelope routinely touch the same row — and one failing does not cancel its siblings. A delivery
+with any failed event is a failed delivery, so the `500` covers the batch and the response body
+names which events failed and how many landed.
 </Callout>
 
 ## The four, side by side
@@ -41,7 +73,7 @@ node ace make:webhook-handler payment.succeeded
 
 ```ts title="app/payment_handlers/payment_succeeded.ts"
 import { inject } from '@adonisjs/core'
-import type { WebhookEvent } from '@adonis-agora/payments'
+import type { WebhookEventFor } from '@adonis-agora/payments'
 import { DateTime } from 'luxon'
 import Order from '#models/order'
 import GrantService from '#services/grant_service'
@@ -52,8 +84,9 @@ export default class PaymentSucceededHandler {
 
   constructor(private grants: GrantService) {}
 
-  async handle(event: WebhookEvent): Promise<void> {
-    const orderId = (event.data as { externalReference?: string }).externalReference
+  async handle(event: WebhookEventFor<'payment.succeeded'>): Promise<void> {
+    // Typed from the event type — a `PaymentWebhookData`, no cast.
+    const orderId = event.data.externalReference
     if (!orderId) return
 
     // The inner idempotency guard — see below.
@@ -73,6 +106,12 @@ That is the whole setup. The provider scans `app/payment_handlers/` at boot and 
 finds — no import, no config entry, no `adonisrc.ts` edit. The class form (`static eventType` +
 `handle`) is resolved through the container, so constructor injection just works.
 
+`eventType` is checked at boot. A type in the library's own `payment.*`/`subscription.*` namespace
+that is not one of the ten `WEBHOOK_EVENT_TYPES` throws, naming the file — because `'payment.suceeded'`
+used to register a handler nothing ever called while the ledger recorded the delivery as processed
+and the route answered `200`. Two files claiming the same type throw too, naming both: registration
+is a map keyed by type, so the second used to silently replace the first.
+
 <Callout title="How discovery actually runs">
 `node ace add` registers an Assembler `init` hook that generates a barrel of the folder at build and
 dev time, so boot imports a generated module instead of reading the directory. If that hook is not
@@ -81,7 +120,8 @@ registered — an older install, or a hand-built `adonisrc.ts` — the provider 
 not a requirement.
 </Callout>
 
-**Throwing marks the event `failed` in the ledger and the dispatcher retries it.**
+**Throwing marks the event `failed` in the ledger and makes the route answer `500`, so the gateway
+redelivers.** See [What actually retries](#what-actually-retries-a-failed-handler).
 
 </Tab>
 <Tab value="billing.handlers">
@@ -89,7 +129,7 @@ not a requirement.
 The same handler, wired explicitly in the config instead of found by convention:
 
 ```ts title="config/payments.ts"
-import { defineConfig, payments } from '@adonis-agora/payments'
+import { defineConfig, defineWebhookHandler, payments } from '@adonis-agora/payments'
 import PaymentSucceededHandler from '#payment_handlers/payment_succeeded'
 
 export default defineConfig({
@@ -103,11 +143,11 @@ export default defineConfig({
       // A DI service class — the library resolves it and calls `.handle(event)`.
       'payment.succeeded': PaymentSucceededHandler,
 
-      // Or a plain function, for logic that needs no injection.
-      'payment.refunded': async (event) => {
-        const ref = (event.data as { externalReference?: string }).externalReference
-        if (ref) await revokeAccessFor(ref)
-      },
+      // Or a plain function, for logic that needs no injection. `defineWebhookHandler`
+      // types `event.data` from the type it is given.
+      'payment.refunded': defineWebhookHandler('payment.refunded', async (event) => {
+        if (event.data.externalReference) await revokeAccessFor(event.data.externalReference)
+      }),
     },
   },
 })
@@ -212,27 +252,34 @@ billing: { dispatcher: 'durable' }
 
 | | Survives a restart |
 | --- | --- |
-| `'auto'` (default) | depends on what it picked — durable, then queue, then in-process |
+| `'auto'` (default) | depends on what it picked — durable when its provider is registered, else in-process |
 | `'durable'` | yes |
-| `'queue'` | yes |
 | `'in-process'` | no — 5 retries with backoff, lost on deploy |
 
 `'auto'` degrades **silently**: an app that meant to run durable and forgot to register its provider
 falls back to in-process and nothing says so. Name the backend in production. See
 [Production](/docs/payments/production).
 
-<Callout type="warn" title="durable and queue need their worker running">
+<Callout type="warn" title="There is no `'queue'` dispatcher">
+`billing.dispatcher: 'queue'` used to type-check and then silently run durable-or-in-process,
+because the queue path was never implemented. It is now refused at boot with an error naming the
+supported set. The three values are `'auto'`, `'durable'` and `'in-process'` — use `'durable'` when
+you need a restart-surviving channel.
+</Callout>
+
+<Callout type="warn" title="durable needs its worker running">
 There is no `payments:listen` — webhooks arrive over HTTP into the route the provider already mounts,
-so there is nothing to start for the *receiving* side. But with `dispatcher: 'durable'` or `'queue'`,
-the **processing** happens in that library's worker:
+so there is nothing to start for the *receiving* side. But with `dispatcher: 'durable'`, the
+**processing** happens in durable's worker:
 
 ```sh
-node ace durable:work   # dispatcher: 'durable'
-node ace queue:listen   # dispatcher: 'queue'
+node ace durable:work
 ```
 
 Without it, webhooks are accepted, ledgered and enqueued — and never processed. The endpoint answers
-`200` the whole time, so nothing looks wrong until someone notices nobody got what they paid for.
+`200` the whole time (dispatch succeeded; the work has not run), so nothing looks wrong until
+someone notices nobody got what they paid for. `payments:health` is the check that catches it: its
+`stuck_webhooks` count is events claimed in the ledger and never finished.
 `dispatcher: 'in-process'` is the one that needs no worker, because it runs inside the web process.
 </Callout>
 
@@ -274,6 +321,9 @@ anything whose second execution is a no-op *at the database*.
   checkpointed.
 - **Receipts, metrics, Slack pings, analytics** → a diagnostics subscriber. Cheap, decoupled, and
   losing one is survivable.
+- **A chargeback** → a handler, and read the deadline off it. `payment.dispute_warning`,
+  `payment.disputed` and `payment.dispute_closed` are ordinary handler events, but the window they
+  carry is on a clock nothing else here runs on. See [Disputes](/docs/payments/patterns/disputes).
 - **A response shape the mounted route cannot produce** → your own controller with
   `new WebhookProcessor({ store, driver, handlers })`. See [Webhooks](/docs/payments/webhooks).
 

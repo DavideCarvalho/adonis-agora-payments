@@ -81,7 +81,7 @@ describe('driver registry', () => {
       const supports = (name: string) =>
         new RegExp(`${name}\\s*:\\s*true`).test(caps) ? '✅' : '—';
       const cells = (row ?? '').split('|').map((cell) => cell.trim());
-      // | link | methods | refunds | subscriptions | invoices |
+      // | link | methods | charge | refunds | subscriptions | invoices | disputes | webhook auth |
       // The methods cell was NOT gated at first, so when two drivers widened their
       // supportedMethods the table went stale in silence — the exact drift this test is
       // supposed to make impossible.
@@ -93,9 +93,24 @@ describe('driver registry', () => {
       expect(cells[2], `${slug}: methods cell disagrees with supportedMethods`).toBe(
         methods.join(', ') || '—',
       );
-      expect(cells[3], `${slug}: refunds cell disagrees with the driver`).toBe(supports('refunds'));
-      expect(cells[4], `${slug}: subscriptions cell disagrees`).toBe(supports('subscriptions'));
-      expect(cells[5], `${slug}: invoices cell disagrees`).toBe(supports('invoices'));
+      // Whether the gateway can be charged from the server at all. Four are checkout-only —
+      // their `charge()` opens with a throw — and that is the difference a reader most needs
+      // up front: every other column is moot if the charge call cannot be made.
+      const chargeBody =
+        source.match(/async charge\([\s\S]*?\)[^{]*\{\s*([\s\S]{0,40})/)?.[1] ?? '';
+      expect(cells[3], `${slug}: charge cell disagrees with the driver`).toBe(
+        chargeBody.trimStart().startsWith('throw') ? 'checkout only' : 'server',
+      );
+      expect(cells[4], `${slug}: refunds cell disagrees with the driver`).toBe(supports('refunds'));
+      expect(cells[5], `${slug}: subscriptions cell disagrees`).toBe(supports('subscriptions'));
+      expect(cells[6], `${slug}: invoices cell disagrees`).toBe(supports('invoices'));
+      expect(cells[7], `${slug}: disputes cell disagrees`).toBe(supports('disputes'));
+      // A driver returns the literal `'configured'` only from `webhookVerification`, so its
+      // presence is exactly "this gateway signs its deliveries and we can check it". The two
+      // without it sign nothing at all — a dash there is the gateway's gap, not the driver's.
+      expect(cells[8], `${slug}: webhook-auth cell disagrees`).toBe(
+        source.includes("'configured'") ? '\u2705' : '\u2014',
+      );
     }
   });
 
@@ -126,6 +141,66 @@ describe('driver registry', () => {
     expect(
       missing,
       `pages that exist but are not in providers/meta.json — invisible in the sidebar: ${missing.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  /**
+   * The gateway count is a selling point, so it is written on four surfaces nobody edits
+   * when a driver lands: two npm descriptions and two docs descriptions. It went stale
+   * exactly that way — the package advertised four gateways while eighteen shipped, and
+   * nothing failed, because a description is not code. It is now.
+   */
+  it('advertises the real number of gateways everywhere it claims one', async () => {
+    const count = (await slugs()).length;
+    const claim = new RegExp(`\\b${count} (?:payment )?gateways\\b`);
+    const read = async (path: string) =>
+      readFile(fileURLToPath(new URL(path, import.meta.url)), 'utf-8');
+
+    const surfaces = [
+      {
+        name: 'packages/adonis/package.json',
+        text: JSON.parse(await read('../package.json')).description as string,
+      },
+      {
+        name: 'package.json (repo root)',
+        text: JSON.parse(await read('../../../package.json')).description as string,
+      },
+      {
+        name: 'docs/meta.json',
+        text: JSON.parse(await read('../../../docs/meta.json')).description as string,
+      },
+      {
+        name: 'docs/index.mdx (frontmatter)',
+        text: (await read('../../../docs/index.mdx')).match(/^description:\s*(.+)$/m)?.[1] ?? '',
+      },
+    ];
+
+    const stale = surfaces.filter((surface) => !claim.test(surface.text));
+    expect(
+      stale.map((surface) => `${surface.name}: ${surface.text}`),
+      `descriptions that do not say "${count} gateways" — ${count} drivers ship`,
+    ).toEqual([]);
+  });
+
+  /**
+   * npm search is how someone with an Adyen account finds out this package already speaks
+   * Adyen. Ten drivers shipped without ever reaching the keywords, so the package was
+   * unfindable by the name of the gateway it supported.
+   */
+  it('names every gateway in the npm keywords', async () => {
+    /** Drivers whose gateway is sold under a different name than the file. */
+    const aliases: Record<string, string> = { abacate: 'abacatepay' };
+    const keywords = new Set<string>(
+      JSON.parse(
+        await readFile(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf-8'),
+      ).keywords,
+    );
+    const missing = (await slugs()).filter(
+      (slug) => !keywords.has(slug) && !keywords.has(aliases[slug] ?? slug),
+    );
+    expect(
+      missing,
+      `drivers absent from the npm keywords — unfindable by gateway name: ${missing.join(', ')}`,
     ).toEqual([]);
   });
 });

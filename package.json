@@ -2,7 +2,7 @@
   "name": "adonis-payments",
   "version": "0.1.0",
   "private": true,
-  "description": "Billing library for the Agora AdonisJS ecosystem — multi-gateway payments (Stripe, AbacatePay, Asaas, Woovi) with a Cashier-style subscription billing layer.",
+  "description": "Billing library for the Agora AdonisJS ecosystem — 18 payment gateways behind one driver contract, with a Cashier-style subscription billing layer.",
   "license": "MIT",
   "repository": {
     "type": "git",

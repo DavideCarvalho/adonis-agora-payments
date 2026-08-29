@@ -19,26 +19,26 @@ These pages are the per-gateway cheat sheet for exactly those differences.
 
 {/* providers:table:start — generated from the drivers; `driver_registry.spec.ts` fails if it drifts */}
 
-| Gateway | Methods | Refunds | Subscriptions | Invoices |
-| --- | --- | --- | --- | --- |
-| [AbacatePay](/docs/payments/providers/abacate) | pix, boleto, any | ✅ | ✅ | ✅ |
-| [Adyen](/docs/payments/providers/adyen) | credit card, any | ✅ | — | — |
-| [Asaas](/docs/payments/providers/asaas) | pix, boleto, credit card, debit card, any | ✅ | ✅ | ✅ |
-| [Dodo Payments](/docs/payments/providers/dodo) | credit card, debit card, pix, upi, wallet, bank transfer, bank debit, bnpl, any | ✅ | ✅ | ✅ |
-| [Efí](/docs/payments/providers/efi) | pix | ✅ | — | — |
-| [InfinitePay](/docs/payments/providers/infinitepay) | pix, credit card | — | — | — |
-| [Lemon Squeezy](/docs/payments/providers/lemonsqueezy) | any | ✅ | ✅ | ✅ |
-| [Mercado Pago](/docs/payments/providers/mercadopago) | pix, boleto, credit card, debit card | ✅ | ✅ | — |
-| [Mollie](/docs/payments/providers/mollie) | credit card, bank transfer, bank debit, wallet, bnpl, voucher, any | ✅ | ✅ | — |
-| [Paddle](/docs/payments/providers/paddle) | any | ✅ | ✅ | ✅ |
-| [Pagar.me](/docs/payments/providers/pagarme) | pix, boleto, credit card, debit card | ✅ | ✅ | ✅ |
-| [PagBank](/docs/payments/providers/pagbank) | pix, credit card, debit card, boleto | ✅ | — | — |
-| [PayPal](/docs/payments/providers/paypal) | wallet, any | ✅ | ✅ | — |
-| [Polar](/docs/payments/providers/polar) | credit card, any | ✅ | ✅ | ✅ |
-| [Razorpay](/docs/payments/providers/razorpay) | any | ✅ | ✅ | ✅ |
-| [Square](/docs/payments/providers/square) | credit card, debit card, wallet, bank debit, bnpl, any | ✅ | ✅ | ✅ |
-| [Stripe](/docs/payments/providers/stripe) | pix, credit card, boleto, any | ✅ | ✅ | ✅ |
-| [Woovi (OpenPix)](/docs/payments/providers/woovi) | pix, any | — | ✅ | — |
+| Gateway | Methods | Charge | Refunds | Subscriptions | Invoices | Disputes | Webhook auth |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [AbacatePay](/docs/payments/providers/abacate) | pix, boleto, any | server | ✅ | ✅ | ✅ | — | ✅ |
+| [Adyen](/docs/payments/providers/adyen) | credit card, any | server | ✅ | — | — | — | ✅ |
+| [Asaas](/docs/payments/providers/asaas) | pix, boleto, credit card, debit card, any | server | ✅ | ✅ | ✅ | — | ✅ |
+| [Dodo Payments](/docs/payments/providers/dodo) | credit card, debit card, pix, upi, wallet, bank transfer, bank debit, bnpl, any | server | ✅ | ✅ | ✅ | — | ✅ |
+| [Efí](/docs/payments/providers/efi) | pix | server | ✅ | — | — | — | — |
+| [InfinitePay](/docs/payments/providers/infinitepay) | pix, credit card | checkout only | — | — | — | — | — |
+| [Lemon Squeezy](/docs/payments/providers/lemonsqueezy) | any | checkout only | ✅ | ✅ | ✅ | — | ✅ |
+| [Mercado Pago](/docs/payments/providers/mercadopago) | pix, boleto, credit card, debit card | server | ✅ | ✅ | — | — | ✅ |
+| [Mollie](/docs/payments/providers/mollie) | credit card, bank transfer, bank debit, wallet, bnpl, voucher, any | server | ✅ | ✅ | — | — | ✅ |
+| [Paddle](/docs/payments/providers/paddle) | any | checkout only | ✅ | ✅ | ✅ | — | ✅ |
+| [Pagar.me](/docs/payments/providers/pagarme) | pix, boleto, credit card, debit card | server | ✅ | ✅ | ✅ | — | ✅ |
+| [PagBank](/docs/payments/providers/pagbank) | pix, credit card, debit card, boleto | server | ✅ | — | — | — | ✅ |
+| [PayPal](/docs/payments/providers/paypal) | wallet, any | server | ✅ | ✅ | — | — | ✅ |
+| [Polar](/docs/payments/providers/polar) | credit card, any | checkout only | ✅ | ✅ | ✅ | — | ✅ |
+| [Razorpay](/docs/payments/providers/razorpay) | any | server | ✅ | ✅ | ✅ | — | ✅ |
+| [Square](/docs/payments/providers/square) | credit card, debit card, wallet, bank debit, bnpl, any | server | ✅ | ✅ | ✅ | — | ✅ |
+| [Stripe](/docs/payments/providers/stripe) | pix, credit card, boleto, any | server | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [Woovi (OpenPix)](/docs/payments/providers/woovi) | pix, any | server | — | ✅ | — | — | ✅ |
 
 {/* providers:table:end */}
 
@@ -46,6 +46,37 @@ These pages are the per-gateway cheat sheet for exactly those differences.
 driver lists a specific one. A dash is not a missing feature to add later: it is an endpoint the
 gateway does not expose, and the driver refuses the call rather than reporting a change that never
 happened.
+
+**Charge** is the column to read first. `server` means you can create a payment from your own
+backend; `checkout only` means the gateway collects through its own hosted page and `charge()`
+throws — every other column on that row is reached through `createCheckout()` instead.
+
+## When it is a dash
+
+A refusal is not a dead end. Each gap has a way through it that does not involve forking the
+driver, and the error the driver throws names it — these are the same routes, collected:
+
+| Gap | Gateways | What happens if you call it | What to do instead |
+| --- | --- | --- | --- |
+| **Server-side charge** | InfinitePay, Lemon Squeezy, Paddle, Polar | `charge()` throws — as merchants of record (or, for InfinitePay, a payment-link product) they collect through their own hosted page | `createCheckout()` and redirect the payer; the payment still reaches you as a webhook, and the billing tables fill from it the same way. There is no server-side charge for `invoice: true` to attach to |
+| **Refunds** | InfinitePay, Woovi | `refund()` throws — neither gateway exposes one | Move the money out-of-band (a Pix transfer, the gateway's own app), then record it and revoke access in your tables: no webhook is coming. See [Recovering](/docs/payments/patterns/recovering) |
+| **Subscriptions** | Adyen, Efí, InfinitePay, PagBank | `createSubscription()` throws, naming that gateway's reason | Charge each cycle from your own scheduler — Adyen tokenizes (`storePaymentMethod: true`, then `charge({ paymentMethodId })`); or name a different provider for that one call. See [Subscriptions](/docs/payments/patterns/subscriptions) |
+| **Invoices** | Adyen, Efí, InfinitePay, Mercado Pago, Mollie, PagBank, PayPal, Woovi | listing the gateway's invoices throws — most have no invoice resource at all, and Mollie's *is* one, for the fees it bills **you** | Nothing to work around — this column is about the gateway's own invoice resource, not about emitting one. `invoice: true` on a charge goes through the configured **invoice provider**, and works on every gateway that charges server-side — dash in this column included. See [Invoices](/docs/payments/invoices) |
+| **Disputes** | every gateway but Stripe | `findDispute` / `submitDisputeEvidence` are omitted from the driver — so the call site writes `?.` — except Adyen, which defines both and throws with the reason | No dispute events will arrive — a chargeback reaches you as an email from the gateway. Reconcile from its console, and keep the money-out path (revoke, refund) independent of the dispute one. See [Disputes](/docs/payments/patterns/disputes) |
+| **Webhook auth** | Efí, InfinitePay | nothing — these gateways sign nothing, so the driver declares `'unsupported'` and there is no boot refusal to satisfy | Put the authenticity in front of the app: an IP allowlist, mTLS, or a secret in the path. The endpoint is otherwise open to anyone who knows the URL. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal) |
+
+<Callout title="The gateway is a per-call argument, not a deployment decision">
+`getPayments().driver('stripe')` names a provider for one call, and the routing map binds a
+*method* to a provider — so "this gateway cannot do subscriptions" costs you one argument, not a
+migration. Keeping Pix on Asaas and cards on Stripe is the ordinary configuration, not an advanced
+one.
+
+What that does **not** do is move a payment between gateways after the fact: a subscription created
+at one gateway is updated and cancelled at that same gateway, and its webhooks arrive from there.
+</Callout>
+
+If none of the routes above fit, the driver contract is the last one: extend a bundled driver or
+write your own as a config factory — [Custom providers](/docs/payments/custom-providers).
 
 ## Picking one
 

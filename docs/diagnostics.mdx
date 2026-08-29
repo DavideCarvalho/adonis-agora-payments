@@ -79,7 +79,7 @@ onDiagnostic('payments', 'payment.succeeded', ({ payload }) => {
 <Callout type="warn" title="Events are fire-and-forget">
 A throwing subscriber does not fail the webhook — the event was already ledgered. For work
 that must not be lost, use the webhook handlers (which mark failed + retry) or dispatch a
-durable workflow. See [Webhooks → Running your business logic](/docs/payments/webhooks#running-your-business-logic-four-options).
+durable workflow. See [Webhooks → Running your business logic](/docs/payments/webhooks#running-your-business-logic--four-options).
 </Callout>
 
 ## How emission works — the structural slot

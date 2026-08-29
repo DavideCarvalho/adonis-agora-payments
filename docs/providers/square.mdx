@@ -105,9 +105,10 @@ because the ledger could not tell it apart from a real card payment afterwards.
 
 ### `APPROVED` is not `paid`
 
-Square separates authorization from capture. A payment created with `metadata:
-{ autocomplete: false }` sits at `APPROVED` — funds held on the buyer's card, nothing moved
-to the seller — and Square voids the hold on its own when the delay window runs out. The
+Square separates authorization from capture. A payment created with
+`metadata: { autocomplete: false }` sits at `APPROVED` — funds held on the buyer's card,
+nothing moved to the seller — and Square voids the hold on its own when the delay window
+runs out. The
 canonical `BillingStatus` has no name for that, so **`APPROVED` maps to `pending`**, and
 the `payment.updated` webhook that carries it normalizes to `payment.updated`, never
 `payment.succeeded`. Finish it with the one method outside the driver contract:

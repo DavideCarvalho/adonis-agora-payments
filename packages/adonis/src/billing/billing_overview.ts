@@ -15,23 +15,32 @@ export interface BillingOverview {
 
 /**
  * Compute a billing overview from the store — the data foundation a billing dashboard
- * (Agora dashboard pattern) renders. Aggregates KPIs over a `from`/`to` window: revenue
- * (sum of paid payments), active subscriptions, and usage per meter. Pure store queries
- * (no gateway calls), so it works headless and is trivially testable.
+ * (Agora dashboard pattern) renders. Aggregates KPIs over a `from`/`to` window: revenue —
+ * BOTH gross (`revenue`, the sum of paid payments) and net of refunds (`net_revenue`,
+ * `amount - refunded_amount` over the same rows) — active subscriptions, and usage per meter.
+ * Pure store queries (no gateway calls), so it works headless and is trivially testable.
  */
 export async function billingOverview(
   store: BillingStore,
   options: { from: Date; to: Date },
 ): Promise<BillingOverview> {
   const { from, to } = options;
-  const [revenue, activeSubscriptions, usage] = await Promise.all([
+  const [revenue, netRevenue, activeSubscriptions, usage] = await Promise.all([
     store.revenue({ from, to }),
+    store.netRevenue({ from, to }),
     store.countActiveSubscriptions(),
     store.usageReport({ from, to }),
   ]);
 
   const metrics: BillingOverviewMetric[] = [
-    { key: 'revenue', label: 'Revenue (cents)', value: revenue },
+    // Two money lines, and the labels are load-bearing. `revenue` was the only one for two
+    // releases, and it is GROSS: a charge that was half refunded counts at its full value in
+    // it. Nothing on the screen said so, so a partial refund was invisible in the console's
+    // headline number. Both figures are legitimate — gross is what was collected, net is what
+    // was kept — and the fix is to publish both under names that cannot be confused, not to
+    // quietly redefine the one apps already read.
+    { key: 'revenue', label: 'Revenue, gross (cents)', value: revenue },
+    { key: 'net_revenue', label: 'Revenue, net of refunds (cents)', value: netRevenue },
     { key: 'active_subscriptions', label: 'Active subscriptions', value: activeSubscriptions },
   ];
   for (const line of usage) {

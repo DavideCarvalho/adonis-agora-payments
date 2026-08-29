@@ -858,6 +858,24 @@ export class InMemoryBillingStore
   }
 
   async revenue(query: { from?: Date; to?: Date }): Promise<number> {
+    return this.#sumPaid(query, (row) => row.amount);
+  }
+
+  /**
+   * Gross minus what came back, on exactly the rows `revenue()` sums.
+   *
+   * A `null` `refundedAmount` — every row written before the column existed, and every row no
+   * refund has ever touched — reads as zero, mirroring the `COALESCE(refunded_amount, 0)` the
+   * Lucid store emits. Reading it as anything else here would make the in-memory store
+   * disagree with the database, which is the one thing a fake store must never do: a contract
+   * fixed in one implementation of two is not fixed.
+   */
+  async netRevenue(query: { from?: Date; to?: Date }): Promise<number> {
+    return this.#sumPaid(query, (row) => row.amount - (row.refundedAmount ?? 0));
+  }
+
+  /** The row selection `revenue()` and `netRevenue()` share; only the summed figure differs. */
+  #sumPaid(query: { from?: Date; to?: Date }, figure: (row: InMemoryPaymentRow) => number): number {
     let total = 0;
     for (const row of this.payments.values()) {
       if (row.status !== 'paid') continue;
@@ -870,7 +888,7 @@ export class InMemoryBillingStore
       if (windowed && row.paidAt === null) continue;
       if (query.from !== undefined && row.paidAt !== null && row.paidAt < query.from) continue;
       if (query.to !== undefined && row.paidAt !== null && row.paidAt >= query.to) continue;
-      total += row.amount;
+      total += figure(row);
     }
     return total;
   }

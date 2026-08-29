@@ -39,10 +39,11 @@ export default class BillingDashboardController {
 {
   period: { from: Date, to: Date },
   metrics: [
-    { key: 'revenue',              label: 'Revenue (cents)',      value: 1_284_900 },
-    { key: 'active_subscriptions', label: 'Active subscriptions', value: 212 },
-    { key: 'meter:api_calls',      label: 'Usage · api_calls',    value: 481_230 },
-    { key: 'meter:storage_gb',     label: 'Usage · storage_gb',   value: 3_042 },
+    { key: 'revenue',              label: 'Revenue, gross (cents)',           value: 1_284_900 },
+    { key: 'net_revenue',          label: 'Revenue, net of refunds (cents)', value: 1_231_400 },
+    { key: 'active_subscriptions', label: 'Active subscriptions',            value: 212 },
+    { key: 'meter:api_calls',      label: 'Usage · api_calls',               value: 481_230 },
+    { key: 'meter:storage_gb',     label: 'Usage · storage_gb',              value: 3_042 },
   ]
 }
 ```
@@ -52,14 +53,17 @@ usage in the window, keyed `meter:<name>`.
 
 | Metric | Counts |
 | --- | --- |
-| `revenue` | the sum of **paid** payments whose `paidAt` falls in the window, in cents |
+| `revenue` | **gross**: the sum of `amount` on **paid** payments whose `paidAt` falls in the window, in cents |
+| `net_revenue` | the same rows, **net**: `amount - COALESCE(refunded_amount, 0)`, in the same cents |
 | `active_subscriptions` | subscriptions currently `active` **or** `trialing` — not windowed |
 | `meter:<name>` | quantity consumed for that meter in the window |
 
-`revenue` is gross: it sums `amount` and does **not** subtract `refunded_amount`. A partially
-refunded charge stays `paid`, keeps its full amount, and records what went back on
-`billing_payments.refunded_amount`. Net revenue for a row is `amount - refundedAmount` — subtract at
-the edge, alongside the one division, and never before you have finished adding.
+The two revenue lines are the same query with a different figure summed, and the pair exists because
+a partially refunded charge stays `paid` and keeps its full `amount` — what went back is recorded
+separately, on `billing_payments.refunded_amount`. So the charge counts at full value in `revenue`
+and at its net in `net_revenue`, and **a screen showing one of them has to say which**: a tile
+labelled only "Revenue" over the gross figure is money that came back still being reported as
+earned. Both are integers in minor units; subtract and add freely, divide only at the edge.
 
 Two details worth knowing before you put a number on a screen:
 
@@ -99,7 +103,9 @@ export function BillingOverview({ overview }: { overview: BillingOverview }) {
         <div key={metric.key}>
           <dt>{metric.label}</dt>
           <dd>
-            {metric.key === 'revenue'
+            {/* BOTH revenue keys are money. A new money metric rendered as a plain count is
+                the figure wrong by 100×. */}
+            {metric.key === 'revenue' || metric.key === 'net_revenue'
               ? money(metric.value)
               : metric.value.toLocaleString('pt-BR')}
           </dd>
@@ -191,7 +197,23 @@ await store.savePayment({
 })
 
 const overview = await billingOverview(store, { from, to })
-const revenue = overview.metrics.find((metric) => metric.key === 'revenue')
+const gross = overview.metrics.find((metric) => metric.key === 'revenue')
+const net = overview.metrics.find((metric) => metric.key === 'net_revenue')
 
-assert.equal(revenue?.value, 1990)
+assert.equal(gross?.value, 1990)
+assert.equal(net?.value, 1990)   // nothing refunded yet — the two only diverge once something is
+
+// Refund R$5 of it: the row stays `paid` at 1990, and only the net figure moves.
+await store.savePayment({
+  gatewayId: 'pi_1',
+  provider: 'stripe',
+  status: 'paid',
+  amount: 1990,
+  currency: 'brl',
+  refundedAmount: 500,
+})
+
+const after = await billingOverview(store, { from, to })
+assert.equal(after.metrics.find((m) => m.key === 'revenue')?.value, 1990)
+assert.equal(after.metrics.find((m) => m.key === 'net_revenue')?.value, 1490)
 ```

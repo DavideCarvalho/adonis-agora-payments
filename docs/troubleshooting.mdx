@@ -320,8 +320,11 @@ does nothing, check in this order:
    `PENDING` refund, one awaiting approval, and a denied one are all money still in the account, so
    the driver sends no `refundedAmount` at all and the stored figure is left alone.
 
-Remember that the row **stays `paid`** and keeps its full `amount`. Net revenue is
-`amount - refunded_amount`; `revenue()` itself is gross.
+Remember that the row **stays `paid`** and keeps its full `amount`, so a partial refund is invisible
+in a gross figure by design. `revenue()` is gross; `netRevenue()` — and the `net_revenue` metric on
+`billingOverview`, shown as **Revenue (net)** in the console — is the one that subtracts it. If the
+refund is recorded on the row and the number you are reading has not moved, check which of the two
+you are reading.
 
 ## Durable is installed but webhooks run in-process
 
@@ -357,7 +360,7 @@ is worse than recording less:
 | Missing | What you see instead of an error |
 | --- | --- |
 | `billing_payments.external_reference` | references are never stored, `findPaymentByExternalReference` always answers `null`, and handlers that route on it hit their silent `return` |
-| `billing_payments.refunded_amount` | partial refunds are recorded nowhere; the row keeps its full amount and revenue stays overstated |
+| `billing_payments.refunded_amount` | partial refunds are recorded nowhere; the row keeps its full amount, and `netRevenue()` answers exactly what `revenue()` does — there is nothing recorded to subtract |
 | `billing_webhook_events.normalized` | the dashboard's retry cannot rebuild the event and answers `422` on any signed gateway |
 | the `billing_disputes` table | disputes are never recorded, and `payments:health` reports a healthy **zero** closing windows over a table that does not exist |
 | the `billing_audit_events` table | console refunds, dispute resolutions and **rejected deliveries** are recorded nowhere; `rejected_deliveries` reports a healthy zero and the Activity screen is empty |

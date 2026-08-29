@@ -131,4 +131,70 @@ describe('paid_at and refunded_amount (integration)', () => {
     const undated = rows.find((row) => row.gatewayId === 'pay_undated');
     expect(undated?.refundedAmount).toBeNull();
   });
+
+  /**
+   * Net revenue, against the real column and the real `NULL`s.
+   *
+   * By this point the table holds exactly the mix that matters: `pay_dispute` and
+   * `pay_undated` have `refunded_amount = NULL` (nothing ever refunded them), `pay_partial`
+   * has `1000`. That is not a contrived fixture — it is what every upgraded install looks
+   * like — and it is the mix that decides whether `SUM(amount - refunded_amount)` is a figure
+   * or a `NULL`, which is a question the in-memory store is structurally unable to ask.
+   */
+  describe('netRevenue', () => {
+    it('subtracts the refunded part while revenue stays gross', async () => {
+      // pay_dispute 10000 (nothing back) + pay_partial 10000 − 1000.
+      expect(await store.netRevenue({ from: JAN_START, to: FEB_START })).toBe(19_000);
+      expect(await store.revenue({ from: JAN_START, to: FEB_START })).toBe(20_000);
+    });
+
+    it('does not let a NULL refunded_amount poison the whole window', async () => {
+      // Postgres propagates `NULL` through arithmetic and through `SUM`: without
+      // `COALESCE(refunded_amount, 0)` the two untouched rows would drag the entire window to
+      // `NULL`, and the store would report zero for an install that took R$200. The assertion
+      // that matters is that the two NULL rows are IN the figure at full value.
+      const net = await store.netRevenue({ from: JAN_START, to: FEB_START });
+      expect(net).not.toBe(0);
+      expect(net).toBe(19_000);
+      // Unwindowed, `pay_undated` (7000, NULL) joins them.
+      expect(await store.netRevenue({})).toBe(26_000);
+      expect(await store.revenue({})).toBe(27_000);
+    });
+
+    it('comes back as a NUMBER — a BIGINT sum arrives from Postgres as a string', async () => {
+      // `amount` is `BIGINT`, so `SUM(...)` is `numeric` and node-postgres hands it over as
+      // `'19000'`. Un-consumed it would cross the dashboard API as a string and be divided by
+      // the SPA's formatter, which is exactly the class of bug this file exists for.
+      const net = await store.netRevenue({ from: JAN_START, to: FEB_START });
+      expect(typeof net).toBe('number');
+      expect(Number.isInteger(net)).toBe(true);
+    });
+
+    it('answers what revenue answers on an install whose table has no such column', async () => {
+      // The upgrade order nobody controls: the package is newer than the schema. Asking for a
+      // column Postgres does not have raises `column "refunded_amount" does not exist` — on an
+      // overview endpoint a browser is merely polling. And the honest answer there is gross:
+      // no refund was ever recorded on that install, so there is nothing to subtract.
+      await database.db.rawQuery('ALTER TABLE billing_payments DROP COLUMN refunded_amount');
+      // A fresh store, so the column probe is not answered from the memo — and one that will
+      // NOT put the column back underneath the test.
+      const legacy = new LucidBillingStore({}, { autoCreateSchema: false });
+
+      const net = await legacy.netRevenue({});
+      expect(net).toBe(await legacy.revenue({}));
+      expect(net).toBe(27_000);
+
+      await database.db.rawQuery('ALTER TABLE billing_payments ADD COLUMN refunded_amount BIGINT');
+    });
+
+    it('is zero, not NULL, over a window holding nothing', async () => {
+      // `SUM` over no rows is `NULL` in SQL, and `NULL` reaching a money tile renders as blank
+      // or as `NaN`, never as "you earned nothing".
+      const net = await store.netRevenue({
+        from: new Date('2020-01-01T00:00:00.000Z'),
+        to: new Date('2020-02-01T00:00:00.000Z'),
+      });
+      expect(net).toBe(0);
+    });
+  });
 });

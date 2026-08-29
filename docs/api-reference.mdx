@@ -539,7 +539,8 @@ interface BillingStore {
   findPaymentByExternalReference(reference): Promise<PaymentRow | null>
   listPayments(query: PaymentListQuery): Promise<PaymentListItem[]>
   countPayments(query): Promise<number>
-  revenue(query: { from?: Date; to?: Date }): Promise<number>
+  revenue(query: { from?: Date; to?: Date }): Promise<number>     // GROSS — sums `amount`
+  netRevenue(query: { from?: Date; to?: Date }): Promise<number>  // NET   — minus refunded_amount
 
   saveDispute(dispute): Promise<DisputeRow | null>             // null ⇒ no billing_disputes table
   findDisputeByGatewayId(gatewayId): Promise<DisputeRow | null>
@@ -600,6 +601,15 @@ used to be written through unconditionally, so a refund, a chargeback or a dispu
 which carries a settlement date — set `paid_at = NULL`, and `revenue()` filters on that column. A
 dispute closed as *won* therefore restored `status = 'paid'` with no date, and the recovered money
 left every windowed revenue figure.
+
+`revenue` and `netRevenue` are the same query with a different figure summed: both take
+`status = 'paid'` rows windowed on `paid_at`, both answer integer minor units, and the second
+subtracts `COALESCE(refunded_amount, 0)` per row. `revenue` is **gross** and stays gross — it was
+the only revenue figure for two releases and apps read it — so a partially refunded charge counts at
+full value there and at its net in `netRevenue`. `COALESCE` carries the weight: `refunded_amount` is
+`NULL` on every row predating the column, and `amount - NULL` is `NULL`, which `SUM` would spread
+across the whole window. On an install whose table has no `refunded_amount` at all, `netRevenue`
+answers exactly what `revenue` does, because no refund was ever recorded to subtract.
 
 <Callout title="recordWebhookEvent claims a failed event again">
 `null` means in flight or already processed — a redelivery. An event whose previous attempt
@@ -689,7 +699,8 @@ and every following query failed on a missing relation.
 ```ts
 billingOverview(store, { from: Date; to: Date }): Promise<BillingOverview>
 // → { period, metrics: [{ key, label, value }] }
-//   revenue (cents) · active_subscriptions · meter:<name> per meter
+//   revenue (cents, GROSS) · net_revenue (cents, minus refunded_amount)
+//   · active_subscriptions · meter:<name> per meter
 
 meteredBill(usage, rates): MeteredBill
 meteredBillForSubscription(store, { subscriptionId, from, to, rates }): Promise<MeteredBill>

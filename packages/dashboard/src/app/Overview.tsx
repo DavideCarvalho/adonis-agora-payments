@@ -22,9 +22,35 @@ const PERIODS: ReadonlyArray<{ value: PeriodPreset; label: string }> = [
  * R$ 1.234,56 or `R$ 12,00` for twelve subscriptions, so the distinction is made HERE, by key,
  * rather than guessed from the number.
  */
+const MONEY_METRICS = new Set(['revenue', 'net_revenue']);
+
 function isMoneyMetric(metric: OverviewMetric): boolean {
-  return metric.key === 'revenue';
+  return MONEY_METRICS.has(metric.key);
 }
+
+/**
+ * The tile label and the sentence under it, for the metrics whose server-side label is a
+ * headless string with `(cents)` in it.
+ *
+ * Both money tiles are here, and both say which figure they are IN WORDS. `revenue` is gross —
+ * a charge that was half refunded counts at its full value in it — and for two releases that
+ * was the only revenue number the console had and nothing on screen admitted it. Showing gross
+ * and net side by side without labelling them would be the same bug with an extra tile.
+ */
+const STAT_COPY: Record<string, { label: string; hint: string }> = {
+  revenue: {
+    label: 'Revenue (gross)',
+    hint: 'Paid payments settled in this window. Refunds NOT subtracted.',
+  },
+  net_revenue: {
+    label: 'Revenue (net)',
+    hint: 'The same payments, minus what was refunded. This is what you kept.',
+  },
+  active_subscriptions: {
+    label: 'Active subscriptions',
+    hint: 'Includes trialing. Not windowed — a live count.',
+  },
+};
 
 /** `Usage · api_calls` reads better as its meter name once it is under a "Usage" heading. */
 function isUsageMetric(metric: OverviewMetric): boolean {
@@ -93,23 +119,21 @@ export function Overview({
 
       <QueryState query={query} empty={false}>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {headline.map((metric) => (
-            <Stat
-              key={metric.key}
-              label={metric.key === 'revenue' ? 'Revenue' : metric.label}
-              value={
-                isMoneyMetric(metric)
-                  ? formatCents(metric.value, data?.currency ?? 'BRL')
-                  : formatCount(metric.value)
-              }
-              {...(metric.key === 'revenue'
-                ? { hint: 'Paid payments settled in this window.' }
-                : {})}
-              {...(metric.key === 'active_subscriptions'
-                ? { hint: 'Includes trialing. Not windowed — a live count.' }
-                : {})}
-            />
-          ))}
+          {headline.map((metric) => {
+            const copy = STAT_COPY[metric.key];
+            return (
+              <Stat
+                key={metric.key}
+                label={copy?.label ?? metric.label}
+                value={
+                  isMoneyMetric(metric)
+                    ? formatCents(metric.value, data?.currency ?? 'BRL')
+                    : formatCount(metric.value)
+                }
+                {...(copy !== undefined ? { hint: copy.hint } : {})}
+              />
+            );
+          })}
         </div>
 
         <Panel

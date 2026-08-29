@@ -1,6 +1,6 @@
 ---
 title: Roadmap
-description: What is still missing — a queue dispatcher, subscription amounts on Stripe, net revenue in the aggregates, a per-payment history, splits beyond Asaas, dispute submission beyond Stripe, and fiscal invoice reconciliation.
+description: What is still missing — a queue dispatcher, subscription amounts on Stripe, a per-payment history, splits beyond Asaas, dispute submission beyond Stripe, and fiscal invoice reconciliation.
 icon: Map
 ---
 
@@ -115,11 +115,14 @@ What exists today and what does not:
   minor units, `BIGINT`, on `BillingPayment`, `withPayment()` and `PaymentListItem`), and
   `payment.updated` — which is what a partial refund arrives as — writes it. A partially refunded
   charge keeps its `status`, its `amount` and its `paid_at`, and the net is
-  `amount - refunded_amount`: a subtraction, never a division. What is still open is that
-  `revenue()` and `billingOverview` are **gross** — they sum `amount` on `paid` rows and subtract
-  nothing — so a screen that wants net revenue does the subtraction itself. Wiring it into the
-  aggregate is a decision about what "revenue" means to a given business, and it has not been made
-  here.
+  `amount - refunded_amount`: a subtraction, never a division.
+- **Landed: net revenue in the aggregates.** `store.netRevenue({ from, to })` sums
+  `amount - COALESCE(refunded_amount, 0)` over the same `paid` rows and the same `paid_at` window as
+  `revenue()`, and `billingOverview` publishes both — `revenue` (gross) and `net_revenue` — with the
+  console showing them side by side. `revenue()` was NOT redefined: it was the only revenue figure
+  for two releases and apps read it, so changing what it means would have moved numbers on other
+  people's screens with nothing to announce it. The question of which figure a given business calls
+  "revenue" is now answered by choosing a key, not by patching the library.
 - **Landed: an audit trail.** `billing_audit_events` records what no other table did — who refunded
   from the console, who closed a dispute a gateway will never close, and every delivery the endpoint
   **refused**. A rejected delivery is answered `400` before an event exists, so it never becomes a

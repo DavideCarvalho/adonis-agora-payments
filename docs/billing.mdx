@@ -93,7 +93,8 @@ await store.recordAuditEvent({ action: 'payment.refunded', actor: 'ana@acme.com'
 await store.listAuditEvents({ action: 'webhook.rejected', limit: 20 })
 await store.countAuditEvents({ action: 'webhook.rejected', createdAfter: cutoff })
 
-await store.revenue({ from, to })                       // cents
+await store.revenue({ from, to })                       // cents, GROSS  — subtracts no refund
+await store.netRevenue({ from, to })                    // cents, NET    — minus refunded_amount
 await store.countActiveSubscriptions()
 await store.usageReport({ subscriptionId, from, to })
 ```
@@ -535,14 +536,19 @@ export default class BillingDashboardController {
 
 // overview.period  → { from, to }
 // overview.metrics → [
-//   { key: 'revenue',              label: 'Revenue (cents)',      value: 1_284_900 },
-//   { key: 'active_subscriptions', label: 'Active subscriptions', value: 212 },
+//   { key: 'revenue',              label: 'Revenue, gross (cents)',           value: 1_284_900 },
+//   { key: 'net_revenue',          label: 'Revenue, net of refunds (cents)', value: 1_231_400 },
+//   { key: 'active_subscriptions', label: 'Active subscriptions',            value: 212 },
 //   { key: 'meter:api_calls',      label: 'Usage · api_calls',    value: 481_230 },
 // ]
 ```
 
-Revenue is the sum of **paid** payments in the window, in cents — format at the edge, and never
-divide before you have finished adding. See [Money](/docs/payments/concepts/money).
+Revenue arrives **twice**, in cents. `revenue` is gross — the sum of `amount` on **paid** payments
+in the window, subtracting nothing — and `net_revenue` is the same rows minus what came back
+(`amount - COALESCE(refunded_amount, 0)`). A charge that was half refunded counts at full value in
+the first and at its net in the second, so a screen showing one of them has to say which. Format at
+the edge, and never divide before you have finished adding. See
+[Money](/docs/payments/concepts/money).
 
 ## The billing store
 

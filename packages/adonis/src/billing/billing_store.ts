@@ -741,8 +741,39 @@ export interface BillingStore<
     to?: Date;
   }): Promise<Array<{ meter: string; quantity: number }>>;
 
-  /** Sum of paid payments within a window (revenue, in cents). */
+  /**
+   * Sum of paid payments within a window, **GROSS** — `amount` on `status = 'paid'` rows,
+   * windowed on `paid_at`, with nothing subtracted.
+   *
+   * A half-refunded charge counts at its FULL value here, because that is what gross means:
+   * it answers "how much did we charge and collect in this window". For "how much did we
+   * keep", see {@link BillingStore.netRevenue}. Both are legitimate figures and neither is
+   * the other's replacement — a screen that shows one without saying which is the screen that
+   * misleads. Integer minor units; NEVER divide.
+   */
   revenue(query: { from?: Date; to?: Date }): Promise<number>;
+
+  /**
+   * The same rows and the same window as {@link BillingStore.revenue}, **NET of refunds**:
+   * `SUM(amount - COALESCE(refunded_amount, 0))`.
+   *
+   * The `refunded_amount` column exists precisely so a PARTIAL refund does not have to be
+   * spelled by mangling `amount` or `status` — a R$10 refund on a R$100 charge leaves the row
+   * `paid` at `amount: 10000, refundedAmount: 1000`. Gross sees R$100 of that row, net sees
+   * R$90, and until this existed only gross was reachable, so a partially refunded charge was
+   * invisible in every revenue figure the console printed.
+   *
+   * `COALESCE` is not decoration: `refunded_amount` is `NULL` on every row written before the
+   * column existed, and `10000 - NULL` is `NULL` in SQL, which would poison the whole SUM into
+   * `NULL` — one legacy row would report zero revenue for the entire window. `NULL` means
+   * "nothing came back", so it reads as zero.
+   *
+   * On an install whose table predates the column, this equals {@link BillingStore.revenue}:
+   * no refund was ever recorded, so there is nothing to subtract.
+   *
+   * Integer minor units, like everything else here. NEVER divide — format at the edge.
+   */
+  netRevenue(query: { from?: Date; to?: Date }): Promise<number>;
 
   /** Count of active subscriptions (status `'active'`/`'trialing'`). */
   countActiveSubscriptions(): Promise<number>;

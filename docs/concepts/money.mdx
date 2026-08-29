@@ -156,10 +156,35 @@ this row — a gateway that sent no refunds array, or a row written before the c
 asserts that nothing has gone back. The store's leave-alone rule keeps them distinct: an absent
 `refundedAmount` on a write does not clear a stored one.
 
-<Callout type="warn" title="`revenue()` and `billingOverview` are gross">
-Both sum `amount` on `paid` rows and neither subtracts `refunded_amount`. If a partially refunded
-charge should not count at full value on your screen, do the subtraction where you render — at the
-same edge as the one division, and after you have finished adding.
+## Gross and net are two figures, and both are published
+
+The store answers the same window twice:
+
+```ts
+await store.revenue({ from, to })     // GROSS — sums `amount`, subtracts nothing
+await store.netRevenue({ from, to })  // NET   — sums `amount - COALESCE(refunded_amount, 0)`
+```
+
+Same rows (`status = 'paid'`), same window (`paid_at`), same integer minor units. The only
+difference is the figure summed, and both are legitimate: gross is what you collected, net is what
+you kept. A half-refunded charge counts at full value in the first and at `amount - refunded_amount`
+in the second.
+
+`billingOverview` publishes both, as `revenue` and `net_revenue`, and the console shows them side by
+side as **Revenue (gross)** and **Revenue (net)**.
+
+<Callout type="warn" title="`revenue()` is gross, and stays gross">
+It was the only revenue figure for two releases, and apps read it. Redefining it to net would have
+changed the meaning of a number already on other people's screens without a single error to
+announce it, so `netRevenue()` was added beside it instead. Whichever you render, **say which one it
+is** — a number labelled only "Revenue" over a gross figure is exactly the bug this pair exists to
+close.
+</Callout>
+
+<Callout title="`COALESCE`, not `-` alone">
+`refunded_amount` is `NULL` on every row written before the column existed, and `amount - NULL` is
+`NULL` in SQL, which `SUM` carries across the whole window. Reading `NULL` as zero is not defensive
+padding — without it one legacy row makes the entire figure disappear.
 </Callout>
 
 ## Splitting an amount

@@ -42,7 +42,7 @@ a wildcard, for that reason.
 
 | Screen | Reads | What it answers |
 | --- | --- | --- |
-| **Overview** | `billingHealth` + `billingOverview` | What needs attention today, then revenue and active subscriptions for a period, plus usage per meter. |
+| **Overview** | `billingHealth` + `billingOverview` | What needs attention today, then revenue — gross **and** net of refunds — and active subscriptions for a period, plus usage per meter. |
 | **Payments** | `listPayments` | A page of payments, filterable by status and gateway, searchable by **your** reference or the gateway id — which charge failed, and when. Refund from here, and open one row in full. |
 | **Customers** | `listCustomers` | The `billing_customers` mapping — which app user a `cus_…` belongs to, filterable by owner, gateway id and provider. |
 | **Subscriptions** | `listSubscriptions` | Who is `past_due` or `paused`, on which plan, with the trial and period end dates. |
@@ -70,6 +70,19 @@ what it means, names which provider and event type is failing, and links straigh
 Revenue answers "how did we do". Health answers "is anything broken right now". On the morning the
 worker is dead, the revenue tile still shows yesterday's healthy number.
 </Callout>
+
+### The two revenue tiles
+
+Under the health panel the console shows revenue **twice**, because there are two true answers:
+
+- **Revenue (gross)** — paid payments settled in the window, with refunds *not* subtracted.
+- **Revenue (net)** — the same payments minus what went back (`amount - refunded_amount`).
+
+A partial refund keeps its payment row `paid` at the full `amount` and records what came back
+separately, so it moves the second tile and leaves the first alone. That is why both are on screen
+and both say which one they are: for two releases the console showed only the gross figure under the
+word "Revenue", and a charge that was half refunded was reported as fully earned with nothing
+disagreeing. Both tiles are integer minor units formatted once, at render.
 
 ### Filtering by gateway
 

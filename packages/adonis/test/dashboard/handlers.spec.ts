@@ -126,9 +126,32 @@ describe('overview', () => {
     expect(body.period.to).toBe(NOW.toISOString());
     // Revenue crosses the wire as INTEGER CENTS: 123456 + 1, never 1234.57.
     expect(body.metrics.find((m) => m.key === 'revenue')?.value).toBe(123457);
+    // Nothing refunded in this window, so net matches gross — the two only diverge once a
+    // refund is recorded, and BOTH keys have to cross the wire either way.
+    expect(body.metrics.find((m) => m.key === 'net_revenue')?.value).toBe(123457);
     // countActiveSubscriptions includes `trialing`.
     expect(body.metrics.find((m) => m.key === 'active_subscriptions')?.value).toBe(2);
     expect(body.metrics.find((m) => m.key === 'meter:api_calls')?.value).toBe(7);
+  });
+
+  it('carries gross and net separately once part of a charge has come back', async () => {
+    // The API is a passthrough, and this is the assertion that it passes BOTH figures through.
+    // A console reading only `revenue` reports R$1234.57 for a charge R$100 of which is already
+    // back with the cardholder.
+    const store = await seed();
+    await store.savePayment({
+      gatewayId: 'pi_1',
+      provider: 'stripe',
+      status: 'paid',
+      amount: 123456,
+      currency: 'BRL',
+      refundedAmount: 10_000,
+    });
+
+    const res = await overview(deps(store), req());
+    const metrics = (res.body as { metrics: Array<{ key: string; value: number }> }).metrics;
+    expect(metrics.find((m) => m.key === 'revenue')?.value).toBe(123457);
+    expect(metrics.find((m) => m.key === 'net_revenue')?.value).toBe(113457);
   });
 
   it('honors the period preset', async () => {

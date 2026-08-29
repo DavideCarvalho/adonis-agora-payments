@@ -1059,6 +1059,37 @@ export class LucidBillingStore
     return toCount(await builder);
   }
 
+  /**
+   * Gross minus what came back. Same rows, same window, one subtraction.
+   *
+   * Three details this has to get right, each of which has already bitten this package:
+   *
+   * 1. `COALESCE(refunded_amount, 0)`. `refunded_amount` is `NULL` on every row written before
+   *    the column existed, and SQL `amount - NULL` is `NULL`, which propagates through `SUM`
+   *    and turns the whole window into `NULL` — one legacy row would report zero net revenue
+   *    for an install that took a million. `NULL` means "nothing came back".
+   * 2. `SUM` over no rows is `NULL`, not `0`; `toCount` normalizes it, exactly as `revenue()`
+   *    already relies on.
+   * 3. Postgres returns a `BIGINT` sum as a STRING. `toCount` runs it through `Number` for the
+   *    same reason `amount` is read through `Number` everywhere else in this file — without it
+   *    the metric would cross the API as `"9000"` and the SPA would render `"9000" / 100`.
+   *
+   * An install whose table predates the column has no refund recorded anywhere, so net IS
+   * gross — and asking for a column Postgres does not have would raise `column
+   * "refunded_amount" does not exist` at a dashboard that is merely loading its overview.
+   */
+  async netRevenue(query: { from?: Date; to?: Date }): Promise<number> {
+    await this.#ready();
+    if (!(await this.#hasColumn(this.#paymentModel, 'refunded_amount'))) {
+      return this.revenue(query);
+    }
+    const builder = this.#paymentModel.query().where('status', 'paid').pojo();
+    builder.select(builder.client.raw('SUM(amount - COALESCE(refunded_amount, 0)) as total'));
+    if (query.from !== undefined) builder.where('paid_at', '>=', query.from);
+    if (query.to !== undefined) builder.where('paid_at', '<', query.to);
+    return toCount(await builder);
+  }
+
   async countActiveSubscriptions(): Promise<number> {
     await this.#ready();
     return toCount(

@@ -10,25 +10,25 @@ Sorted by how often they come up.
 
 ## The app will not boot after an upgrade
 
-Four boot refusals were added deliberately, each closing a failure that was previously silent. All
-four name the fix in the message.
+Four boot refusals are deliberate, each closing a failure that would otherwise be silent. All four
+name the fix in the message.
 
-**`The "asaas" driver can verify webhook deliveries but has no credential configured`** — the empty
-slot used to mean "skip verification", so `POST /payments/webhook/asaas` accepted any body anyone
-posted, including one that marks a payment paid. Set the credential, or, only when verification
+**`The "asaas" driver can verify webhook deliveries but has no credential configured`** — with an
+empty slot there is nothing to check against, so `POST /payments/webhook/asaas` would accept any
+body anyone posted, including one that marks a payment paid. Set the credential, or, only when verification
 genuinely happens upstream, `allowUnverifiedWebhooks: ['asaas']`. Efí and InfinitePay never trip
 this: their gateways sign nothing, so they report `'unsupported'`.
 
 **`Webhook handler (…) is registered for "payment.suceeded", which is not a normalized event
-type`** — a typo in an `eventType` or a `billing.handlers` key. It used to register a handler
-nothing ever called while the ledger recorded the delivery as **processed** and the route answered
+type`** — a typo in an `eventType` or a `billing.handlers` key. Unchecked it registers a handler
+nothing ever calls, while the ledger records the delivery as **processed** and the route answers
 `200`. The rule is namespace-based: `payment.*`/`subscription.*` is the library's own, so a type
 there must be canonical. A gateway type a driver could not map arrives lowercased without a dot
 (`payment_anticipated`) and is accepted as-is; for the rare one spelled *with* a dot, list it in
 `billing.passthroughEvents`.
 
 **`Two webhook handlers claim "payment.succeeded"`** — registration is a map keyed by event type, so
-the second used to silently replace the first. Keep one handler per type (call the other from it) or
+the second would silently replace the first. Keep one handler per type (call the other from it) or
 give them different types. The message names both files.
 
 **`driver() resolved "asaas", and config.methods routes pix, boleto to it`** — thrown from
@@ -61,8 +61,7 @@ webhook token looked exactly like a quiet week — zero events, zero failures, e
 
 ## The webhook route started returning `500`
 
-This is the fix, not a regression. A delivery whose handler threw used to answer `200`; it answers
-`500` now.
+This is deliberate: a delivery whose handler threw answers `500`, not `200`.
 
 A 2xx tells the gateway it never has to send that delivery again. Answering it over an event that
 failed is how a payment is lost for good — the effect never happened, the gateway never retries, and
@@ -85,9 +84,10 @@ A `400` is a different animal and did not change: the delivery was rejected befo
 a bad signature, an unparsable body, an unknown provider — and redelivering it would fail
 identically.
 
-<Callout type="warn" title="Your 5xx alert will fire where it used to be silent">
-If you page on 5xx from `/payments/webhook/*`, expect it. Nothing new is breaking; the failure is
-just visible on your side now instead of only in the gateway's dashboard.
+<Callout type="warn" title="Your 5xx alert will fire on these">
+If you page on 5xx from `/payments/webhook/*`, expect it: a delivery the endpoint cannot process is
+reported to the gateway as a failure, so it shows on your side rather than only in the gateway's
+dashboard.
 </Callout>
 
 ## The webhook returns `200` but nothing happened
@@ -304,12 +304,10 @@ node ace payments:sync --customer=cus_123
 
 ## A partial refund did not change anything
 
-That is what it used to do. Six Asaas events map to `payment.updated`, which had no built-in sync at
-all, so the money came back, the ledger row went to `processed`, and the payment row stayed `paid` at
-the full amount forever with no screen disagreeing.
-
-Two things had to change together, and both are in place: `billing_payments` gained
-`refunded_amount`, and `payment.updated` gained a handler that writes it. If a partial refund still
+A partial refund arrives as `payment.updated` — one of six Asaas events that map to it — and lands
+in two places: `billing_payments.refunded_amount`, written by the `payment.updated` handler. Without
+both, the money comes back while the payment row stays `paid` at the full amount and no screen
+disagrees. If a partial refund still
 does nothing, check in this order:
 
 1. **The column exists.** With `autoCreateSchema: false`, it arrives only when a new migration calls

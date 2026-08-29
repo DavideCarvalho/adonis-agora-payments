@@ -66,10 +66,9 @@ const session = await payments.driver('mollie').createCheckout({
 This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
 `webhookSecret` is not configured (env fallback `MOLLIE_WEBHOOK_SECRET`).
 Set it before you deploy, or — only when verification genuinely happens upstream — name this
-provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
-running without it: the empty slot used to mean "skip verification", so
-`POST /payments/webhook/mollie` accepted any body anyone posted, including one that marks a
-payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+provider in `allowUnverifiedWebhooks`. An empty credential slot is not "skip verification": with nothing to check against,
+`POST /payments/webhook/mollie` would accept any body anyone posted to it — including one
+that marks a payment paid. The app refuses to start instead. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
 </Callout>
 
 ## Webhooks — the fetch is the authentication
@@ -138,8 +137,7 @@ envelope without a fetch, for an app handler to pick up.
 `PaymentMethodName` names **categories**, not brands — enumerating iDEAL, Bancontact, EPS,
 Przelewy24, BLIK, TWINT and a new one each quarter is a union that never closes, and a
 union that never closes cannot make a routing typo fail at the manager. So Mollie's
-catalogue maps onto six categories, and every method that used to be unroutable now has a
-home:
+catalogue maps onto six categories, so every method has a routable home:
 
 | Category | Mollie method ids |
 | --- | --- |

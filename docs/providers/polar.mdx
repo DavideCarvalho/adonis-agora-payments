@@ -53,21 +53,14 @@ you create in Polar, and money moves through Polar's own checkout.
   itself. `listInvoices(customerId)` maps a customer's orders; `hostedPdfUrl` is left
   unset because the PDF sits behind a separate per-order call.
 
-<Callout type="warn" title="Not yet verified against a live account">
-This driver is written against Polar's published API reference (spec version `2026-04`)
-and covered by unit tests. It has not been exercised against a live Polar account — run it
-in the sandbox and confirm a real checkout, webhook and refund before you take real money
-with it.
-</Callout>
 
 <Callout type="warn" title="Webhook verification is required at boot">
 This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
 `webhookSecret` is not configured (env fallback `POLAR_WEBHOOK_SECRET`).
 Set it before you deploy, or — only when verification genuinely happens upstream — name this
-provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
-running without it: the empty slot used to mean "skip verification", so
-`POST /payments/webhook/polar` accepted any body anyone posted, including one that marks a
-payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+provider in `allowUnverifiedWebhooks`. An empty credential slot is not "skip verification": with nothing to check against,
+`POST /payments/webhook/polar` would accept any body anyone posted to it — including one
+that marks a payment paid. The app refuses to start instead. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
 </Callout>
 
 ## What it refuses
@@ -189,8 +182,8 @@ handler is holding.
 ### Paused subscriptions are `paused`, not `active`
 
 `subscription.paused` and a `paused` status from `findSubscription` now report
-`Subscription.status === 'paused'`. It used to report `active`, which handed entitlement to
-a subscriber who is not paying: a paused subscription exists and will bill again, but it is
+`Subscription.status === 'paused'`. Reporting it as `active` would hand entitlement to a
+subscriber who is not paying: a paused subscription exists and will bill again, but it is
 not billing *now*. Anything gating access on `status === 'active'` will start refusing
 paused subscribers, which is the point. The raw value is still on
 `subscription.payload.status`.

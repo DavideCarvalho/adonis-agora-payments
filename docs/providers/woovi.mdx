@@ -42,10 +42,9 @@ neither `webhookPublicKey` nor `webhookSecret` is configured (env fallbacks
 `WOOVI_WEBHOOK_PUBLIC_KEY` / `WOOVI_WEBHOOK_SECRET`). Prefer the public key: it is the recommended
 scheme and wins when both are set.
 Set it before you deploy, or — only when verification genuinely happens upstream — name this
-provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
-running without it: the empty slot used to mean "skip verification", so
-`POST /payments/webhook/woovi` accepted any body anyone posted, including one that marks a
-payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+provider in `allowUnverifiedWebhooks`. An empty credential slot is not "skip verification": with nothing to check against,
+`POST /payments/webhook/woovi` would accept any body anyone posted to it — including one
+that marks a payment paid. The app refuses to start instead. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
 </Callout>
 
 ## Disputes are Pix MED, not chargebacks
@@ -102,8 +101,8 @@ moves already knows what it was charged. `event.raw.dispute.value` has it if you
 <Callout type="warn" title="Money is in centavos here, and it was not">
 OpenPix documents `value` as *"o valor em centavos da cobrança Pix"* — the same integer
 minor unit this package uses everywhere — so nothing is converted at this boundary. The
-driver used to run `toDecimal`/`fromDecimal` over it, which sent a R$19,90 charge as
-`value: 19.9` and created a **20 centavo** charge at the gateway.
+Running `toDecimal`/`fromDecimal` over it would send a R$19,90 charge as `value: 19.9` and create
+a **20 centavo** charge at the gateway.
 
 This is worth stating because the neighbouring Brazilian drivers are the other way round:
 Asaas and AbacatePay genuinely work in decimal reais and genuinely need the conversion. The
@@ -112,8 +111,8 @@ difference is Woovi's, not an inconsistency here.
 
 <Callout type="info" title="Woovi prefixes its event names">
 Real payloads say `"event": "OPENPIX:CHARGE_COMPLETED"`, not `"CHARGE_COMPLETED"`. The
-driver now accepts both spellings — before, a live webhook matched none of the mapped names
-and fell through as an unrecognized event, so the payment was ledgered and never synced.
+driver matches both spellings, so the prefix a live delivery carries does not keep the event
+from being recognized.
 </Callout>
 
 <Callout type="info" title="`externalReference` is how webhooks find your records">

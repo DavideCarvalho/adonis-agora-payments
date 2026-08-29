@@ -141,9 +141,9 @@ in reverse creation order (so a foreign key never blocks a delete), with `DELETE
 table that was never created rather than raising.
 
 Do **not** reach for `dropBillingTables` between groups. `LucidBillingStore` memoizes "the schema
-exists", so a store built before the drop used to go on believing the tables were there and every
-following query failed on a missing relation. The drop now tells live stores to forget — but
-truncating is what a suite actually needs.
+exists", so the drop tells live stores to forget; without that a store built before the drop goes on
+believing the tables are there and every following query fails on a missing relation. Truncating is
+what a suite actually needs.
 
 ## InMemoryBillingStore
 
@@ -292,10 +292,9 @@ them would keep the suite green while the stub drifted, which is precisely the f
 exists to catch.
 
 <Callout title="One stub, not three">
-There used to be three published migrations, and the harness ran all three in order. The
-library now [owns its schema](/docs/payments/billing#the-billing-tables): one stub,
-`create_billing_tables`, calling the same `createBillingTables` the store calls at boot.
-A test written against the old three-file list is out of date, not broken.
+The library [owns its schema](/docs/payments/billing#the-billing-tables), so the harness runs a
+single stub — `create_billing_tables`, calling the same `createBillingTables` the store calls at
+boot. A test written against a three-file migration list is out of date, not broken.
 </Callout>
 
 Pass `{ migrate: false }` for a schema with **nothing** in it:

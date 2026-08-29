@@ -54,10 +54,9 @@ const session = await payments.driver('adyen').createCheckout({
 This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
 `hmacKey` is not configured (env fallback `ADYEN_HMAC_KEY`).
 Set it before you deploy, or — only when verification genuinely happens upstream — name this
-provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
-running without it: the empty slot used to mean "skip verification", so
-`POST /payments/webhook/adyen` accepted any body anyone posted, including one that marks a
-payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+provider in `allowUnverifiedWebhooks`. An empty credential slot is not "skip verification": with nothing to check against,
+`POST /payments/webhook/adyen` would accept any body anyone posted to it — including one
+that marks a payment paid. The app refuses to start instead. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
 </Callout>
 
 ## Webhooks
@@ -217,9 +216,9 @@ webhook reference answers that per event, and the mapping follows it exactly.
 | `DISPUTE_DEFENSE_PERIOD_ENDED` | `payment.dispute_closed`, outcome from `disputeStatus` | depends |
 | `INFORMATION_SUPPLIED` | `payment.updated` | untouched — defense documents uploaded |
 
-**`NOTIFICATION_OF_CHARGEBACK` is a warning, not a chargeback.** It used to map to
-`payment.disputed`, which moved a paid row over money still sitting in the account — Adyen
-lists "funds withdrawn: no" for it. It is also the **only** event that carries
+**`NOTIFICATION_OF_CHARGEBACK` is a warning, not a chargeback.** Mapping it to
+`payment.disputed` would move a paid row over money still sitting in the account — Adyen lists
+"funds withdrawn: no" for it. It is also the **only** event that carries
 `additionalData.defensePeriodEndsAt`, which the driver surfaces as `actionableUntil` on the
 normalized event. That deadline is what makes a dispute actionable at all, and flattening the
 event into one with no room for it threw the field away.
@@ -341,6 +340,6 @@ type the request asked for:
 | `klarna…`, `afterpay…`, `clearpay` | `bnpl` |
 | `paysafecard` | `voucher` |
 
-It used to be hardcoded to `card`, which labelled a SEPA mandate or an iDEAL transfer a card
-payment — a lie the ledger cannot tell apart from a real one. Pass a non-card type as
+The type is read from that table, never assumed: labelling a SEPA mandate or an iDEAL transfer
+a card payment is a lie the ledger cannot tell apart from a real one. Pass a non-card type as
 `metadata: { paymentMethodType: 'sepadirectdebit' }`; the brand stays on `payment.payload`.

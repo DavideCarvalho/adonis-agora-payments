@@ -174,11 +174,9 @@ Asaas sends its **own** `id` on the body of every notification — a value like
 `evt_05b708f9…&368604920`, stable across its retries of that notification — and the driver
 declares it. That id is what the [idempotency ledger](/docs/payments/concepts/idempotency) keys on.
 
-It used to be synthesized as `${event}-${paymentId}`, which is not an event identity: it is a
-(payment, event-type) identity, so the **second** `PAYMENT_UPDATED` about one payment was discarded
-as a replay of the first — and a partial refund arrives as exactly that type. When the payload named
-neither a payment nor a subscription it fell back to `Math.random()`, which turned deduplication off
-outright for those deliveries: every retry of a failing one looked new.
+Synthesizing one as `${event}-${paymentId}` would not be an event identity but a
+(payment, event-type) identity — the **second** `PAYMENT_UPDATED` about one payment would be
+discarded as a replay of the first, and a partial refund arrives as exactly that type.
 
 The fallback is now a SHA-256 digest of the raw body, used only when Asaas genuinely sends no `id`.
 It is deterministic — a redelivery of the same notification hashes to the same key and is still
@@ -189,9 +187,9 @@ lacked.
 
 `GET /payments` is a paged endpoint (`limit`/`offset`, with an explicit `hasMore` in the envelope),
 and `listInvoices` reads **all** of it: 100 rows per page, `hasMore` as the loop's authority, a short
-page ending it when the envelope omits one. It used to ask with neither parameter and hand back
-whatever default page Asaas felt like returning — so `payments:sync` printed a confident total over
-the most recent page and left every older charge unreconciled, silently.
+page ending it when the envelope omits one. Asking with neither parameter hands back whatever
+default page Asaas returns, so `payments:sync` would print a confident total over the most recent
+page and leave every older charge unreconciled, silently.
 
 A paging loop that does not terminate **throws** rather than truncating. Returning a partial list
 quietly is the exact bug the paging replaced.
@@ -219,10 +217,9 @@ own guidance is that you deduplicate on your side before you retry. So `refund`,
 `idempotencyKey`, rather than accepting it and dropping it: a silently ignored key turns
 your retry guarantee into a second refund.
 
-**`charge()` is the exception, and it honours the key.** It used to accept one and quietly
-repurpose it as an `externalReference` fallback — so an app passing `idempotencyKey: order.id`
-on the one call that moves money, believing it was protected against a double charge on a
-retry, got no protection and no warning either.
+**`charge()` is the exception, and it honours the key.** Accepting one and quietly repurposing it
+as an `externalReference` fallback would leave an app passing `idempotencyKey: order.id` on the one
+call that moves money with no protection against a double charge on a retry, and no warning either.
 
 It now does the deduplication the refusal message describes, on your behalf: the key travels
 as the charge's `externalReference` — the only handle Asaas echoes back **and** accepts as a

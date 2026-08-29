@@ -13,10 +13,10 @@ gap between that and money moving.
 
 The app **will not boot** without them, which is the change most likely to bite an upgrade.
 
-Verification used to be opt-in for the gateways where signing is optional (Asaas, AbacatePay,
-Woovi), so local development worked without configuring a dashboard. In production that same
-leniency meant an **unauthenticated endpoint**: anyone who could reach the URL could POST a payload
-claiming a payment happened, and the built-in sync would mark it paid.
+Making verification optional for the gateways where signing is optional (Asaas, AbacatePay, Woovi)
+would buy a local development convenience at the price of an **unauthenticated endpoint** in
+production: anyone who could reach the URL could POST a payload claiming a payment happened, and
+the built-in sync would mark it paid.
 
 Every driver now declares `webhookVerification`, and a driver that *can* verify with nothing
 configured refuses at boot — the same failing-closed the dashboard already does on a missing session
@@ -180,9 +180,8 @@ Keep out of the handler: sending email, calling third-party APIs, generating PDF
 takes seconds. Those belong in the workflow or job the handler dispatches.
 
 <Callout type="warn" title="The webhook route answers 500 when a handler fails">
-It used to answer `200`. A 2xx tells the gateway it never has to send that delivery again, which
-over a failed event is the payment lost for good — while the in-process retry that was supposed to
-cover it dies with the next deploy. Adyen retries a non-2xx for up to 30 days and Efí makes nine
+A 2xx tells the gateway it never has to send that delivery again, which over a failed event is the
+payment lost for good — and an in-process retry meant to cover it dies with the next deploy. Adyen retries a non-2xx for up to 30 days and Efí makes nine
 attempts, and neither starts on a 2xx.
 
 Two consequences for a running install. **Anything alerting on 5xx from `/payments/webhook/*` will
@@ -252,10 +251,10 @@ account, and there is no horizon at which that stops mattering. `billingHealth()
 is the only priority left.
 
 `rejected_deliveries` is the only visibility a refused delivery has anywhere. It is answered `400`
-before an event exists, so it never becomes a ledger row: a rotated webhook secret used to look
-exactly like a quiet week — zero events, zero failures, every check green — while every refund,
-chargeback and dispute closure was dropped on the floor. `unconfirmed_payments` eventually notices,
-but only for charges the app itself created. Each rejection now writes a `webhook.rejected` row into
+before an event exists, so it never becomes a ledger row: without this check a rotated webhook
+secret looks exactly like a quiet week — zero events, zero failures, every check green — while every
+refund, chargeback and dispute closure is dropped on the floor. `unconfirmed_payments` eventually
+notices, but only for charges the app itself created. Each rejection writes a `webhook.rejected` row into
 `billing_audit_events`; read them with `listAuditEvents({ action: 'webhook.rejected' })`.
 
 See [Disputes](/docs/payments/patterns/disputes) for what to do when a dispute check fires.

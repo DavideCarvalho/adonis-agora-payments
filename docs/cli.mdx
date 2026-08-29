@@ -77,8 +77,8 @@ node ace payments:sync --all --provider=stripe
 
 It pages **every** invoice the gateway holds for the customer, asks the gateway what each charge's
 payment actually says, and writes that back — in **both directions**. A local row saying `paid`
-while the gateway says refunded is corrected to `refunded`, which is the one drift a
-gateway-is-truth reconcile exists for and the one it used to be unable to fix.
+while the gateway says refunded is corrected to `refunded` — the drift a gateway-is-truth
+reconcile exists for.
 
 ```text
   cus_123: 7 invoice(s), 2 reconciled, 4 already current, 1 undecidable (gateway had no payment)
@@ -117,10 +117,10 @@ gateway that never sends one.
 </Callout>
 
 <Callout title="Settlement dates come from the gateway, or not at all">
-`revenue()` windows on `paid_at`. This used to stamp `new Date()` on every row it wrote, which
-filed historic money in the month the reconcile *ran* — run it in two different months and the same
-charge was counted in both. It now takes the gateway's own settlement date, never overwrites one
-already recorded, and records none when the gateway states none.
+`revenue()` windows on `paid_at`, so the reconcile takes the gateway's own settlement date, never
+overwrites one already recorded, and records none when the gateway states none. Stamping
+`new Date()` on every row it wrote would file historic money in the month the reconcile *ran* —
+run it in two different months and the same charge lands in both.
 </Callout>
 
 <Callout title="`--all` iterates what you recorded">
@@ -201,8 +201,9 @@ first**, because with no deadline to sort on, age is the only priority signal le
 
 A delivery the endpoint answers `400` to — a bad signature, an unparsable body, a provider nobody
 configured — never becomes a ledger row, because it is refused before an event exists to record. So
-a rotated webhook secret used to look exactly like a quiet week: zero events, zero failures, every
-check green. Each rejection now writes a `webhook.rejected` row into `billing_audit_events`, and
+without a record of its own, a rotated webhook secret looks exactly like a quiet week: zero events,
+zero failures, every check green. Each rejection writes a `webhook.rejected` row into
+`billing_audit_events`, and
 this check counts them over the last 24 h. Read them with
 `listAuditEvents({ action: 'webhook.rejected' })`, or on
 [the console's Activity screen](/docs/payments/dashboard#activity--the-trail-nothing-else-keeps).
@@ -266,9 +267,9 @@ export default class PaymentSucceededHandler {
 }
 ```
 
-`WebhookEventFor<T>` types `event.data` from the event type, so the
-`event.data as PaymentWebhookData` that used to open every handler is gone — and reading a payment
-field off a dispute event is now a compile error rather than `undefined` at runtime.
+`WebhookEventFor<T>` types `event.data` from the event type, so a handler needs no
+`event.data as PaymentWebhookData` cast to open it — and reading a payment field off a dispute
+event is a compile error rather than `undefined` at runtime.
 
 The file is discovered at boot with no further wiring. `node ace add` registers an Assembler `init`
 hook that generates a barrel of the folder at build and dev time (the file watcher re-runs it); when
@@ -278,7 +279,7 @@ See [Reacting to payments](/docs/payments/patterns/reacting-to-payments).
 <Callout type="warn" title="A misspelled `eventType` no longer boots">
 `eventType` is validated at boot. A type in the library's own `payment.*`/`subscription.*`
 namespace that is not one of the normalized `WEBHOOK_EVENT_TYPES` throws, naming the file — because
-`'payment.suceeded'` used to register a handler nothing ever called while the delivery was still
-recorded as processed and the route still answered `200`. Two handler files claiming the same type
+`'payment.suceeded'` would otherwise register a handler nothing ever calls, while the delivery is
+still recorded as processed and the route still answers `200`. Two handler files claiming the same type
 throw too, naming both. See [Webhooks](/docs/payments/webhooks#a-typo-in-eventtype-does-not-boot).
 </Callout>

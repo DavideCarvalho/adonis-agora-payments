@@ -141,9 +141,9 @@ const customer = await driver.createCustomer({
 
 <Callout type="warn" title="Woovi works in centavos, and the driver no longer converts">
 OpenPix documents its `value` field as *o valor em centavos* — the same integer minor unit this
-package uses everywhere. The driver used to divide by 100 anyway, so `amount: 1990` was sent as
-`value: 19.9` and Woovi created a **20-centavo** charge. Both halves of the driver agreed with each
-other and the tests agreed with both, which is why it survived review.
+package uses everywhere, so the amount is passed through untouched. Dividing by 100 would send
+`amount: 1990` as `value: 19.9` and have Woovi create a **20-centavo** charge — a mistake both
+halves of a driver can agree on, with the tests agreeing with both.
 
 `input.amount` now goes straight through. If you carried a workaround that multiplied Woovi amounts
 by 100, remove it — it now creates charges a hundred times too large.
@@ -248,8 +248,8 @@ A Pix cannot be charged back the way a card can — there is no issuing bank and
 **Efí — the Banco Central's MED.** A `devolução` on the Pix webhook carries a `natureza`, and three
 of its values (`MED_OPERACIONAL`, `MED_FRAUDE`, `MED_PIX_AUTOMATICO`) mean the money is being
 returned to a payer who reported fraud or an operational failure — not a refund the merchant chose
-to give. The driver used to map all of them to `payment.refunded`, which said the merchant decided
-to give the money back. Now:
+to give. Mapping all of them to `payment.refunded` would say the merchant chose to give the money
+back. Instead:
 
 - `status: 'EM_PROCESSAMENTO'` → `payment.dispute_warning` (the return is executing)
 - `status: 'DEVOLVIDO'` → `payment.disputed` (the money is gone)

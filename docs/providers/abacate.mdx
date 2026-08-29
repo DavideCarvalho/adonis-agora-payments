@@ -27,19 +27,18 @@ import { Callout } from 'fumadocs-ui/components/callout';
 This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
 neither `webhookSecret` nor `publicKey` is configured (env fallback `ABACATE_PUBLIC_KEY`).
 Set it before you deploy, or — only when verification genuinely happens upstream — name this
-provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
-running without it: the empty slot used to mean "skip verification", so
-`POST /payments/webhook/abacate` accepted any body anyone posted, including one that marks a
-payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+provider in `allowUnverifiedWebhooks`. An empty credential slot is not "skip verification": with nothing to check against,
+`POST /payments/webhook/abacate` would accept any body anyone posted to it — including one
+that marks a payment paid. The app refuses to start instead. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
 </Callout>
 
 ## Chargebacks
 
 `checkout.disputed` and `transparent.disputed` — "Disputa/chargeback aberta em um
 checkout" and "…em um pagamento transparente", one per charge flow — normalize to
-**`payment.disputed`**. They used to arrive as `payment.failed`, which files a chargeback
-as a payment that never went through: the row stopped saying `paid`, but it said the wrong
-thing, and the account whose access has to be reconsidered was never flagged.
+**`payment.disputed`**, not `payment.failed`. A failed payment says the money never moved; a
+chargeback says it moved and came back. Only the second one means an account's access has to
+be reconsidered, and a row that says `failed` never raises that question.
 
 Those two events are AbacatePay's **entire** dispute vocabulary. The published event list —
 `checkout.*`, `transparent.*`, `subscription.*`, `transfer.*`, `payout.*` — has nothing

@@ -596,11 +596,11 @@ field does not erase a stored one, and only an explicit `null` clears it. The ev
 dispute carries the deadline and the reason; the event that closes it carries neither, and blanking
 them on the close would destroy the record of the window that was answered.
 
-On `savePayment` that rule covers `externalReference`, **`paidAt` and `refundedAmount`**. `paidAt`
-used to be written through unconditionally, so a refund, a chargeback or a dispute close — none of
-which carries a settlement date — set `paid_at = NULL`, and `revenue()` filters on that column. A
-dispute closed as *won* therefore restored `status = 'paid'` with no date, and the recovered money
-left every windowed revenue figure.
+On `savePayment` that rule covers `externalReference`, **`paidAt` and `refundedAmount`**. Writing
+`paidAt` through unconditionally would let a refund, a chargeback or a dispute close — none of which
+carries a settlement date — set `paid_at = NULL`, and `revenue()` filters on that column. A dispute
+closed as *won* would restore `status = 'paid'` with no date, and the recovered money would leave
+every windowed revenue figure.
 
 `revenue` and `netRevenue` are the same query with a different figure summed: both take
 `status = 'paid'` rows windowed on `paid_at`, both answer integer minor units, and the second
@@ -837,8 +837,8 @@ flushWebhooks(options?: { timeoutMs?: number }): Promise<void>
 ```
 
 `fakePayments()` builds a real `PaymentsManager`, so `invoice()` and `assertCapability()` are there
-— the `setPayments({ driver: () => fake } as never)` apps used to write erased exactly the two
-methods whose absence would have been caught. No `methods` routing is configured, so `driver()`
+— a `setPayments({ driver: () => fake } as never)` stub erases exactly the two methods whose
+absence would have been caught. No `methods` routing is configured, so `driver()`
 returns the fake unbound; route explicitly if the test is *about* routing.
 
 Both swaps return a restore that works when **nothing** was set, which is the normal case in a test

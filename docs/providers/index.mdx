@@ -99,11 +99,6 @@ that driver **bound to `pix`** — so a charge made through it is created as Pix
 repeating yourself. An explicit `method` on the charge still wins; routing is a default, not
 an override.
 
-It did not always. Until recently the method reached the driver only when the caller set it
-twice, so a charge routed as Pix was created with whatever the gateway's dashboard defaults
-are — and could come back a card. If you have `method: 'pix'` on charges that already route
-by method, it is now redundant rather than load-bearing.
-
 `driver()` with **no** argument consults the routing map too. One method routed to the default
 provider is bound; several is ambiguous, and `charge()`/`createSubscription()` refuse rather than
 guessing which one you meant. See [Routing](/docs/payments/concepts/routing).
@@ -111,9 +106,8 @@ guessing which one you meant. See [Routing](/docs/payments/concepts/routing).
 
 <Callout type="warn" title="Every one of these needs its webhook credential before it boots">
 Sixteen of the eighteen can authenticate a webhook delivery, and each declares whether it was given
-what it needs to. A driver that **can** verify and has nothing configured refuses the boot: an empty
-credential slot used to mean "skip verification", which made
-`POST /payments/webhook/<provider>` accept any body anyone posted to it.
+what it needs to. A driver that **can** verify and has nothing configured refuses the boot: with nothing to check
+against, `POST /payments/webhook/<provider>` would accept any body anyone posted to it.
 
 Efí and InfinitePay are the two exceptions — their gateways sign nothing at all, so they declare
 `'unsupported'` and there is no credential to forget. Each page names the config key and the env

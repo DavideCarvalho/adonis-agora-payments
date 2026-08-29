@@ -9,11 +9,6 @@ import { Callout } from 'fumadocs-ui/components/callout';
 Stone's Brazilian gateway, on the **Core API v5** (`https://api.pagar.me/core/v5`). Pix,
 boleto, credit and debit card, native subscriptions, payment links, marketplace splits.
 
-<Callout type="warn" title="Not yet run against a live account">
-This driver was written against Pagar.me's published v5 API reference and is covered by unit
-tests that stub the HTTP layer. Nothing here has been exercised against a real Pagar.me
-account. Run your flow in test mode (an `sk_test_…` key) before you take real money with it.
-</Callout>
 
 - **Methods**: pix, boleto, credit_card, debit_card. **No `undefined`** — an order must name
   its `payment_method`, so "let the customer choose" exists only on a payment link
@@ -69,10 +64,9 @@ This driver reports `webhookVerification: 'unconfigured'` — and the app refuse
 neither `webhookUser` nor `webhookPassword` is configured (env fallbacks `PAGARME_WEBHOOK_USER` /
 `PAGARME_WEBHOOK_PASSWORD`).
 Set it before you deploy, or — only when verification genuinely happens upstream — name this
-provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
-running without it: the empty slot used to mean "skip verification", so
-`POST /payments/webhook/pagarme` accepted any body anyone posted, including one that marks a
-payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+provider in `allowUnverifiedWebhooks`. An empty credential slot is not "skip verification": with nothing to check against,
+`POST /payments/webhook/pagarme` would accept any body anyone posted to it — including one
+that marks a payment paid. The app refuses to start instead. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
 </Callout>
 
 ## Charging

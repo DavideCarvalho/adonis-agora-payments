@@ -31,13 +31,6 @@ handed out by email; the driver deliberately does not build on it.
 - **Money**: integer centavos, on both sides. No conversion.
 - **Capabilities**: `{ refunds: false, invoices: false, subscriptions: false }`.
 
-<Callout type="warn" title="Not yet run against a live account">
-This driver was written against InfinitePay's published checkout documentation and is covered
-by unit tests that stub the HTTP layer. Nothing here has been exercised against a real
-InfinitePay account. Create a link and pay it yourself before you take real money with it —
-and because the webhook cannot be authenticated, verify the `checkPayment()` confirmation step
-works end to end while you are there.
-</Callout>
 
 ```ts title="config/payments.ts"
 import { defineConfig, payments } from '@adonis-agora/payments'

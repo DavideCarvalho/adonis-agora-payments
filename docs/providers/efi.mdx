@@ -169,12 +169,6 @@ redelivery is the only thing that gets the failed Pix processed. A `200` would t
 done.
 </Callout>
 
-<Callout type="warn" title="Not yet run against a live account">
-This driver is written against Efí's published Pix API reference (read August 2026) and
-covered by unit tests; it has never presented a real certificate to a real Efí account. Run
-it against homologation (`pix-h`) with your own `.p12` before it touches real money — the
-mutual-TLS handshake in particular is something only a live call can prove.
-</Callout>
 
 ## MED: the Pix version of a chargeback
 
@@ -251,9 +245,9 @@ await payments.driver('efi').refund('abc123def456ghi789jkl012mn', undefined, {
   present, because Efí rejects a half-filled `devedor`.
 - **Invoices.** `capabilities.invoices` is `false` and **`listInvoices` throws**. Pix
   charges are indexed by txid and by date range, never by payer, and the API has no invoice
-  resource at all. It used to answer `[]`, which is indistinguishable from "this customer
-  has no invoices" — the reader concludes the customer never bought anything, and nothing
-  in the flow says otherwise. `PaymentsManager.assertCapability` already stops the
+  resource at all. Answering `[]` would be indistinguishable from "this customer has no
+  invoices" — the reader concludes the customer never bought anything, and nothing in the
+  flow says otherwise. `PaymentsManager.assertCapability` already stops the
   documented path, so the throw is for whoever reaches the driver directly. Fiscal notes
   come from an [invoice provider](/docs/payments/invoices); to list charges, call
   `GET /v2/cob` over a date range yourself.

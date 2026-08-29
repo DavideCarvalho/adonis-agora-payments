@@ -48,7 +48,8 @@ before the call.
 
 The provider mounts `POST /payments/webhook/:provider` for every configured driver, and that route
 is reachable from the public internet. A driver whose credential slot is empty verifies nothing, so
-anyone who knows the URL can post a body that marks a payment paid — and nothing used to say so.
+anyone who knows the URL can post a body that marks a payment paid. Declaring the state is what
+lets the library refuse to boot instead of serving that route silently.
 
 ```ts
 get webhookVerification(): WebhookVerificationState {
@@ -396,8 +397,8 @@ methods: {
 }
 ```
 
-The router's `supportedMethods` validation now accepts `credit_card` for this provider,
-and the rest of the library (routing, invoices, webhooks) works unchanged.
+The router's `supportedMethods` validation accepts `credit_card` for this provider, and the rest of
+the library (routing, invoices, webhooks) works unchanged.
 
 <Callout type="info" title="Drivers are just objects">
 Because a driver is a plain object (interface + declared metadata), testing a custom driver

@@ -66,10 +66,10 @@ provided the driver declares a real **event** id, since that is what the ledger 
 why that redelivery is cheap — the events that succeeded are already `processed` and skip
 the claim, so only the failed one runs again.
 
-<Callout type="warn" title="A failed webhook now shows up in your 5xx rate">
-This changed: a delivery whose handler threw used to answer `200`. If you alert on 5xx from the
-webhook route, it will start firing — and that is the honest signal. It was firing at the gateway
-all along, in a delivery log nobody reads. See
+<Callout type="warn" title="A failed webhook shows up in your 5xx rate">
+A delivery whose handler threw answers `500`. If you alert on 5xx from the webhook route, it will
+fire — and that is the honest signal; the gateway's own delivery log, which nobody reads, would be
+the only other place it shows. See
 [Webhooks → When one event in a batch fails](/docs/payments/webhooks#when-one-event-in-a-batch-fails).
 </Callout>
 
@@ -93,9 +93,9 @@ built-in sync switches on nothing else:
 
 ### The three dispute events
 
-`payment.disputed` is the one that takes revenue **away**. A chargeback used to arrive as an unknown
-type and pass through unprocessed, leaving the payment row saying `paid` while the money was already
-being pulled back — the app found out from its bank statement.
+`payment.disputed` is the one that takes revenue **away**. A chargeback that passes through as an
+unknown type leaves the payment row saying `paid` while the money is already being pulled back, and
+the app finds out from its bank statement.
 
 `payment.dispute_warning` is the moment before that, and it is the one worth acting on: a Stripe
 inquiry or early fraud warning, Adyen's notification of chargeback, a Razorpay `retrieval` phase,

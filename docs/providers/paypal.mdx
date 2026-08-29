@@ -62,10 +62,9 @@ return response.redirect(session.url) // paypal.com/checkoutnow?token=…
 This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
 `webhookId` is not configured (env fallback `PAYPAL_WEBHOOK_ID`).
 Set it before you deploy, or — only when verification genuinely happens upstream — name this
-provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
-running without it: the empty slot used to mean "skip verification", so
-`POST /payments/webhook/paypal` accepted any body anyone posted, including one that marks a
-payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+provider in `allowUnverifiedWebhooks`. An empty credential slot is not "skip verification": with nothing to check against,
+`POST /payments/webhook/paypal` would accept any body anyone posted to it — including one
+that marks a payment paid. The app refuses to start instead. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
 </Callout>
 
 ## Every webhook costs a round trip
@@ -153,11 +152,6 @@ next 10 days for PayPal-funded subscriptions.
 - `PARTIALLY_REFUNDED` captures map to `paid`: the canonical status set has no partial
   state, and the money did settle. The refund shows up as a `Refund` of its own.
 
-<Callout type="warn" title="Not yet exercised against a live account">
-This driver was written against PayPal's published API reference and is covered by unit
-tests, but it has never run against a real PayPal account. Put it through the sandbox with
-your own credentials before it takes real money.
-</Callout>
 
 ## Payment methods
 
@@ -266,9 +260,8 @@ orders, their webhooks are recognized:
 
 ## Paused subscriptions
 
-`SUSPENDED` used to map to `past_due`, which said the subscriber owed money. It is `paused`
-now: nothing is owed, nothing bills today, `POST /v1/billing/subscriptions/{id}/activate`
-restarts it — and this driver's own `cancelSubscription` points at suspend as the way to hold
+`SUSPENDED` maps to `paused`, not `past_due`: nothing is owed, nothing bills today,
+`POST /v1/billing/subscriptions/{id}/activate` restarts it — and this driver's own `cancelSubscription` points at suspend as the way to hold
 a subscription open. Either way it entitles nobody.
 
 ## `idempotencyKey`

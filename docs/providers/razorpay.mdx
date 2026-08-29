@@ -22,24 +22,18 @@ Basic: the key id is the username, the key secret the password.
   `reference_id` on a payment link. Read back out on `event.data.externalReference`.
 - **Refunds**: `POST /payments/{id}/refund`, full or partial.
 - **Subscriptions**: native, with plans (`POST /plans`) you create outside this driver. A
-  `paused` subscription reads as `paused` (it used to read `past_due`, which said the
-  subscriber owed money they did not); `halted` and `pending` stay `past_due`.
+  `paused` subscription reads as `paused`, not `past_due` — the subscriber owes nothing;
+  `halted` and `pending` stay `past_due`.
 - **Invoices**: `GET /invoices?customer_id=…`.
 
-<Callout type="warn" title="Not yet run against a live account">
-This driver is written against Razorpay's published API reference and covered by unit
-tests that stub the HTTP layer; nothing in it has touched a real Razorpay account. Verify
-your flow with `rzp_test_…` keys before taking real money.
-</Callout>
 
 <Callout type="warn" title="Webhook verification is required at boot">
 This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
 `webhookSecret` is not configured (env fallback `RAZORPAY_WEBHOOK_SECRET`).
 Set it before you deploy, or — only when verification genuinely happens upstream — name this
-provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
-running without it: the empty slot used to mean "skip verification", so
-`POST /payments/webhook/razorpay` accepted any body anyone posted, including one that marks a
-payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+provider in `allowUnverifiedWebhooks`. An empty credential slot is not "skip verification": with nothing to check against,
+`POST /payments/webhook/razorpay` would accept any body anyone posted to it — including one
+that marks a payment paid. The app refuses to start instead. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
 </Callout>
 
 ## `charge()` creates an order, not a payment
@@ -93,8 +87,8 @@ says what they chose. That is now mapped by category instead of only `card`:
 | `netbanking` | `bank_transfer` |
 | `paylater`, `cardless_emi` | `bnpl` |
 
-A UPI payment used to leave `Payment.method` unset, because calling it `pix` would have put
-a Brazilian label on an Indian payment. It says `upi` now.
+A UPI payment reports `Payment.method === 'upi'`. Calling it `pix` would put a Brazilian label on
+an Indian payment, and leaving it unset says nothing at all.
 
 ## `authorized` is not `paid`
 
@@ -102,10 +96,9 @@ A Razorpay payment is `authorized` — funds held on the instrument — before i
 `captured`, which is when the money moves to you. This is the clearest authorize-then-capture
 split of any gateway here.
 
-**`authorized` maps to `authorized`.** It used to map to `pending`, and the driver said so
-on purpose: of the statuses that existed, `pending` was the only one meaning "not settled,
-not failed". It understated the case — a `pending` payment is one nobody has attempted,
-while an authorized one has the payer's money reserved and a clock running on it, because
+**`authorized` maps to `authorized`.** `pending` understates the case — a `pending` payment is one
+nobody has attempted, while an authorized one has the payer's money reserved and a clock running on
+it, because
 Razorpay voids an uncaptured authorization on its own after a few days.
 
 It is still not `paid`, and the `payment.authorized` webhook still normalizes to
@@ -179,7 +172,7 @@ over money still in the account.
 
 **`respond_by` is the deadline**, a Unix timestamp — "the Unix timestamp by which a response
 should be sent to the customer" — and it comes through as `actionableUntil` in ISO 8601 on
-every dispute event that carries one. It used to sit unread on `event.raw`.
+every dispute event that carries one, rather than sitting unread on `event.raw`.
 
 **`payment.dispute.closed` is `canceled`, not `won`.** Razorpay's definition of the `closed`
 status is "a fraudulent transaction is closed after you provide details of the transaction or

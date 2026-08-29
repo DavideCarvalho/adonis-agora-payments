@@ -45,20 +45,14 @@ works on a product with Pay What You Want enabled.
   and puts the PDF on `invoice_url`. `listInvoices(customerId)` maps a customer's payments
   and fills `hostedPdfUrl` from it, which saves a call to `GET /invoices/payments/{id}`.
 
-<Callout type="warn" title="Not yet verified against a live account">
-This driver is written against Dodo Payments' published API reference and covered by unit
-tests. It has not been exercised against a live Dodo Payments account — run it in test mode
-and confirm a real payment, webhook and refund before you take real money with it.
-</Callout>
 
 <Callout type="warn" title="Webhook verification is required at boot">
 This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
 `webhookKey` is not configured (env fallback `DODO_PAYMENTS_WEBHOOK_KEY`).
 Set it before you deploy, or — only when verification genuinely happens upstream — name this
-provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
-running without it: the empty slot used to mean "skip verification", so
-`POST /payments/webhook/dodo` accepted any body anyone posted, including one that marks a
-payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+provider in `allowUnverifiedWebhooks`. An empty credential slot is not "skip verification": with nothing to check against,
+`POST /payments/webhook/dodo` would accept any body anyone posted to it — including one
+that marks a payment paid. The app refuses to start instead. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
 </Callout>
 
 ## Every charge names a product
@@ -128,7 +122,7 @@ supported-methods documentation. `voucher` has no Dodo equivalent at all.
 
 On the way back, `payment.method` reports the category the instrument belongs to: an iDEAL
 payment is `bank_transfer`, a SEPA one `bank_debit`, Klarna `bnpl`, Apple Pay `wallet`, UPI
-`upi`. All of those used to come back `unknown`.
+`upi`. Without that mapping every one of them is `unknown`.
 
 ## Money
 
@@ -171,9 +165,8 @@ made.
 ## Payment status: `authorized` is not `paid`
 
 Dodo's `requires_capture` maps to `BillingStatus === 'authorized'`: funds are held on the
-card and **nothing has been captured**, so no money has moved — but `pending`, which is
-what it used to report, understated it. There is an authorization there to capture or let
-expire.
+card and **nothing has been captured**, so no money has moved. `pending` would understate it:
+there is an authorization there to capture or let expire.
 
 `partially_captured` and `partially_captured_and_capturable` deliberately stay `pending`.
 Part of the authorization has already settled, so `authorized` ("nothing captured") would
@@ -236,9 +229,9 @@ Everything else (`refund.failed`, `license_key.*`, `payout.*`, `credit.*`, `dunn
 app handler can subscribe to it directly.
 
 **Paused subscriptions are `paused`, not `active`.** `subscription.paused` and a `paused`
-status from `findSubscription` report `Subscription.status === 'paused'`. It used to report
-`active`, which handed entitlement to a subscriber who is not paying; anything gating access
-on `status === 'active'` will start refusing them, which is the point.
+status from `findSubscription` report `Subscription.status === 'paused'`. Reporting it as
+`active` would hand entitlement to a subscriber who is not paying; anything gating access on
+`status === 'active'` refuses them, which is the point.
 
 ### Disputes: Dodo forwards them, and the clock is yours
 

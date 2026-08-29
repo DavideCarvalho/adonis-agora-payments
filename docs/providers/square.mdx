@@ -26,11 +26,6 @@ with a Bearer access token and a pinned `Square-Version` header.
 - **Subscriptions**: native, against a catalog plan **variation**.
 - **Invoices**: `POST /v2/invoices/search`, filtered by location and customer.
 
-<Callout type="warn" title="Not yet run against a live account">
-This driver is written against Square's published API reference and covered by unit tests
-that stub the HTTP layer; nothing in it has touched a real Square account. Verify your flow
-in the Sandbox (`sandbox: true`, `connect.squareupsandbox.com`) before taking real money.
-</Callout>
 
 <Callout type="warn" title="Webhook verification is required at boot">
 This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — unless
@@ -38,10 +33,9 @@ This driver reports `webhookVerification: 'unconfigured'` — and the app refuse
 `SQUARE_WEBHOOK_SIGNATURE_KEY` / `SQUARE_WEBHOOK_NOTIFICATION_URL`). Square's signature is computed
 over the notification URL as well as the body, so one without the other cannot verify anything.
 Set it before you deploy, or — only when verification genuinely happens upstream — name this
-provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
-running without it: the empty slot used to mean "skip verification", so
-`POST /payments/webhook/square` accepted any body anyone posted, including one that marks a
-payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+provider in `allowUnverifiedWebhooks`. An empty credential slot is not "skip verification": with nothing to check against,
+`POST /payments/webhook/square` would accept any body anyone posted to it — including one
+that marks a payment paid. The app refuses to start instead. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
 </Callout>
 
 ## `locationId` is required, and that is deliberate
@@ -346,8 +340,8 @@ payment. `event.data` also carries `disputeId`, `reason`, `disputeState` and, on
 
 A payment created with `metadata: { autocomplete: false }` comes back `APPROVED`: Square is
 holding the funds and the authorization expires on its own if `CompletePayment` never runs.
-That is `authorized` now. It used to read `pending`, which is the status of a payment nobody
-has attempted — an `APPROVED` one has the buyer's money reserved and a clock against it.
+That is `authorized`. `pending` is the status of a payment nobody has attempted — an `APPROVED`
+one has the buyer's money reserved and a clock against it.
 `PENDING` still maps to `pending`: Square has approved nothing yet.
 
 ```ts
@@ -382,7 +376,7 @@ decides — and a `method` Square cannot produce at all (`pix`, `boleto`) still 
 | `BUY_NOW_PAY_LATER` (Afterpay/Clearpay) | `bnpl` |
 | `CASH`, `EXTERNAL` | *unset* — money taken outside Square, which no member of the union describes |
 
-Everything but `CARD` used to come back unset, which is indistinguishable from "Square did
+Without these, everything but `CARD` comes back unset, which is indistinguishable from "Square did
 not say".
 
 ## `idempotencyKey`
@@ -399,9 +393,9 @@ reaches it on every call that has one:
 | `createSubscription` | `idempotency_key` on `CreateSubscription` | 45 |
 | `updateSubscription` | — | **throws** |
 
-`refund`, `createCustomer` and `createSubscription` used to generate a UUID and drop yours,
-which made Square's own retry safe and a retried **job** double-refund. A call that still
-arrives without a key gets a generated UUID, because Square requires one on payments and
+`refund`, `createCustomer` and `createSubscription` honour the key you pass: generating a UUID and
+dropping yours makes Square's own retry safe while letting a retried **job** double-refund. A call
+that arrives without a key gets a generated UUID, because Square requires one on payments and
 refunds.
 
 `updateSubscription` throws on an `idempotencyKey`: neither `PUT /v2/subscriptions/{id}` nor

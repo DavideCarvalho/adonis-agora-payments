@@ -125,7 +125,7 @@ disputes filed against it, the ledger rows whose stored delivery names it, and w
 this console.
 
 <Callout type="warn" title="It is not a history, and it does not claim to be">
-`billing_payments` is a single mutable row upserted in place. What it used to be is recorded
+`billing_payments` is a single mutable row upserted in place. Its earlier states are recorded
 nowhere, so "what changed on this payment, and when?" has no answer here.
 
 The ledger strand in particular is a `CAST(payload AS TEXT) LIKE` scan over the stored payloads,
@@ -267,9 +267,9 @@ processed one, which is the same guard that makes a gateway redelivery a no-op.
 **Every gateway replays, signed ones included.** The event is rebuilt from the ledger row's own two
 columns — the raw `payload` and the `normalized` event recorded beside it — and handed straight to
 the processor. No driver is involved and `parseWebhook` is never called again, so there is no
-signature to re-verify from headers the ledger does not keep. That used to be the whole problem:
-rebuilding through the driver made Stripe, Adyen and every other signing gateway answer `422`, and
-retry worked only for the minority that do not sign.
+signature to re-verify from headers the ledger does not keep. Rebuilding through the driver would
+make Stripe, Adyen and every other signing gateway answer `422`, leaving retry usable only on the
+minority that do not sign.
 
 <Callout type="warn" title="Events recorded before the `normalized` column existed">
 `billing_webhook_events.normalized` arrived after the first release. There is nothing to run for
@@ -416,7 +416,8 @@ When the billing layer is disabled (`billing.enabled: false`) the API answers `5
 
 ## Activity — the trail nothing else keeps
 
-Three kinds of row, each of which used to be a diagnostic and nothing else:
+Three kinds of row, each of which is otherwise only a diagnostic — a log line, gone by the time
+somebody asks:
 
 | Action | Written when |
 | --- | --- |

@@ -69,9 +69,9 @@ It is the **outer** defence, and it is not the only one you need.
   `PAYMENT_RECEIVED` and later `PAYMENT_CONFIRMED` for one payment sends two distinct ids, and both
   are legitimately new.
 - **It is only as good as the id the driver declares.** The key has to be an *event* identity. The
-  Asaas driver used to synthesize `${event}-${paymentId}`, which is a (payment, event-type) identity
-  — so the **second** `PAYMENT_UPDATED` about a payment was discarded as a replay of the first, and
-  a partial refund arrives as exactly that type. It reads Asaas' own top-level `id` now, and falls
+  Asaas driver reads Asaas' own top-level `id`: synthesizing `${event}-${paymentId}` would be a
+  (payment, event-type) identity, so the **second** `PAYMENT_UPDATED` about a payment would be
+  discarded as a replay of the first — and a partial refund arrives as exactly that type. It falls
   back to a deterministic hash of the raw body (a redelivery of the same notification hashes to the
   same key; two different notifications do not) rather than to the `Math.random()` that had been
   disabling deduplication outright for any payload naming neither a payment nor a subscription.

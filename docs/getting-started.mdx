@@ -62,8 +62,8 @@ from a vault, another config file, or a literal (not recommended for secrets).
 
 <Callout type="warn" title="The webhook credential is not optional">
 `webhookToken` above is what lets the driver authenticate a delivery, and a driver that *can*
-verify with nothing configured **refuses to boot** — because the empty slot used to mean "accept
-anything anyone posts to `/payments/webhook/asaas`", including a body that marks a payment paid.
+verify with nothing configured **refuses to boot** — the alternative is accepting anything anyone
+posts to `/payments/webhook/asaas`, including a body that marks a payment paid.
 
 Set the credential, or, only if verification really happens upstream, say so:
 `allowUnverifiedWebhooks: ['asaas']`. Efí and InfinitePay are exempt: their gateways sign nothing,

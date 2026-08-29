@@ -83,8 +83,8 @@ The webhook credentials are what make the mounted route **enforce** signatures �
 
 ### `allowUnverifiedWebhooks` — the opt-out for a boot refusal
 
-A driver that *can* authenticate a webhook and was given no credential **refuses to boot**. The
-empty slot used to mean "skip verification", which made `POST /payments/webhook/:provider` accept
+A driver that *can* authenticate a webhook and was given no credential **refuses to boot**. With an
+empty slot there is nothing to check against, and `POST /payments/webhook/:provider` would accept
 any body anyone posted to it — including one that marks a payment paid.
 
 ```ts title="config/payments.ts"
@@ -135,10 +135,10 @@ misconfiguration from failing *at the gateway*:
    a Pix-only gateway (AbacatePay, Woovi) is a config error, and it's caught when you
    resolve the driver — not after a request to the gateway. The manager checks
    `driver.supportedMethods` before returning the driver.
-3. **`driver()` with no argument consults `methods` too.** It used to skip the map entirely, so an
-   app that configured routing and then called `driver()` got a driver bound to **nothing** and
-   every charge fell back to whatever the gateway dashboard defaults to. Now: exactly one method
-   routed to that provider is applied, the same binding `driver('pix')` would have produced.
+3. **`driver()` with no argument consults `methods` too.** Exactly one method routed to that
+   provider is applied, the same binding `driver('pix')` would produce. Skipping the map would hand
+   back a driver bound to **nothing**, and every charge would fall back to whatever the gateway
+   dashboard defaults to.
 4. **Ambiguity is refused, not guessed.** When `methods` routes several methods to the provider
    `driver()` resolved, there is no honest answer — so `charge()` and `createSubscription()` throw
    unless the call names a `method:`, and the message names both ways to say what you meant. Every
@@ -327,11 +327,10 @@ option would have said, the code detects instead:
   claimed those channels by the time the provider looks, and the provider stands down. Your
   registration is the one that runs, and nothing is recorded twice.
 
-<Callout type="warn" title="Delete the old `start/telescope.ts` wiring">
-This page and [Diagnostics](/docs/payments/diagnostics) used to tell you to copy six lines into
-`start/telescope.ts` to register `PaymentsWatcher` by hand. The provider does it now. The hand-wired
-version still works — the claim check makes sure it is not doubled — but it is dead weight, so
-delete it.
+<Callout type="warn" title="Delete any hand-written `start/telescope.ts` wiring">
+The provider registers `PaymentsWatcher` itself, so the six lines some apps copy into
+`start/telescope.ts` are dead weight. The hand-wired version still works — the claim check makes
+sure it is not doubled — but delete it.
 </Callout>
 
 The generic `DiagnosticsWatcher` telescope ships records the payments channels either way: they are

@@ -84,14 +84,14 @@ Woovi's recommended `x-webhook-signature` takes precedence over the deprecated H
 when `webhookPublicKey` is set it is enforced, and `webhookSecret` (if also set) is
 ignored. The public key accepts PEM or the base64-encoded PEM shown in the dashboard.
 
-<Callout type="warn" title='Breaking change: an empty credential slot used to mean "skip"'>
-It used to be `if (webhookToken !== undefined)` — a driver with nothing configured verified
-**nothing**, and the mounted `POST /payments/webhook/:provider` accepted any body anyone posted to
-it, including one that marks a payment paid. Nothing logged it and nothing warned.
+<Callout type="warn" title="A provider without its webhook credential does not boot">
+A driver that can verify a delivery and has nothing configured refuses to start, naming the
+provider and the route it would have mounted. The alternative is an endpoint that accepts any body
+anyone posts to it, including one that marks a payment paid, with nothing to log and nothing to
+warn about.
 
-If you are upgrading and a provider's webhook credential is not set, the app now throws at boot
-naming the provider and the route it would have mounted. Set the credential (each provider page
-names the env var), or say explicitly that verification happens upstream:
+Set the credential (each provider page names the env var), or say explicitly that verification
+happens upstream:
 
 ```ts title="config/payments.ts"
 export default defineConfig({
@@ -305,10 +305,10 @@ same lie one level down.
 
 ### A typo in `eventType` does not boot
 
-`'payment.suceeded'` used to register a handler nothing ever called: the processor looked the type
-up, missed, and skipped — while the ledger still recorded the delivery as **processed** and the
-route still answered `200`, which tells the gateway it never has to send that event again. The
-grant simply never happened, and nothing anywhere said so.
+`'payment.suceeded'` would register a handler nothing ever calls: the processor looks the type up,
+misses, and skips — while the ledger still records the delivery as **processed** and the route still
+answers `200`, which tells the gateway it never has to send that event again. The grant simply never
+happens, and nothing anywhere says so. It throws at boot instead.
 
 The provider now refuses at boot. The rule is namespace-based and stated in the error:
 
@@ -317,7 +317,7 @@ The provider now refuses at boot. The rule is namespace-based and stated in the 
 - A gateway event a driver could not map arrives **lowercased as the gateway spells it** —
   Asaas' `PAYMENT_ANTICIPATED` becomes `payment_anticipated`, which has no dot and is accepted as-is.
 - Two handlers claiming the same type also throw, naming both files. Registration is a map keyed by
-  event type, so the second used to silently replace the first.
+  event type, so without the check the second would silently replace the first.
 
 For the rare gateway that really does spell a passthrough event with a dot inside that namespace,
 declare it:
@@ -430,9 +430,8 @@ const row = await store.findPaymentByExternalReference(payment.id)
 <Callout type="warn" title="Rows written before the column existed stay null">
 `external_reference` arrived after the first release, and there is **nothing to run** for it: the
 library [owns its schema](/docs/payments/billing#the-billing-tables) and adds the column as a
-guarded `ALTER` on the next boot, whether the install is fresh or is upgrading. (The migration
-that used to carry it, `add_billing_external_reference`, no longer exists — a page telling you to
-run it is out of date.)
+guarded `ALTER` on the next boot, whether the install is fresh or is upgrading. (There is no
+`add_billing_external_reference` migration to run — a page telling you to run one is out of date.)
 
 What does **not** happen is a backfill. Every payment row written before the column was there
 keeps `external_reference` null: `findPaymentByExternalReference` answers `null` for those ids,

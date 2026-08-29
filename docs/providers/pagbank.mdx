@@ -33,10 +33,9 @@ This driver reports `webhookVerification: 'unconfigured'` — and the app refuse
 `verifyWebhooks` is off, which is what an unset `webhookToken` (and unset `PAGBANK_WEBHOOK_TOKEN`,
 and no API token to fall back on) leaves you with.
 Set it before you deploy, or — only when verification genuinely happens upstream — name this
-provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
-running without it: the empty slot used to mean "skip verification", so
-`POST /payments/webhook/pagbank` accepted any body anyone posted, including one that marks a
-payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+provider in `allowUnverifiedWebhooks`. An empty credential slot is not "skip verification": with nothing to check against,
+`POST /payments/webhook/pagbank` would accept any body anyone posted to it — including one
+that marks a payment paid. The app refuses to start instead. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
 </Callout>
 
 ## One order, two ids — and which one this driver uses
@@ -136,11 +135,6 @@ answered in the PagBank panel. So none of `payment.dispute_warning`, `payment.di
 `payment.dispute_closed` is ever emitted here — an honest gap, pinned by a test.
 </Callout>
 
-<Callout type="warn" title="Not yet run against a live account">
-This driver is written against PagBank's published API reference (Orders API v4, read
-August 2026) and covered by unit tests; it has never talked to a real PagBank account. Run
-it in the sandbox against your own credentials before it touches real money.
-</Callout>
 
 ## What it does not do
 

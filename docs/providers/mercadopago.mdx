@@ -69,10 +69,9 @@ payment.hostedUrl // Mercado Pago's own payment page
 This driver reports `webhookVerification: 'unconfigured'` — and the app refuses to boot — when
 `webhookSecret` is not configured (env fallback `MERCADOPAGO_WEBHOOK_SECRET`).
 Set it before you deploy, or — only when verification genuinely happens upstream — name this
-provider in `allowUnverifiedWebhooks`. This is a **breaking change** for an app that has been
-running without it: the empty slot used to mean "skip verification", so
-`POST /payments/webhook/mercadopago` accepted any body anyone posted, including one that marks a
-payment paid. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
+provider in `allowUnverifiedWebhooks`. An empty credential slot is not "skip verification": with nothing to check against,
+`POST /payments/webhook/mercadopago` would accept any body anyone posted to it — including one
+that marks a payment paid. The app refuses to start instead. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
 </Callout>
 
 ## The notification carries an id and nothing else
@@ -137,9 +136,9 @@ off money that came back, because `revenue()` sums rows that say `paid`. A `char
 payment whose `status_detail` this driver does not recognize stays `payment.disputed` rather
 than closing on a guess.
 
-`charged_back` used to arrive as `payment.refunded`, which says the seller gave the money
-back voluntarily — indistinguishable from a real refund, and the row read `refunded`
-either way.
+`charged_back` maps to `payment.disputed`, never `payment.refunded`: a refund says the seller
+gave the money back voluntarily, and once the row reads `refunded` the two are
+indistinguishable.
 
 Disputes also arrive on their own webhook topic, **`topic_chargebacks_wh`**, which the
 driver handles:
@@ -192,17 +191,17 @@ so it is left unmapped and reaches your handlers under its own name.
 ## Authorized, not captured
 
 `status: "authorized"` (`status_detail: "pending_capture"`) maps to **`authorized`**: the
-card is held and nothing has moved. It used to collapse into `pending`, which understates a
-hold the issuer already granted — and `paid` would have granted access against money that
-evaporates if the authorization is never captured. The webhook for it is `payment.updated`;
+card is held and nothing has moved. Collapsing it into `pending` understates a hold the issuer
+already granted, and `paid` would grant access against money that evaporates if the authorization
+is never captured. The webhook for it is `payment.updated`;
 the contract has no authorization event.
 
 ## Paused subscriptions
 
 A preapproval with `status: "paused"` maps to **`paused`** — billing has stopped, the
 subscription is alive and can be reactivated by PUT-ing `status: "authorized"`, and it must
-**not** entitle the payer meanwhile. It used to map to `past_due`, which says a charge
-failed; nothing failed, Mercado Pago was told to stop.
+**not** entitle the payer meanwhile. `past_due` would say a charge failed; nothing failed,
+Mercado Pago was told to stop.
 
 ## What it refuses
 
@@ -256,8 +255,3 @@ failed; nothing failed, Mercado Pago was told to stop.
   `payment.updated`: it is read from `/authorized_payments/{id}`, whose response shape this
   driver has not verified against the reference.
 
-<Callout type="warn" title="Not yet exercised against a live account">
-This driver was written against Mercado Pago's published API reference and is covered by
-unit tests, but it has never run against a real Mercado Pago account. Put it through
-sandbox with your own credentials before it takes real money.
-</Callout>

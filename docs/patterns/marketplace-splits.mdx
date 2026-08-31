@@ -5,7 +5,6 @@ icon: Split
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
-import { Tab } from 'fumadocs-ui/components/tabs';
 
 When the money does not all belong to you — a marketplace, a platform taking a cut, a booking site
 paying a venue — the gateway can divide the charge at settlement instead of you moving money
@@ -25,10 +24,10 @@ application fee for an OAuth-connected seller, which is not the same thing; pass
 That is the honest failure. A `split` silently dropped is a marketplace that keeps the seller's
 money.
 
-{/* ProviderTabs is registered by the docs site (Agora): Tabs whose tabs are gateways, following the one picked at the top of the page. */}
+{/* ProviderSwitch/ProviderCase are registered by the docs site (Agora): only the case for the gateway picked in the sidebar renders — the first one until a gateway is picked. */}
 
-<ProviderTabs items={['Asaas', 'Pagar.me', 'Woovi']}>
-<Tab value="Asaas">
+<ProviderSwitch>
+<ProviderCase for="Asaas" default>
 
 Pass `split` on the charge. Each entry names a wallet and its share, by percent, by fixed amount, or
 both:
@@ -52,8 +51,8 @@ library — the driver converts it to the decimal Asaas expects, so you never wr
 Whatever is not split stays with the account that owns the API key. The split applies to the charge,
 so it flows through to a subscription's generated charges too.
 
-</Tab>
-<Tab value="Pagar.me">
+</ProviderCase>
+<ProviderCase for="Pagar.me">
 
 The same `split` input, mapped onto Pagar.me's split rules — `walletId` is the **recipient id**:
 
@@ -81,8 +80,8 @@ set percentualValue and fixedValue — pick one.
 An entry with neither is refused the same way. Pagar.me is centavos throughout, so a `flat` share
 needs no conversion — unlike Asaas, where the driver converts to the decimal the API expects.
 
-</Tab>
-<Tab value="Woovi">
+</ProviderCase>
+<ProviderCase for="Woovi">
 
 Woovi models recipients as **subaccounts**, created ahead of time and keyed by a Pix key rather than
 attached per charge:
@@ -111,8 +110,8 @@ Woovi-specific and sit outside the shared `PaymentsDriver` contract, because no 
 concept. That is the honest way to reach a gateway feature the abstraction does not cover — see
 [Custom providers](/docs/payments/custom-providers) for the other options.
 
-</Tab>
-</ProviderTabs>
+</ProviderCase>
+</ProviderSwitch>
 
 ## Computing a split yourself
 

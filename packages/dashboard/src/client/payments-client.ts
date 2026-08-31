@@ -334,19 +334,58 @@ export interface RetryResult {
 
 declare global {
   interface Window {
-    /** UI mount base (e.g. `/payments-dashboard`) injected by the provider. */
+    /** UI mount base (e.g. `/payments-dashboard`). Test/escape-hatch override; see {@link readConfig}. */
     __PAYMENTS_BASE__?: string;
-    /** JSON API base (e.g. `/payments-dashboard/api`) injected by the provider. */
+    /** JSON API base (e.g. `/payments-dashboard/api`). */
     __PAYMENTS_API__?: string;
-    /** ISO 4217 display currency injected by the provider (`config.currency`). */
+    /** ISO 4217 display currency (`config.currency`). */
     __PAYMENTS_CURRENCY__?: string;
+    /** The `dashboardAuth` surface(s), or `null` when the deployment has none. */
+    __PAYMENTS_AUTH__?: { modes: string[] } | null;
+  }
+}
+
+/** `id` of the JSON data block the provider injects into `index.html` (`spa.ts`'s `CONFIG_ELEMENT_ID`). */
+export const CONFIG_ELEMENT_ID = 'payments-dashboard-config';
+
+interface InjectedConfig {
+  base?: unknown;
+  api?: unknown;
+  currency?: unknown;
+  auth?: unknown;
+}
+
+/**
+ * The deployment config the provider handed this page.
+ *
+ * It arrives as a `<script type="application/json">` DATA block, not as globals set by an inline
+ * script. The difference is the whole bug it fixes: a host Content-Security-Policy of
+ * `script-src 'self' 'nonce-…'` (shield's `@nonce`) refuses an un-nonced inline script without a
+ * word, so the globals were never set, every URL below fell back to the default mount, and a
+ * console that had rendered perfectly answered 404 to all of its own requests. A data block is
+ * never executed, so no policy can refuse it.
+ *
+ * The `window.__PAYMENTS_*__` globals are still honoured, AFTER the block, so a test or a host
+ * embedding the bundle by hand can set them — but they are no longer how the provider speaks.
+ */
+function readConfig(): InjectedConfig {
+  if (typeof document === 'undefined') return {};
+  const element = document.getElementById(CONFIG_ELEMENT_ID);
+  if (element === null) return {};
+  try {
+    const parsed: unknown = JSON.parse(element.textContent ?? '');
+    return typeof parsed === 'object' && parsed !== null ? (parsed as InjectedConfig) : {};
+  } catch {
+    return {};
   }
 }
 
 export function uiBase(): string {
-  // Checked with `typeof ... === 'string'` (not a truthy check): the provider injects `''` for a
+  // Checked with `typeof ... === 'string'` (not a truthy check): the provider sends `''` for a
   // root-mounted dashboard (`path: ''`), which is a deliberate, valid base — a truthy check would
   // silently fall through to the default instead of honoring it.
+  const injected = readConfig().base;
+  if (typeof injected === 'string') return injected;
   if (typeof window !== 'undefined' && typeof window.__PAYMENTS_BASE__ === 'string') {
     return window.__PAYMENTS_BASE__;
   }
@@ -354,6 +393,8 @@ export function uiBase(): string {
 }
 
 export function apiBase(): string {
+  const injected = readConfig().api;
+  if (typeof injected === 'string') return injected;
   if (typeof window !== 'undefined' && typeof window.__PAYMENTS_API__ === 'string') {
     return window.__PAYMENTS_API__;
   }
@@ -362,10 +403,33 @@ export function apiBase(): string {
 
 /** The display currency the server was configured with; `'BRL'` when the page was not injected. */
 export function displayCurrency(): string {
+  const injected = readConfig().currency;
+  if (typeof injected === 'string') return injected;
   if (typeof window !== 'undefined' && typeof window.__PAYMENTS_CURRENCY__ === 'string') {
     return window.__PAYMENTS_CURRENCY__;
   }
   return 'BRL';
+}
+
+/**
+ * The auth surface the page was served with — `null` when this deployment configures no
+ * `dashboardAuth`. Only a deployment with one has a session to end: the provider registers
+ * `GET <path>/logout` ONLY alongside `dashboardAuth`, so a Sign out link on any other deployment
+ * points at a 404. A page with no config at all reads as "none" too, which errs towards hiding a
+ * link rather than showing a broken one.
+ */
+export function authSurface(): { modes: string[] } | null {
+  const config = readConfig();
+  const candidate =
+    'auth' in config
+      ? config.auth
+      : typeof window !== 'undefined'
+        ? window.__PAYMENTS_AUTH__
+        : undefined;
+  if (typeof candidate !== 'object' || candidate === null) return null;
+  const modes = (candidate as { modes?: unknown }).modes;
+  if (!Array.isArray(modes)) return null;
+  return { modes: modes.filter((m): m is string => typeof m === 'string') };
 }
 
 /** Best-effort read of an `{ error: 'unauthorized', auth: { modes } }` 401 body. */

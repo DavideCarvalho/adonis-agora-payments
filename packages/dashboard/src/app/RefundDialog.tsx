@@ -53,7 +53,7 @@ export function RefundDialog({ payment, onClose }: { payment: PaymentRow; onClos
           <h2 className="text-sm text-zinc-100">Refund this payment?</h2>
         </header>
 
-        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 px-4 py-3 text-sm">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 px-4 py-3 text-sm">
           <dt className="text-[11px] uppercase tracking-wider text-zinc-500">Amount</dt>
           <dd className="mono tnum text-zinc-100">
             {formatCents(payment.amount, payment.currency)}

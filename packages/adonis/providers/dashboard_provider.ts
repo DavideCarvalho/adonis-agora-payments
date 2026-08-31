@@ -320,7 +320,15 @@ export default class PaymentsDashboardProvider {
         return ctx.response
           .header('content-type', 'text/html; charset=utf-8')
           .header('cache-control', 'no-store, must-revalidate')
-          .send(renderIndexHtml(html, config.path, apiBase, config.currency));
+          .send(
+            renderIndexHtml(
+              html,
+              config.path,
+              apiBase,
+              config.currency,
+              config.dashboardAuth ? { modes: config.dashboardAuth.modes } : null,
+            ),
+          );
       })
       .as('payments_dashboard.index');
 

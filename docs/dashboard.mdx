@@ -50,6 +50,24 @@ a wildcard, for that reason.
 | **Webhook events** | `listWebhookEvents` | The ledger, defaulting to `failed`, filterable by event **type**, with each handler's error rendered in full. Retry from here. |
 | **Activity** | `listAuditEvents` | Who refunded what, who closed which dispute, and every delivery this endpoint **refused**. |
 
+### Linking to a screen
+
+The screen you are on is in the URL fragment, so the back button works, a reload comes back to the
+same place, and a view can be pasted into a ticket:
+
+| Hash | Opens |
+| --- | --- |
+| `#/webhooks` | a screen, on its own default filter |
+| `#/webhooks?status=failed` | a screen narrowed to a status — what the health panel's buttons write |
+| `#/activity?status=webhook.rejected` | the activity screen narrowed to one action |
+| `#/payments?customer=cus_9f2` | every payment recorded for one gateway customer |
+| `#/payments/pay_8f2…` | the payments screen with that one payment open in full |
+
+It is a fragment rather than a path on purpose. The provider registers `<path>` as an **exact** route
+and no catch-all — the prefix is shared with the package's own webhook endpoints — so
+`<path>/webhooks` would be a 404 on reload. The fragment never reaches the server, and it works at
+any mount `path` with nothing to configure. Anything it does not recognise opens the overview.
+
 ### The health panel
 
 The first thing on the Overview, above the revenue tiles, is [`billingHealth`](/docs/payments/production#health-checks)
@@ -303,7 +321,7 @@ export default defineConfig({
 | `path` | `'/payments'` | Route prefix. The HTML serves at the root; the JSON API at `<path>/api`. |
 | `currency` | `'BRL'` | ISO 4217 code the money columns render in. Does not change what is stored. |
 | `authorize` | see below | Per-request guard: `(ctx: HttpContext) => boolean \| Promise<boolean>`. |
-| `dashboardAuth` | absent | Opt-in session layer on top of `authorize`. |
+| `dashboardAuth` | absent | Opt-in session layer on top of `authorize`. The console's **Sign out** link exists only when this is set — it is the only configuration that registers a `<path>/logout` route. |
 
 ### Authorization
 
@@ -369,6 +387,25 @@ With a session configured, an unauthenticated page navigation is redirected (`30
 page and an unauthenticated API call gets `401`. `secret` is always required, plus at least one of
 `login`/`session` — a `dashboardAuth` missing either fails at boot rather than serving an ungated
 console.
+
+### Content Security Policy
+
+The console works under a strict CSP. Everything it needs is same-origin: the bundle and the
+stylesheet are served from `<path>/assets/`, the API is `<path>/api`, and the deployment config
+(mount path, API base, currency, auth surface) reaches the page as a `<script type="application/json">`
+**data block**, which is never executed and so cannot be refused. `script-src 'self'` is enough —
+including [`@adonisjs/shield`](https://docs.adonisjs.com/guides/security/securing-ssr-applications)'s
+`scriptSrc: ["'self'", '@nonce']`, the recommended setup.
+
+Before `0.4.1` the config was injected as an inline `<script>` assigning `window.__PAYMENTS_*__`
+globals. Under a nonce-only `script-src` the browser drops that script without a word, the SPA falls
+back to its default mount and **every request 404s** from a console that rendered perfectly well. If
+you saw that, this is why; upgrading fixes it with no change on your side.
+
+Two things stay optional. The page links the JetBrains Mono / Space Grotesk web fonts from Google;
+a `style-src`/`font-src` that does not allow `fonts.googleapis.com` / `fonts.gstatic.com` just
+falls back to the system monospace and sans — nothing breaks. And `img-src` is never needed: the
+favicon is an inline `data:` SVG, which `img-src 'self' data:` covers.
 
 ## The JSON API
 

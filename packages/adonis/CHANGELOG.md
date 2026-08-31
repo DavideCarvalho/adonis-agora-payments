@@ -1,5 +1,33 @@
 # @adonis-agora/payments
 
+## 0.4.0
+
+### Minor Changes
+
+- [#11](https://github.com/DavideCarvalho/adonis-agora-payments/pull/11) [`7702f90`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/7702f90a239a8062b940edf797e2c65fa962a5c4) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Stripe SDK 19–22 accepted as a peer (`^17 || ^18 || ^19 || ^20 || ^21 || ^22`)
+  
+  Stripe 22 widened `Invoice.Status` with an open string member, so the driver now maps invoice
+  statuses explicitly: the known ones pass through, an unknown one falls back to `draft` — the
+  same default a missing status already had. Nothing narrows for apps still on 17 or 18.
+  
+  The dashboard is rebuilt on Tailwind 4, React 19 and Vite 8 — same tokens and layout.
+
+### Patch Changes
+
+- [#9](https://github.com/DavideCarvalho/adonis-agora-payments/pull/9) [`01d5a0c`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/01d5a0c2f6453dd8db7d162cf500b2dae635ae74) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Docs describe how the library works, not how it got there
+  
+  Roughly sixty passages across thirty-four pages narrated the library's own bug history —
+  "it used to answer `200`", "the driver used to divide by 100", "this used to be the silent
+  default". That belongs in a changelog. A reader arriving at a provider page wants the rule
+  that holds now; the fix that produced it is noise, and it makes a stable library read like a
+  list of things that were once broken.
+  
+  Every one is rewritten to state present behaviour, keeping the reasoning that made it the
+  right behaviour — the *why* survives, the *when* goes.
+  
+  Ten provider pages also carried a "Not yet run against a live account" warning. Those are
+  gone.
+
 ## 0.3.0
 
 ### Minor Changes

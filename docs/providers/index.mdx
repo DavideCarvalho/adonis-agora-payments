@@ -25,26 +25,26 @@ These pages are the per-gateway cheat sheet for exactly those differences.
 
 {/* providers:table:start — generated from the drivers; `driver_registry.spec.ts` fails if it drifts */}
 
-| Gateway | Methods | Charge | Refunds | Subscriptions | Invoices | Disputes | Webhook auth |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| [AbacatePay](/docs/payments/providers/abacate) | pix, boleto, any | server | ✅ | ✅ | ✅ | — | ✅ |
-| [Adyen](/docs/payments/providers/adyen) | credit card, any | server | ✅ | — | — | — | ✅ |
-| [Asaas](/docs/payments/providers/asaas) | pix, boleto, credit card, debit card, any | server | ✅ | ✅ | ✅ | — | ✅ |
-| [Dodo Payments](/docs/payments/providers/dodo) | credit card, debit card, pix, upi, wallet, bank transfer, bank debit, bnpl, any | server | ✅ | ✅ | ✅ | — | ✅ |
-| [Efí](/docs/payments/providers/efi) | pix | server | ✅ | — | — | — | — |
-| [InfinitePay](/docs/payments/providers/infinitepay) | pix, credit card | checkout only | — | — | — | — | — |
-| [Lemon Squeezy](/docs/payments/providers/lemonsqueezy) | any | checkout only | ✅ | ✅ | ✅ | — | ✅ |
-| [Mercado Pago](/docs/payments/providers/mercadopago) | pix, boleto, credit card, debit card | server | ✅ | ✅ | — | — | ✅ |
-| [Mollie](/docs/payments/providers/mollie) | credit card, bank transfer, bank debit, wallet, bnpl, voucher, any | server | ✅ | ✅ | — | — | ✅ |
-| [Paddle](/docs/payments/providers/paddle) | any | checkout only | ✅ | ✅ | ✅ | — | ✅ |
-| [Pagar.me](/docs/payments/providers/pagarme) | pix, boleto, credit card, debit card | server | ✅ | ✅ | ✅ | — | ✅ |
-| [PagBank](/docs/payments/providers/pagbank) | pix, credit card, debit card, boleto | server | ✅ | — | — | — | ✅ |
-| [PayPal](/docs/payments/providers/paypal) | wallet, any | server | ✅ | ✅ | — | — | ✅ |
-| [Polar](/docs/payments/providers/polar) | credit card, any | checkout only | ✅ | ✅ | ✅ | — | ✅ |
-| [Razorpay](/docs/payments/providers/razorpay) | any | server | ✅ | ✅ | ✅ | — | ✅ |
-| [Square](/docs/payments/providers/square) | credit card, debit card, wallet, bank debit, bnpl, any | server | ✅ | ✅ | ✅ | — | ✅ |
-| [Stripe](/docs/payments/providers/stripe) | pix, credit card, boleto, any | server | ✅ | ✅ | ✅ | ✅ | ✅ |
-| [Woovi (OpenPix)](/docs/payments/providers/woovi) | pix, any | server | — | ✅ | — | — | ✅ |
+| Gateway | Methods | Charge | Refunds | Subscriptions | Invoices | Disputes | Webhook auth | Card tokenization |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [AbacatePay](/docs/payments/providers/abacate) | pix, boleto, any | server | ✅ | ✅ | ✅ | — | ✅ | — |
+| [Adyen](/docs/payments/providers/adyen) | credit card, any | server | ✅ | — | — | — | ✅ | — |
+| [Asaas](/docs/payments/providers/asaas) | pix, boleto, credit card, debit card, any | server | ✅ | ✅ | ✅ | — | ✅ | ✅ |
+| [Dodo Payments](/docs/payments/providers/dodo) | credit card, debit card, pix, upi, wallet, bank transfer, bank debit, bnpl, any | server | ✅ | ✅ | ✅ | — | ✅ | — |
+| [Efí](/docs/payments/providers/efi) | pix | server | ✅ | — | — | — | — | — |
+| [InfinitePay](/docs/payments/providers/infinitepay) | pix, credit card | checkout only | — | — | — | — | — | — |
+| [Lemon Squeezy](/docs/payments/providers/lemonsqueezy) | any | checkout only | ✅ | ✅ | ✅ | — | ✅ | — |
+| [Mercado Pago](/docs/payments/providers/mercadopago) | pix, boleto, credit card, debit card | server | ✅ | ✅ | — | — | ✅ | — |
+| [Mollie](/docs/payments/providers/mollie) | credit card, bank transfer, bank debit, wallet, bnpl, voucher, any | server | ✅ | ✅ | — | — | ✅ | — |
+| [Paddle](/docs/payments/providers/paddle) | any | checkout only | ✅ | ✅ | ✅ | — | ✅ | — |
+| [Pagar.me](/docs/payments/providers/pagarme) | pix, boleto, credit card, debit card | server | ✅ | ✅ | ✅ | — | ✅ | — |
+| [PagBank](/docs/payments/providers/pagbank) | pix, credit card, debit card, boleto | server | ✅ | — | — | — | ✅ | — |
+| [PayPal](/docs/payments/providers/paypal) | wallet, any | server | ✅ | ✅ | — | — | ✅ | — |
+| [Polar](/docs/payments/providers/polar) | credit card, any | checkout only | ✅ | ✅ | ✅ | — | ✅ | — |
+| [Razorpay](/docs/payments/providers/razorpay) | any | server | ✅ | ✅ | ✅ | — | ✅ | — |
+| [Square](/docs/payments/providers/square) | credit card, debit card, wallet, bank debit, bnpl, any | server | ✅ | ✅ | ✅ | — | ✅ | — |
+| [Stripe](/docs/payments/providers/stripe) | pix, credit card, boleto, any | server | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| [Woovi (OpenPix)](/docs/payments/providers/woovi) | pix, any | server | — | ✅ | — | — | ✅ | — |
 
 {/* providers:table:end */}
 

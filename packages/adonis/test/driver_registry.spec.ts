@@ -105,6 +105,12 @@ describe('driver registry', () => {
       expect(cells[5], `${slug}: subscriptions cell disagrees`).toBe(supports('subscriptions'));
       expect(cells[6], `${slug}: invoices cell disagrees`).toBe(supports('invoices'));
       expect(cells[7], `${slug}: disputes cell disagrees`).toBe(supports('disputes'));
+      // Tokenização de cartão é a coluna que responde "posso montar um checkout
+      // transparente com este gateway?" antes de alguém digitar um cartão — e a resposta
+      // é código (`capabilities.cardTokenization`), não folclore.
+      expect(cells[9], `${slug}: card tokenization cell disagrees`).toBe(
+        supports('cardTokenization'),
+      );
       // A driver returns the literal `'configured'` only from `webhookVerification`, so its
       // presence is exactly "this gateway signs its deliveries and we can check it". The two
       // without it sign nothing at all — a dash there is the gateway's gap, not the driver's.

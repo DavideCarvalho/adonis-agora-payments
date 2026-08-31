@@ -247,20 +247,60 @@ Four properties worth knowing:
   both create; Asaas offers nothing to prevent that. It closes the retry case, which is the
   one that actually happens.
 
-## Transparent checkout — `card`
+## Transparent checkout — `tokenizeCard` then `card`
 
-Asaas' card flow is "tokenize in the frontend, charge with the token" — the card number
-never touches your server. `card` carries the token plus the holder info the gateway
-requires for the charge (and for issuing the NFS-e):
+Asaas has **no browser-side tokenization**. There is no publishable key: the tokenization
+endpoint authenticates with the account's API key, so the card number necessarily reaches
+your server on its way to Asaas. Any guide that tells you otherwise is describing Stripe.
+
+That is the whole reason `tokenizeCard` exists on the driver — the alternative is every
+application hand-rolling the same authenticated POST, which is how one of them shipped it
+against `/creditCard/tokenize` (a path that does not exist) and turned every card checkout
+into "cartão inválido".
 
 ```ts
-await payments.driver('credit_card').charge({
+const driver = payments.driver('credit_card')
+
+// Step 1 — the ONE call that carries a PAN. Do not log the input, do not store it.
+const card = await driver.tokenizeCard({
+  customerId: 'cus_123',
+  card: { holderName, number, expiryMonth: '05', expiryYear: '2030', ccv },
+  holder: { name, email, cpfCnpj, postalCode, addressNumber, phone },
+  // The payer's IP, from the request the card was typed into — never a client-set field.
+  remoteIp: request.ip(),
+})
+
+// Step 2 — from here on, only the token travels.
+await driver.charge({
   customerId: 'cus_123',
   amount: 1990,
-  card: {
-    token: cardTokenFromFrontend,
-    holder: { name, email, cpfCnpj, postalCode, addressNumber, phone },
-    remoteIp,
-  },
+  card: { token: card.token, holder: { name, email, cpfCnpj, postalCode, addressNumber, phone } },
 })
 ```
+
+`tokenizeCard` returns `{ token, last4, brand, provider }` — enough to charge, and enough
+for a UI to say *"Visa •••• 8829"*. Nothing else from the gateway's response crosses the
+boundary; the point of tokenizing is that the card stops travelling.
+
+The same token works for recurring billing: `createSubscription({ card: { token } })` makes
+Asaas charge the card each cycle.
+
+<Callout type="warn">
+  **Tokenization must be enabled on your production account.** It is on by default in
+  sandbox, but in production Asaas gates it behind your account manager and a risk review,
+  which can be denied. Verify it before shipping a card checkout — otherwise the endpoint
+  refuses in production while every sandbox test passed.
+</Callout>
+
+<Callout>
+  **The token belongs to the customer.** Asaas binds it to the `customer` it was created
+  for and refuses it in anyone else's transaction, which is why `customerId` is required
+  rather than optional.
+</Callout>
+
+### PCI scope, stated plainly
+
+For this one request your server handles a primary account number. That puts the request
+in PCI scope (SAQ A-EP territory at best) and makes three things non-negotiable: do not log
+the body, do not persist the card, and terminate TLS properly. The driver holds up its end —
+it never logs the input and returns only the token — but the rest is the application's.

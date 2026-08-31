@@ -153,11 +153,13 @@ export {
   webhookVerificationOutcome,
 } from './diagnostics.js';
 export type {
+  CardInput,
   ChargeInput,
   CheckoutInput,
   CreateCustomerInput,
   CreateSubscriptionInput,
   PaymentsDriver,
+  TokenizeCardInput,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
   WebhookVerificationState,
@@ -200,6 +202,7 @@ export type {
   Refund,
   Subscription,
   SubscriptionStatus,
+  TokenizedCard,
   WebhookEvent,
 } from './types.js';
 export type {

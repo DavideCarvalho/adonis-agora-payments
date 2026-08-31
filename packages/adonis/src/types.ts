@@ -286,6 +286,23 @@ export interface Refund {
   createdAt: string;
 }
 
+/**
+ * What comes back from {@link import('./driver.js').PaymentsDriver.tokenizeCard}.
+ *
+ * Deliberately narrow: a token to charge with, plus the two fields a UI needs to say
+ * WHICH card is saved. Nothing else from the gateway's tokenization response belongs on
+ * this side of the boundary — the point of tokenizing is that the card stops travelling.
+ */
+export interface TokenizedCard {
+  /** The reusable token — what {@link import('./driver.js').CardInput.token} takes. */
+  token: string;
+  /** Last four digits, for "Mastercard •••• 4242". */
+  last4: string;
+  /** Card brand as the gateway reports it, e.g. `'VISA'`, `'MASTERCARD'`. */
+  brand: string;
+  provider: string;
+}
+
 export interface CheckoutSession {
   id: string;
   gatewayId: string;

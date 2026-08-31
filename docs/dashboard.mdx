@@ -330,7 +330,8 @@ equal to `PAYMENTS_DASHBOARD_TOKEN`, compared in constant time, and **denies whe
 unset** — it fails closed. The token is read from an `Authorization: Bearer <token>` header, an
 `x-payments-token` header, or a `?token=` query param.
 
-Replace it with your own guard; a denied request gets a `403`:
+Replace it with your own guard; a denied request gets a `403` — JSON for an API call, the
+[access-denied page](#the-access-denied-page) for a browser:
 
 ```ts
 export default defineConfig({
@@ -359,6 +360,54 @@ gateway. The default token gate is a floor for staging, not an answer for produc
 guard in front of it.
 </Callout>
 
+### The access-denied page
+
+A refused **API** request gets JSON (`403 { "error": "forbidden" }`, or
+`401 { "error": "unauthorized", "auth": { "modes": [...] } }` without a session) — that is what
+the console's own `fetch` calls expect. A refused **page** navigation — the console shell, its
+assets, or the Mode-A-only "open this from your app" case — gets a real page instead: a dark card
+in the console's visual language showing the status, a sentence explaining the refusal, a
+"Back to app" link and, when `dashboardAuth.login` is configured, a "Sign in" button. It carries
+no inline script, so a nonce'd `script-src` CSP cannot break it (its one inline `<style>` picks up
+`@adonisjs/shield`'s request nonce).
+
+Tweak it with `accessDenied` — every field optional:
+
+```ts title="config/payments_dashboard.ts"
+export default defineConfig({
+  accessDenied: {
+    brand: 'Entre Textos',           // eyebrow + <title>; default "Payments"
+    title: 'Sem acesso',             // default depends on the refusal
+    message: 'Peça ao admin para liberar o console de pagamentos.',
+    homeHref: '/admin',              // "Back to app"; default "/", `false` hides it
+    homeLabel: 'Voltar',
+    loginHref: '/entrar',            // default: the built-in login page when one exists
+    loginLabel: 'Entrar',
+    accent: '#f59e0b',               // any CSS colour; default: the console's cyan
+  },
+})
+```
+
+Or replace it. Pass a function and it receives the refusal (`status`, `reason` —
+`'forbidden'`, `'unauthenticated'` or `'session-required'` — `basePath`, `loginHref`, and the CSP
+`nonce` when there is one) plus the `HttpContext`. Return an HTML string to have it served with the
+right status; answer the request yourself and return nothing to make the provider stand down:
+
+```ts title="config/payments_dashboard.ts"
+export default defineConfig({
+  accessDenied: (info, ctx) => {
+    if (info.reason === 'unauthenticated') {
+      ctx.response.redirect(`/login?next=${encodeURIComponent(info.basePath)}`)
+      return
+    }
+    return `<!doctype html><title>${info.status}</title><h1>Sem acesso</h1>`
+  },
+})
+```
+
+An `authorize` hook that already wrote a redirect still wins — the provider never overwrites a
+`location` header, with or without `accessDenied`.
+
 ### A session instead of a token
 
 `dashboardAuth` adds a signed session cookie on top of `authorize` (**both** must pass). It is
@@ -384,7 +433,10 @@ export default defineConfig({
 ```
 
 With a session configured, an unauthenticated page navigation is redirected (`302`) to the login
-page and an unauthenticated API call gets `401`. `secret` is always required, plus at least one of
+page and an unauthenticated API call gets `401`. The login page is a plain HTML form that works
+without JavaScript (a form submit is answered with a redirect — to the page the operator came
+from, or back to the form with the error shown) and whose inline script and style carry
+`@adonisjs/shield`'s request nonce, so a `script-src 'self' @nonce` policy keeps it working. `secret` is always required, plus at least one of
 `login`/`session` — a `dashboardAuth` missing either fails at boot rather than serving an ungated
 console.
 

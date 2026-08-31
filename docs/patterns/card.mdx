@@ -5,7 +5,6 @@ icon: CreditCard
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
-import { Tab } from 'fumadocs-ui/components/tabs';
 
 **The card number never touches your server.** The browser sends it straight to the gateway's
 tokenizer — Stripe.js, or Asaas' tokenization endpoint — and gets back an opaque string. That string
@@ -71,10 +70,10 @@ Prefer `card` — it is the only one that carries `holder` and `remoteIp`.
 
 ## What each gateway needs
 
-{/* ProviderTabs is registered by the docs site (Agora): Tabs whose tabs are gateways, following the one picked at the top of the page. */}
+{/* ProviderSwitch/ProviderCase are registered by the docs site (Agora): only the case for the gateway picked in the sidebar renders — the first one until a gateway is picked. */}
 
-<ProviderTabs items={['Stripe', 'Asaas']}>
-<Tab value="Stripe">
+<ProviderSwitch>
+<ProviderCase for="Stripe" default>
 
 **The token becomes `payment_method` on the PaymentIntent.** That is the whole mapping — either
 input reaches the same field:
@@ -120,8 +119,8 @@ the same rule as everywhere else in this library; cards just make it easier to g
 **Currency** falls back to the driver's configured currency, which Stripe requires you to set — pass
 `currency` on the charge when a single app bills in more than one.
 
-</Tab>
-<Tab value="Asaas">
+</ProviderCase>
+<ProviderCase for="Asaas">
 
 **Three fields, and the holder block is not optional in practice:**
 
@@ -196,8 +195,8 @@ immediately, but it is on the payload.
 **Your reference** is Asaas' own `externalReference`, and on subscriptions it is propagated to every
 installment. See [Subscriptions](/docs/payments/patterns/subscriptions).
 
-</Tab>
-</ProviderTabs>
+</ProviderCase>
+</ProviderSwitch>
 
 ## The differences at a glance
 

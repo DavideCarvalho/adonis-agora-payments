@@ -5,7 +5,6 @@ icon: RefreshCw
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
-import { Tab } from 'fumadocs-ui/components/tabs';
 
 A subscription is created at the gateway; the billing layer keeps `billing_subscriptions` in sync
 from the webhooks after that. What you own is creating it correctly — and the gateways differ enough
@@ -40,10 +39,10 @@ themselves do **not** carry it — route those on `gatewayId`, and see
 
 ## What each gateway needs
 
-{/* ProviderTabs is registered by the docs site (Agora): Tabs whose tabs are gateways, following the one picked at the top of the page. */}
+{/* ProviderSwitch/ProviderCase are registered by the docs site (Agora): only the case for the gateway picked in the sidebar renders — the first one until a gateway is picked. */}
 
-<ProviderTabs items={['Asaas', 'Woovi', 'Stripe', 'AbacatePay']}>
-<Tab value="Asaas">
+<ProviderSwitch>
+<ProviderCase for="Asaas" default>
 
 Native recurring billing, and the most complete of the four: card, Pix or boleto, with a real
 transparent-checkout card flow.
@@ -93,8 +92,8 @@ await driver.cancelSubscription(subscription.gatewayId)
 If you sell "access until the end of the period", keep that end date in your own row and enforce it
 yourself.
 
-</Tab>
-<Tab value="Woovi">
+</ProviderCase>
+<ProviderCase for="Woovi">
 
 **Pix Automático — recurring Pix, no card.** The payer approves a recurring authorization and each
 cycle generates a charge against it.
@@ -133,8 +132,8 @@ metadata: { chargeType: 'FIXED', dayDue: 5 }
 
 **No card, and no refunds.** If you need either, route them to a different gateway.
 
-</Tab>
-<Tab value="Stripe">
+</ProviderCase>
+<ProviderCase for="Stripe">
 
 SDK-backed recurring billing, and the one place `planId` means a real gateway object:
 
@@ -159,8 +158,8 @@ the webhook payload.
 await driver.cancelSubscription(subscription.gatewayId, { atPeriodEnd: true })
 ```
 
-</Tab>
-<Tab value="AbacatePay">
+</ProviderCase>
+<ProviderCase for="AbacatePay">
 
 Recurring is supported, but **the transparent checkout is not** — the recurring charge does not go
 through the inline PIX/Boleto flow that one-off charges use.
@@ -182,8 +181,8 @@ normalized onto the usual `subscription.*` types.
 For a card-backed subscription, route `credit_card` elsewhere — AbacatePay has no card support and
 the manager will tell you so before any request goes out.
 
-</Tab>
-</ProviderTabs>
+</ProviderCase>
+</ProviderSwitch>
 
 ## The differences at a glance
 

@@ -5,7 +5,6 @@ icon: QrCode
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
-import { Tab } from 'fumadocs-ui/components/tabs';
 
 Pix is the flow most Brazilian apps start with, and the gateways that serve it disagree on almost
 every detail: whether a customer is required, where your reference goes, what the QR looks like
@@ -54,10 +53,10 @@ export async function startPixCheckout(user: User, plan: Plan) {
 
 ## What each gateway needs
 
-{/* ProviderTabs is registered by the docs site (Agora): Tabs whose tabs are gateways, following the one picked at the top of the page. */}
+{/* ProviderSwitch/ProviderCase are registered by the docs site (Agora): only the case for the gateway picked in the sidebar renders — the first one until a gateway is picked. */}
 
-<ProviderTabs items={['Asaas', 'Woovi', 'AbacatePay']}>
-<Tab value="Asaas">
+<ProviderSwitch>
+<ProviderCase for="Asaas" default>
 
 **Requires a customer.** A charge without `customerId` throws before any request goes out:
 
@@ -106,8 +105,8 @@ worth handling in the UI rather than assuming.
 
 **Due date** defaults to 7 days from now. Override it with `metadata.dueDate` as `YYYY-MM-DD`.
 
-</Tab>
-<Tab value="Woovi">
+</ProviderCase>
+<ProviderCase for="Woovi">
 
 **No customer required.** Woovi's model is charge-first; `customerId` is optional and, when given, is
 the Woovi customer id.
@@ -158,8 +157,8 @@ button:
 getPayments().assertCapability(driver, 'refunds')   // throws on Woovi
 ```
 
-</Tab>
-<Tab value="AbacatePay">
+</ProviderCase>
+<ProviderCase for="AbacatePay">
 
 **Requires a customer, and the payer's name + taxId.** AbacatePay's charge is a *transparent
 checkout* (`POST /v2/transparents/create`) — PIX or Boleto inline, no redirect — and the gateway
@@ -198,8 +197,8 @@ the gateway. See [Routing](/docs/payments/concepts/routing).
 **What comes back** is the QR inline — `brCodeBase64` → `pixQrCodeImage`, `brCode` → `pixCode` — or,
 for boleto, a hosted URL in `hostedUrl`.
 
-</Tab>
-</ProviderTabs>
+</ProviderCase>
+</ProviderSwitch>
 
 ## The differences at a glance
 

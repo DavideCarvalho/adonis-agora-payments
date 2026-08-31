@@ -308,3 +308,334 @@ describe('action routes are guarded', () => {
     });
   }
 });
+
+/**
+ * A BROWSER that is refused gets a page, not the API's JSON. The shell and the assets route are
+ * `page` requests; the API stays JSON so the SPA's `fetch` calls keep parsing it.
+ */
+describe('page routes are refused with the access-denied page', () => {
+  interface Recorded {
+    status?: number;
+    body?: unknown;
+    headers: Record<string, string>;
+  }
+
+  function fakeCtx(recorded: Recorded, extra: Record<string, unknown> = {}) {
+    const response = {
+      getHeader: (name: string) => recorded.headers[name.toLowerCase()],
+      status(code: number) {
+        recorded.status = code;
+        return this;
+      },
+      json(body: unknown) {
+        recorded.body = body;
+        return this;
+      },
+      header(name: string, value: string) {
+        recorded.headers[name.toLowerCase()] = value;
+        return this;
+      },
+      send(body: unknown) {
+        recorded.body = body;
+      },
+      redirect: () => ({ withQs: () => ({ toPath: () => undefined }) }),
+      ...extra,
+    };
+    return {
+      response,
+      params: { file: 'index.js' },
+      request: {
+        qs: () => ({}),
+        body: () => ({}),
+        url: () => '/payments',
+        plainCookie: () => undefined,
+        secure: () => false,
+        headers: () => ({}),
+      },
+    };
+  }
+
+  async function pageHandler(config: PaymentsDashboardConfig, pattern = '/payments') {
+    const routes = await bootWith(config);
+    const route = routes.find((r) => r.pattern === pattern && r.method === 'get');
+    expect(route?.handler).toBeTypeOf('function');
+    return route?.handler as (ctx: unknown) => Promise<unknown>;
+  }
+
+  it('answers a forbidden shell navigation with the built-in 403 page', async () => {
+    const recorded: Recorded = { headers: {} };
+    await (await pageHandler({ authorize: () => false }))(fakeCtx(recorded));
+    expect(recorded.status).toBe(403);
+    expect(recorded.headers['content-type']).toBe('text/html; charset=utf-8');
+    expect(recorded.headers['cache-control']).toBe('no-store, must-revalidate');
+    expect(recorded.body).toContain('<!doctype html>');
+    expect(recorded.body).toContain('<h1>Access denied</h1>');
+    expect(recorded.body).toContain('Payments');
+  });
+
+  it('refuses the assets route the same way', async () => {
+    const recorded: Recorded = { headers: {} };
+    await (await pageHandler({ authorize: () => false }, '/payments/assets/:file'))(
+      fakeCtx(recorded),
+    );
+    expect(recorded.status).toBe(403);
+    expect(recorded.body).toContain('<h1>Access denied</h1>');
+  });
+
+  it('keeps JSON for the API', async () => {
+    const recorded: Recorded = { headers: {} };
+    await (await pageHandler({ authorize: () => false }, '/payments/api/health'))(
+      fakeCtx(recorded),
+    );
+    expect(recorded.status).toBe(403);
+    expect(recorded.body).toEqual({ error: 'forbidden' });
+  });
+
+  it('serves the "open from your app" page (401) when only a session hook is configured', async () => {
+    const recorded: Recorded = { headers: {} };
+    await (await pageHandler({ dashboardAuth: { secret: 's'.repeat(32), session: () => null } }))(
+      fakeCtx(recorded),
+    );
+    expect(recorded.status).toBe(401);
+    expect(recorded.body).toContain('<h1>Open this console from your app</h1>');
+    expect(recorded.body).not.toContain('/payments/login');
+  });
+
+  it('applies the accessDenied object options', async () => {
+    const recorded: Recorded = { headers: {} };
+    await (
+      await pageHandler({
+        authorize: () => false,
+        accessDenied: { brand: 'Entre Textos', title: 'Sem acesso', homeHref: '/admin' },
+      })
+    )(fakeCtx(recorded));
+    expect(recorded.body).toContain('<h1>Sem acesso</h1>');
+    expect(recorded.body).toContain('Entre Textos');
+    expect(recorded.body).toContain('href="/admin"');
+  });
+
+  it('serves a renderer function HTML with the refusal info and the ctx', async () => {
+    const recorded: Recorded = { headers: {} };
+    const ctx = fakeCtx(recorded);
+    let seen: unknown[] = [];
+    await (
+      await pageHandler({
+        authorize: () => false,
+        dashboardAuth: { secret: 's'.repeat(32), login: () => null },
+        accessDenied: (info, c) => {
+          seen = [info, c];
+          return '<p>custom</p>';
+        },
+      })
+    )(ctx);
+    expect(recorded.status).toBe(403);
+    expect(recorded.body).toBe('<p>custom</p>');
+    expect(seen[0]).toEqual({
+      status: 403,
+      reason: 'forbidden',
+      basePath: '/payments',
+      loginHref: '/payments/login',
+    });
+    expect(seen[1]).toBe(ctx);
+  });
+
+  it('stands down when the renderer redirected instead of returning HTML', async () => {
+    const recorded: Recorded = { headers: {} };
+    await (
+      await pageHandler({
+        authorize: () => false,
+        accessDenied: (_info, c) => {
+          (c.response as unknown as { header(n: string, v: string): void }).header(
+            'location',
+            '/login',
+          );
+        },
+      })
+    )(fakeCtx(recorded));
+    expect(recorded.headers.location).toBe('/login');
+    expect(recorded.body).toBeUndefined();
+  });
+
+  it('never overwrites a redirect the authorize hook already wrote', async () => {
+    const recorded: Recorded = { headers: {} };
+    await (
+      await pageHandler({
+        authorize: (c) => {
+          (c.response as unknown as { header(n: string, v: string): void }).header(
+            'location',
+            '/login',
+          );
+          return false;
+        },
+      })
+    )(fakeCtx(recorded));
+    expect(recorded.headers.location).toBe('/login');
+    expect(recorded.status).toBeUndefined();
+    expect(recorded.body).toBeUndefined();
+  });
+
+  it('puts the CSP nonce on the inline <style> when the host exposes one', async () => {
+    const recorded: Recorded = { headers: {} };
+    await (await pageHandler({ authorize: () => false }))(fakeCtx(recorded, { nonce: 'n0nce' }));
+    expect(recorded.body).toContain('<style nonce="n0nce">');
+  });
+});
+
+/**
+ * The built-in login page must work with its script dropped by a CSP (or JavaScript off): the
+ * same `POST` answers JSON to the page's `fetch` and a redirect to a classic form submit.
+ */
+describe('login routes: JSON for the script, redirects for a plain form', () => {
+  interface Recorded {
+    status?: number;
+    body?: unknown;
+    headers: Record<string, string>;
+    redirect?: { path: string; qs?: Record<string, string> };
+    cookie?: string;
+  }
+
+  function fakeCtx(
+    recorded: Recorded,
+    request: { body?: unknown; contentType?: string; qs?: Record<string, unknown>; nonce?: string },
+  ) {
+    const response = {
+      getHeader: (name: string) => recorded.headers[name.toLowerCase()],
+      status(code: number) {
+        recorded.status = code;
+        return this;
+      },
+      json(body: unknown) {
+        recorded.body = body;
+        return this;
+      },
+      header(name: string, value: string) {
+        recorded.headers[name.toLowerCase()] = value;
+        return this;
+      },
+      send(body: unknown) {
+        recorded.body = body;
+      },
+      redirect: () => {
+        let qs: Record<string, string> | undefined;
+        const chain = {
+          withQs(value: Record<string, string>) {
+            qs = value;
+            return chain;
+          },
+          toPath(path: string) {
+            recorded.redirect = qs ? { path, qs } : { path };
+          },
+        };
+        return chain;
+      },
+      plainCookie: (_name: string, value: string) => {
+        recorded.cookie = value;
+      },
+      ...(request.nonce !== undefined ? { nonce: request.nonce } : {}),
+    };
+    return {
+      response,
+      params: {},
+      request: {
+        qs: () => request.qs ?? {},
+        body: () => request.body ?? {},
+        header: (name: string) =>
+          name.toLowerCase() === 'content-type' ? request.contentType : undefined,
+        url: () => '/payments',
+        plainCookie: () => undefined,
+        secure: () => false,
+        headers: () => ({}),
+      },
+    };
+  }
+
+  const config: PaymentsDashboardConfig = {
+    dashboardAuth: {
+      secret: 's'.repeat(32),
+      login: (username, password) =>
+        username === 'ana' && password === 'pw' ? { id: 'u1', name: 'Ana' } : null,
+    },
+  };
+
+  async function handler(method: 'get' | 'post') {
+    const routes = await bootWith(config);
+    const route = routes.find((r) => r.pattern === '/payments/login' && r.method === method);
+    expect(route?.handler).toBeTypeOf('function');
+    return route?.handler as (ctx: unknown) => Promise<unknown>;
+  }
+
+  it('GET renders the page with the sanitized returnTo, the error flag and the CSP nonce', async () => {
+    const recorded: Recorded = { headers: {} };
+    await (await handler('get'))(
+      fakeCtx(recorded, { qs: { returnTo: '/payments/p/1', error: '1' }, nonce: 'n0nce' }),
+    );
+    expect(recorded.headers['content-type']).toBe('text/html; charset=utf-8');
+    expect(recorded.body).toContain('name="returnTo" value="/payments/p/1"');
+    expect(recorded.body).toContain('role="alert" style="display:block"');
+    expect(recorded.body).toContain('<script nonce="n0nce">');
+
+    const open: Recorded = { headers: {} };
+    await (await handler('get'))(fakeCtx(open, { qs: { returnTo: '//evil.com' } }));
+    expect(open.body).toContain('name="returnTo" value="/payments"');
+    expect(open.body).not.toContain('style="display:block"');
+  });
+
+  it('POST as JSON keeps answering JSON', async () => {
+    const ok: Recorded = { headers: {} };
+    await (await handler('post'))(
+      fakeCtx(ok, {
+        contentType: 'application/json',
+        body: { username: 'ana', password: 'pw', returnTo: '/payments/p/1' },
+      }),
+    );
+    expect(ok.status).toBe(200);
+    expect(ok.body).toEqual({ redirectTo: '/payments/p/1' });
+    expect(ok.cookie).toBeTypeOf('string');
+    expect(ok.redirect).toBeUndefined();
+
+    const bad: Recorded = { headers: {} };
+    await (await handler('post'))(
+      fakeCtx(bad, { contentType: 'application/json', body: { username: 'ana', password: 'x' } }),
+    );
+    expect(bad.status).toBe(401);
+    expect(bad.body).toEqual({ error: 'Invalid username or password.' });
+  });
+
+  it('POST as a form redirects: to returnTo on success, back to the login page on failure', async () => {
+    const ok: Recorded = { headers: {} };
+    await (await handler('post'))(
+      fakeCtx(ok, {
+        contentType: 'application/x-www-form-urlencoded',
+        body: { username: 'ana', password: 'pw', returnTo: '/payments/p/1' },
+      }),
+    );
+    expect(ok.cookie).toBeTypeOf('string');
+    expect(ok.redirect).toEqual({ path: '/payments/p/1' });
+    expect(ok.body).toBeUndefined();
+
+    const bad: Recorded = { headers: {} };
+    await (await handler('post'))(
+      fakeCtx(bad, {
+        contentType: 'application/x-www-form-urlencoded; charset=UTF-8',
+        body: { username: 'ana', password: 'x', returnTo: '/payments/p/1' },
+      }),
+    );
+    expect(bad.cookie).toBeUndefined();
+    expect(bad.redirect).toEqual({
+      path: '/payments/login',
+      qs: { error: '1', returnTo: '/payments/p/1' },
+    });
+
+    const malformed: Recorded = { headers: {} };
+    await (await handler('post'))(
+      fakeCtx(malformed, {
+        contentType: 'application/x-www-form-urlencoded',
+        body: { returnTo: 'https://evil.com' },
+      }),
+    );
+    expect(malformed.redirect).toEqual({
+      path: '/payments/login',
+      qs: { error: '1', returnTo: '/payments' },
+    });
+  });
+});

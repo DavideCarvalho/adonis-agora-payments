@@ -6,6 +6,10 @@ import type { ApplicationService, HttpRouterService } from '@adonisjs/core/types
 import type { BillingStore } from '../src/billing/billing_store.js';
 import type { WebhookHandler } from '../src/billing/webhook_processor.js';
 import { WebhookProcessor } from '../src/billing/webhook_processor.js';
+import {
+  type AccessDeniedInfo,
+  resolveAccessDeniedPage,
+} from '../src/dashboard/access_denied_page.js';
 import { createRefundAction, createReplayAction } from '../src/dashboard/actions.js';
 import {
   performLogin,
@@ -13,6 +17,7 @@ import {
   type ResolvedDashboardAuth,
   readSession,
   SESSION_COOKIE_NAME,
+  sanitizeReturnTo,
 } from '../src/dashboard/auth.js';
 import {
   type PaymentsDashboardConfig,
@@ -378,21 +383,49 @@ export default class PaymentsDashboardProvider {
         .get(loginPath, async (ctx) => {
           ctx.response.header('content-type', 'text/html; charset=utf-8');
           ctx.response.header('cache-control', 'no-store, must-revalidate');
-          return ctx.response.send(renderLoginPage(config.path));
+          const qs = ctx.request.qs();
+          const nonce = cspNonce(ctx);
+          return ctx.response.send(
+            renderLoginPage(config.path, {
+              ...(nonce !== undefined ? { nonce } : {}),
+              error: qs.error !== undefined,
+              returnTo: qs.returnTo,
+            }),
+          );
         })
         .as('payments_dashboard.login.page');
 
+      // Two callers: the page's own `fetch` (JSON in, JSON out — `{ redirectTo }` / `{ error }`)
+      // and, with JavaScript off or its inline script dropped by a CSP, the same page as a classic
+      // form post (form-encoded in, a redirect out: to `returnTo` on success, back to the login
+      // page with `?error` on failure). Same hook, same cookie, same uniform failure either way.
       router
         .post(loginPath, async (ctx) => {
-          const outcome = await performLogin(auth, ctx.request.body(), config.path);
+          const body = ctx.request.body();
+          const outcome = await performLogin(auth, body, config.path);
+          const form = isFormPost(ctx);
+          const backToLogin = () =>
+            ctx.response
+              .redirect()
+              .withQs({
+                error: '1',
+                returnTo: sanitizeReturnTo(
+                  (body as { returnTo?: unknown } | null)?.returnTo,
+                  config.path || '/',
+                ),
+              })
+              .toPath(loginPath);
           if (outcome.kind === 'bad-request') {
+            if (form) return backToLogin();
             return ctx.response.status(400).json({ error: outcome.message });
           }
           if (outcome.kind === 'unauthorized') {
             await this.warnHookThrow(outcome.hookError);
+            if (form) return backToLogin();
             return ctx.response.status(401).json({ error: outcome.message });
           }
           this.writeSessionCookie(ctx, auth, outcome.cookieValue);
+          if (form) return ctx.response.redirect().toPath(outcome.redirectTo);
           return ctx.response.status(200).json({ redirectTo: outcome.redirectTo });
         })
         .as('payments_dashboard.login.submit');
@@ -432,10 +465,12 @@ export default class PaymentsDashboardProvider {
    * Run the guards for a dashboard resource. Composes the `authorize` hook (bearer token/custom)
    * with the optional `dashboardAuth` session guard — BOTH must pass:
    *
-   * 1. `authorize` fails -> `403`.
+   * 1. `authorize` fails -> `403`: the built-in (or host-customised) access-denied PAGE for a
+   *    `page` request, `{ error: 'forbidden' }` JSON for an `api` request.
    * 2. `dashboardAuth` configured AND no valid session -> for a `page` request, redirect `302` to
-   *    the login page (Mode B) carrying a sanitized `returnTo`, or a `401` notice (Mode A only);
-   *    for an `api` request, `401 { error: 'unauthorized', auth: { modes } }`.
+   *    the login page (Mode B) carrying a sanitized `returnTo`, or the `401` "open this console
+   *    from your app" page (Mode A only); for an `api` request,
+   *    `401 { error: 'unauthorized', auth: { modes } }`.
    *
    * Returns `allowed: false` (and has already written the response) when the request must
    * short-circuit. On success it also carries WHO passed the gate: the session's user, which
@@ -450,7 +485,9 @@ export default class PaymentsDashboardProvider {
   ): Promise<{ allowed: boolean; actor?: string }> {
     const allowed = await config.authorize(ctx);
     if (!allowed) {
-      if (!ctx.response.getHeader('location')) {
+      if (mode === 'page') {
+        await this.denyPage(ctx, config, { status: 403, reason: 'forbidden' });
+      } else if (!ctx.response.getHeader('location')) {
         ctx.response.status(403).json({ error: 'forbidden' });
       }
       return { allowed: false };
@@ -477,17 +514,40 @@ export default class PaymentsDashboardProvider {
       }
       // Mode A only: there's no login page to send the browser to — this deployment expects the
       // host app to mint a session via `POST <path>/session` before ever navigating here.
-      ctx.response
-        .status(401)
-        .header('content-type', 'text/html; charset=utf-8')
-        .header('cache-control', 'no-store, must-revalidate')
-        .send(
-          '<!doctype html><html><body style="font-family:ui-monospace,monospace;background:#09090b;color:#e7e7ea;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><p>Open this console from your application.</p></body></html>',
-        );
+      await this.denyPage(ctx, config, { status: 401, reason: 'session-required' });
       return { allowed: false };
     }
     ctx.response.status(401).json({ error: 'unauthorized', auth: { modes: auth.modes } });
     return { allowed: false };
+  }
+
+  /**
+   * Answer a refused PAGE navigation with HTML instead of the API's JSON: the built-in page, the
+   * host's tweaked version of it, or whatever the host's `accessDenied` renderer produced. Stands
+   * down when the request is already answered — an `authorize` hook (or the renderer) that wrote a
+   * redirect keeps it; the provider never overwrites a `location` header.
+   */
+  private async denyPage(
+    ctx: HttpContext,
+    config: ResolvedPaymentsDashboardConfig,
+    denial: Pick<AccessDeniedInfo, 'status' | 'reason'>,
+  ): Promise<void> {
+    const answered = () => responseAnswered(ctx);
+    if (answered()) return;
+    const nonce = cspNonce(ctx);
+    const info: AccessDeniedInfo = {
+      ...denial,
+      basePath: config.path,
+      ...(config.dashboardAuth?.login ? { loginHref: `${config.path}/login` } : {}),
+      ...(nonce !== undefined ? { nonce } : {}),
+    };
+    const html = await resolveAccessDeniedPage(info, config.accessDenied, ctx, answered);
+    if (html === null) return;
+    ctx.response
+      .status(info.status)
+      .header('content-type', 'text/html; charset=utf-8')
+      .header('cache-control', 'no-store, must-revalidate')
+      .send(html);
   }
 
   private readSessionCookie(ctx: HttpContext): string | undefined {
@@ -505,6 +565,38 @@ export default class PaymentsDashboardProvider {
       encode: false,
     });
   }
+}
+
+/**
+ * Whether something already answered this request: a redirect (`location` header — the signal the
+ * `authorize` contract has always honoured) or a body queued on the response. The body check reads
+ * AdonisJS's `response.hasLazyBody` structurally so a plain-object `ctx` double in a unit test
+ * (which has neither) still works.
+ */
+function responseAnswered(ctx: HttpContext): boolean {
+  if (ctx.response.getHeader('location')) return true;
+  const response = ctx.response as unknown as { hasLazyBody?: unknown; headersSent?: unknown };
+  return response.hasLazyBody === true || response.headersSent === true;
+}
+
+/**
+ * The request's CSP nonce when the host runs `@adonisjs/shield` with `@nonce` in its policy (shield
+ * exposes it as `response.nonce`). Read structurally: this package neither depends on shield nor
+ * cares which middleware minted the nonce — only that the page's inline `<style>` carries it.
+ */
+function cspNonce(ctx: HttpContext): string | undefined {
+  const nonce = (ctx.response as unknown as { nonce?: unknown }).nonce;
+  return typeof nonce === 'string' && nonce !== '' ? nonce : undefined;
+}
+
+/**
+ * Whether a login `POST` came from a classic HTML form submit (form-encoded — JavaScript off, or
+ * the page's inline script dropped by a CSP) rather than the page's own JSON `fetch`. Decides
+ * whether the reply is a redirect (a browser navigating) or JSON (a script awaiting it).
+ */
+function isFormPost(ctx: HttpContext): boolean {
+  const type = ctx.request.header('content-type') ?? '';
+  return type.includes('application/x-www-form-urlencoded') || type.includes('multipart/form-data');
 }
 
 /** Adapt an AdonisJS `HttpContext` to the framework-light {@link ApiRequest}. */

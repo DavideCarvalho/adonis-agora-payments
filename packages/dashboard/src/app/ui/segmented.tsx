@@ -34,7 +34,7 @@ export function Segmented<T extends string | undefined>({
       role="tablist"
       aria-label={ariaLabel}
       className={cn(
-        'inline-flex items-center gap-1 rounded border border-line bg-panel p-1',
+        'inline-flex items-center gap-1 rounded-sm border border-line bg-panel p-1',
         className,
       )}
     >
@@ -48,7 +48,7 @@ export function Segmented<T extends string | undefined>({
             aria-selected={selected}
             onClick={() => onChange(option.value)}
             className={cn(
-              'rounded px-2.5 py-1 text-xs transition-colors',
+              'rounded-sm px-2.5 py-1 text-xs transition-colors',
               selected
                 ? 'bg-brand/15 text-brand'
                 : 'text-zinc-400 hover:bg-panel-2 hover:text-zinc-200',

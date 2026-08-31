@@ -7,13 +7,6 @@
  * `@adonis-agora/payments-react`.
  */
 
-export { defineConfig, resolveConfig } from './define_config.js';
-export {
-  defaultAuthorize,
-  defaultOwner,
-  registryReferenceGuard,
-  resolveRequestUser,
-} from './define_config.js';
 export type {
   ClientAuthorizeHook,
   ClientAuthorizeReferenceHook,
@@ -28,18 +21,24 @@ export type {
   ReferenceOutcome,
   ResolvedPaymentsClientConfig,
 } from './define_config.js';
-
-export { normalizePayment, paymentStatus } from './handlers.js';
-export type { ClientApiResponse, PaymentStatusBody, PaymentStatusDeps } from './handlers.js';
-
 export {
-  PAYMENT_STATUSES,
-  PAYMENT_STATUSES_ARE_EXHAUSTIVE,
-  TERMINAL_PAYMENT_STATUSES,
-  isTerminalPaymentStatus,
-} from './statuses.js';
+  defaultAuthorize,
+  defaultOwner,
+  defineConfig,
+  registryReferenceGuard,
+  resolveConfig,
+  resolveRequestUser,
+} from './define_config.js';
+export type { ClientApiResponse, PaymentStatusBody, PaymentStatusDeps } from './handlers.js';
+export { normalizePayment, paymentStatus } from './handlers.js';
 export type {
   PaymentStatus,
   PaymentStatusesAreExhaustive,
   TerminalPaymentStatus,
+} from './statuses.js';
+export {
+  isTerminalPaymentStatus,
+  PAYMENT_STATUSES,
+  PAYMENT_STATUSES_ARE_EXHAUSTIVE,
+  TERMINAL_PAYMENT_STATUSES,
 } from './statuses.js';

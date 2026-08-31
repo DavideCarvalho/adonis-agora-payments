@@ -15,8 +15,8 @@ import type {
   WebhookVerificationState,
 } from '../driver.js';
 import { headerValue, httpRequest, isNotFound } from '../http.js';
-import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
 import type { EmitInvoiceContext } from '../invoice/emit_invoice.js';
+import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
 import type {
   CheckoutSession,
   Customer,
@@ -908,10 +908,7 @@ export class PagarmeDriver implements PaymentsDriver {
    * The app's own id echoed back — `metadata.external_reference` first (order metadata is
    * repeated on every charge), then the `code` the order/subscription was created with.
    */
-  #reference(data: {
-    code?: string;
-    metadata?: Record<string, unknown>;
-  }): string | undefined {
+  #reference(data: { code?: string; metadata?: Record<string, unknown> }): string | undefined {
     const fromMetadata = data.metadata?.external_reference;
     if (typeof fromMetadata === 'string' && fromMetadata !== '') return fromMetadata;
     return data.code;

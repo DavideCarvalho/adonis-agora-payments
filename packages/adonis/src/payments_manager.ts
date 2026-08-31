@@ -1,8 +1,8 @@
 import type { PaymentsConfig } from './define_config.js';
 import type { PaymentsDriver } from './driver.js';
 import type { InvoiceManager } from './invoice/invoice_manager.js';
-import { PAYMENT_METHOD_NAMES } from './types.js';
 import type { PaymentMethodName } from './types.js';
+import { PAYMENT_METHOD_NAMES } from './types.js';
 
 export interface PaymentsManagerOptions {
   drivers: Map<string, PaymentsDriver>;

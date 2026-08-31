@@ -57,7 +57,7 @@ export function Customers({ onOpenPayments }: { onOpenPayments?: (customerId: st
                 setOffset(0);
               }}
               placeholder="4102"
-              className="mono w-32 rounded border border-line bg-panel px-2 py-1 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-brand focus:outline-none"
+              className="mono w-32 rounded-sm border border-line bg-panel px-2 py-1 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-brand focus:outline-hidden"
             />
           </label>
         </div>
@@ -108,7 +108,7 @@ export function Customers({ onOpenPayments }: { onOpenPayments?: (customerId: st
                     <button
                       type="button"
                       onClick={() => onOpenPayments(row.gatewayId)}
-                      className="rounded border border-line px-2 py-1 text-xs text-zinc-300 hover:bg-panel-2 hover:text-zinc-100"
+                      className="rounded-sm border border-line px-2 py-1 text-xs text-zinc-300 hover:bg-panel-2 hover:text-zinc-100"
                     >
                       Payments
                     </button>

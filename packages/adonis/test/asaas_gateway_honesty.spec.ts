@@ -121,7 +121,7 @@ describe('AsaasDriver charge idempotency', () => {
       );
       expect(post).toBeDefined();
       // The key travels as the external reference, which is what makes the lookup possible.
-      expect(JSON.parse(String((post?.[1] as RequestInit).body))).toMatchObject({
+      expect(JSON.parse(String((post![1] as RequestInit).body))).toMatchObject({
         externalReference: 'order-1042',
       });
     } finally {
@@ -135,7 +135,7 @@ describe('AsaasDriver charge idempotency', () => {
     try {
       await driver().charge({ customerId: 'cus_1', amount: 10_000, method: 'boleto' });
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect((fetchMock.mock.calls[0]?.[1] as RequestInit).method).toBe('POST');
+      expect((fetchMock.mock.calls[0]![1] as RequestInit).method).toBe('POST');
     } finally {
       vi.unstubAllGlobals();
     }

@@ -6,8 +6,8 @@ import { Disputes } from './Disputes';
 import { Overview } from './Overview';
 import { PaymentsList } from './PaymentsList';
 import { Subscriptions } from './Subscriptions';
-import { WebhookEvents } from './WebhookEvents';
 import { Segmented } from './ui/segmented';
+import { WebhookEvents } from './WebhookEvents';
 
 type Screen =
   | 'overview'
@@ -94,7 +94,7 @@ export function App() {
           </div>
           <a
             href={`${uiBase()}/logout`}
-            className="rounded border border-line px-2 py-1 text-xs text-zinc-400 hover:bg-panel-2 hover:text-zinc-200"
+            className="rounded-sm border border-line px-2 py-1 text-xs text-zinc-400 hover:bg-panel-2 hover:text-zinc-200"
           >
             Sign out
           </a>

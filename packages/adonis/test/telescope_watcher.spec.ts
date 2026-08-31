@@ -1,6 +1,6 @@
 import { channel } from 'node:diagnostics_channel';
 import { afterEach, describe, expect, it } from 'vitest';
-import { PAYMENTS_DIAGNOSTIC_EVENTS, isPaymentsDiagnosticClaimed } from '../src/diagnostics.js';
+import { isPaymentsDiagnosticClaimed, PAYMENTS_DIAGNOSTIC_EVENTS } from '../src/diagnostics.js';
 import { PaymentsWatcher } from '../src/telescope/payments_watcher.js';
 import type { WatcherContext } from '../src/telescope/telescope-sdk.js';
 

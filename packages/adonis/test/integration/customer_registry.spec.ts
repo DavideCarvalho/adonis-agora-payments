@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { LucidBillingStore } from '../../src/billing/lucid_billing_store.js';
 import type { PaymentsDriver } from '../../src/driver.js';
 import { ensureCustomer } from '../../src/ensure_customer.js';
-import { type IntegrationDatabase, createIntegrationDatabase } from './harness.js';
+import { createIntegrationDatabase, type IntegrationDatabase } from './harness.js';
 
 /**
  * The `billing_customers` mapping against real SQL.

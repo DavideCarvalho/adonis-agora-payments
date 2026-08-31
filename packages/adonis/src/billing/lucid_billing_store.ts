@@ -31,9 +31,9 @@ import {
   BillingWebhookEvent as DefaultWebhookEvent,
 } from './mixins/index.js';
 import {
-  type LucidDatabase,
   createBillingTables,
   detectDialect,
+  type LucidDatabase,
   registerBillingSchemaCache,
 } from './schema.js';
 

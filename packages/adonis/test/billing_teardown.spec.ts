@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   BILLING_TABLES,
-  type LucidDatabase,
   dropBillingTables,
+  type LucidDatabase,
   registerBillingSchemaCache,
   truncateBillingTables,
 } from '../src/billing/schema.js';

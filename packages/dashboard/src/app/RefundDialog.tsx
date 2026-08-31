@@ -47,13 +47,13 @@ export function RefundDialog({ payment, onClose }: { payment: PaymentRow; onClos
         open
         aria-modal="true"
         aria-label="Confirm refund"
-        className="relative m-0 w-full max-w-md rounded border border-line bg-panel-2 p-0 text-inherit shadow-xl"
+        className="relative m-0 w-full max-w-md rounded-sm border border-line bg-panel-2 p-0 text-inherit shadow-xl"
       >
         <header className="border-b border-line px-4 py-3">
           <h2 className="text-sm text-zinc-100">Refund this payment?</h2>
         </header>
 
-        <dl className="grid grid-cols-[auto,1fr] gap-x-4 gap-y-2 px-4 py-3 text-sm">
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 px-4 py-3 text-sm">
           <dt className="text-[11px] uppercase tracking-wider text-zinc-500">Amount</dt>
           <dd className="mono tnum text-zinc-100">
             {formatCents(payment.amount, payment.currency)}
@@ -76,7 +76,7 @@ export function RefundDialog({ payment, onClose }: { payment: PaymentRow; onClos
               disabled={mutation.isPending}
               onChange={(event) => setPartial(event.target.value)}
               placeholder={`Leave empty to refund ${formatCents(payment.amount, payment.currency)}`}
-              className="mono mt-1 w-full rounded border border-line bg-panel px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-brand focus:outline-none disabled:opacity-50"
+              className="mono mt-1 w-full rounded-sm border border-line bg-panel px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-brand focus:outline-hidden disabled:opacity-50"
             />
           </label>
           {amountInvalid && (
@@ -98,15 +98,15 @@ export function RefundDialog({ payment, onClose }: { payment: PaymentRow; onClos
         </div>
 
         {mutation.isError && (
-          <div className="mx-4 mb-3 rounded border border-bad/40 bg-bad/10 p-2">
-            <p className="mono whitespace-pre-wrap break-words text-[11px] text-rose-300">
+          <div className="mx-4 mb-3 rounded-sm border border-bad/40 bg-bad/10 p-2">
+            <p className="mono whitespace-pre-wrap wrap-break-word text-[11px] text-rose-300">
               {mutation.error instanceof Error ? mutation.error.message : 'The refund failed.'}
             </p>
           </div>
         )}
 
         {mutation.isSuccess && (
-          <div className="mx-4 mb-3 rounded border border-good/40 bg-good/10 p-2">
+          <div className="mx-4 mb-3 rounded-sm border border-good/40 bg-good/10 p-2">
             <p className="text-[11px] text-emerald-300">
               Refund accepted by {payment.provider} (
               {formatCents(mutation.data.refund.amount, mutation.data.refund.currency)},{' '}
@@ -120,7 +120,7 @@ export function RefundDialog({ payment, onClose }: { payment: PaymentRow; onClos
             type="button"
             onClick={onClose}
             disabled={mutation.isPending}
-            className="rounded border border-line px-3 py-1.5 text-xs text-zinc-300 enabled:hover:bg-panel disabled:opacity-40"
+            className="rounded-sm border border-line px-3 py-1.5 text-xs text-zinc-300 enabled:hover:bg-panel disabled:opacity-40"
           >
             {mutation.isSuccess ? 'Close' : 'Cancel'}
           </button>
@@ -129,7 +129,7 @@ export function RefundDialog({ payment, onClose }: { payment: PaymentRow; onClos
               type="button"
               onClick={() => mutation.mutate()}
               disabled={blocked}
-              className="rounded border border-bad/50 bg-bad/15 px-3 py-1.5 text-xs text-rose-200 enabled:hover:bg-bad/25 disabled:opacity-40"
+              className="rounded-sm border border-bad/50 bg-bad/15 px-3 py-1.5 text-xs text-rose-200 enabled:hover:bg-bad/25 disabled:opacity-40"
             >
               {mutation.isPending
                 ? 'Refunding…'

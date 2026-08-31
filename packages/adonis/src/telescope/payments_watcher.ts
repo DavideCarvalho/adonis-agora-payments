@@ -1,8 +1,8 @@
 import { subscribe, unsubscribe } from 'node:diagnostics_channel';
 import {
+  claimPaymentsDiagnostics,
   PAYMENTS_DIAGNOSTIC_EVENTS,
   type PaymentsDiagnosticEvent,
-  claimPaymentsDiagnostics,
 } from '../diagnostics.js';
 import type { WatcherContext } from './telescope-sdk.js';
 

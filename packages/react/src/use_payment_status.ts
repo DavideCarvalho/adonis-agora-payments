@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { type PaymentStatus, isPaymentStatus, isTerminalPaymentStatus } from './statuses.js';
+import { isPaymentStatus, isTerminalPaymentStatus, type PaymentStatus } from './statuses.js';
 
 /** What one successful read of the endpoint said. */
 export interface PaymentStatusSnapshot {

@@ -32,7 +32,7 @@ export function HealthPanel({
 
   if (query.isPending) {
     return (
-      <div className="rounded border border-line bg-panel px-4 py-3 text-sm text-zinc-500">
+      <div className="rounded-sm border border-line bg-panel px-4 py-3 text-sm text-zinc-500">
         Checking…
       </div>
     );
@@ -40,7 +40,7 @@ export function HealthPanel({
 
   if (query.isError) {
     return (
-      <div className="rounded border border-bad/40 bg-bad/10 px-4 py-3">
+      <div className="rounded-sm border border-bad/40 bg-bad/10 px-4 py-3">
         <p className="text-sm text-rose-300">
           {query.error instanceof Error ? query.error.message : 'The health check failed.'}
         </p>
@@ -53,7 +53,7 @@ export function HealthPanel({
 
   if (report.healthy) {
     return (
-      <div className="flex flex-wrap items-center gap-3 rounded border border-good/30 bg-good/[0.06] px-4 py-3">
+      <div className="flex flex-wrap items-center gap-3 rounded-sm border border-good/30 bg-good/[0.06] px-4 py-3">
         <span className="s-processed dot" aria-hidden />
         <p className="text-sm text-zinc-200">All clear</p>
         <p className="text-[11px] text-zinc-500">{healthyLine(report)}</p>
@@ -65,7 +65,7 @@ export function HealthPanel({
   }
 
   return (
-    <section className="rise rounded border border-bad/40 bg-bad/[0.05]">
+    <section className="rise rounded-sm border border-bad/40 bg-bad/[0.05]">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-bad/25 px-4 py-3">
         <div className="flex items-center gap-3">
           <span className="s-failed dot" aria-hidden />
@@ -96,7 +96,7 @@ export function HealthPanel({
               <button
                 type="button"
                 onClick={() => onNavigate(target.screen, target.status)}
-                className="rounded border border-line bg-panel px-2 py-1 text-xs text-zinc-300 hover:bg-panel-2 hover:text-zinc-100"
+                className="rounded-sm border border-line bg-panel px-2 py-1 text-xs text-zinc-300 hover:bg-panel-2 hover:text-zinc-100"
               >
                 {target.label}
               </button>
@@ -116,7 +116,7 @@ export function HealthPanel({
             {report.deadlines.map((dispute) => (
               <li
                 key={dispute.id}
-                className="flex items-center gap-1.5 rounded border border-line bg-panel px-2 py-1"
+                className="flex items-center gap-1.5 rounded-sm border border-line bg-panel px-2 py-1"
               >
                 <Badge variant="provider">{dispute.provider}</Badge>
                 <span className="mono text-[11px] text-zinc-400">{dispute.gatewayId}</span>
@@ -145,7 +145,7 @@ export function HealthPanel({
             {report.openDisputes.map((dispute) => (
               <li
                 key={dispute.id}
-                className="flex items-center gap-1.5 rounded border border-line bg-panel px-2 py-1"
+                className="flex items-center gap-1.5 rounded-sm border border-line bg-panel px-2 py-1"
               >
                 <Badge variant="provider">{dispute.provider}</Badge>
                 <span className="mono text-[11px] text-zinc-400">{dispute.gatewayId}</span>
@@ -167,7 +167,7 @@ export function HealthPanel({
             {report.failures.map((failure) => (
               <li
                 key={`${failure.provider}:${failure.type}`}
-                className="flex items-center gap-1.5 rounded border border-line bg-panel px-2 py-1"
+                className="flex items-center gap-1.5 rounded-sm border border-line bg-panel px-2 py-1"
               >
                 <Badge variant="provider">{failure.provider}</Badge>
                 <Badge variant="type">{failure.type}</Badge>

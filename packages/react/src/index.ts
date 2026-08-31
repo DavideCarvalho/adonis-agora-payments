@@ -9,17 +9,16 @@
  * that for eighteen gateways is a surface this package could not keep honest.
  */
 
-export { usePaymentStatus } from './use_payment_status.js';
+export type { PaymentStatus, TerminalPaymentStatus } from './statuses.js';
+export {
+  isPaymentStatus,
+  isTerminalPaymentStatus,
+  PAYMENT_STATUSES,
+  TERMINAL_PAYMENT_STATUSES,
+} from './statuses.js';
 export type {
   PaymentStatusSnapshot,
   UsePaymentStatusOptions,
   UsePaymentStatusResult,
 } from './use_payment_status.js';
-
-export {
-  PAYMENT_STATUSES,
-  TERMINAL_PAYMENT_STATUSES,
-  isPaymentStatus,
-  isTerminalPaymentStatus,
-} from './statuses.js';
-export type { PaymentStatus, TerminalPaymentStatus } from './statuses.js';
+export { usePaymentStatus } from './use_payment_status.js';

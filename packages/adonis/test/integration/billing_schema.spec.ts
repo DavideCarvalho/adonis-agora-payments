@@ -5,7 +5,7 @@ import {
   createBillingTables,
   dropBillingTables,
 } from '../../src/billing/schema.js';
-import { type IntegrationDatabase, createIntegrationDatabase } from './harness.js';
+import { createIntegrationDatabase, type IntegrationDatabase } from './harness.js';
 
 /**
  * `createBillingTables` against a real Postgres.

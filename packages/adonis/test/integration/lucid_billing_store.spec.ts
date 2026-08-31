@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { LucidBillingStore } from '../../src/billing/lucid_billing_store.js';
 import { WebhookProcessor } from '../../src/billing/webhook_processor.js';
 import { createReplayAction } from '../../src/dashboard/actions.js';
-import { type IntegrationDatabase, createIntegrationDatabase } from './harness.js';
+import { createIntegrationDatabase, type IntegrationDatabase } from './harness.js';
 
 /**
  * `LucidBillingStore` against a real Postgres, on the real published migration.

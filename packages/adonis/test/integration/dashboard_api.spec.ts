@@ -17,7 +17,7 @@ import {
   webhookEvents,
 } from '../../src/dashboard/handlers.js';
 import { setBillingStore } from '../../src/services/main.js';
-import { type IntegrationDatabase, createIntegrationDatabase } from './harness.js';
+import { createIntegrationDatabase, type IntegrationDatabase } from './harness.js';
 
 /**
  * The dashboard's JSON API against a real Postgres, on the real published migration.

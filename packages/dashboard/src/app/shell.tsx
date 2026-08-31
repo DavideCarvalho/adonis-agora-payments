@@ -17,7 +17,7 @@ export function Panel({
   children: ReactNode;
 }) {
   return (
-    <section className={cn('rounded border border-line bg-panel', className)}>
+    <section className={cn('rounded-sm border border-line bg-panel', className)}>
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
         <div>
           <h2 className="text-sm text-zinc-200">{title}</h2>
@@ -55,7 +55,7 @@ export function QueryState<T>({
   }
   if (query.isError) {
     return (
-      <div className="rounded border border-bad/40 bg-bad/10 p-4">
+      <div className="rounded-sm border border-bad/40 bg-bad/10 p-4">
         <p className="text-sm text-rose-300">
           {query.error instanceof Error ? query.error.message : 'Request failed.'}
         </p>
@@ -119,7 +119,7 @@ export function Pager({
           type="button"
           disabled={offset === 0}
           onClick={() => onOffset(Math.max(0, offset - limit))}
-          className="rounded border border-line px-2 py-1 text-zinc-300 enabled:hover:bg-panel-2 disabled:opacity-40"
+          className="rounded-sm border border-line px-2 py-1 text-zinc-300 enabled:hover:bg-panel-2 disabled:opacity-40"
         >
           Previous
         </button>
@@ -127,7 +127,7 @@ export function Pager({
           type="button"
           disabled={!maybeMore}
           onClick={() => onOffset(offset + limit)}
-          className="rounded border border-line px-2 py-1 text-zinc-300 enabled:hover:bg-panel-2 disabled:opacity-40"
+          className="rounded-sm border border-line px-2 py-1 text-zinc-300 enabled:hover:bg-panel-2 disabled:opacity-40"
         >
           Next
         </button>

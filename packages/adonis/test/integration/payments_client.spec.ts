@@ -6,7 +6,7 @@ import { resolveConfig } from '../../src/client/define_config.js';
 import { paymentStatus } from '../../src/client/handlers.js';
 import type { PaymentsDriver } from '../../src/driver.js';
 import { ensureCustomer } from '../../src/ensure_customer.js';
-import { type IntegrationDatabase, createIntegrationDatabase } from './harness.js';
+import { createIntegrationDatabase, type IntegrationDatabase } from './harness.js';
 
 /**
  * The browser-facing status endpoint against a real Postgres, on the real published

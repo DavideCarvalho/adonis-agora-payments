@@ -2,20 +2,20 @@ import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import type { DisputeRow } from '../client/payments-client';
 import { displayCurrency, paymentsClient } from '../client/payments-client';
-import { ResolveDisputeDialog } from './ResolveDisputeDialog';
 import {
   DEFAULT_DUE_WITHIN_HOURS,
   type DeadlineTone,
-  HORIZONS,
-  NO_DEADLINE,
   deadlineTone,
   disputeAmountLabel,
   formatCountdown,
+  HORIZONS,
   logEmptyMessage,
+  NO_DEADLINE,
   workListEmptyMessage,
   workListSubtitle,
 } from './disputes';
 import { formatDay, formatWhen } from './money';
+import { ResolveDisputeDialog } from './ResolveDisputeDialog';
 import { Pager, Panel, QueryState } from './shell';
 import { disputeIsChargeback, disputeIsOpen, disputeStatusClass } from './status';
 import { Badge } from './ui/badge';
@@ -256,7 +256,7 @@ function DisputeLog({ initialStatus }: { initialStatus?: string | undefined }) {
                     <button
                       type="button"
                       onClick={() => setResolving(row)}
-                      className="rounded border border-line px-2 py-1 text-xs text-zinc-300 hover:bg-panel-2 hover:text-zinc-100"
+                      className="rounded-sm border border-line px-2 py-1 text-xs text-zinc-300 hover:bg-panel-2 hover:text-zinc-100"
                     >
                       Record outcome
                     </button>

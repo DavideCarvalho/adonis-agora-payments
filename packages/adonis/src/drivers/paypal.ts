@@ -14,8 +14,8 @@ import type {
   WebhookVerificationState,
 } from '../driver.js';
 import { headerValue, httpRequest, isNotFound } from '../http.js';
-import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
 import type { EmitInvoiceContext } from '../invoice/emit_invoice.js';
+import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
 import { formatDecimal, fromDecimal } from '../money.js';
 import type {
   CheckoutSession,

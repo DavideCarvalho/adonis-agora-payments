@@ -43,11 +43,7 @@ function inHours(hours: number): string {
  * Answer the two dispute reads separately: the work list (`?dueWithin=`) and the log. They are the
  * same route, and a screen that showed the same rows in both panels would look right and be wrong.
  */
-function stubApi(options: {
-  due?: DisputeRow[];
-  total?: number;
-  log?: DisputeRow[];
-}): void {
+function stubApi(options: { due?: DisputeRow[]; total?: number; log?: DisputeRow[] }): void {
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     const body = url.includes('dueWithin')

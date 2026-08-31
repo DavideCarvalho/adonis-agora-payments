@@ -199,7 +199,7 @@ describe('actions are POSTs', () => {
     document.cookie = 'XSRF-TOKEN=abc%20123';
     const { inits } = stubFetch({ json: async () => ({ refund: {} }) });
     return paymentsClient.refundPayment('pi_1').then(() => {
-      expect((inits[0]?.headers as Record<string, string>)['x-xsrf-token']).toBe('abc 123');
+      expect((inits[0]!.headers as Record<string, string>)['x-xsrf-token']).toBe('abc 123');
     });
   });
 
@@ -207,7 +207,7 @@ describe('actions are POSTs', () => {
     document.cookie = 'XSRF-TOKEN=tok2';
     const { inits } = stubFetch({ json: async () => ({ status: 'processed' }) });
     return paymentsClient.retryWebhookEvent('evt_1').then(() => {
-      expect((inits[0]?.headers as Record<string, string>)['x-xsrf-token']).toBe('tok2');
+      expect((inits[0]!.headers as Record<string, string>)['x-xsrf-token']).toBe('tok2');
     });
   });
 

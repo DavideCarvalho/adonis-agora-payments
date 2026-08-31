@@ -13,8 +13,8 @@ import type {
   WebhookVerificationState,
 } from '../driver.js';
 import { headerValue } from '../http.js';
-import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
 import type { EmitInvoiceContext } from '../invoice/emit_invoice.js';
+import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
 import type {
   CheckoutSession,
   Customer,

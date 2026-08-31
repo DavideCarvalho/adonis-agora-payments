@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/1.9.0/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.5.11/schema.json",
   "vcs": {
     "enabled": true,
     "clientKind": "git",
@@ -7,13 +7,14 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "ignore": [
-      "dist/**",
-      "node_modules/**",
-      ".turbo/**",
-      "coverage/**",
-      "**/*.stub",
-      "**/test/integration/__generated__/**"
+    "includes": [
+      "**",
+      "!**/dist",
+      "!**/node_modules",
+      "!**/.turbo",
+      "!**/coverage",
+      "!**/*.stub",
+      "!**/test/integration/__generated__"
     ]
   },
   "formatter": {
@@ -29,10 +30,15 @@
       "trailingCommas": "all"
     }
   },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
+  },
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
+      "preset": "recommended",
       "complexity": {
         "noBannedTypes": "off",
         "noStaticOnlyClass": "off"
@@ -49,7 +55,7 @@
   },
   "overrides": [
     {
-      "include": ["**/test/**", "**/*.spec.ts", "**/*.test.ts"],
+      "includes": ["**/test/**", "**/*.spec.ts", "**/*.test.ts"],
       "linter": {
         "rules": {
           "suspicious": {

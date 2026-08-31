@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AUDIT_ACTIONS } from '../../src/billing/billing_store.js';
 import { LucidBillingStore } from '../../src/billing/lucid_billing_store.js';
-import { type IntegrationDatabase, createIntegrationDatabase } from './harness.js';
+import { createIntegrationDatabase, type IntegrationDatabase } from './harness.js';
 
 /**
  * The console's new reads, against a real Postgres and the real published migration.

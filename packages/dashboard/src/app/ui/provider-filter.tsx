@@ -42,7 +42,7 @@ export function ProviderFilter({
         aria-label="Gateway"
         value={value ?? ''}
         onChange={(event) => onChange(event.target.value === '' ? undefined : event.target.value)}
-        className="rounded border border-line bg-panel px-2 py-1 text-xs text-zinc-300 focus:border-brand focus:outline-none"
+        className="rounded-sm border border-line bg-panel px-2 py-1 text-xs text-zinc-300 focus:border-brand focus:outline-hidden"
       >
         <option value="">All</option>
         {providers.map((provider) => (

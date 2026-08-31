@@ -1,8 +1,10 @@
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import ts from 'typescript';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WEBHOOK_EVENT_TYPES } from '../src/billing/webhook_events.js';
 import type { WebhookEvent } from '../src/types.js';
@@ -13,6 +15,12 @@ import {
 } from '../src/webhook_handlers.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+const typescriptPackage = require.resolve('typescript/package.json');
+const tsc = join(
+  dirname(typescriptPackage),
+  (JSON.parse(readFileSync(typescriptPackage, 'utf8')) as { bin: { tsc: string } }).bin.tsc,
+);
 
 /**
  * `WebhookEvent<T = unknown>` plus `WebhookHandler = (event: WebhookEvent) => …` forced every
@@ -69,21 +77,41 @@ describe('defineWebhookHandler', () => {
       dirs.push(dir);
       const file = join(dir, 'probe.ts');
       const source = `import { defineWebhookHandler } from '${join(here, '../src/webhook_handlers.js').replace(/\\/g, '/')}'\n${body}\n`;
-      await writeFile(file, source);
-      const program = ts.createProgram([file], {
-        target: ts.ScriptTarget.ES2022,
-        module: ts.ModuleKind.NodeNext,
-        moduleResolution: ts.ModuleResolutionKind.NodeNext,
-        strict: true,
-        noEmit: true,
-        skipLibCheck: true,
-        exactOptionalPropertyTypes: true,
-        noUncheckedIndexedAccess: true,
+      const tsconfig = join(dir, 'tsconfig.json');
+      await Promise.all([
+        writeFile(file, source),
+        writeFile(
+          tsconfig,
+          JSON.stringify({
+            compilerOptions: {
+              target: 'ES2022',
+              module: 'NodeNext',
+              moduleResolution: 'NodeNext',
+              strict: true,
+              noEmit: true,
+              skipLibCheck: true,
+              exactOptionalPropertyTypes: true,
+              noUncheckedIndexedAccess: true,
+            },
+            files: ['./probe.ts'],
+          }),
+        ),
+      ]);
+      // Shelling out to `tsc` rather than driving the compiler API keeps this working across
+      // TypeScript majors: TS 7 (the native compiler) no longer ships `createProgram`.
+      const result = spawnSync(process.execPath, [tsc, '-p', tsconfig, '--pretty', 'false'], {
+        encoding: 'utf8',
       });
-      return ts
-        .getPreEmitDiagnostics(program)
-        .filter((d) => d.file?.fileName === file.replace(/\\/g, '/'))
-        .map((d) => ts.flattenDiagnosticMessageText(d.messageText, ' '));
+      if (result.error) throw result.error;
+      const errors: string[] = [];
+      for (const line of `${result.stdout}\n${result.stderr}`.split('\n')) {
+        const match = /^.*probe\.ts\(\d+,\d+\): error TS\d+: (.*)$/.exec(line);
+        if (match) errors.push(match[1]!);
+        // `--pretty false` continues a multi-line message on indented lines.
+        else if (/^\s+\S/.test(line) && errors.length > 0)
+          errors[errors.length - 1] += ` ${line.trim()}`;
+      }
+      return errors;
     }
 
     it('accepts a handler reading its own event type payload', async () => {

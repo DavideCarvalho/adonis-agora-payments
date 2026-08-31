@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   BILLING_TABLES,
-  type LucidDatabase,
   createBillingTables,
   dropBillingTables,
+  type LucidDatabase,
 } from '../src/billing/schema.js';
 
 /** A Lucid client that records SQL instead of running it, optionally failing on a pattern. */

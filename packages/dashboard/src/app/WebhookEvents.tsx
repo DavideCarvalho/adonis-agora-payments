@@ -130,7 +130,7 @@ export function WebhookEvents({ initialStatus }: { initialStatus?: string | unde
                           type="button"
                           disabled={retry.isPending}
                           onClick={() => retry.mutate(row.gatewayEventId)}
-                          className="rounded border border-line px-2 py-1 text-xs text-zinc-300 enabled:hover:bg-panel-2 enabled:hover:text-zinc-100 disabled:opacity-40"
+                          className="rounded-sm border border-line px-2 py-1 text-xs text-zinc-300 enabled:hover:bg-panel-2 enabled:hover:text-zinc-100 disabled:opacity-40"
                         >
                           {inFlight ? 'Retrying…' : 'Retry'}
                         </button>
@@ -141,7 +141,7 @@ export function WebhookEvents({ initialStatus }: { initialStatus?: string | unde
                     <tr className="border-b border-line-soft">
                       <td />
                       <td colSpan={6} className="px-4 pb-3">
-                        <pre className="mono whitespace-pre-wrap break-words rounded border border-bad/30 bg-bad/[0.06] p-2 text-[11px] text-rose-300">
+                        <pre className="mono whitespace-pre-wrap wrap-break-word rounded-sm border border-bad/30 bg-bad/[0.06] p-2 text-[11px] text-rose-300">
                           {row.error}
                         </pre>
                       </td>
@@ -151,7 +151,7 @@ export function WebhookEvents({ initialStatus }: { initialStatus?: string | unde
                     <tr className="border-b border-line-soft">
                       <td />
                       <td colSpan={6} className="px-4 pb-3">
-                        <p className="rounded border border-warn/40 bg-warn/[0.08] p-2 text-[11px] text-amber-300">
+                        <p className="rounded-sm border border-warn/40 bg-warn/[0.08] p-2 text-[11px] text-amber-300">
                           Retry refused:{' '}
                           {retry.error instanceof Error ? retry.error.message : 'unknown reason'}
                         </p>

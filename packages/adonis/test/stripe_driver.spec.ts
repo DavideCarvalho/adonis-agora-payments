@@ -11,7 +11,13 @@ const stripeMock = vi.hoisted(() => ({
   webhooks: { constructEvent: vi.fn() },
 }));
 
-vi.mock('stripe', () => ({ default: vi.fn(() => stripeMock) }));
+vi.mock('stripe', () => ({
+  // vitest 4 gives mocks JS semantics: the driver does `new Stripe(...)`, and an arrow function
+  // is not constructible, so the implementation has to be a plain function.
+  default: vi.fn(function Stripe() {
+    return stripeMock;
+  }),
+}));
 
 import { StripeDriver } from '../src/drivers/stripe.js';
 

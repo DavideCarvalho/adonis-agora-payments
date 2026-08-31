@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_DUE_WITHIN_HOURS,
-  HORIZONS,
-  NO_DEADLINE,
   deadlineTone,
   disputeAmountLabel,
   formatCountdown,
+  HORIZONS,
   horizonLabel,
   hoursUntil,
   logEmptyMessage,
+  NO_DEADLINE,
   workListEmptyMessage,
   workListSubtitle,
 } from './disputes';

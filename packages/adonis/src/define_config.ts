@@ -629,7 +629,7 @@ export const invoice = {
   },
 };
 
-export type { PaymentsDriver, InvoiceProvider };
+export type { InvoiceProvider, PaymentsDriver };
 
 /** Invoice emission settings (the `invoice` key of {@link PaymentsConfig}). */
 export interface InvoiceSectionConfig {
@@ -646,4 +646,5 @@ export interface InvoiceSectionConfig {
 }
 
 export type { InvoiceConfig }; // compat alias
+
 type InvoiceConfig = InvoiceSectionConfig;

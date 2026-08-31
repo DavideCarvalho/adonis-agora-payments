@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PaymentsManager, defineConfig, resolveDrivers } from '../src/index.js';
+import { defineConfig, PaymentsManager, resolveDrivers } from '../src/index.js';
 import { FakePaymentsDriver } from '../src/testing/fake_payments_driver.js';
 
 function makeManager(

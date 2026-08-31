@@ -1,14 +1,14 @@
 import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  PAYMENTS_DIAGNOSTIC_EVENTS,
-  REDACTED,
   claimPaymentsDiagnostics,
   configurePaymentsDiagnostics,
   currentPaymentsTrace,
   isPaymentsDiagnosticClaimed,
+  PAYMENTS_DIAGNOSTIC_EVENTS,
   paymentsDiagnosticsOptions,
   publishPayments,
+  REDACTED,
   redactBody,
   redactQueryString,
   redactText,

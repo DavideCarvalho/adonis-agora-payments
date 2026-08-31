@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { LucidBillingStore } from '../../src/billing/lucid_billing_store.js';
 import {
-  type LucidDatabase,
   dropBillingTables,
+  type LucidDatabase,
   truncateBillingTables,
 } from '../../src/billing/schema.js';
-import { type IntegrationDatabase, createIntegrationDatabase } from './harness.js';
+import { createIntegrationDatabase, type IntegrationDatabase } from './harness.js';
 
 /**
  * The test-teardown trap, against a real Postgres — the only place it is visible.

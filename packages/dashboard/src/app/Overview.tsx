@@ -61,17 +61,9 @@ function meterName(metric: OverviewMetric): string {
   return metric.key.slice('meter:'.length);
 }
 
-function Stat({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  value: string;
-  hint?: string;
-}) {
+function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
-    <div className="rise rounded border border-line bg-panel p-4">
+    <div className="rise rounded-sm border border-line bg-panel p-4">
       <p className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</p>
       <p className="mono tnum mt-2 text-2xl text-zinc-100">{value}</p>
       {hint !== undefined && <p className="mt-1 text-[11px] text-zinc-500">{hint}</p>}

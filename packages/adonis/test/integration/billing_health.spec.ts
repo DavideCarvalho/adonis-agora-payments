@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { billingHealth } from '../../src/billing/billing_health.js';
 import { LucidBillingStore } from '../../src/billing/lucid_billing_store.js';
-import { type IntegrationDatabase, createIntegrationDatabase } from './harness.js';
+import { createIntegrationDatabase, type IntegrationDatabase } from './harness.js';
 
 /**
  * `billingHealth` over real SQL.

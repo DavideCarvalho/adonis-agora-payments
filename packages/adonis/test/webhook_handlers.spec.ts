@@ -3,13 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { WebhookEvent } from '../src/types.js';
+import type { WebhookHandlerService } from '../src/webhook_handlers.js';
 import {
   discoverWebhookHandlers,
   isWebhookHandlerService,
   normalizeWebhookHandlerModule,
   resolveWebhookHandler,
 } from '../src/webhook_handlers.js';
-import type { WebhookHandlerService } from '../src/webhook_handlers.js';
 
 const event = { id: 'e1', type: 'payment.succeeded', data: {}, raw: {} } as WebhookEvent;
 

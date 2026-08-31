@@ -2,9 +2,9 @@ import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import type { PaymentRow } from '../client/payments-client';
 import { paymentsClient } from '../client/payments-client';
+import { formatCents, formatWhen } from './money';
 import { PaymentDetail } from './PaymentDetail';
 import { RefundDialog } from './RefundDialog';
-import { formatCents, formatWhen } from './money';
 import { Pager, Panel, QueryState, ScanNotice } from './shell';
 import { paymentStatusClass } from './status';
 import { Badge } from './ui/badge';
@@ -27,7 +27,10 @@ const STATUS_OPTIONS: ReadonlyArray<{ value: string | undefined; label: string }
 export function PaymentsList({
   initialStatus,
   initialCustomerId,
-}: { initialStatus?: string | undefined; initialCustomerId?: string | undefined } = {}) {
+}: {
+  initialStatus?: string | undefined;
+  initialCustomerId?: string | undefined;
+} = {}) {
   const [status, setStatus] = useState<string | undefined>(initialStatus);
   const [provider, setProvider] = useState<string | undefined>(undefined);
   const [offset, setOffset] = useState(0);
@@ -103,7 +106,7 @@ export function PaymentsList({
                 }}
                 placeholder="order-4102 or pay_8f2…"
                 aria-label="Reference or gateway id"
-                className="mono w-48 rounded border border-line bg-panel px-2 py-1 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-brand focus:outline-none"
+                className="mono w-48 rounded-sm border border-line bg-panel px-2 py-1 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-brand focus:outline-hidden"
               />
             </label>
           </form>
@@ -171,7 +174,7 @@ export function PaymentsList({
                   <button
                     type="button"
                     onClick={() => setOpened(row.gatewayId)}
-                    className="rounded border border-line px-2 py-1 text-xs text-zinc-400 hover:bg-panel-2 hover:text-zinc-100"
+                    className="rounded-sm border border-line px-2 py-1 text-xs text-zinc-400 hover:bg-panel-2 hover:text-zinc-100"
                   >
                     Detail
                   </button>
@@ -181,7 +184,7 @@ export function PaymentsList({
                     <button
                       type="button"
                       onClick={() => setRefunding(row)}
-                      className="rounded border border-line px-2 py-1 text-xs text-zinc-300 hover:bg-panel-2 hover:text-zinc-100"
+                      className="rounded-sm border border-line px-2 py-1 text-xs text-zinc-300 hover:bg-panel-2 hover:text-zinc-100"
                     >
                       Refund
                     </button>

@@ -15,8 +15,8 @@ import type {
   UpdateSubscriptionInput,
   WebhookVerificationState,
 } from '../driver.js';
-import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
 import type { EmitInvoiceContext } from '../invoice/emit_invoice.js';
+import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
 import type {
   CheckoutSession,
   Customer,
@@ -427,7 +427,7 @@ export class StripeDriver implements PaymentsDriver {
         provider: this.provider,
         ...(typeof invoice.customer === 'string' ? { customerId: invoice.customer } : {}),
         ...(subscriptionId !== undefined ? { subscriptionId } : {}),
-        status: invoice.status ?? 'draft',
+        status: this.#mapInvoiceStatus(invoice.status),
         amount: { amount: invoice.amount_due, currency: invoice.currency },
         createdAt: new Date(invoice.created * 1000).toISOString(),
         ...(invoice.hosted_invoice_url !== null && invoice.hosted_invoice_url !== undefined
@@ -609,6 +609,23 @@ export class StripeDriver implements PaymentsDriver {
         return 'canceled';
       default:
         return 'failed';
+    }
+  }
+
+  /**
+   * A Stripe invoice status → an `Invoice['status']`. stripe-node's enums are open-ended (every
+   * union carries a forward-compatible string member), so an unrecognised value falls back to
+   * `draft` — the same default a missing status always took — instead of leaking into the contract.
+   */
+  #mapInvoiceStatus(status: string | null | undefined): Invoice['status'] {
+    switch (status) {
+      case 'open':
+      case 'paid':
+      case 'void':
+      case 'uncollectible':
+        return status;
+      default:
+        return 'draft';
     }
   }
 

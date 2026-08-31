@@ -14,6 +14,9 @@ fixed window to respond, and past it the dispute is lost **by default rather tha
 the evidence you had all along stops being admissible. That is the one thing this page exists to
 make impossible to miss.
 
+{/* ProviderSummary/ProviderMatrix are registered by the docs site (Agora): with a gateway picked at the top of the page, the summary restates that gateway's row of the matrix below, and the matrix highlights it. */}
+<ProviderSummary matrix="disputes" />
+
 ## The three moments
 
 A dispute is not one event. It is up to three, and what your code should do differs at each:
@@ -353,6 +356,8 @@ entirely, and it is only available while the alert is fresh. That is the whole r
 Sixteen drivers went through the dispute vocabulary pass, and several genuinely have nothing. Those
 rows are honest answers, not gaps to be filled.
 
+<ProviderMatrix id="disputes">
+
 | Gateway | Pre-dispute alert | Chargeback | Outcome | Deadline |
 | --- | --- | --- | --- | --- |
 | Stripe | inquiries (`warning_*`) + `radar.early_fraud_warning.created` | ✅ | won / lost / expired | ✅ `evidence_details.due_by` |
@@ -373,6 +378,8 @@ rows are honest answers, not gaps to be filled.
 | InfinitePay | ❌ none | — never | — never | ❌ none |
 | Lemon Squeezy | ❌ none | — never | — never | ❌ none |
 | Polar | ❌ none | — never | — never | ❌ none |
+
+</ProviderMatrix>
 
 Read that table twice, because two rows in it are traps:
 

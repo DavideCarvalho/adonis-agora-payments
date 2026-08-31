@@ -5,7 +5,7 @@ icon: QrCode
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
-import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Tab } from 'fumadocs-ui/components/tabs';
 
 Pix is the flow most Brazilian apps start with, and the gateways that serve it disagree on almost
 every detail: whether a customer is required, where your reference goes, what the QR looks like
@@ -54,7 +54,8 @@ export async function startPixCheckout(user: User, plan: Plan) {
 
 ## What each gateway needs
 
-<Tabs items={['Asaas', 'Woovi', 'AbacatePay']}>
+{/* ProviderTabs is registered by the docs site (Agora): Tabs whose tabs are gateways, following the one picked at the top of the page. */}
+<ProviderTabs items={['Asaas', 'Woovi', 'AbacatePay']}>
 <Tab value="Asaas">
 
 **Requires a customer.** A charge without `customerId` throws before any request goes out:
@@ -197,7 +198,7 @@ the gateway. See [Routing](/docs/payments/concepts/routing).
 for boleto, a hosted URL in `hostedUrl`.
 
 </Tab>
-</Tabs>
+</ProviderTabs>
 
 ## The differences at a glance
 

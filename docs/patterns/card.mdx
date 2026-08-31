@@ -5,7 +5,7 @@ icon: CreditCard
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
-import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Tab } from 'fumadocs-ui/components/tabs';
 
 **The card number never touches your server.** The browser sends it straight to the gateway's
 tokenizer — Stripe.js, or Asaas' tokenization endpoint — and gets back an opaque string. That string
@@ -71,7 +71,8 @@ Prefer `card` — it is the only one that carries `holder` and `remoteIp`.
 
 ## What each gateway needs
 
-<Tabs items={['Stripe', 'Asaas']}>
+{/* ProviderTabs is registered by the docs site (Agora): Tabs whose tabs are gateways, following the one picked at the top of the page. */}
+<ProviderTabs items={['Stripe', 'Asaas']}>
 <Tab value="Stripe">
 
 **The token becomes `payment_method` on the PaymentIntent.** That is the whole mapping — either
@@ -195,7 +196,7 @@ immediately, but it is on the payload.
 installment. See [Subscriptions](/docs/payments/patterns/subscriptions).
 
 </Tab>
-</Tabs>
+</ProviderTabs>
 
 ## The differences at a glance
 

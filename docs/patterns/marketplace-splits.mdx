@@ -5,7 +5,7 @@ icon: Split
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
-import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Tab } from 'fumadocs-ui/components/tabs';
 
 When the money does not all belong to you — a marketplace, a platform taking a cut, a booking site
 paying a venue — the gateway can divide the charge at settlement instead of you moving money
@@ -25,7 +25,8 @@ application fee for an OAuth-connected seller, which is not the same thing; pass
 That is the honest failure. A `split` silently dropped is a marketplace that keeps the seller's
 money.
 
-<Tabs items={['Asaas', 'Pagar.me', 'Woovi']}>
+{/* ProviderTabs is registered by the docs site (Agora): Tabs whose tabs are gateways, following the one picked at the top of the page. */}
+<ProviderTabs items={['Asaas', 'Pagar.me', 'Woovi']}>
 <Tab value="Asaas">
 
 Pass `split` on the charge. Each entry names a wallet and its share, by percent, by fixed amount, or
@@ -110,7 +111,7 @@ concept. That is the honest way to reach a gateway feature the abstraction does 
 [Custom providers](/docs/payments/custom-providers) for the other options.
 
 </Tab>
-</Tabs>
+</ProviderTabs>
 
 ## Computing a split yourself
 

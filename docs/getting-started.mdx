@@ -36,6 +36,13 @@ however you like and reference them with `env.get(...)`. The library's built-in 
 (`ASAAS_API_KEY`, `STRIPE_KEY`, …) are a convenience when you don't pass a value, not a
 contract.
 
+Pick the gateway you are starting with. The selector at the top of the page remembers it, and
+every page of these docs follows it from here on.
+
+{/* ProviderTabs is registered by the docs site (Agora): Tabs whose tabs are gateways, following the one picked at the top of the page. */}
+<ProviderTabs items={['Asaas', 'Stripe', 'Woovi']}>
+<Tab value="Asaas">
+
 ```ini title=".env" — your names, your choice
 PAYMENTS_ASAAS_KEY=your-asaas-api-key
 PAYMENTS_ASAAS_WEBHOOK_TOKEN=your-asaas-webhook-token
@@ -57,13 +64,79 @@ export default defineConfig({
 })
 ```
 
+Asaas takes Pix, boleto and cards from one account, so routing both methods to it is the whole
+map. Outside production the driver talks to the sandbox host on its own (`sandbox` defaults to
+`NODE_ENV !== 'production'`).
+
+</Tab>
+<Tab value="Stripe">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_STRIPE_KEY=sk_test_...
+PAYMENTS_STRIPE_WEBHOOK_SECRET=whsec_...
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'stripe',
+  providers: {
+    stripe: payments.stripe({
+      apiKey: env.get('PAYMENTS_STRIPE_KEY'),
+      webhookSecret: env.get('PAYMENTS_STRIPE_WEBHOOK_SECRET'),
+      currency: 'brl',
+    }),
+  },
+  methods: { pix: 'stripe', credit_card: 'stripe' },
+})
+```
+
+`currency` is **required** (lowercase ISO 4217) and the driver refuses to boot without it — Stripe
+bills in whatever you hand it, so a default would be a guess at your country. Pix and boleto have to
+be enabled on a Brazilian Stripe account first; the gateway, not the driver, tells you when they
+are not.
+
+</Tab>
+<Tab value="Woovi">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_WOOVI_APP_ID=your-woovi-app-id
+PAYMENTS_WOOVI_PUBLIC_KEY=your-woovi-webhook-public-key
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'woovi',
+  providers: {
+    woovi: payments.woovi({
+      appId: env.get('PAYMENTS_WOOVI_APP_ID'),
+      webhookPublicKey: env.get('PAYMENTS_WOOVI_PUBLIC_KEY'),
+    }),
+  },
+  methods: { pix: 'woovi' },
+})
+```
+
+Woovi (OpenPix) is **Pix only**, so `credit_card` has nowhere to go here — when you need cards, add
+a second provider (Stripe, Asaas) and route the method to it; see [Card](/docs/payments/patterns/card).
+`webhookPublicKey` is the account public key from `GET /api/v1/webhook/public-keys`.
+
+</Tab>
+</ProviderTabs>
+
 Or pass values from anywhere — the driver configs are plain objects, so an API key can come
 from a vault, another config file, or a literal (not recommended for secrets).
 
 <Callout type="warn" title="The webhook credential is not optional">
-`webhookToken` above is what lets the driver authenticate a delivery, and a driver that *can*
-verify with nothing configured **refuses to boot** — the alternative is accepting anything anyone
-posts to `/payments/webhook/asaas`, including a body that marks a payment paid.
+The webhook credential above — `webhookToken`, `webhookSecret`, `webhookPublicKey`, whatever your
+gateway calls it — is what lets the driver authenticate a delivery, and a driver that *can* verify
+with nothing configured **refuses to boot** — the alternative is accepting anything anyone posts to
+`/payments/webhook/<provider>`, including a body that marks a payment paid.
 
 Set the credential, or, only if verification really happens upstream, say so:
 `allowUnverifiedWebhooks: ['asaas']`. Efí and InfinitePay are exempt: their gateways sign nothing,

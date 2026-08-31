@@ -15,7 +15,12 @@ has no subscription-update endpoint at all.
 
 These pages are the per-gateway cheat sheet for exactly those differences.
 
+{/* ProviderSummary/ProviderMatrix are registered by the docs site (Agora): with a gateway picked at the top of the page, the summary restates that gateway's row of the matrix below, and the matrix highlights it. */}
+<ProviderSummary matrix="capabilities" />
+
 ## What each one does
+
+<ProviderMatrix id="capabilities">
 
 {/* providers:table:start — generated from the drivers; `driver_registry.spec.ts` fails if it drifts */}
 
@@ -41,6 +46,8 @@ These pages are the per-gateway cheat sheet for exactly those differences.
 | [Woovi (OpenPix)](/docs/payments/providers/woovi) | pix, any | server | — | ✅ | — | — | ✅ |
 
 {/* providers:table:end */}
+
+</ProviderMatrix>
 
 "Any" means the gateway decides at its own checkout — set `method` on the charge only when the
 driver lists a specific one. A dash is not a missing feature to add later: it is an endpoint the

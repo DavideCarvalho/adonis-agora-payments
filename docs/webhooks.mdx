@@ -44,6 +44,9 @@ Each gateway signs webhooks its own way. Configure the credential in the driver 
 (or the env fallback) and the driver enforces it — a request without a valid signature
 returns `400` and is never processed.
 
+{/* ProviderMatrix is registered by the docs site (Agora): highlights the row of the gateway picked at the top of the page. */}
+<ProviderMatrix>
+
 | Provider | Mechanism | Header | Config / env |
 | --- | --- | --- | --- |
 | Stripe | HMAC via `constructEvent` | `stripe-signature` | `webhookSecret` / `STRIPE_WEBHOOK_SECRET` |
@@ -54,6 +57,8 @@ returns `400` and is never processed.
 | PagBank | SHA-256 of `<token>-<body>` — **not an HMAC**, [read why](/docs/payments/providers/pagbank#webhook-authenticity--read-this-before-you-rely-on-it) | `x-authenticity-token` | `webhookToken` / `PAGBANK_WEBHOOK_TOKEN` (defaults to the API token) |
 | Efí | **None** — mTLS or an `hmac` query param, both [enforced outside the driver](/docs/payments/providers/efi#webhooks-are-not-authenticated-by-this-driver) | — | — |
 | InfinitePay | **None** — the gateway publishes no signature | — | — |
+
+</ProviderMatrix>
 
 The other eleven drivers each sign their own way; the provider page for each one names the header
 and the env var.

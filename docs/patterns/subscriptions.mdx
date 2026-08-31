@@ -5,7 +5,7 @@ icon: RefreshCw
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
-import { Tabs, Tab } from 'fumadocs-ui/components/tabs';
+import { Tab } from 'fumadocs-ui/components/tabs';
 
 A subscription is created at the gateway; the billing layer keeps `billing_subscriptions` in sync
 from the webhooks after that. What you own is creating it correctly — and the gateways differ enough
@@ -40,7 +40,8 @@ themselves do **not** carry it — route those on `gatewayId`, and see
 
 ## What each gateway needs
 
-<Tabs items={['Asaas', 'Woovi', 'Stripe', 'AbacatePay']}>
+{/* ProviderTabs is registered by the docs site (Agora): Tabs whose tabs are gateways, following the one picked at the top of the page. */}
+<ProviderTabs items={['Asaas', 'Woovi', 'Stripe', 'AbacatePay']}>
 <Tab value="Asaas">
 
 Native recurring billing, and the most complete of the four: card, Pix or boleto, with a real
@@ -181,7 +182,7 @@ For a card-backed subscription, route `credit_card` elsewhere — AbacatePay has
 the manager will tell you so before any request goes out.
 
 </Tab>
-</Tabs>
+</ProviderTabs>
 
 ## The differences at a glance
 

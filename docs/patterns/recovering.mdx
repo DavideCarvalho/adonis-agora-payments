@@ -100,10 +100,15 @@ async handle(event: WebhookEventFor<'payment.refunded'>) {
 Sixteen of the eighteen drivers declare `refunds: true`. **Two do not**, and they are the two the
 capability check exists for:
 
+{/* ProviderMatrix is registered by the docs site (Agora): highlights the row of the gateway picked at the top of the page. */}
+<ProviderMatrix>
+
 | Gateway | Refunds |
 | --- | --- |
 | Woovi / OpenPix | **no** — no refund API; its `capabilities` declares only `subscriptions` |
 | InfinitePay | **no** — `refunds: false`, along with invoices and subscriptions |
+
+</ProviderMatrix>
 
 For Woovi, a refund is an out-of-band Pix transfer you make yourself; record it in your own tables
 and revoke access there, because no webhook is coming. InfinitePay is the same shape — the driver is

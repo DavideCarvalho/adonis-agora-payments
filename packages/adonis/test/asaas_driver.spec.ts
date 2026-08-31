@@ -459,6 +459,87 @@ describe('AsaasDriver', () => {
     }
   });
 
+  // ── Tokenização de cartão ──────────────────────────────────────────────────────────
+
+  it('tokenizes a card against the endpoint Asaas actually documents', async () => {
+    // O path é o ponto do teste. A rota é `/creditCard/tokenizeCreditCard`, e a versão
+    // "óbvia" (`/creditCard/tokenize`) não existe — escrita de memória, ela dá 404 e todo
+    // checkout com cartão morre dizendo que o cartão é inválido. Foi exatamente o bug que
+    // trouxe este método para a lib.
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        creditCardNumber: '8829',
+        creditCardBrand: 'VISA',
+        creditCardToken: 'a75a1d98-c52d-4a6b-a413-71e00b193c99',
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const tokenized = await makeDriver().tokenizeCard({
+        customerId: 'cus_1',
+        card: {
+          holderName: 'Fulana de Tal',
+          number: '5162306219378829',
+          expiryMonth: '05',
+          expiryYear: '2030',
+          ccv: '318',
+        },
+        holder: {
+          name: 'Fulana de Tal',
+          email: 'fulana@example.com',
+          cpfCnpj: '24971563792',
+          postalCode: '89223005',
+          addressNumber: '277',
+          phone: '4738010919',
+        },
+        remoteIp: '116.213.42.7',
+      });
+
+      const [url, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
+      expect(url).toBe('https://api-sandbox.asaas.com/v3/creditCard/tokenizeCreditCard');
+      expect(init.method).toBe('POST');
+
+      const body = JSON.parse(String(init.body));
+      expect(body.customer).toBe('cus_1');
+      expect(body.creditCard.number).toBe('5162306219378829');
+      expect(body.creditCardHolderInfo.cpfCnpj).toBe('24971563792');
+      // Antifraude do Asaas: sem `remoteIp` a tokenização é recusada.
+      expect(body.remoteIp).toBe('116.213.42.7');
+
+      expect(tokenized).toEqual({
+        token: 'a75a1d98-c52d-4a6b-a413-71e00b193c99',
+        // `creditCardNumber` são os ÚLTIMOS 4 dígitos, apesar do nome — devolver o PAN
+        // aqui seria devolver o cartão inteiro para quem acabou de tokenizá-lo.
+        last4: '8829',
+        brand: 'VISA',
+        provider: 'asaas',
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('feeds the token straight into a card charge', async () => {
+    // O contrato fecha o ciclo: o que `tokenizeCard` devolve é o que `card.token` aceita.
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(paymentIn('CONFIRMED')));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await makeDriver().charge({
+        customerId: 'cus_1',
+        amount: 1990,
+        method: 'credit_card',
+        card: { token: 'a75a1d98-c52d-4a6b-a413-71e00b193c99' },
+      });
+      const post = fetchMock.mock.calls.find(
+        ([, init]) => (init as RequestInit)?.method === 'POST',
+      )!;
+      const body = JSON.parse(String((post[1] as RequestInit).body));
+      expect(body.creditCardToken).toBe('a75a1d98-c52d-4a6b-a413-71e00b193c99');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   // ── Authorization vs capture ───────────────────────────────────────────────────────
 
   it('reports an authorizeOnly card payment as authorized, not paid and not pending', async () => {

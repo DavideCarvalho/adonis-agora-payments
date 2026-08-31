@@ -10,6 +10,7 @@ import type {
   PaymentMethodName,
   Refund,
   Subscription,
+  TokenizedCard,
   WebhookEvent,
 } from './types.js';
 
@@ -53,6 +54,17 @@ export interface PaymentsDriver {
     invoices?: boolean;
     /** Recurring subscriptions. InfinitePay-style links lack it. */
     subscriptions?: boolean;
+    /**
+     * Turning raw card data into a reusable token — checkout transparente.
+     *
+     * Separate from the rest because it is the one call that puts a PAN in the request
+     * body: a gateway either exposes a tokenization endpoint (Asaas) or expects the card
+     * to be tokenized somewhere the server never sees it (Stripe's `payment_method`,
+     * collected by Stripe.js), and a merchant of record collects the card on its own
+     * checkout and offers nothing here at all. Declaring it makes that difference
+     * answerable before a card is typed, instead of at the gateway.
+     */
+    cardTokenization?: boolean;
   };
 
   /**
@@ -102,6 +114,31 @@ export interface PaymentsDriver {
     amount?: Money,
     options?: { idempotencyKey?: string },
   ): Promise<Refund>;
+
+  // ── Card tokenization ────────────────────────────────────────────────────────────────
+
+  /**
+   * Exchange raw card data for a reusable token — the server half of checkout
+   * transparente.
+   *
+   * ⚠️ **This is the only call in the contract that carries a PAN.** The card number
+   * reaches your server, goes to the gateway and must not be logged, stored or echoed;
+   * what comes back is a token, the last four digits and the brand. It exists because
+   * some gateways have no browser-side tokenization at all: Asaas has no publishable key,
+   * so its tokenization endpoint requires the account's API key and there is no path that
+   * keeps the PAN out of the server. Naming that honestly is better than each application
+   * rediscovering it and hand-rolling the same HTTP call — which is exactly what happened
+   * in the app this method came from.
+   *
+   * Optional: a driver whose gateway tokenizes in the browser (Stripe, Mercado Pago,
+   * Pagar.me) or which is a merchant of record (Polar, Dodo) declares
+   * `capabilities.cardTokenization = false` and omits this, rather than inventing an
+   * endpoint. Callers check with {@link PaymentsManager.assertCapability}.
+   *
+   * The token from here is what {@link CardInput.token} takes, in
+   * {@link ChargeInput.card} and {@link CreateSubscriptionInput.card}.
+   */
+  tokenizeCard?(input: TokenizeCardInput): Promise<TokenizedCard>;
 
   // ── Checkout ─────────────────────────────────────────────────────────────────────────
 
@@ -240,6 +277,45 @@ export interface CardInput {
     phone: string;
   };
   remoteIp?: string;
+}
+
+/**
+ * Raw card data on its way to becoming a token. See {@link PaymentsDriver.tokenizeCard}
+ * for why this shape exists and what it costs.
+ */
+export interface TokenizeCardInput {
+  /**
+   * Gateway customer id the token belongs to. Required, and not decoration: Asaas binds
+   * the token to the customer and REFUSES it in another customer's transaction.
+   */
+  customerId: string;
+  card: {
+    holderName: string;
+    /** PAN, digits only — no spaces, no mask. */
+    number: string;
+    /** Two digits, `'01'`–`'12'`. */
+    expiryMonth: string;
+    /** Four digits, e.g. `'2030'`. */
+    expiryYear: string;
+    /** Security code, 3 or 4 digits. */
+    ccv: string;
+  };
+  /** Holder identity/address, which BR gateways require for the risk check. */
+  holder: {
+    name: string;
+    email: string;
+    cpfCnpj: string;
+    postalCode: string;
+    addressNumber: string;
+    phone: string;
+    addressComplement?: string;
+    mobilePhone?: string;
+  };
+  /**
+   * The PAYER's IP, required by Asaas for antifraud. It must come from the request the
+   * card was typed into, and never from a field the client can set.
+   */
+  remoteIp: string;
 }
 
 export interface ChargeInput {

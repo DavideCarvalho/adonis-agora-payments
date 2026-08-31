@@ -11,6 +11,7 @@ import type {
   CreateCustomerInput,
   CreateSubscriptionInput,
   PaymentsDriver,
+  TokenizeCardInput,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
   WebhookVerificationState,
@@ -27,6 +28,7 @@ import type {
   Payment,
   Refund,
   Subscription,
+  TokenizedCard,
   WebhookEvent,
 } from '../types.js';
 import { requireMatchingCredential } from '../webhook_security.js';
@@ -119,6 +121,14 @@ interface AsaasPaymentResponse {
   }>;
 }
 
+/** `POST /creditCard/tokenizeCreditCard` — CreditCardTokenizeResponseDTO. */
+interface AsaasTokenizeCardResponse {
+  /** Últimos 4 dígitos, apesar do nome. */
+  creditCardNumber: string;
+  creditCardBrand: string;
+  creditCardToken: string;
+}
+
 interface AsaasSubscriptionResponse {
   id: string;
   customer: string;
@@ -182,7 +192,12 @@ const ASAAS_MAX_PAGES = 100_000;
 export class AsaasDriver implements PaymentsDriver {
   readonly provider = 'asaas';
   readonly supportedMethods = ['pix', 'boleto', 'credit_card', 'debit_card', 'undefined'] as const;
-  readonly capabilities = { refunds: true, invoices: true, subscriptions: true };
+  readonly capabilities = {
+    refunds: true,
+    invoices: true,
+    subscriptions: true,
+    cardTokenization: true,
+  };
 
   #baseUrl: string;
   #webhookToken: string | undefined;
@@ -277,6 +292,63 @@ export class AsaasDriver implements PaymentsDriver {
    * and both create — Asaas offers nothing to prevent that. It closes the retry case, which is
    * the one that actually happens.
    */
+  // ── Card tokenization ────────────────────────────────────────────────────────────────
+
+  /**
+   * `POST /creditCard/tokenizeCreditCard` — troca os dados do cartão por um token
+   * reutilizável.
+   *
+   * O PAN passa pelo servidor de propósito, e não por descuido: o Asaas não tem chave
+   * publicável, então não existe caminho que tokenize no browser. Quem chama isto está
+   * em escopo PCI para esta requisição — nada aqui loga o corpo, e o que volta é só o
+   * token, a bandeira e os quatro últimos dígitos.
+   *
+   * ⚠️ **Em produção a tokenização precisa ser habilitada pelo gerente da conta Asaas**
+   * (no sandbox já vem ligada). Enquanto não for, este endpoint recusa — o erro que volta
+   * é o do gateway, repassado como está.
+   *
+   * O token é preso ao `customer`: o próprio Asaas recusa usá-lo numa transação de outro
+   * cliente. Por isso `customerId` é obrigatório aqui e não um detalhe opcional.
+   */
+  async tokenizeCard(input: TokenizeCardInput): Promise<TokenizedCard> {
+    const data = await this.#request<AsaasTokenizeCardResponse>('/creditCard/tokenizeCreditCard', {
+      method: 'POST',
+      body: {
+        customer: input.customerId,
+        creditCard: {
+          holderName: input.card.holderName,
+          number: input.card.number,
+          expiryMonth: input.card.expiryMonth,
+          expiryYear: input.card.expiryYear,
+          ccv: input.card.ccv,
+        },
+        creditCardHolderInfo: {
+          name: input.holder.name,
+          email: input.holder.email,
+          cpfCnpj: input.holder.cpfCnpj,
+          postalCode: input.holder.postalCode,
+          addressNumber: input.holder.addressNumber,
+          phone: input.holder.phone,
+          ...(input.holder.addressComplement !== undefined
+            ? { addressComplement: input.holder.addressComplement }
+            : {}),
+          ...(input.holder.mobilePhone !== undefined
+            ? { mobilePhone: input.holder.mobilePhone }
+            : {}),
+        },
+        remoteIp: input.remoteIp,
+      },
+    });
+
+    return {
+      token: data.creditCardToken,
+      // `creditCardNumber` são os últimos 4 dígitos, não o número — o nome é do Asaas.
+      last4: data.creditCardNumber,
+      brand: data.creditCardBrand,
+      provider: this.provider,
+    };
+  }
+
   async charge(input: ChargeInput): Promise<Payment> {
     if (!input.customerId) {
       throw new Error('[payments] Asaas requires a customer for every charge.');

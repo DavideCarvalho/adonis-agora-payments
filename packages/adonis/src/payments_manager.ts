@@ -215,7 +215,7 @@ export class PaymentsManager {
    */
   assertCapability(
     driver: PaymentsDriver,
-    capability: 'refunds' | 'invoices' | 'subscriptions' | 'disputes',
+    capability: 'refunds' | 'invoices' | 'subscriptions' | 'disputes' | 'cardTokenization',
   ): void {
     if (
       driver.capabilities?.[capability] === false ||

@@ -6,6 +6,12 @@ import { cn } from './cn';
  * This console's whole interaction surface is "pick one of a few things", so it gets ONE control
  * instead of three near-identical ones. `value` may be `undefined` for an "all" option, which is
  * why options carry `value?: string` rather than a bare string.
+ *
+ * It scrolls sideways rather than wrapping or overflowing: seven tabs (or eight payment statuses)
+ * do not fit a phone, and a flex item's default `min-width: auto` let this row push the WHOLE
+ * page wider than the viewport. Scrolling keeps it one line, keeps the selected pill findable by
+ * swiping, and — because `overflow` other than `visible` zeroes that min-width — stops it
+ * dictating the page width. The pills themselves must not shrink or wrap, or the labels do.
  */
 export interface SegmentedOption<T extends string | undefined> {
   value: T;
@@ -34,7 +40,7 @@ export function Segmented<T extends string | undefined>({
       role="tablist"
       aria-label={ariaLabel}
       className={cn(
-        'inline-flex items-center gap-1 rounded-sm border border-line bg-panel p-1',
+        'scroll-x inline-flex max-w-full items-center gap-1 overflow-x-auto rounded-sm border border-line bg-panel p-1 align-top',
         className,
       )}
     >
@@ -48,7 +54,7 @@ export function Segmented<T extends string | undefined>({
             aria-selected={selected}
             onClick={() => onChange(option.value)}
             className={cn(
-              'rounded-sm px-2.5 py-1 text-xs transition-colors',
+              'shrink-0 whitespace-nowrap rounded-sm px-2.5 py-1 text-xs transition-colors',
               selected
                 ? 'bg-brand/15 text-brand'
                 : 'text-zinc-400 hover:bg-panel-2 hover:text-zinc-200',

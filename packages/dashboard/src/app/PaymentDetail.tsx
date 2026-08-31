@@ -32,11 +32,11 @@ export function PaymentDetail({ gatewayId, onClose }: { gatewayId: string; onClo
         className="relative m-0 w-full max-w-3xl rounded-sm border border-line bg-panel-2 p-0 text-inherit shadow-xl"
       >
         <header className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
-          <h2 className="mono text-sm text-zinc-100">{gatewayId}</h2>
+          <h2 className="mono min-w-0 break-all text-sm text-zinc-100">{gatewayId}</h2>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-sm border border-line px-2 py-1 text-xs text-zinc-300 hover:bg-panel"
+            className="shrink-0 rounded-sm border border-line px-2 py-1 text-xs text-zinc-300 hover:bg-panel"
           >
             Close
           </button>
@@ -53,7 +53,7 @@ export function PaymentDetail({ gatewayId, onClose }: { gatewayId: string; onClo
           <div className="flex flex-col gap-4 px-4 py-4">
             <section>
               <p className="text-[10px] uppercase tracking-wider text-zinc-500">Current state</p>
-              <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
+              <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-sm">
                 <dt className="text-[11px] text-zinc-500">Status</dt>
                 <dd>
                   <span className={paymentStatusClass(query.data.payment.status)}>
@@ -78,7 +78,7 @@ export function PaymentDetail({ gatewayId, onClose }: { gatewayId: string; onClo
                     )}
                 </dd>
                 <dt className="text-[11px] text-zinc-500">Reference</dt>
-                <dd className="mono text-zinc-200">
+                <dd className="mono break-all text-zinc-200">
                   {query.data.payment.externalReference ?? '— (the gateway echoed none)'}
                 </dd>
                 <dt className="text-[11px] text-zinc-500">Owner</dt>

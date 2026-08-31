@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { apiBase, buildQuery, displayCurrency, paymentsClient, uiBase } from './payments-client';
+import {
+  apiBase,
+  authSurface,
+  buildQuery,
+  CONFIG_ELEMENT_ID,
+  displayCurrency,
+  paymentsClient,
+  uiBase,
+} from './payments-client';
 
 const originalFetch = globalThis.fetch;
 
@@ -29,6 +37,65 @@ afterEach(() => {
   Reflect.deleteProperty(window, '__PAYMENTS_BASE__');
   Reflect.deleteProperty(window, '__PAYMENTS_API__');
   Reflect.deleteProperty(window, '__PAYMENTS_CURRENCY__');
+});
+
+/** Put the provider's config block on the page, the way `renderIndexHtml` does. */
+function injectConfig(config: Record<string, unknown>): void {
+  const el = document.createElement('script');
+  el.type = 'application/json';
+  el.id = CONFIG_ELEMENT_ID;
+  el.textContent = JSON.stringify(config);
+  document.head.appendChild(el);
+}
+
+describe('the injected config block', () => {
+  afterEach(() => {
+    document.getElementById(CONFIG_ELEMENT_ID)?.remove();
+    Reflect.deleteProperty(window, '__PAYMENTS_AUTH__');
+  });
+
+  it('is where the base, api, currency and auth surface come from', () => {
+    // The provider speaks through a JSON data block, because a host CSP with `script-src 'self'
+    // 'nonce-…'` refuses an inline script and the console then 404s on every request.
+    injectConfig({
+      base: '/ops/billing',
+      api: '/ops/billing/api',
+      currency: 'USD',
+      auth: { modes: ['login'] },
+    });
+    expect(uiBase()).toBe('/ops/billing');
+    expect(apiBase()).toBe('/ops/billing/api');
+    expect(displayCurrency()).toBe('USD');
+    expect(authSurface()).toEqual({ modes: ['login'] });
+  });
+
+  it('wins over the window globals', () => {
+    injectConfig({ base: '', api: '/api', currency: 'BRL', auth: null });
+    window.__PAYMENTS_BASE__ = '/stale';
+    window.__PAYMENTS_API__ = '/stale/api';
+    window.__PAYMENTS_AUTH__ = { modes: ['login'] };
+    expect(uiBase()).toBe('');
+    expect(apiBase()).toBe('/api');
+    expect(authSurface()).toBeNull();
+  });
+
+  it('falls through to the globals, then the defaults, when there is no block', () => {
+    window.__PAYMENTS_API__ = '/g/api';
+    expect(apiBase()).toBe('/g/api');
+    Reflect.deleteProperty(window, '__PAYMENTS_API__');
+    Reflect.deleteProperty(window, '__PAYMENTS_BASE__');
+    expect(apiBase()).toBe('/payments-dashboard/api');
+    expect(authSurface()).toBeNull();
+  });
+
+  it('ignores a block that is not JSON rather than crashing the console', () => {
+    const el = document.createElement('script');
+    el.type = 'application/json';
+    el.id = CONFIG_ELEMENT_ID;
+    el.textContent = '{not json';
+    document.head.appendChild(el);
+    expect(apiBase()).toBe('/payments-dashboard/api');
+  });
 });
 
 describe('base resolution', () => {

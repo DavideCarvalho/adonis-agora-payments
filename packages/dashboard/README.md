@@ -50,6 +50,22 @@ when that variable is unset. Replace `authorize` with your own guard, and/or add
 `dashboardAuth` session gate (a built-in login page and/or an "open the console from your app"
 endpoint) on top of it.
 
+## URLs
+
+The current screen lives in the hash — `#/payments`, `#/webhooks?status=failed`,
+`#/payments/<gatewayId>` for one payment open in full — so the back button, reload and copy-paste
+all work (`src/app/routes.ts`). A fragment and not a path, because the provider registers no SPA
+catch-all: `<path>` is an exact route, and anything under it that is not `/api` or `/assets` is a
+404 by design. It also fits on a phone: every pill row scrolls sideways rather than pushing the page
+wider than the viewport.
+
+## CSP
+
+The provider hands the SPA its config as a `<script type="application/json">` data block, never an
+executable inline script, so `script-src 'self'` (with or without a nonce) is all the console needs.
+The `window.__PAYMENTS_*__` globals `src/client/payments-client.ts` also reads are a test/embedding
+escape hatch, consulted only when the block is absent.
+
 ## Money
 
 Amounts are integer cents everywhere — in the store, in `billingOverview()`, and on the wire. The only

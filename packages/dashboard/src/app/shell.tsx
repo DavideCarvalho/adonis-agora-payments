@@ -23,7 +23,12 @@ export function Panel({
           <h2 className="text-sm text-zinc-200">{title}</h2>
           {subtitle !== undefined && <p className="mt-0.5 text-[11px] text-zinc-500">{subtitle}</p>}
         </div>
-        {actions}
+        {/* `min-w-0` is what lets the filter row fit a phone. A flex item's default `min-width:
+            auto` is its min-content width — for a row of pills, ALL the pills side by side — so
+            without it this header pushed the whole page to 570px on a 390px screen. As a
+            block-level box inside a shrinkable item, the actions get the header's real width and
+            a `Segmented` inside them can scroll instead of overflowing. */}
+        {actions !== undefined && <div className="min-w-0 max-w-full">{actions}</div>}
       </header>
       <div className="overflow-x-auto">{children}</div>
     </section>

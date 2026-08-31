@@ -27,15 +27,29 @@ const STATUS_OPTIONS: ReadonlyArray<{ value: string | undefined; label: string }
 export function PaymentsList({
   initialStatus,
   initialCustomerId,
+  openedGatewayId,
+  onOpen,
 }: {
   initialStatus?: string | undefined;
   initialCustomerId?: string | undefined;
+  /**
+   * The payment whose detail dialog is open, owned by the CALLER: it lives in the URL hash
+   * (`#/payments/<gatewayId>`, see `routes.ts`) so a detail view survives a reload and can be
+   * pasted into a ticket. `null` = closed.
+   */
+  openedGatewayId?: string | null | undefined;
+  /** Open (`gatewayId`) or close (`null`) the detail dialog. */
+  onOpen?: ((gatewayId: string | null) => void) | undefined;
 } = {}) {
   const [status, setStatus] = useState<string | undefined>(initialStatus);
   const [provider, setProvider] = useState<string | undefined>(undefined);
   const [offset, setOffset] = useState(0);
   const [refunding, setRefunding] = useState<PaymentRow | null>(null);
-  const [opened, setOpened] = useState<string | null>(null);
+  // Uncontrolled fallback for a caller that does not route the detail dialog (a test, a host
+  // embedding just this screen). `App` always does.
+  const [openedLocal, setOpenedLocal] = useState<string | null>(null);
+  const opened = onOpen === undefined ? openedLocal : (openedGatewayId ?? null);
+  const setOpened = onOpen ?? setOpenedLocal;
   /**
    * The lookup box. One field, two meanings, resolved by the SERVER: it is sent as both
    * `reference` and `gatewayId`, and whichever matches wins.
@@ -164,7 +178,20 @@ export function PaymentsList({
                 <td className="px-4 py-2 text-zinc-400" title={row.customerId ?? ''}>
                   {ownerCell(row)}
                 </td>
-                <td className="mono px-4 py-2 text-zinc-400">{row.gatewayId}</td>
+                <td className="mono px-4 py-2 text-zinc-400">
+                  {/* A link, not just a button: the detail has a URL now, and a URL is what an
+                      operator drags into a ticket. */}
+                  <a
+                    href={`#/payments/${encodeURIComponent(row.gatewayId)}`}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      setOpened(row.gatewayId);
+                    }}
+                    className="hover:text-zinc-100 hover:underline"
+                  >
+                    {row.gatewayId}
+                  </a>
+                </td>
                 <td className="px-4 py-2">
                   <Badge variant="provider">{row.provider}</Badge>
                 </td>

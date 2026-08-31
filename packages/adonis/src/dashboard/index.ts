@@ -71,4 +71,11 @@ export type {
   VerifyOptions,
 } from './session_cookie.js';
 export { signSessionCookie, verifySessionCookie } from './session_cookie.js';
-export { BASE_PLACEHOLDER, CONTENT_TYPES, contentTypeFor, renderIndexHtml } from './spa.js';
+export type { InjectedAuth, InjectedConfig } from './spa.js';
+export {
+  BASE_PLACEHOLDER,
+  CONFIG_ELEMENT_ID,
+  CONTENT_TYPES,
+  contentTypeFor,
+  renderIndexHtml,
+} from './spa.js';

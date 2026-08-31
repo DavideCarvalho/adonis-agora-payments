@@ -247,6 +247,21 @@ body {
   animation: rise 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both;
 }
 
+/* A row that scrolls sideways instead of overflowing the page (the tab bar, the status pills).
+   A thin bar rather than none: on a narrow desktop window there is no swipe, and an invisible
+   scrollbar hides that there IS more. */
+.scroll-x {
+  scrollbar-width: thin;
+  scrollbar-color: #26262c transparent;
+  -webkit-overflow-scrolling: touch;
+}
+.scroll-x::-webkit-scrollbar {
+  height: 4px;
+}
+.scroll-x::-webkit-scrollbar-thumb {
+  border: 0;
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;

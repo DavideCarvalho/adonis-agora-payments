@@ -75,7 +75,7 @@ export function ResolveDisputeDialog({
           </p>
         </header>
 
-        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 px-4 py-3 text-sm">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 px-4 py-3 text-sm">
           <dt className="text-[11px] uppercase tracking-wider text-zinc-500">Dispute</dt>
           <dd className="mono break-all text-zinc-300">{dispute.gatewayId}</dd>
           <dt className="text-[11px] uppercase tracking-wider text-zinc-500">Payment</dt>

@@ -36,12 +36,13 @@ however you like and reference them with `env.get(...)`. The library's built-in 
 (`ASAAS_API_KEY`, `STRIPE_KEY`, …) are a convenience when you don't pass a value, not a
 contract.
 
-Pick the gateway you are starting with. The selector at the top of the page remembers it, and
-every page of these docs follows it from here on.
+The configuration below is for the gateway picked in the sidebar — Asaas until you pick one.
+Every gateway's own options are on its [provider page](/docs/payments/providers).
 
-{/* ProviderTabs is registered by the docs site (Agora): Tabs whose tabs are gateways, following the one picked at the top of the page. */}
-<ProviderTabs items={['Asaas', 'Stripe', 'Woovi']}>
-<Tab value="Asaas">
+{/* ProviderSwitch/ProviderCase are registered by the docs site (Agora): only the case for the gateway picked in the sidebar renders — Asaas until one is picked. */}
+
+<ProviderSwitch>
+<ProviderCase for="asaas" default>
 
 ```ini title=".env" — your names, your choice
 PAYMENTS_ASAAS_KEY=your-asaas-api-key
@@ -68,8 +69,8 @@ Asaas takes Pix, boleto and cards from one account, so routing both methods to i
 map. Outside production the driver talks to the sandbox host on its own (`sandbox` defaults to
 `NODE_ENV !== 'production'`).
 
-</Tab>
-<Tab value="Stripe">
+</ProviderCase>
+<ProviderCase for="stripe">
 
 ```ini title=".env" — your names, your choice
 PAYMENTS_STRIPE_KEY=sk_test_...
@@ -98,8 +99,8 @@ bills in whatever you hand it, so a default would be a guess at your country. Pi
 be enabled on a Brazilian Stripe account first; the gateway, not the driver, tells you when they
 are not.
 
-</Tab>
-<Tab value="Woovi">
+</ProviderCase>
+<ProviderCase for="woovi">
 
 ```ini title=".env" — your names, your choice
 PAYMENTS_WOOVI_APP_ID=your-woovi-app-id
@@ -126,8 +127,455 @@ Woovi (OpenPix) is **Pix only**, so `credit_card` has nowhere to go here — whe
 a second provider (Stripe, Asaas) and route the method to it; see [Card](/docs/payments/patterns/card).
 `webhookPublicKey` is the account public key from `GET /api/v1/webhook/public-keys`.
 
-</Tab>
-</ProviderTabs>
+</ProviderCase>
+<ProviderCase for="abacate">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_ABACATE_KEY=your-abacatepay-api-key
+PAYMENTS_ABACATE_WEBHOOK_SECRET=your-abacatepay-webhook-secret
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'abacate',
+  providers: {
+    abacate: payments.abacate({
+      apiKey: env.get('PAYMENTS_ABACATE_KEY'),
+      webhookSecret: env.get('PAYMENTS_ABACATE_WEBHOOK_SECRET'),
+    }),
+  },
+  methods: { pix: 'abacate', boleto: 'abacate' },
+})
+```
+
+AbacatePay does Pix and boleto — **no card** — so `credit_card` needs a second provider when you
+get there. Webhooks are HMAC-SHA256 in `x-webhook-signature`, verified against `webhookSecret`.
+
+</ProviderCase>
+<ProviderCase for="adyen">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_ADYEN_API_KEY=your-adyen-api-key
+PAYMENTS_ADYEN_MERCHANT_ACCOUNT=YourCompanyECOM
+PAYMENTS_ADYEN_HMAC_KEY=your-webhook-hmac-key
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'adyen',
+  providers: {
+    adyen: payments.adyen({
+      apiKey: env.get('PAYMENTS_ADYEN_API_KEY'),
+      merchantAccount: env.get('PAYMENTS_ADYEN_MERCHANT_ACCOUNT'),
+      hmacKey: env.get('PAYMENTS_ADYEN_HMAC_KEY'),
+      currency: 'eur',
+    }),
+  },
+  methods: { credit_card: 'adyen' },
+})
+```
+
+`currency` is **required** (lowercase ISO 4217). Adyen is cards — `charge()` sends a stored card
+token, there is no Pix and no subscription resource (charge each cycle yourself). Going live also
+needs `liveUrlPrefix`, the prefix Adyen assigns to your live endpoints.
+
+</ProviderCase>
+<ProviderCase for="dodo">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_DODO_KEY=your-dodo-api-key
+PAYMENTS_DODO_WEBHOOK_KEY=your-dodo-webhook-key
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'dodo',
+  providers: {
+    dodo: payments.dodo({
+      apiKey: env.get('PAYMENTS_DODO_KEY'),
+      webhookKey: env.get('PAYMENTS_DODO_WEBHOOK_KEY'),
+      currency: 'usd',
+    }),
+  },
+  methods: { credit_card: 'dodo', pix: 'dodo' },
+})
+```
+
+`currency` is **required** (lowercase ISO 4217) and becomes Dodo's `billing_currency`. `sandbox`
+defaults to `NODE_ENV !== 'production'` and picks the test host — test and live keys are not
+interchangeable. Webhooks follow the Standard Webhooks spec, verified with `webhookKey`.
+
+</ProviderCase>
+<ProviderCase for="efi">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_EFI_CLIENT_ID=your-efi-client-id
+PAYMENTS_EFI_CLIENT_SECRET=your-efi-client-secret
+PAYMENTS_EFI_PIX_KEY=your-pix-key
+PAYMENTS_EFI_CERTIFICATE=base64-of-your-p12-certificate
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'efi',
+  providers: {
+    efi: payments.efi({
+      clientId: env.get('PAYMENTS_EFI_CLIENT_ID'),
+      clientSecret: env.get('PAYMENTS_EFI_CLIENT_SECRET'),
+      pixKey: env.get('PAYMENTS_EFI_PIX_KEY'),
+      certificate: env.get('PAYMENTS_EFI_CERTIFICATE'),
+    }),
+  },
+  methods: { pix: 'efi' },
+})
+```
+
+Efí is **Pix only**, over mTLS — the certificate is part of the credentials. Its webhooks carry no
+signature the driver can check, so there is no webhook credential to set and no boot refusal;
+authenticity is enforced in front of the app (mTLS or the `hmac` query parameter). See
+[Efí → webhooks](/docs/payments/providers/efi#webhooks-are-not-authenticated-by-this-driver).
+
+</ProviderCase>
+<ProviderCase for="infinitepay">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_INFINITEPAY_HANDLE=your-infinitepay-handle
+PAYMENTS_INFINITEPAY_WEBHOOK_URL=https://you.app/payments/webhook/infinitepay
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'infinitepay',
+  providers: {
+    infinitepay: payments.infinitepay({
+      handle: env.get('PAYMENTS_INFINITEPAY_HANDLE'),
+      webhookUrl: env.get('PAYMENTS_INFINITEPAY_WEBHOOK_URL'),
+    }),
+  },
+  methods: { pix: 'infinitepay', credit_card: 'infinitepay' },
+})
+```
+
+InfinitePay is a payment-link product: it collects through its own hosted page, so `charge()`
+throws and you call `createCheckout()` instead — the confirmation still reaches you as a webhook.
+The gateway signs nothing, so there is no webhook credential; no refunds, subscriptions or invoices
+either.
+
+</ProviderCase>
+<ProviderCase for="lemonsqueezy">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_LEMONSQUEEZY_KEY=your-lemon-squeezy-api-key
+PAYMENTS_LEMONSQUEEZY_STORE_ID=12345
+PAYMENTS_LEMONSQUEEZY_WEBHOOK_SECRET=your-signing-secret
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'lemonsqueezy',
+  providers: {
+    lemonsqueezy: payments.lemonsqueezy({
+      apiKey: env.get('PAYMENTS_LEMONSQUEEZY_KEY'),
+      storeId: env.get('PAYMENTS_LEMONSQUEEZY_STORE_ID'),
+      webhookSecret: env.get('PAYMENTS_LEMONSQUEEZY_WEBHOOK_SECRET'),
+    }),
+  },
+})
+```
+
+Lemon Squeezy is a merchant of record: the hosted checkout decides the payment method, so there
+is no `methods` map and `charge()` throws — you call `createCheckout()`. `storeId` is **required**
+because an account can hold several stores, each with its own currency.
+
+</ProviderCase>
+<ProviderCase for="mercadopago">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_MERCADOPAGO_ACCESS_TOKEN=APP_USR-...
+PAYMENTS_MERCADOPAGO_WEBHOOK_SECRET=your-webhook-secret
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'mercadopago',
+  providers: {
+    mercadopago: payments.mercadopago({
+      accessToken: env.get('PAYMENTS_MERCADOPAGO_ACCESS_TOKEN'),
+      webhookSecret: env.get('PAYMENTS_MERCADOPAGO_WEBHOOK_SECRET'),
+      currency: 'brl',
+    }),
+  },
+  methods: { pix: 'mercadopago', credit_card: 'mercadopago' },
+})
+```
+
+`currency` is **required** (lowercase ISO 4217) — Mercado Pago bills in seven currencies. There is
+no sandbox host: test and production are different credentials on the same URL. Every charge names
+its method; there is no "let the gateway choose" here.
+
+</ProviderCase>
+<ProviderCase for="mollie">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_MOLLIE_KEY=test_...
+PAYMENTS_MOLLIE_WEBHOOK_SECRET=your-webhook-secret
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'mollie',
+  providers: {
+    mollie: payments.mollie({
+      apiKey: env.get('PAYMENTS_MOLLIE_KEY'),
+      webhookSecret: env.get('PAYMENTS_MOLLIE_WEBHOOK_SECRET'),
+      currency: 'eur',
+    }),
+  },
+  methods: { credit_card: 'mollie' },
+})
+```
+
+`currency` is **required** (lowercase ISO 4217). There is no sandbox flag — a `test_...` key is test
+mode and a `live_...` key is live, on the same host. Cards, bank transfer, wallets, BNPL and
+vouchers; no Pix, no invoice resource.
+
+</ProviderCase>
+<ProviderCase for="paddle">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_PADDLE_KEY=pdl_sdbx_apikey_...
+PAYMENTS_PADDLE_WEBHOOK_SECRET=pdl_ntfset_...
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'paddle',
+  providers: {
+    paddle: payments.paddle({
+      apiKey: env.get('PAYMENTS_PADDLE_KEY'),
+      webhookSecret: env.get('PAYMENTS_PADDLE_WEBHOOK_SECRET'),
+      currency: 'usd',
+    }),
+  },
+})
+```
+
+Paddle is a merchant of record: Paddle Checkout decides the payment method, so there is no
+`methods` map and `charge()` throws — you call `createCheckout()`. `currency` is **required**;
+`sandbox` defaults to `NODE_ENV !== 'production'` and switches to `sandbox-api.paddle.com`.
+
+</ProviderCase>
+<ProviderCase for="pagarme">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_PAGARME_SECRET_KEY=sk_test_...
+PAYMENTS_PAGARME_WEBHOOK_USER=your-webhook-user
+PAYMENTS_PAGARME_WEBHOOK_PASSWORD=your-webhook-password
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'pagarme',
+  providers: {
+    pagarme: payments.pagarme({
+      secretKey: env.get('PAYMENTS_PAGARME_SECRET_KEY'),
+      webhookUser: env.get('PAYMENTS_PAGARME_WEBHOOK_USER'),
+      webhookPassword: env.get('PAYMENTS_PAGARME_WEBHOOK_PASSWORD'),
+    }),
+  },
+  methods: { pix: 'pagarme', credit_card: 'pagarme' },
+})
+```
+
+Webhooks are authenticated with the HTTP Basic credentials you set on the endpoint in the Pagar.me
+dashboard — `webhookUser` / `webhookPassword`. There is no sandbox host: a `sk_test_…` key puts
+the account in test mode. Every order names its method.
+
+</ProviderCase>
+<ProviderCase for="pagbank">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_PAGBANK_TOKEN=your-pagbank-token
+PAYMENTS_PAGBANK_WEBHOOK_TOKEN=your-webhook-token
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'pagbank',
+  providers: {
+    pagbank: payments.pagbank({
+      token: env.get('PAYMENTS_PAGBANK_TOKEN'),
+      webhookToken: env.get('PAYMENTS_PAGBANK_WEBHOOK_TOKEN'),
+    }),
+  },
+  methods: { pix: 'pagbank', credit_card: 'pagbank' },
+})
+```
+
+`webhookToken` defaults to the API token when you leave it out. PagBank's `x-authenticity-token` is
+a SHA-256 of `<token>-<body>` — not an HMAC — so
+[read this before you rely on it](/docs/payments/providers/pagbank#webhook-authenticity--read-this-before-you-rely-on-it).
+`sandbox` defaults to `NODE_ENV !== 'production'`. No subscription resource.
+
+</ProviderCase>
+<ProviderCase for="paypal">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_PAYPAL_CLIENT_ID=your-client-id
+PAYMENTS_PAYPAL_CLIENT_SECRET=your-client-secret
+PAYMENTS_PAYPAL_WEBHOOK_ID=your-webhook-id
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'paypal',
+  providers: {
+    paypal: payments.paypal({
+      clientId: env.get('PAYMENTS_PAYPAL_CLIENT_ID'),
+      clientSecret: env.get('PAYMENTS_PAYPAL_CLIENT_SECRET'),
+      webhookId: env.get('PAYMENTS_PAYPAL_WEBHOOK_ID'),
+      currency: 'usd',
+    }),
+  },
+  methods: { wallet: 'paypal' },
+})
+```
+
+`currency` is **required** (lowercase ISO 4217). PayPal is a `wallet` — the payer approves at
+PayPal, so there is no Pix or card entry here. Webhooks are verified by calling PayPal's
+`verify-webhook-signature` with `webhookId`. `sandbox` defaults to `NODE_ENV !== 'production'`.
+
+</ProviderCase>
+<ProviderCase for="polar">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_POLAR_ACCESS_TOKEN=polar_oat_...
+PAYMENTS_POLAR_WEBHOOK_SECRET=your-webhook-secret
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'polar',
+  providers: {
+    polar: payments.polar({
+      accessToken: env.get('PAYMENTS_POLAR_ACCESS_TOKEN'),
+      webhookSecret: env.get('PAYMENTS_POLAR_WEBHOOK_SECRET'),
+      currency: 'usd',
+    }),
+  },
+  methods: { credit_card: 'polar' },
+})
+```
+
+Polar is a merchant of record: it collects through its own checkout, so `charge()` throws and you
+call `createCheckout()`. `currency` is **required**; `sandbox` defaults to
+`NODE_ENV !== 'production'` and switches to `sandbox-api.polar.sh` — sandbox tokens belong to a
+separate organization and do not work in production.
+
+</ProviderCase>
+<ProviderCase for="razorpay">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_RAZORPAY_KEY_ID=rzp_test_...
+PAYMENTS_RAZORPAY_KEY_SECRET=your-key-secret
+PAYMENTS_RAZORPAY_WEBHOOK_SECRET=your-webhook-secret
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'razorpay',
+  providers: {
+    razorpay: payments.razorpay({
+      keyId: env.get('PAYMENTS_RAZORPAY_KEY_ID'),
+      keySecret: env.get('PAYMENTS_RAZORPAY_KEY_SECRET'),
+      webhookSecret: env.get('PAYMENTS_RAZORPAY_WEBHOOK_SECRET'),
+      currency: 'inr',
+    }),
+  },
+})
+```
+
+A Razorpay order does not name a payment method — the payer picks one on Razorpay Checkout — so
+there is no `methods` map; `driver()` with no argument resolves the default. `currency` is
+**required**. There is no `sandbox` option: test mode is a property of the key pair (`rzp_test_…`).
+
+</ProviderCase>
+<ProviderCase for="square">
+
+```ini title=".env" — your names, your choice
+PAYMENTS_SQUARE_ACCESS_TOKEN=your-access-token
+PAYMENTS_SQUARE_LOCATION_ID=your-location-id
+PAYMENTS_SQUARE_WEBHOOK_SIGNATURE_KEY=your-signature-key
+PAYMENTS_SQUARE_WEBHOOK_URL=https://you.app/payments/webhook/square
+```
+
+```ts title="config/payments.ts"
+import env from '#start/env'
+import { defineConfig, payments } from '@adonis-agora/payments'
+
+export default defineConfig({
+  default: 'square',
+  providers: {
+    square: payments.square({
+      accessToken: env.get('PAYMENTS_SQUARE_ACCESS_TOKEN'),
+      locationId: env.get('PAYMENTS_SQUARE_LOCATION_ID'),
+      webhookSignatureKey: env.get('PAYMENTS_SQUARE_WEBHOOK_SIGNATURE_KEY'),
+      notificationUrl: env.get('PAYMENTS_SQUARE_WEBHOOK_URL'),
+      currency: 'usd',
+    }),
+  },
+  methods: { credit_card: 'square' },
+})
+```
+
+`currency` is **required** (lowercase ISO 4217). Square's signature covers the notification URL as
+well as the body, which is why `notificationUrl` is part of the config — it has to be the exact
+URL registered in the Square dashboard. `sandbox` defaults to `NODE_ENV !== 'production'`.
+
+</ProviderCase>
+</ProviderSwitch>
 
 Or pass values from anywhere — the driver configs are plain objects, so an API key can come
 from a vault, another config file, or a literal (not recommended for secrets).
@@ -216,6 +664,29 @@ const payment = await payments.driver('pix').charge({
 
 // payment.pixCode → the copy-paste BR code to show the customer
 ```
+
+<ProviderSwitch>
+<ProviderCase for="infinitepay lemonsqueezy paddle polar">
+
+<Callout type="info" title="This gateway collects through its own hosted page">
+`charge()` throws here — the gateway is a merchant of record (or, for InfinitePay, a payment link)
+and takes the payment on its own checkout. Call `createCheckout()` with the same customer, amount
+and `externalReference`, redirect the payer to the URL it returns, and the confirmation reaches you
+as a webhook exactly like the charge above would. See [Providers → when it is a dash](/docs/payments/providers#when-it-is-a-dash).
+</Callout>
+
+</ProviderCase>
+<ProviderCase for="adyen mollie square paypal razorpay">
+
+<Callout type="info" title="This gateway does not take Pix">
+Route the method it does take — `driver('credit_card')` for cards, `driver('wallet')` on PayPal,
+`driver()` on Razorpay where the payer picks the method at checkout — and the call is otherwise the
+same. For a card, the charge also carries the token your frontend produced; see
+[Card](/docs/payments/patterns/card).
+</Callout>
+
+</ProviderCase>
+</ProviderSwitch>
 
 Add `invoice: true` to that call to emit a fiscal note with it — it needs an `invoice` section in
 the config first, or the charge throws. See [Invoices](/docs/payments/invoices).

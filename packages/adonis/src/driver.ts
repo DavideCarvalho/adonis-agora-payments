@@ -55,6 +55,30 @@ export interface PaymentsDriver {
     /** Recurring subscriptions. InfinitePay-style links lack it. */
     subscriptions?: boolean;
     /**
+     * Which parts of the subscription lifecycle the GATEWAY performs, for gateways that do
+     * some but not all of them.
+     *
+     * `subscriptions: boolean` could only say "recurring billing, yes or no", and that is not
+     * the shape of reality. Woovi/OpenPix CREATES subscriptions and cannot cancel or update
+     * one — its API is `create` and `get`. Declaring `subscriptions: true` was therefore true
+     * about the only question it could answer and misleading about the two that decide
+     * whether an app can offer a cancel button at all, so every caller rediscovered the
+     * limitation the same way: by calling cancel and reading the exception.
+     *
+     * Omit it and every operation follows `subscriptions` — a driver that already answered
+     * the coarse question keeps its meaning, which is why this is additive rather than a
+     * replacement.
+     *
+     * This describes the GATEWAY only. It is not a verdict on whether the app can cancel:
+     * with `subscriptions.mode: 'managed'` the library owns the recurrence and cancelling is
+     * a local operation on any gateway, including the ones that answer `false` here.
+     */
+    subscriptionLifecycle?: {
+      create?: boolean;
+      update?: boolean;
+      cancel?: boolean;
+    };
+    /**
      * Turning raw card data into a reusable token — checkout transparente.
      *
      * Separate from the rest because it is the one call that puts a PAN in the request
@@ -458,6 +482,22 @@ export interface CreateSubscriptionInput {
     name?: string;
     email?: string;
     taxId?: string;
+    phone?: string;
+    /**
+     * Payer address. Required by Woovi for Pix Automático (`PIX_RECURRING`) — a recurring
+     * bank mandate carries the payer's address, so the gateway refuses the subscription
+     * without it. Ignored by gateways that do not ask for one.
+     */
+    address?: {
+      zipcode?: string;
+      street?: string;
+      number?: string;
+      neighborhood?: string;
+      city?: string;
+      state?: string;
+      complement?: string;
+      country?: string;
+    };
   };
   /**
    * Your own reference echoed on the gateway subscription (and its generated charges) —

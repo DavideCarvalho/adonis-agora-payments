@@ -332,6 +332,27 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   // `BIGINT`, matching `amount`, so net revenue is one subtraction and never a division.
   await addColumn(db, dialect, 'billing_payments', 'refunded_amount', 'BIGINT');
 
+  // 0.7.0 — library-managed subscriptions. When `subscriptions.mode` is `'managed'` the
+  // recurrence lives HERE, not at the gateway: there is no `gateway_id` to read the amount,
+  // the cycle or the period back from, because no gateway subscription was ever created. Each
+  // cycle is an ordinary charge, which is what makes cancelling and re-pricing local
+  // operations on a gateway whose API cannot do either.
+  //
+  // Nullable across the board: a gateway-mode row has none of this and must not be forced to
+  // invent it.
+  await addColumn(db, dialect, 'billing_subscriptions', 'managed', 'BOOLEAN');
+  await addColumn(db, dialect, 'billing_subscriptions', 'amount', 'BIGINT');
+  await addColumn(db, dialect, 'billing_subscriptions', 'currency', 'VARCHAR(3)');
+  await addColumn(db, dialect, 'billing_subscriptions', 'cycle', 'VARCHAR(32)');
+  await addColumn(db, dialect, 'billing_subscriptions', 'method', 'VARCHAR(32)');
+  await addColumn(db, dialect, 'billing_subscriptions', 'description', 'VARCHAR(255)');
+  await addColumn(db, dialect, 'billing_subscriptions', 'external_reference', 'VARCHAR(255)');
+  await addColumn(db, dialect, 'billing_subscriptions', 'current_period_start', t.timestamp);
+  await addColumn(db, dialect, 'billing_subscriptions', 'current_period_end', t.timestamp);
+  // The renewal runner's only input. Indexed below: it is scanned on every tick.
+  await addColumn(db, dialect, 'billing_subscriptions', 'next_charge_at', t.timestamp);
+  await addColumn(db, dialect, 'billing_subscriptions', 'cancel_at_period_end', 'BOOLEAN');
+
   // ── Indexes ───────────────────────────────────────────────────────────────────────────
   //
   // Last, and that is load-bearing twice over. Every table above has to exist, and so does
@@ -417,6 +438,15 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
     'billing_usage_customer_meter_idx',
     'billing_usage_events',
     'customer_id, meter',
+  );
+  // The renewal runner's working set: every tick asks "which managed subscriptions are due".
+  // Unindexed, that is a full scan of every subscription ever created, on a schedule.
+  await createIndex(
+    db,
+    dialect,
+    'billing_subscriptions_due_idx',
+    'billing_subscriptions',
+    'managed, status, next_charge_at',
   );
 }
 

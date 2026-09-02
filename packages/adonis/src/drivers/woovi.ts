@@ -32,6 +32,24 @@ import { verifyHmacSignature, verifyRsaSha256Signature } from '../webhook_securi
  * webhooks, no card). Uses the official `@woovi/node-sdk` (lazily imported by the factory,
  * so the SDK stays an optional peer dependency).
  */
+/**
+ * Journey 3. Woovi's own recommendation, and the only one where the payer both authorizes
+ * and pays by scanning a single QR code — the closest thing to a card checkout.
+ */
+const DEFAULT_JOURNEY = 'PAYMENT_ON_APPROVAL';
+
+/**
+ * No automatic retry. The conservative default on purpose: `THREE_RETRIES_7_DAYS` re-debits
+ * a payer's bank account without the app asking, which is not something to opt someone into.
+ */
+const DEFAULT_RETRY_POLICY = 'NON_PERMITED';
+
+/** Days a generated charge stays payable before expiring. */
+const DEFAULT_DAY_DUE = 3;
+
+/** `comment` is the adoption-contract text in the payer's bank app; Woovi caps it at 30. */
+const COMMENT_MAX_LENGTH = 30;
+
 /** A Woovi subaccount (OpenPix for Platforms marketplace receiver). */
 export interface WooviSubAccount {
   name: string;
@@ -43,7 +61,15 @@ export class WooviDriver implements PaymentsDriver {
   readonly provider = 'woovi';
   // Woovi/OpenPix is Pix-only and has no refunds or invoice concept.
   readonly supportedMethods = ['pix', 'undefined'] as const;
-  readonly capabilities = { subscriptions: true };
+  /**
+   * Creates subscriptions; cannot cancel or update one. The OpenPix subscription API is
+   * `create` and `get`, and that asymmetry is a fact callers need BEFORE they offer a cancel
+   * button — not an exception they discover when a customer clicks it.
+   */
+  readonly capabilities = {
+    subscriptions: true,
+    subscriptionLifecycle: { create: true, update: false, cancel: false },
+  };
 
   #client: {
     charge: {
@@ -214,20 +240,50 @@ export class WooviDriver implements PaymentsDriver {
 
   // ── Subscriptions (Pix Automático) ──────────────────────────────────────────────────
 
+  /**
+   * Create a subscription. Pix Automático (`type: 'PIX_RECURRING'`) unless opted out.
+   *
+   * ## Why this is not the old body
+   *
+   * `POST /api/v1/subscriptions` serves TWO products. Send `type: 'PIX_RECURRING'` plus
+   * `pixRecurringOptions` and you get Pix Automático: the payer authorizes a recurring debit
+   * at their bank once, and every cycle is collected without them doing anything. Omit them
+   * and the same endpoint creates an ordinary subscription that emails a payment link each
+   * cycle — a different product, which the payer has to act on every month.
+   *
+   * This driver documents itself as Pix Automático and maps the `PIX_AUTOMATIC_*` webhooks,
+   * but the body it sent had neither field, so it created the ordinary kind. Those webhooks
+   * only fire for `PIX_RECURRING`: every event the driver knew how to translate was an event
+   * the gateway had no reason to send. Nothing failed loudly — the subscription existed, the
+   * dashboard showed it, and the recurring debit simply never happened.
+   *
+   * `correlationID` is the other half. The API accepts it and echoes it on the root of every
+   * `PIX_AUTOMATIC_COBR_*` webhook; the SDK's `CreatePayload` type just does not declare it,
+   * so it was dropped. Without it Woovi assigns its own, and an app routing webhooks by its
+   * own reference cannot recognise its own renewals.
+   *
+   * ## Required by the gateway, not by us
+   *
+   * `name`, `comment`, `frequency`, `dayGenerateCharge`, `dayDue`, both `pixRecurringOptions`
+   * and a customer WITH `address` are all mandatory for `PIX_RECURRING`. `comment` is the
+   * adoption-contract text shown in the payer's bank app and is capped at 30 characters —
+   * longer text is rejected, so it is truncated here rather than sent to fail.
+   *
+   * Pass `metadata.pixAutomatic: false` for the ordinary link-per-cycle subscription.
+   */
   async createSubscription(input: CreateSubscriptionInput): Promise<Subscription> {
     // Woovi creates subscriptions with an inline customer (no customer-id flow).
     const customer = await this.#resolveSubscriptionCustomer(input);
+    const reference =
+      input.externalReference !== undefined ? { correlationID: input.externalReference } : {};
+
     const body: Record<string, unknown> = {
       customer,
       value: input.amount ?? 0,
-      dayGenerateCharge: this.#dayOfMonth(input.startDate) ?? 1,
-      ...(input.cycle !== undefined ? { frequency: this.#mapFrequency(input.cycle) } : {}),
-      // Pix Automático journey 3 (pay-on-approval): `DYNAMIC` generates each charge and
-      // asks the payer to approve it. Override via `metadata.chargeType` if needed.
-      ...(input.metadata?.chargeType !== undefined
-        ? { chargeType: input.metadata.chargeType }
-        : { chargeType: 'DYNAMIC' }),
-      ...(input.metadata?.dayDue !== undefined ? { dayDue: input.metadata.dayDue } : {}),
+      ...reference,
+      ...(input.metadata?.pixAutomatic === false
+        ? this.#plainSubscriptionFields(input)
+        : this.#pixAutomaticFields(input)),
     };
     const data = await this.#client.subscription.create(body);
     // The SDK wraps the created subscription in `{ subscription }` (get/find return it bare).
@@ -239,15 +295,96 @@ export class WooviDriver implements PaymentsDriver {
     return subscription;
   }
 
+  /**
+   * The `PIX_RECURRING` half of the body — what turns a subscription into a real recurring
+   * bank authorization.
+   */
+  #pixAutomaticFields(input: CreateSubscriptionInput): Record<string, unknown> {
+    const journey = (input.metadata?.journey as string | undefined) ?? DEFAULT_JOURNEY;
+    const label = input.description ?? input.planId;
+
+    return {
+      type: 'PIX_RECURRING',
+      name: label,
+      // Truncated, not rejected: 31 characters of description is a caller's honest mistake,
+      // and failing the whole subscription over the contract label helps nobody.
+      comment: ((input.metadata?.comment as string | undefined) ?? label).slice(
+        0,
+        COMMENT_MAX_LENGTH,
+      ),
+      frequency: this.#mapRecurringFrequency(input.cycle),
+      // `PAYMENT_ON_APPROVAL` collects on approval, so the gateway requires the generation
+      // day to be TODAY. Deriving it from a `startDate` in another month is rejected — when
+      // the caller named no date, today is also the only answer that can be right.
+      dayGenerateCharge:
+        this.#dayOfMonth(input.startDate) ??
+        (journey === DEFAULT_JOURNEY ? new Date().getDate() : 1),
+      dayDue: input.metadata?.dayDue ?? DEFAULT_DAY_DUE,
+      pixRecurringOptions: {
+        journey,
+        retryPolicy: (input.metadata?.retryPolicy as string | undefined) ?? DEFAULT_RETRY_POLICY,
+        ...(input.metadata?.minimumValue !== undefined
+          ? { minimumValue: input.metadata.minimumValue }
+          : {}),
+      },
+    };
+  }
+
+  /** The ordinary subscription (a payment link per cycle) — `metadata.pixAutomatic: false`. */
+  #plainSubscriptionFields(input: CreateSubscriptionInput): Record<string, unknown> {
+    return {
+      dayGenerateCharge: this.#dayOfMonth(input.startDate) ?? 1,
+      ...(input.cycle !== undefined ? { frequency: this.#mapFrequency(input.cycle) } : {}),
+      ...(input.metadata?.chargeType !== undefined
+        ? { chargeType: input.metadata.chargeType }
+        : { chargeType: 'DYNAMIC' }),
+      ...(input.metadata?.dayDue !== undefined ? { dayDue: input.metadata.dayDue } : {}),
+    };
+  }
+
+  /**
+   * Cycle → `frequency` for `PIX_RECURRING`, which spells them the ordinary way.
+   *
+   * Deliberately NOT `#mapFrequency`: the plain subscription product uses its own spellings
+   * (`TRIMONTHLY`, `SEMIANUALY`, `ANNUALY` — the last two missing a letter each, and that is
+   * the gateway's spelling, not a typo here). Sending those under `PIX_RECURRING` is a
+   * rejected enum. Same field name, two vocabularies, chosen by `type`.
+   *
+   * Woovi does not offer bimonthly on Pix Automático at all; it falls back to monthly rather
+   * than sending a value the gateway refuses.
+   */
+  #mapRecurringFrequency(cycle: string | undefined): string {
+    switch (cycle) {
+      case 'WEEKLY':
+        return 'WEEKLY';
+      case 'QUARTERLY':
+        return 'QUARTERLY';
+      case 'SEMIANNUALLY':
+        return 'SEMIANNUALLY';
+      case 'YEARLY':
+        return 'ANNUALLY';
+      default:
+        return 'MONTHLY';
+    }
+  }
+
   /** Woovi's inline customer: `input.customer`, else the gateway customer (needs name+taxId). */
   async #resolveSubscriptionCustomer(
     input: CreateSubscriptionInput,
-  ): Promise<{ name: string; email: string; taxID: string; phone?: string }> {
+  ): Promise<Record<string, unknown>> {
+    // The address rides along because `PIX_RECURRING` requires it. It is NOT defaulted or
+    // faked when absent: an address the payer never gave is wrong data on a bank mandate,
+    // and the gateway's own rejection names the missing field better than a guess would.
+    const address = input.customer?.address;
+    const withAddress = address !== undefined ? { address } : {};
+
     if (input.customer?.name && input.customer.taxId) {
       return {
         name: input.customer.name,
         email: input.customer.email ?? '',
         taxID: input.customer.taxId.replace(/\D/g, ''),
+        ...(input.customer.phone !== undefined ? { phone: input.customer.phone } : {}),
+        ...withAddress,
       };
     }
     if (input.customerId) {
@@ -257,6 +394,7 @@ export class WooviDriver implements PaymentsDriver {
           name: customer.name,
           email: customer.email ?? '',
           taxID: customer.taxId.replace(/\D/g, ''),
+          ...withAddress,
         };
       }
     }

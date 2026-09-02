@@ -37,6 +37,15 @@ export {
 } from './billing/list_query.js';
 export type { BillingModels } from './billing/lucid_billing_store.js';
 export { LucidBillingStore, lucidBillingStore } from './billing/lucid_billing_store.js';
+export type { ManagedCycle, RenewalOutcome } from './billing/managed_subscriptions.js';
+export {
+  advancePeriod,
+  cancelManagedSubscription,
+  createManagedSubscription,
+  cycleIdempotencyKey,
+  renewDueManagedSubscriptions,
+  updateManagedSubscription,
+} from './billing/managed_subscriptions.js';
 export type { MeteredBill, MeteredBillLine, MeterRate } from './billing/metered_bill.js';
 export { meteredBill, meteredBillForSubscription } from './billing/metered_bill.js';
 export { BillingAuditEvent } from './billing/mixins/with_audit_event.js';
@@ -181,6 +190,18 @@ export { InvoiceManager, resolveInvoiceProviders } from './invoice/invoice_manag
 export type { InvoiceEmitInput, InvoiceProvider } from './invoice/invoice_provider.js';
 export { currencyExponent, formatDecimal, fromDecimal, toDecimal } from './money.js';
 export { PaymentsManager, resolveDrivers } from './payments_manager.js';
+export type {
+  ResolvedSubscriptionLifecycle,
+  SubscriptionOperation,
+} from './subscription_lifecycle.js';
+export {
+  gatewayPerforms,
+  gatewaySubscriptionLifecycle,
+} from './subscription_lifecycle.js';
+export type { SubscriptionMode, SubscriptionsConfig } from './subscription_mode.js';
+export { resolveSubscriptionMode } from './subscription_mode.js';
+export type { CreateSubscriptionRequest, SubscriptionHandle } from './subscriptions_api.js';
+export { SubscriptionsApi } from './subscriptions_api.js';
 export type {
   BillingStatus,
   CheckoutSession,

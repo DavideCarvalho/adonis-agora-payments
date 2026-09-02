@@ -14,9 +14,19 @@ import { Callout } from 'fumadocs-ui/components/callout';
   (`X-OpenPix-Signature`, HMAC-SHA1 base64) is supported via `webhookSecret` and takes a
   back seat when both are set.
 - **`externalReference`**: maps to Woovi's `correlationID` — the id you pass comes back on
-  the charge and its webhook, so it's your routing key.
-- **Subscriptions**: Pix Automático — recurring Pix via webhooks, **no card**. Pass
-  `startDate` to set the monthly charge day (`dayGenerateCharge`). They are **write-once**:
+  the charge and its webhook, so it's your routing key. It reaches subscriptions too: it is
+  sent on create and echoed at the ROOT of every `PIX_AUTOMATIC_COBR_*` delivery, so a
+  renewal routes like any other payment.
+- **Subscriptions**: Pix Automático (`type: 'PIX_RECURRING'`) — recurring Pix authorized once
+  at the payer's bank, **no card**. The payer's `customer.address` is **required**: a
+  recurring mandate carries it, and the gateway refuses the subscription without one. Journey
+  and retry default to `PAYMENT_ON_APPROVAL` / `NON_PERMITED`; override with
+  `metadata.journey`, `metadata.retryPolicy`, `metadata.minimumValue`, `metadata.dayDue`.
+  `description` becomes the subscription `name` and, truncated to 30 characters, the
+  adoption-contract `comment` shown in the bank app. Pass `metadata.pixAutomatic: false` for
+  the ordinary subscription that mails a payment link each cycle instead. Pass
+  `startDate` to set the monthly charge day (`dayGenerateCharge`) — with the default
+  pay-on-approval journey the gateway requires it to be **today**. They are **write-once**:
   the API creates and reads them and nothing else, so both `updateSubscription` and
   `cancelSubscription` throw instead of pretending. Cancel in the Woovi dashboard and
   reconcile your own record — the payer can also revoke a Pix Automático authorization at

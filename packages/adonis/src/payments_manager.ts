@@ -1,6 +1,10 @@
+import type { BillingStore } from './billing/billing_store.js';
 import type { PaymentsConfig } from './define_config.js';
 import type { PaymentsDriver } from './driver.js';
 import type { InvoiceManager } from './invoice/invoice_manager.js';
+import { gatewayPerforms, type SubscriptionOperation } from './subscription_lifecycle.js';
+import { resolveSubscriptionMode, type SubscriptionsConfig } from './subscription_mode.js';
+import { SubscriptionsApi } from './subscriptions_api.js';
 import type { PaymentMethodName } from './types.js';
 import { PAYMENT_METHOD_NAMES } from './types.js';
 
@@ -9,6 +13,17 @@ export interface PaymentsManagerOptions {
   invoices?: InvoiceManager;
   /** Method → provider name routing (`config.methods`). */
   methods?: Partial<Record<PaymentMethodName, string>>;
+  /** Who owns the recurrence, globally and per provider (`config.subscriptions`). */
+  subscriptions?: SubscriptionsConfig;
+  /**
+   * The billing store, resolved LAZILY.
+   *
+   * A getter and not the store itself because the manager is built before the billing layer
+   * — the provider constructs it inside a container singleton, and the store needs a booted
+   * database. Managed subscriptions are the only thing that reads it, so a gateway-only app
+   * never calls this and never needs a store at all.
+   */
+  store?: () => BillingStore;
   /** Explicit default provider name (`config.default`). */
   defaultName?: string;
 }
@@ -25,6 +40,9 @@ export class PaymentsManager {
    * one's identity.
    */
   #boundDrivers = new Map<string, PaymentsDriver>();
+  #subscriptionsConfig: SubscriptionsConfig | undefined;
+  #store: (() => BillingStore) | undefined;
+  #subscriptionsApi: SubscriptionsApi | undefined;
 
   constructor(options: PaymentsManagerOptions) {
     this.#drivers = options.drivers;
@@ -35,6 +53,34 @@ export class PaymentsManager {
       throw new Error('[payments] No drivers configured. Add a provider to config/payments.ts.');
     }
     this.#defaultName = options.defaultName ?? names[0]!;
+    this.#subscriptionsConfig = options.subscriptions;
+    this.#store = options.store;
+  }
+
+  /**
+   * Create, cancel and re-price subscriptions without the caller branching on who owns the
+   * recurrence. See {@link SubscriptionsApi}.
+   */
+  subscriptions(): SubscriptionsApi {
+    if (this.#subscriptionsApi === undefined) {
+      this.#subscriptionsApi = new SubscriptionsApi({
+        resolveDriver: (via?: string) => this.driver(via),
+        store: () => {
+          const store = this.#store?.();
+          if (store === undefined) {
+            throw new Error(
+              "[payments] Managed subscriptions need the billing store, and none is configured. Enable `billing` in config/payments.ts, or use `subscriptions.mode: 'gateway'`.",
+            );
+          }
+          return store;
+        },
+        mode: (provider, managedOnCall) =>
+          resolveSubscriptionMode(this.#subscriptionsConfig, provider, managedOnCall),
+        assertGatewayCan: (driver, operation) =>
+          this.assertGatewaySubscriptionOperation(driver, operation),
+      });
+    }
+    return this.#subscriptionsApi;
   }
 
   /**
@@ -232,6 +278,28 @@ export class PaymentsManager {
           `Supported capabilities: ${supported.join(', ') || '(none)'}.`,
       );
     }
+  }
+
+  /**
+   * Refuse a subscription operation the GATEWAY does not perform, naming the alternative.
+   *
+   * Separate from {@link assertCapability} because the answer is not a single boolean: a
+   * gateway can create subscriptions and be unable to cancel them (Woovi/OpenPix), so
+   * `subscriptions` alone cannot decide this call. And unlike a missing refund API, this
+   * limitation has a way out that costs nothing at the gateway — `subscriptions.mode:
+   * 'managed'`, where the library owns the recurrence — so the error says so rather than
+   * leaving the reader to conclude the feature is impossible.
+   */
+  assertGatewaySubscriptionOperation(
+    driver: PaymentsDriver,
+    operation: SubscriptionOperation,
+  ): void {
+    if (gatewayPerforms(driver, operation)) return;
+    throw new Error(
+      `[payments] Gateway "${driver.provider}" cannot ${operation} a subscription through its API. ` +
+        `Set \`subscriptions.mode: 'managed'\` (globally, per provider, or \`managed: true\` on the ` +
+        `call) to have the library own the recurrence and make this a local operation.`,
+    );
   }
 
   #resolveName(methodOrName?: PaymentMethodName | string): {

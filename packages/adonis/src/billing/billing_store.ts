@@ -62,10 +62,48 @@ export interface CustomerListItem {
   createdAt: Date | null;
 }
 
+/** A library-owned subscription at creation time. */
+export interface ManagedSubscriptionInput {
+  provider: string;
+  customerId: string;
+  status: string;
+  planId: string;
+  /** Integer minor units, per cycle. */
+  amount: number;
+  currency: string;
+  cycle: string;
+  method?: string | null;
+  description?: string | null;
+  /** Copied onto every cycle's charge, so renewals route like any other payment. */
+  externalReference?: string | null;
+  currentPeriodStart: Date;
+  currentPeriodEnd: Date;
+  nextChargeAt: Date | null;
+  payload?: Record<string, unknown>;
+}
+
+/** The fields a managed subscription can change after creation. */
+export interface ManagedSubscriptionPatch {
+  status?: string;
+  amount?: number;
+  description?: string | null;
+  cycle?: string;
+  currentPeriodStart?: Date;
+  currentPeriodEnd?: Date;
+  nextChargeAt?: Date | null;
+  cancelAtPeriodEnd?: boolean;
+  endsAt?: Date | null;
+}
+
 /** One `billing_subscriptions` row, normalized for reading. See {@link PaymentListItem}. */
 export interface SubscriptionListItem {
   id: string;
-  gatewayId: string;
+  /**
+   * `null` when no gateway subscription backs this row — a managed subscription, a free
+   * plan, or an admin-granted courtesy. The column was always nullable; only the type
+   * disagreed.
+   */
+  gatewayId: string | null;
   provider: string;
   status: string;
   planId: string;
@@ -411,6 +449,33 @@ export interface BillingStore<
   }): Promise<SubscriptionRow>;
 
   findSubscriptionByGatewayId(gatewayId: string): Promise<SubscriptionRow | null>;
+
+  // ── Managed subscriptions ────────────────────────────────────────────────────────
+  //
+  // Separate from `saveSubscription` because that one is keyed by `gatewayId`, and a managed
+  // subscription has none — nothing was created at the gateway. Reusing it would have meant
+  // inventing a fake gateway id, which then flows into `findSubscriptionByGatewayId` and the
+  // webhook processor as if a gateway knew about it.
+
+  /** Insert a library-owned subscription. `id` is the app-visible handle from here on. */
+  createManagedSubscription(sub: ManagedSubscriptionInput): Promise<SubscriptionRow>;
+
+  findSubscriptionById(id: string): Promise<SubscriptionRow | null>;
+
+  /** Patch a managed subscription. Returns `null` when the id matches nothing. */
+  updateManagedSubscription(
+    id: string,
+    patch: ManagedSubscriptionPatch,
+  ): Promise<SubscriptionRow | null>;
+
+  /**
+   * Managed subscriptions whose next cycle is due at or before `now`, oldest first.
+   *
+   * `limit` is not decoration: this is what the renewal runner iterates, and an unbounded
+   * read on a backlog (a worker that was down for a day) is how a renewal pass turns into an
+   * out-of-memory restart that then renews nothing at all.
+   */
+  listDueManagedSubscriptions(now: Date, limit: number): Promise<SubscriptionRow[]>;
 
   /**
    * Page through subscriptions, newest first, optionally filtered by status.

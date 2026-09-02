@@ -267,6 +267,30 @@ export async function cancelManagedSubscription(
 }
 
 /**
+ * Undo a cancel-at-period-end, putting the subscription back on renewal.
+ *
+ * The counterpart of `cancel({ atPeriodEnd: true })`, and the reason that flag is a flag
+ * rather than a terminal state: an application that offers "you can change your mind until
+ * the period ends" needs a way to act on that. Without this the only route back was creating
+ * a second subscription, which charges again for a period already paid.
+ *
+ * Refuses a subscription that is already over. `cancelAtPeriodEnd` is a decision that can be
+ * reversed; a `canceled` one has stopped, and quietly restarting it would put a customer back
+ * on a recurring debit they finished — the reverse of the mistake this method exists to fix.
+ */
+export async function resumeManagedSubscription(store: BillingStore, id: string): Promise<void> {
+  const row = (await store.findSubscriptionById(id)) as { status?: string } | null;
+  if (row === null) throw new Error(`[payments] No subscription ${id}.`);
+  if (row.status !== 'active') {
+    throw new Error(
+      `[payments] Subscription ${id} is "${row.status}", not active — only a subscription still ` +
+        'running can have a scheduled cancellation undone. Create a new one instead.',
+    );
+  }
+  await store.updateManagedSubscription(id, { cancelAtPeriodEnd: false });
+}
+
+/**
  * Re-price or re-describe a managed subscription.
  *
  * Takes effect on the NEXT cycle — the current one is already paid, and silently re-charging

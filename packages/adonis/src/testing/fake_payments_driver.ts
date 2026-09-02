@@ -13,6 +13,15 @@ export interface FakePaymentsDriverOptions {
   provider?: string;
   /** Queue of webhook events `parseWebhook` returns (in order). */
   webhookEvents?: WebhookEvent[];
+  /**
+   * Override what this fake claims to support, for a test ABOUT a gateway limitation.
+   *
+   * Merged over the defaults, so `{ disputes: false }` says exactly that and leaves the rest
+   * alone. Spell it out rather than relying on absence: a capability the fake happens not to
+   * declare is a limitation nobody chose, and it fails tests about the application for a
+   * reason that lives in the double.
+   */
+  capabilities?: Partial<NonNullable<PaymentsDriver['capabilities']>>;
 }
 
 /**
@@ -22,6 +31,20 @@ export interface FakePaymentsDriverOptions {
 export class FakePaymentsDriver implements PaymentsDriver {
   readonly provider: string;
   readonly supportedMethods = ['pix', 'credit_card', 'boleto', 'debit_card', 'undefined'] as const;
+
+  /**
+   * Everything, because this driver implements everything.
+   *
+   * It declared NOTHING, which was invisible until the manager started checking: capability
+   * guards read `capabilities?.x === true`, so an absent block means "cannot". The moment
+   * `subscriptions().cancel()` began asserting the gateway can cancel, every consumer's test
+   * that cancelled through a `FakePaymentsDriver` started failing on a limitation the fake
+   * does not have — it records the call and returns a subscription like it always did.
+   *
+   * A test double that refuses what it implements is worse than no double: it fails tests
+   * about the application for a reason that lives in the double.
+   */
+  readonly capabilities: NonNullable<PaymentsDriver['capabilities']>;
 
   /** Canned webhook events returned by `parseWebhook`, in order. */
   webhookEvents: WebhookEvent[];
@@ -44,6 +67,20 @@ export class FakePaymentsDriver implements PaymentsDriver {
   constructor(options: FakePaymentsDriverOptions = {}) {
     this.provider = options.provider ?? 'fake';
     this.webhookEvents = options.webhookEvents ?? [];
+    // Everything on by default, because this driver implements everything. It used to
+    // declare NOTHING, which was invisible until the manager began checking: the guards read
+    // `capabilities?.x === true`, so an absent block means "cannot". The moment
+    // `subscriptions().cancel()` started asserting the gateway can cancel, every test that
+    // cancelled through this fake failed on a limitation the fake does not have.
+    this.capabilities = {
+      disputes: true,
+      refunds: true,
+      invoices: true,
+      subscriptions: true,
+      cardTokenization: false,
+      subscriptionLifecycle: { create: true, update: true, cancel: true },
+      ...options.capabilities,
+    };
   }
 
   async createCustomer(input: Parameters<PaymentsDriver['createCustomer']>[0]): Promise<Customer> {

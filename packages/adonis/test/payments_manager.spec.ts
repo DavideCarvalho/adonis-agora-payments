@@ -144,7 +144,10 @@ describe('PaymentsManager', () => {
     // an app could call `submitDisputeEvidence` on a gateway that had told it not to. The
     // driver still throws on its own — a caller reaching past the manager deserves a real
     // message — but the documented path now stops before the network.
-    const noDisputes = new FakePaymentsDriver({ provider: 'woovi' });
+    const noDisputes = new FakePaymentsDriver({
+      provider: 'woovi',
+      capabilities: { disputes: false },
+    });
     const manager = makeManager([['woovi', noDisputes]]);
     expect(() => manager.assertCapability(manager.driver('woovi'), 'disputes')).toThrow(
       /does not support disputes/,

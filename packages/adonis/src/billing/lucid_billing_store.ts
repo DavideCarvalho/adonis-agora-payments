@@ -473,6 +473,9 @@ export class LucidBillingStore
     planId: string;
     trialEndsAt?: Date | null;
     endsAt?: Date | null;
+    amount?: number | null;
+    currency?: string | null;
+    cycle?: string | null;
     payload?: Record<string, unknown>;
   }): Promise<SubscriptionInstance> {
     await this.#ready();
@@ -485,6 +488,12 @@ export class LucidBillingStore
     row.planId = sub.planId;
     row.trialEndsAt = sub.trialEndsAt ? DateTime.fromJSDate(sub.trialEndsAt) : null;
     row.endsAt = sub.endsAt ? DateTime.fromJSDate(sub.endsAt) : null;
+    // `!== undefined`, não truthiness: ausente é "este evento não falou de preço" e preserva o
+    // que já estava. Um `subscription.canceled` não carrega valor, e sobrescrever com null
+    // apagaria o preço que o `created` gravou.
+    if (sub.amount !== undefined) row.amount = sub.amount;
+    if (sub.currency !== undefined) row.currency = sub.currency;
+    if (sub.cycle !== undefined) row.cycle = sub.cycle;
     row.payload = sub.payload ?? {};
     await row.save();
     return row;

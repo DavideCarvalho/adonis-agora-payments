@@ -484,6 +484,17 @@ export interface BillingStore<
     planId: string;
     trialEndsAt?: Date | null;
     endsAt?: Date | null;
+    /**
+     * Preço por ciclo e o ciclo, quando o gateway os manda. Guardá-los é o que permite somar
+     * receita recorrente de uma assinatura que o GATEWAY administra — antes só as gerenciadas
+     * tinham esse dado deste lado.
+     *
+     * Ausente NÃO apaga: um evento que não carrega o valor (um `canceled`, por exemplo) não
+     * pode zerar o que um `created` gravou.
+     */
+    amount?: number | null;
+    currency?: string | null;
+    cycle?: string | null;
     payload?: Record<string, unknown>;
   }): Promise<SubscriptionRow>;
 

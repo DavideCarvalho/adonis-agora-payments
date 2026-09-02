@@ -69,10 +69,14 @@ export async function billingOverview(
     store.netRevenue({ from, to }),
     store.countActiveSubscriptions(),
     store.usageReport({ from, to }),
-    // Só as gerenciadas: são as únicas cujo valor e ciclo esta biblioteca conhece. Numa
-    // assinatura do gateway o preço vive lá, e somar as duas daria um número que é metade da
-    // verdade apresentada como o total.
-    store.subscriptionAmountByCycle({ status: 'active', managed: true }),
+    // As DUAS famílias. Isto já foi só das gerenciadas, sob o argumento de que numa
+    // assinatura do gateway o preço vive lá — verdade sobre a FONTE, e errada sobre o dado:
+    // os drivers já normalizavam o valor, e o ciclo estava no payload de todo gateway. Só
+    // ninguém propagava. Somar uma carteira pela metade e chamar de MRR era o erro maior.
+    //
+    // Linha sem valor ou sem ciclo (gateway que não manda, ou assinatura gravada antes disto)
+    // é ignorada pela normalização, não chutada.
+    store.subscriptionAmountByCycle({ status: 'active' }),
   ]);
 
   const metrics: BillingOverviewMetric[] = [

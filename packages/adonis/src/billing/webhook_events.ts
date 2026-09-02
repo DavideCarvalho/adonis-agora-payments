@@ -89,6 +89,16 @@ export interface SubscriptionWebhookData {
   planId?: string;
   trialEndsAt?: string;
   endsAt?: string;
+  /**
+   * Preço por ciclo e o ciclo, quando o gateway os manda.
+   *
+   * Sem eles a linha de uma assinatura do gateway não tinha valor nem periodicidade deste
+   * lado, e a receita recorrente só podia ser calculada para as gerenciadas — metade da
+   * carteira. O dado sempre esteve no payload; ninguém o propagava.
+   */
+  amount?: number;
+  currency?: string;
+  cycle?: string;
 }
 
 /**

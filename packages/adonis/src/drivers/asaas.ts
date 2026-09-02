@@ -843,6 +843,9 @@ export class AsaasDriver implements PaymentsDriver {
       status: statusMap[data.status] ?? 'active',
       planId: data.description ?? data.cycle,
       amount: { amount: fromDecimal(data.value), currency: 'brl' },
+      // O ciclo já era lido acima como FALLBACK de `planId`; sem ele num campo próprio,
+      // `amount` sozinho não diz se R$1.200 é um mês ou um ano.
+      ...(data.cycle !== undefined ? { cycle: data.cycle } : {}),
       ...(this.#toIso(data.endDate) !== null ? { endsAt: this.#toIso(data.endDate)! } : {}),
       payload: data as unknown as Record<string, unknown>,
       createdAt: this.#toIso(data.nextDueDate) ?? new Date().toISOString(),
@@ -960,6 +963,12 @@ export class AsaasDriver implements PaymentsDriver {
         customerId: subscription.customerId,
         status: subscription.status,
         planId: subscription.planId,
+        // Valor e ciclo seguem para o store: é o que permite somar a receita recorrente de
+        // uma assinatura que o GATEWAY administra, e não só das gerenciadas pela lib.
+        ...(subscription.amount !== undefined
+          ? { amount: subscription.amount.amount, currency: subscription.amount.currency }
+          : {}),
+        ...(subscription.cycle !== undefined ? { cycle: subscription.cycle } : {}),
         ...(subscription.endsAt !== undefined ? { endsAt: subscription.endsAt } : {}),
       };
     }

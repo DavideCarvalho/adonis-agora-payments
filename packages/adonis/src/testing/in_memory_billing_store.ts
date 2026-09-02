@@ -365,6 +365,9 @@ export class InMemoryBillingStore
     planId: string;
     trialEndsAt?: Date | null;
     endsAt?: Date | null;
+    amount?: number | null;
+    currency?: string | null;
+    cycle?: string | null;
     payload?: Record<string, unknown>;
   }): Promise<InMemorySubscriptionRow> {
     const existing = this.subscriptions.get(sub.gatewayId);
@@ -376,6 +379,11 @@ export class InMemoryBillingStore
       status: sub.status,
       planId: sub.planId,
       trialEndsAt: sub.trialEndsAt ?? null,
+      // Ausente preserva o que já estava: um evento que não fala de preço (um `canceled`) não
+      // pode apagar o que o `created` gravou.
+      amount: sub.amount !== undefined ? sub.amount : (existing?.amount ?? null),
+      currency: sub.currency !== undefined ? sub.currency : (existing?.currency ?? null),
+      cycle: sub.cycle !== undefined ? sub.cycle : (existing?.cycle ?? null),
       endsAt: sub.endsAt ?? null,
       payload: sub.payload ?? {},
       // Preserved across upserts: a subscription's creation time is when it was FIRST

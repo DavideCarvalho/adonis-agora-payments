@@ -53,9 +53,10 @@ const STAT_COPY: Record<string, { label: string; hint: string }> = {
   mrr: {
     label: 'Recurring revenue (MRR)',
     // Diz o recorte em voz alta: as duas de cima olham o que ENTROU na janela, esta olha o
-    // que entra por mês enquanto nada mudar. E só as gerenciadas, porque numa assinatura do
-    // gateway o preço vive lá — somar as duas daria metade da verdade como se fosse o total.
-    hint: 'Library-managed subscriptions only, normalised to a month. Not windowed.',
+    // que entra por mês enquanto nada mudar. Conta as assinaturas do gateway e as gerenciadas;
+    // o que fica de fora é linha sem preço ou sem ciclo conhecido, que é ignorada em vez de
+    // chutada como mensal.
+    hint: 'Active subscriptions with a known price and cycle, normalised to a month. Not windowed.',
   },
 };
 

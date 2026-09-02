@@ -1,5 +1,24 @@
 # @adonis-agora/payments
 
+## 0.7.1
+
+### Patch Changes
+
+- [#24](https://github.com/DavideCarvalho/adonis-agora-payments/pull/24) [`df5f63a`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/df5f63aba68ba962914f93bf72c24a946b19201c) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - `FakePaymentsDriver` declares the capabilities it implements.
+  
+  It declared none, which was invisible until the manager started checking: the capability
+  guards read `capabilities?.x === true`, so an absent block means "cannot". The moment
+  `subscriptions().cancel()` began asserting the gateway can cancel, every consumer's test that
+  cancelled through the fake failed on a limitation the fake does not have — it records the call
+  and returns a subscription, exactly as before. A test double that refuses what it implements
+  fails tests about the application for a reason that lives in the double.
+  
+  Everything is on by default except `cardTokenization`, which stays off so the "gateway that
+  tokenizes in the browser" path is still the default shape. A test ABOUT a gateway limitation
+  now spells it out — `new FakePaymentsDriver({ capabilities: { disputes: false } })` — instead
+  of relying on absence, and the override is merged over the defaults so it says only what it
+  means.
+
 ## 0.7.0
 
 ### Minor Changes

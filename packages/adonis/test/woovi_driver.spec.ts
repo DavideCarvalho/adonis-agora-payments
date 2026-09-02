@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 const createClientMock = vi.hoisted(() => ({
   create: vi.fn(),
   subscription: { create: vi.fn(), get: vi.fn() },
-  charge: { create: vi.fn() },
+  charge: { create: vi.fn(), get: vi.fn() },
   customer: { create: vi.fn() },
   subAccount: { create: vi.fn(), get: vi.fn(), list: vi.fn() },
 }));
@@ -398,5 +398,55 @@ describe('WooviDriver', () => {
     expect(body).not.toHaveProperty('type');
     expect(body).not.toHaveProperty('pixRecurringOptions');
     expect(body).toMatchObject({ chargeType: 'DYNAMIC', frequency: 'TRIMONTHLY' });
+  });
+
+  /**
+   * OpenPix WRAPS a charge: `{ charge: { globalID, brCode, paymentLinkUrl, ... },
+   * correlationID, brCode }`. The driver read the envelope as if it were the charge, so
+   * `globalID` was missing and every payment came back with `gatewayId: ''` — and `brCode`,
+   * a STRING at both levels, was read as `data.brCode.brCode`, an object access on a string.
+   * The result was a Pix charge the caller could neither identify nor show to anyone.
+   */
+  it('reads the charge out of the OpenPix envelope', async () => {
+    createClientMock.charge.create.mockResolvedValue({
+      charge: {
+        globalID: 'Q2hhcmdlOjE=',
+        correlationID: 'order_1',
+        value: 1990,
+        status: 'ACTIVE',
+        brCode: '00020101021226870014br.gov.bcb.pix',
+        paymentLinkUrl: 'https://woovi.dev/pay/abc',
+        qrCodeImage: 'https://api.woovi.com/openpix/charge/brcode/image/abc.png',
+      },
+      correlationID: 'order_1',
+      brCode: '00020101021226870014br.gov.bcb.pix',
+    });
+    const driver = new WooviDriver({ config: () => ({}) }, { appId: 'test' });
+
+    const payment = await driver.charge({ amount: 1990, externalReference: 'order_1' });
+
+    expect(payment.gatewayId).toBe('Q2hhcmdlOjE=');
+    // The BR Code is what the payer copies, and what a QR renders from client-side.
+    expect(payment.pixCode).toBe('00020101021226870014br.gov.bcb.pix');
+    expect(payment.hostedUrl).toBe('https://woovi.dev/pay/abc');
+    // `qrCodeImage` is a URL and `pixQrCodeImage` is documented as base64 PNG — putting the
+    // URL there would render a broken <img> in every consumer that followed the docs.
+    expect(payment.pixQrCodeImage).toBeUndefined();
+  });
+
+  it('still reads a bare charge, without the envelope', async () => {
+    createClientMock.charge.get.mockResolvedValue({
+      globalID: 'Q2hhcmdlOjI=',
+      value: 500,
+      status: 'COMPLETED',
+      brCode: 'brcode-2',
+    });
+    const driver = new WooviDriver({ config: () => ({}) }, { appId: 'test' });
+
+    const payment = await driver.findPayment('Q2hhcmdlOjI=');
+
+    expect(payment?.gatewayId).toBe('Q2hhcmdlOjI=');
+    expect(payment?.status).toBe('paid');
+    expect(payment?.pixCode).toBe('brcode-2');
   });
 });

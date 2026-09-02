@@ -50,6 +50,11 @@ const DEFAULT_DAY_DUE = 3;
 /** `comment` is the adoption-contract text in the payer's bank app; Woovi caps it at 30. */
 const COMMENT_MAX_LENGTH = 30;
 
+/** A non-empty string, or `undefined`. Woovi returns `brCode` as a string at two levels. */
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
 /** A Woovi subaccount (OpenPix for Platforms marketplace receiver). */
 export interface WooviSubAccount {
   name: string;
@@ -221,17 +226,23 @@ export class WooviDriver implements PaymentsDriver {
       value: input.amount,
       ...(input.description !== undefined ? { comment: input.description } : {}),
     });
-    const charge = data as {
-      pixQrCode?: { brCode?: string; qrCodeImage?: string };
-      brCode?: { brCode?: string };
-      id?: string;
-    };
-    const brCode = charge.pixQrCode?.brCode ?? charge.brCode?.brCode ?? '';
+    // Same envelope as `charge()` — unwrap before reading, or every field is undefined.
+    const envelope = data as Record<string, unknown>;
+    const charge =
+      typeof envelope.charge === 'object' && envelope.charge !== null
+        ? (envelope.charge as Record<string, unknown>)
+        : envelope;
+    const brCode =
+      asString(charge.brCode) ??
+      asString(envelope.brCode) ??
+      (charge.pixQrCode as { brCode?: string } | undefined)?.brCode ??
+      '';
+    const id = String(charge.globalID ?? charge.id ?? '');
     return {
-      id: String(charge.id ?? ''),
-      gatewayId: String(charge.id ?? ''),
+      id,
+      gatewayId: id,
       provider: this.provider,
-      url: '',
+      url: asString(charge.paymentLinkUrl) ?? '',
       status: 'open',
       amount: { amount: input.amount, currency: 'brl' },
       ...(brCode !== '' ? { pixCode: brCode, pixCopiaECola: brCode } : {}),
@@ -587,14 +598,27 @@ export class WooviDriver implements PaymentsDriver {
   }
 
   #mapPayment(data: Record<string, unknown>): Payment {
-    const value = typeof data.value === 'number' ? data.value : 0;
-    const status = String(data.status ?? 'ACTIVE').toUpperCase();
+    // OpenPix WRAPS a charge: `POST /api/v1/charge` answers
+    // `{ charge: { globalID, brCode, paymentLinkUrl, ... }, correlationID, brCode }`, and
+    // `charge.get` returns the same envelope. This read the envelope as if it were the
+    // charge, so `globalID` was missing (every payment came back with `gatewayId: ''`) and
+    // `brCode` — a STRING at both levels — was read as `data.brCode.brCode`, an object
+    // access on a string, which is `undefined`. The result was a Pix charge the caller
+    // could neither identify nor show to anyone: no id, no code, no link.
+    const charge =
+      typeof data.charge === 'object' && data.charge !== null
+        ? (data.charge as Record<string, unknown>)
+        : data;
+    const value = typeof charge.value === 'number' ? charge.value : 0;
+    const status = String(charge.status ?? 'ACTIVE').toUpperCase();
     const brCode =
-      (data.pixQrCode as { brCode?: string } | undefined)?.brCode ??
-      (data.brCode as { brCode?: string } | undefined)?.brCode;
+      asString(charge.brCode) ??
+      asString(data.brCode) ??
+      (charge.pixQrCode as { brCode?: string } | undefined)?.brCode;
+    const paymentLinkUrl = asString(charge.paymentLinkUrl);
     return {
-      id: String(data.id ?? data.globalID ?? ''),
-      gatewayId: String(data.globalID ?? data.id ?? ''),
+      id: String(charge.id ?? charge.globalID ?? ''),
+      gatewayId: String(charge.globalID ?? charge.id ?? ''),
       provider: this.provider,
       amount: { amount: Math.round(value), currency: 'brl' },
       status:
@@ -604,9 +628,14 @@ export class WooviDriver implements PaymentsDriver {
             ? 'canceled'
             : 'pending',
       ...(brCode !== undefined ? { pixCode: brCode, pixCopiaECola: brCode } : {}),
-      ...(typeof data.correlationID === 'string' ? { customerId: data.correlationID } : {}),
+      // Woovi's `qrCodeImage` is a URL, and `pixQrCodeImage` is documented as base64 PNG
+      // ("render it directly as `data:image/png;base64,...`"). Putting a URL there would
+      // produce a broken <img> in every consumer that followed the docs, so it is left
+      // unset: `pixCode` is the BR Code and a QR renders from it client-side.
+      ...(paymentLinkUrl !== undefined ? { hostedUrl: paymentLinkUrl } : {}),
+      ...(typeof charge.correlationID === 'string' ? { customerId: charge.correlationID } : {}),
       payload: data,
-      createdAt: typeof data.createdAt === 'string' ? data.createdAt : new Date().toISOString(),
+      createdAt: typeof charge.createdAt === 'string' ? charge.createdAt : new Date().toISOString(),
     };
   }
 

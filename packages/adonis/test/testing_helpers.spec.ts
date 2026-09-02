@@ -33,7 +33,7 @@ afterEach(() => {
  */
 describe('fakePayments', () => {
   it('returns a REAL manager — the two methods the `as never` cast erased are there', () => {
-    const manager = fakePayments();
+    const manager = fakePayments(new FakePaymentsDriver({ capabilities: { refunds: false } }));
     expect(manager).toBeInstanceOf(PaymentsManager);
     // `invoice()` exists and says what it says when nothing is configured, instead of being
     // absent and throwing "manager.invoice is not a function" from inside a charge.

@@ -1,5 +1,90 @@
 # @adonis-agora/payments
 
+## 0.7.0
+
+### Minor Changes
+
+- [#22](https://github.com/DavideCarvalho/adonis-agora-payments/pull/22) [`1c73cf2`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/1c73cf217c65b13cee57b504b15dc1bf30e30bc8) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Subscriptions: say what the gateway can actually do, and offer to own the recurrence instead.
+  
+  **`capabilities.subscriptionLifecycle`.** `subscriptions: boolean` could only ask "recurring
+  billing, yes or no", which is not the shape of reality. Woovi/OpenPix creates subscriptions and
+  cannot cancel or update one — its API is `create` and `get`. Declaring `subscriptions: true` was
+  true about the only question it could answer and misleading about the two that decide whether an
+  app can offer a cancel button, so every caller rediscovered the limitation the same way: by
+  calling cancel and reading the exception. Drivers may now declare
+  `subscriptionLifecycle: { create, update, cancel }`; omitting it keeps following `subscriptions`,
+  so existing drivers are unchanged. `PaymentsManager.assertGatewaySubscriptionOperation()` refuses
+  early and names the way out.
+  
+  **`subscriptions.mode: 'gateway' | 'managed'`.** Who owns the recurrence is now a choice, at
+  three levels — globally, per provider, and `managed` on a single call, narrowest winning, default
+  `'gateway'` so nothing changes until asked. Plenty of teams want the gateway to own everything
+  and administer it in the gateway's dashboard; others want the plan, the price and the cancel
+  button in their own application. Forcing either on the other is what makes a billing library get
+  ripped out — and on a gateway that cannot cancel, `'managed'` is the only way to have a cancel
+  button at all, while the same app's card subscriptions stay gateway-owned.
+  
+  In managed mode the library never asks for a gateway subscription, only for a charge — which
+  every gateway can do. Cancelling becomes "stop issuing charges" and re-pricing becomes "the next
+  one is a different number", both local writes. Each cycle's charge carries the app's own
+  `externalReference`, so a renewal routes through the ordinary webhook path with no per-gateway
+  lookup.
+  
+  - `payments.subscriptions()` — `create`, `cancel`, `update`, `due`, `renewDue`, branching on mode
+    internally so no call site has to.
+  - `node ace payments:renew [--limit] [--dry-run]` charges what is due. **Nothing renews on its
+    own** — point a cron or durable schedule at it. Each cycle is keyed idempotently by
+    subscription and period start, so an overlapping run asks for the same charge rather than a
+    second one. A failed charge does not advance the period and does not stop the pass; dunning
+    stays the application's policy.
+  - `billing_subscriptions` gains `managed`, `amount`, `currency`, `cycle`, `method`, `description`,
+    `external_reference`, `current_period_start`, `current_period_end`, `next_charge_at`,
+    `cancel_at_period_end`, plus an index for the renewal query. Added through the existing
+    `createBillingTables()` upgrade path — no new migration to publish.
+  - `BillingSubscription.gatewayId` and `SubscriptionListItem.gatewayId` widen to `string | null`.
+    The column was always nullable; only the type disagreed, which blocked the managed case and the
+    free-plan/courtesy case alike.
+  
+  `BillingSubscription.amount` consumes through `Number()`, like `billing_payments.amount`:
+  `BIGINT` comes back from node-postgres as a string, and without it the renewal runner handed
+  `'9900'` to `driver.charge({ amount })` — a string in the request that moves money.
+  
+  Month arithmetic clamps rather than rolls over: a subscription starting 31 January renews 28
+  February, not 3 March.
+
+- [#22](https://github.com/DavideCarvalho/adonis-agora-payments/pull/22) [`1c73cf2`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/1c73cf217c65b13cee57b504b15dc1bf30e30bc8) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Woovi: actually create a Pix Automático subscription, and let `externalReference` reach it.
+  
+  `WooviDriver` documents itself as Pix Automático and translates the `PIX_AUTOMATIC_*`
+  webhooks, but the body it sent had neither `type: 'PIX_RECURRING'` nor `pixRecurringOptions`.
+  `POST /api/v1/subscriptions` serves two products, and without those fields it creates the
+  ordinary one — the kind that mails a payment link every cycle instead of debiting the payer's
+  bank. Those webhooks only fire for `PIX_RECURRING`, so every event the driver knew how to
+  handle was an event the gateway had no reason to send. Nothing failed loudly: the subscription
+  existed, the dashboard showed it, and the recurring debit simply never happened.
+  
+  `correlationID` was the other half. The API accepts it and echoes it at the root of every
+  `PIX_AUTOMATIC_COBR_*` delivery, but the SDK's `CreatePayload` type does not declare the field,
+  so the driver dropped it. Woovi then assigned its own, and an application routing webhooks by
+  its own reference could not recognise its own renewals — they arrived looking like a payment
+  for an unknown order.
+  
+  `createSubscription` now sends `type`, `pixRecurringOptions`, `correlationID`, `name`,
+  `comment` (the adoption-contract text, truncated to the gateway's 30-character cap),
+  `frequency` in the spelling `PIX_RECURRING` uses — it differs from the ordinary product's
+  `TRIMONTHLY`/`SEMIANUALY`/`ANNUALY` — plus `dayDue` and the payer's address.
+  
+  - `CreateSubscriptionInput.customer` gains optional `phone` and `address`. Woovi **requires**
+    the address for `PIX_RECURRING`: a recurring mandate carries it, and the subscription is
+    refused without one. It is never defaulted or faked — an address the payer never gave is
+    wrong data on a bank mandate.
+  - Journey and retry default to `PAYMENT_ON_APPROVAL` and `NON_PERMITED` (no silent re-debits);
+    override via `metadata.journey`, `metadata.retryPolicy`, `metadata.minimumValue`,
+    `metadata.dayDue`.
+  - `metadata.pixAutomatic: false` keeps the previous link-per-cycle behaviour.
+  
+  Note for existing callers: a Woovi subscription created before this now becomes a real
+  recurring authorization, and the payer's address becomes required.
+
 ## 0.6.0
 
 ### Minor Changes

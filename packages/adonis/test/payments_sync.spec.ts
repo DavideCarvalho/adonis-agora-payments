@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import PaymentsSync from '../commands/payments_sync.js';
+import PaymentsSync, { reconcileSubscriptions } from '../commands/payments_sync.js';
 import type { BillingStore } from '../src/billing/billing_store.js';
 import { InMemoryBillingStore } from '../src/testing/in_memory_billing_store.js';
-import type { Invoice, Payment } from '../src/types.js';
+import type { Invoice, Payment, Subscription } from '../src/types.js';
 
 /**
  * `payments:sync` — the reconcile, and the three ways it used to make the tables LESS true.
@@ -222,5 +222,159 @@ describe('payments:sync reconciles in both directions', () => {
     const store = new InMemoryBillingStore();
     await runSync(store, fakeDriver([invoice()], {}));
     expect(await store.findPaymentByGatewayId('pay_1')).toBeNull();
+  });
+});
+
+/** O mínimo de um driver que o reconcile de ASSINATURA toca. */
+interface SubscriptionDriver {
+  provider: string;
+  capabilities: { subscriptions: boolean };
+  findSubscription(gatewayId: string): Promise<Subscription | null>;
+}
+
+function subscriptionDriver(
+  answers: Record<string, Subscription | null>,
+  asked: string[] = [],
+): SubscriptionDriver & { asked: string[] } {
+  return {
+    asked,
+    provider: 'asaas',
+    capabilities: { subscriptions: true },
+    async findSubscription(gatewayId: string) {
+      asked.push(gatewayId);
+      return answers[gatewayId] ?? null;
+    },
+  };
+}
+
+/**
+ * Chama o reconcile DIRETO, sem o comando.
+ *
+ * `Object.create(prototype)` não inicializa campos privados `#`, então um método `#` do
+ * comando é inalcançável a partir do harness — que é justamente por que a lógica saiu de lá
+ * e virou função exportada, como `handleWebhookDelivery` já é.
+ */
+async function runReconcile(store: BillingStore, driver: SubscriptionDriver) {
+  const logs: string[] = [];
+  await reconcileSubscriptions({ driver: () => driver } as never, store, {
+    log: {
+      info: (message: string) => logs.push(message),
+      warning: (message: string) => logs.push(`WARN ${message}`),
+    },
+  });
+  return logs;
+}
+
+function remoteSubscription(over: Partial<Subscription> = {}): Subscription {
+  return {
+    id: 'sub_1',
+    gatewayId: 'sub_1',
+    provider: 'asaas',
+    customerId: 'cus_1',
+    status: 'active',
+    planId: 'plano',
+    amount: { amount: 9_900, currency: 'brl' },
+    cycle: 'MONTHLY',
+    payload: {},
+    createdAt: JANUARY,
+    ...over,
+  };
+}
+
+describe('payments:sync --subscriptions', () => {
+  /**
+   * O backfill que motivou tudo: o preço de uma assinatura só chegava ao store quando um
+   * `subscription.created`/`updated` o carregava. Toda assinatura criada ANTES disso ficava
+   * sem `amount`/`cycle` e fora da conta de receita recorrente — e para uma assinatura
+   * saudável que ninguém edita, "o próximo update" é nunca.
+   */
+  it('preenche preço e ciclo de uma assinatura gravada sem eles', async () => {
+    const store = new InMemoryBillingStore();
+    await store.saveSubscription({
+      gatewayId: 'sub_1',
+      provider: 'asaas',
+      customerId: 'cus_1',
+      status: 'active',
+      planId: 'plano',
+    });
+
+    await runReconcile(store, subscriptionDriver({ sub_1: remoteSubscription() }));
+
+    const rows = await store.listSubscriptions({ limit: 10 });
+    expect(rows[0]?.amount).toBe(9_900);
+    expect(rows[0]?.cycle).toBe('MONTHLY');
+  });
+
+  /**
+   * Uma assinatura gerenciada é da BIBLIOTECA — o gateway nunca ouviu falar dela. Perguntar
+   * daria 404, e "corrigir" a partir dessa resposta seria escrever por cima da única
+   * autoridade que existe.
+   */
+  it('não pergunta ao gateway sobre assinatura gerenciada', async () => {
+    const store = new InMemoryBillingStore();
+    await store.createManagedSubscription({
+      provider: 'asaas',
+      customerId: 'cus_1',
+      status: 'active',
+      planId: 'p',
+      amount: 5_000,
+      currency: 'brl',
+      cycle: 'MONTHLY',
+      currentPeriodStart: new Date(JANUARY),
+      currentPeriodEnd: new Date(JANUARY),
+      nextChargeAt: new Date(JANUARY),
+    });
+
+    const driver = subscriptionDriver({});
+    await runReconcile(store, driver);
+
+    expect(driver.asked).toEqual([]);
+  });
+
+  /**
+   * Chave de API trocada e ambiente errado produzem exatamente "não encontrei". Cancelar em
+   * massa a partir disso seria pior que o problema que este comando resolve.
+   */
+  it('não cancela nada quando o gateway não conhece a assinatura', async () => {
+    const store = new InMemoryBillingStore();
+    await store.saveSubscription({
+      gatewayId: 'sub_sumida',
+      provider: 'asaas',
+      customerId: 'cus_1',
+      status: 'active',
+      planId: 'plano',
+    });
+
+    const logs = await runReconcile(store, subscriptionDriver({}));
+
+    const rows = await store.listSubscriptions({ limit: 10 });
+    expect(rows[0]?.status).toBe('active');
+    expect(logs.some((line) => line.includes('not found at the gateway'))).toBe(true);
+  });
+
+  it('corrige o preço que mudou no painel do gateway', async () => {
+    const store = new InMemoryBillingStore();
+    await store.saveSubscription({
+      gatewayId: 'sub_1',
+      provider: 'asaas',
+      customerId: 'cus_1',
+      status: 'active',
+      planId: 'plano',
+      amount: 9_900,
+      currency: 'brl',
+      cycle: 'MONTHLY',
+    });
+
+    // Alguns gateways não emitem webhook quando o valor é editado no painel deles. Um
+    // reconcile é a única coisa que perceberia.
+    await runReconcile(
+      store,
+      subscriptionDriver({
+        sub_1: remoteSubscription({ amount: { amount: 14_900, currency: 'brl' } }),
+      }),
+    );
+
+    const rows = await store.listSubscriptions({ limit: 10 });
+    expect(rows[0]?.amount).toBe(14_900);
   });
 });

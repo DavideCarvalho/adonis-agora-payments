@@ -3,6 +3,7 @@ import type { CommandOptions } from '@adonisjs/core/types/ace';
 import type { BillingStore } from '../src/billing/billing_store.js';
 import { resolveBillingStore } from '../src/billing/resolve_store.js';
 import type { PaymentsConfig } from '../src/define_config.js';
+import type { PaymentsDriver } from '../src/driver.js';
 import { PaymentsManager } from '../src/payments_manager.js';
 
 /** Customers pulled per page while iterating `--all`. */
@@ -22,7 +23,7 @@ function parseInstant(value: string | undefined): Date | undefined {
 }
 
 /**
- * `node ace payments:sync [--provider=stripe] [--customer=cus_123 | --all]` — reconcile
+ * `node ace payments:sync [--provider=stripe] [--customer=cus_123 | --all | --subscriptions]` — reconcile
  * local billing records with the gateway. Useful after missed webhooks or manual dashboard
  * changes: pages through every invoice for a customer (or for every recorded customer with
  * `--all`), asks the gateway what each charge's payment actually says, and writes that into
@@ -41,7 +42,127 @@ function parseInstant(value: string | undefined): Date | undefined {
  *
  * One local state is deliberately NOT reconcilable from the gateway: `disputed`. See the
  * comment on it below.
+ *
+ * `--subscriptions` is a different reconcile on the same principle: it refreshes price, cycle
+ * and status of every recorded gateway subscription. It is the backfill for rows created
+ * before the price reached the store, and afterwards the drift correction for an amount edited
+ * in the gateway's own dashboard — which some gateways do not send a webhook for at all.
  */
+/** O que `reconcileSubscriptions` reporta ao chamador. */
+export interface SubscriptionSyncResult {
+  updated: number;
+  unchanged: number;
+  skipped: number;
+  missing: number;
+}
+
+/** O pedaço do logger do ace que o reconcile usa. */
+export interface SyncLogger {
+  info(message: string): void;
+  warning(message: string): void;
+}
+
+/**
+ * Reconcile recorded subscriptions against the gateway: price, cycle and status.
+ *
+ * This exists because a subscription's price only reached the store when a
+ * `subscription.created`/`updated` delivery carried it. Every subscription created BEFORE
+ * that shipped therefore has no `amount`/`cycle` on its row, and is skipped by the recurring
+ * revenue maths until the gateway happens to send an update — which for a healthy
+ * subscription that nobody edits is never. This is the backfill, and afterwards it is the
+ * drift correction: an amount changed in the gateway's own dashboard produces no webhook in
+ * some gateways, and a reconcile is the only thing that would notice.
+ *
+ * Two kinds of row are skipped, for opposite reasons:
+ *
+ * - **Managed** — the library owns that recurrence and the gateway has never heard of it.
+ *   Asking about it would 404, and "correcting" it from a gateway answer would be writing
+ *   over the only authority there is.
+ * - **No `gatewayId`** — a free plan or an admin courtesy. Nothing to ask about.
+ */
+export async function reconcileSubscriptions(
+  manager: Pick<PaymentsManager, 'driver'>,
+  store: BillingStore,
+  options: { provider?: string | undefined; log: SyncLogger },
+): Promise<SubscriptionSyncResult> {
+  let updated = 0;
+  let unchanged = 0;
+  let skipped = 0;
+  let missing = 0;
+
+  for (let offset = 0; ; offset += PAGE) {
+    const page = await store.listSubscriptions({
+      limit: PAGE,
+      offset,
+      ...(options.provider !== undefined ? { provider: options.provider } : {}),
+    });
+
+    for (const row of page) {
+      if (row.managed || !row.gatewayId) {
+        skipped += 1;
+        continue;
+      }
+
+      let driver: PaymentsDriver;
+      try {
+        driver = manager.driver(row.provider);
+      } catch {
+        // Uma linha de um provider que este deploy não configura mais. Não é erro do
+        // reconcile, e derrubar a varredura inteira por causa dela seria.
+        skipped += 1;
+        continue;
+      }
+      if (driver.capabilities?.subscriptions !== true) {
+        skipped += 1;
+        continue;
+      }
+
+      const remote = await driver.findSubscription(row.gatewayId);
+      if (remote === null) {
+        // O gateway não conhece mais. NÃO é cancelar por conta própria: uma chave de API
+        // trocada ou um ambiente errado produzem exatamente esta resposta, e cancelar em
+        // massa a partir dela seria pior que o problema que este comando resolve.
+        missing += 1;
+        options.log.warning(`${row.provider} ${row.gatewayId}: not found at the gateway`);
+        continue;
+      }
+
+      const amount = remote.amount?.amount;
+      const currency = remote.amount?.currency;
+      if (
+        row.status === remote.status &&
+        row.amount === (amount ?? null) &&
+        row.cycle === (remote.cycle ?? null)
+      ) {
+        unchanged += 1;
+        continue;
+      }
+
+      await store.saveSubscription({
+        gatewayId: row.gatewayId,
+        provider: row.provider,
+        customerId: remote.customerId,
+        status: remote.status,
+        planId: remote.planId,
+        // Só o que o gateway REALMENTE respondeu. Ausente preserva o que já está gravado —
+        // um driver que não mapeia ciclo não pode apagar um que outro caminho gravou.
+        ...(amount !== undefined ? { amount } : {}),
+        ...(currency !== undefined ? { currency } : {}),
+        ...(remote.cycle !== undefined ? { cycle: remote.cycle } : {}),
+        payload: remote.payload,
+      });
+      updated += 1;
+    }
+
+    if (page.length < PAGE) break;
+  }
+
+  options.log.info(
+    `subscriptions: ${updated} updated, ${unchanged} already current, ${skipped} skipped, ${missing} not found`,
+  );
+  return { updated, unchanged, skipped, missing };
+}
+
 export default class PaymentsSync extends BaseCommand {
   static override commandName = 'payments:sync';
   static override description = 'Reconcile local billing records with a payment provider';
@@ -58,6 +179,11 @@ export default class PaymentsSync extends BaseCommand {
   })
   declare all?: boolean;
 
+  @flags.boolean({
+    description: 'Reconcile recorded subscriptions (price, cycle, status) instead of invoices',
+  })
+  declare subscriptions?: boolean;
+
   override async run(): Promise<void> {
     const config = this.app.config.get<PaymentsConfig>('payments', {});
     if (config.billing?.enabled === false) {
@@ -66,14 +192,25 @@ export default class PaymentsSync extends BaseCommand {
       );
       return;
     }
+    const manager = await this.app.container.make(PaymentsManager);
+
+    // Assinaturas ANTES do guard de customer: este modo não itera customers, e exigir
+    // `--all`/`--customer` para rodá-lo seria pedir um argumento que ele ignora.
+    if (this.subscriptions) {
+      await reconcileSubscriptions(manager, await resolveBillingStore(config), {
+        provider: this.provider,
+        log: this.logger,
+      });
+      return;
+    }
+
     if (!this.customer && !this.all) {
       this.logger.error(
-        'Pass --customer=<gateway customer id> to sync one customer, or --all to sync every recorded gateway customer.',
+        'Pass --customer=<gateway customer id> to sync one customer, --all to sync every recorded gateway customer, or --subscriptions to reconcile subscriptions.',
       );
       return;
     }
 
-    const manager = await this.app.container.make(PaymentsManager);
     const driver = manager.driver(this.provider);
     // Some gateways (Woovi/OpenPix) have no invoice concept — fail early with a clear
     // message instead of listing nothing.

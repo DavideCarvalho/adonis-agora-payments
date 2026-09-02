@@ -124,6 +124,30 @@ const STRIPE_EVIDENCE_FILE_FIELDS = new Set([
  * {@link PaymentsDriver} contract. The SDK is imported lazily by the factory in
  * `define_config.ts`, so `stripe` stays an optional peer dependency.
  */
+/**
+ * `interval` + `interval_count` do Stripe no vocabulário de ciclo desta biblioteca.
+ *
+ * Os dois juntos, e não só o `interval`: "a cada 3 meses" no Stripe é `month` com
+ * `interval_count: 3`, e ler só o `interval` contaria essa assinatura como MENSAL — inflando
+ * a receita recorrente em 3×, em silêncio, que é exatamente o erro que o MRR não pode ter.
+ *
+ * Combinação que não mapeia (a cada 5 meses, a cada 2 semanas) devolve `undefined` em vez de
+ * um palpite: o cálculo pula o que não entende, e faltar é melhor que mentir.
+ */
+export function normalizeStripeCycle(interval: string, count: number): string | undefined {
+  if (interval === 'week' && count === 1) return 'WEEKLY';
+  if (interval === 'month') {
+    if (count === 1) return 'MONTHLY';
+    if (count === 2) return 'BIMONTHLY';
+    if (count === 3) return 'QUARTERLY';
+    if (count === 6) return 'SEMIANNUALLY';
+    if (count === 12) return 'YEARLY';
+    return undefined;
+  }
+  if (interval === 'year' && count === 1) return 'YEARLY';
+  return undefined;
+}
+
 export class StripeDriver implements PaymentsDriver {
   readonly provider = 'stripe';
   readonly supportedMethods = ['pix', 'credit_card', 'boleto', 'undefined'] as const;
@@ -669,6 +693,17 @@ export class StripeDriver implements PaymentsDriver {
             },
           }
         : {}),
+      // `price.recurring.interval` é `month`/`year`/`week`/`day` com um `interval_count`:
+      // "a cada 3 meses" é `month` × 3, não um `QUARTERLY`. Normalizar os dois juntos é o
+      // que faz o ciclo do Stripe somar na mesma conta que o do Asaas.
+      ...(() => {
+        const recurring = subscription.items.data[0]?.price.recurring;
+        if (!recurring) return {};
+        const cycle = normalizeStripeCycle(recurring.interval, recurring.interval_count);
+        // Combinação que não mapeia some em vez de virar `undefined` na chave: com
+        // `exactOptionalPropertyTypes`, `{ cycle: undefined }` não é o mesmo que ausente.
+        return cycle === undefined ? {} : { cycle };
+      })(),
       ...(subscription.trial_end !== null
         ? { trialEndsAt: new Date(subscription.trial_end * 1000).toISOString() }
         : {}),
@@ -1243,12 +1278,26 @@ export class StripeDriver implements PaymentsDriver {
         ? subscription.customer
         : (subscription.customer as { id?: string } | undefined)?.id;
     if (typeof subscription.id !== 'string' || typeof customerId !== 'string') return undefined;
-    const planId = subscription.items?.data?.[0]?.price?.id;
+    const price = subscription.items?.data?.[0]?.price;
+    const planId = price?.id;
+    const recurring = price?.recurring as
+      | { interval?: string; interval_count?: number }
+      | undefined;
+    const cycle =
+      typeof recurring?.interval === 'string'
+        ? normalizeStripeCycle(recurring.interval, recurring.interval_count ?? 1)
+        : undefined;
     return {
       gatewayId: subscription.id,
       customerId,
       status: this.#mapSubscriptionStatus(subscription.status),
       ...(typeof planId === 'string' ? { planId } : {}),
+      // Valor e ciclo seguem para o store: sem eles a receita recorrente só podia ser somada
+      // das assinaturas gerenciadas pela lib, que é metade da carteira.
+      ...(typeof price?.unit_amount === 'number' && typeof price.currency === 'string'
+        ? { amount: price.unit_amount, currency: price.currency }
+        : {}),
+      ...(cycle !== undefined ? { cycle } : {}),
       ...(typeof subscription.trial_end === 'number'
         ? { trialEndsAt: new Date(subscription.trial_end * 1000).toISOString() }
         : {}),

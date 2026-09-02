@@ -8,6 +8,7 @@ import {
 } from '../src/billing/managed_subscriptions.js';
 import { payments } from '../src/dashboard/handlers.js';
 import type { PaymentsDriver } from '../src/driver.js';
+import { normalizeStripeCycle } from '../src/drivers/stripe.js';
 import { FakePaymentsDriver } from '../src/testing/fake_payments_driver.js';
 import { InMemoryBillingStore } from '../src/testing/in_memory_billing_store.js';
 
@@ -221,5 +222,83 @@ describe('console: ação que o gateway não sabe fazer', () => {
     // uma indisponibilidade de lookup — mostrar é o comportamento anterior, e o pior caso é
     // um erro do gateway, que é o que acontecia antes o tempo todo.
     expect(body.payments[0]?.refundable).toBe(true);
+  });
+});
+
+describe('MRR: assinatura administrada pelo gateway', () => {
+  /**
+   * Isto já foi só das gerenciadas, sob o argumento de que numa assinatura do gateway o preço
+   * "vive lá". Verdade sobre a FONTE e errada sobre o DADO: os drivers já normalizavam o
+   * valor, e o ciclo estava no payload de todo gateway — só ninguém propagava. Somar uma
+   * carteira pela metade e chamar de MRR era o erro maior.
+   */
+  it('soma a do gateway junto com a gerenciada', async () => {
+    const billing = store();
+    await billing.saveSubscription({
+      gatewayId: 'sub_asaas',
+      provider: 'asaas',
+      customerId: 'cus_1',
+      status: 'active',
+      planId: 'plano',
+      amount: 12_000,
+      currency: 'brl',
+      cycle: 'YEARLY',
+    });
+    await createManagedSubscription(new FakePaymentsDriver(), billing, {
+      customerId: 'cus_2',
+      planId: 'p',
+      amount: 5_000,
+      cycle: 'MONTHLY',
+      startDate: '2026-01-10',
+    });
+
+    const lines = await billing.subscriptionAmountByCycle({ status: 'active' });
+    // 12.000/12 (anual do gateway) + 5.000 (mensal gerenciada)
+    expect(monthlyRecurringRevenue(lines)).toBe(6_000);
+  });
+
+  it('um evento sem preço não apaga o preço que o anterior gravou', async () => {
+    const billing = store();
+    await billing.saveSubscription({
+      gatewayId: 'sub_1',
+      provider: 'asaas',
+      customerId: 'cus_1',
+      status: 'active',
+      planId: 'plano',
+      amount: 9_900,
+      currency: 'brl',
+      cycle: 'MONTHLY',
+    });
+    // `subscription.canceled` do Asaas não carrega valor. Sobrescrever com null aqui apagaria
+    // o preço que o `created` gravou — e o MRR cairia por um evento que não falou de dinheiro.
+    await billing.saveSubscription({
+      gatewayId: 'sub_1',
+      provider: 'asaas',
+      customerId: 'cus_1',
+      status: 'active',
+      planId: 'plano',
+    });
+
+    const lines = await billing.subscriptionAmountByCycle({ status: 'active' });
+    expect(monthlyRecurringRevenue(lines)).toBe(9_900);
+  });
+});
+
+describe('ciclo do Stripe', () => {
+  /**
+   * `interval` + `interval_count` juntos. "A cada 3 meses" é `month` × 3, e ler só o
+   * `interval` contaria essa assinatura como MENSAL — inflando o MRR em 3×, em silêncio.
+   */
+  it('lê o interval_count, não só o interval', () => {
+    expect(normalizeStripeCycle('month', 1)).toBe('MONTHLY');
+    expect(normalizeStripeCycle('month', 3)).toBe('QUARTERLY');
+    expect(normalizeStripeCycle('month', 12)).toBe('YEARLY');
+    expect(normalizeStripeCycle('year', 1)).toBe('YEARLY');
+  });
+
+  it('devolve undefined para combinação que não mapeia, em vez de chutar', () => {
+    // A cada 5 meses não tem nome no nosso vocabulário. Faltar é melhor que mentir.
+    expect(normalizeStripeCycle('month', 5)).toBeUndefined();
+    expect(normalizeStripeCycle('day', 1)).toBeUndefined();
   });
 });

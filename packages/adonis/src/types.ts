@@ -332,6 +332,14 @@ export interface Subscription {
   /** Price id/plan id at the gateway. */
   planId: string;
   amount?: MoneyAmount;
+  /**
+   * Billing cycle, normalised (`MONTHLY`, `YEARLY`, …).
+   *
+   * Every gateway sends it — Asaas as `cycle`, Stripe as `price.recurring.interval` — and it
+   * was the one field standing between a gateway-owned subscription and recurring-revenue
+   * maths on this side. `amount` alone cannot say whether R$1.200 is a month or a year.
+   */
+  cycle?: string;
   /** ISO date the trial ends (when on trial). */
   trialEndsAt?: string;
   /** ISO date the subscription ends (canceled/ended). */

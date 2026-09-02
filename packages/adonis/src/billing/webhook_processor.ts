@@ -546,6 +546,12 @@ export class WebhookProcessor {
       planId: data.planId ?? '',
       ...(data.trialEndsAt !== undefined ? { trialEndsAt: new Date(data.trialEndsAt) } : {}),
       ...(data.endsAt !== undefined ? { endsAt: new Date(data.endsAt) } : {}),
+      // Valor e ciclo quando o gateway os mandou. É o que faz uma assinatura ADMINISTRADA
+      // PELO GATEWAY entrar na conta de receita recorrente — antes só as gerenciadas pela
+      // lib tinham preço deste lado, e o MRR era metade da carteira.
+      ...(data.amount !== undefined ? { amount: data.amount } : {}),
+      ...(data.currency !== undefined ? { currency: data.currency } : {}),
+      ...(data.cycle !== undefined ? { cycle: data.cycle } : {}),
       payload: event.raw,
     });
     const type =

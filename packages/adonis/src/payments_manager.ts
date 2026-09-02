@@ -48,11 +48,19 @@ export class PaymentsManager {
     this.#drivers = options.drivers;
     this.#invoices = options.invoices;
     this.#methods = options.methods ?? {};
+    // Zero providers is a legitimate state, not a boot failure. An application can ship
+    // before it has a gateway — or run its whole test suite and local development without
+    // one, the way an app with a "no credentials, subscriptions are simulated" mode does.
+    //
+    // This used to throw HERE, in the constructor. The provider resolves the manager during
+    // boot (to publish `getPayments()` and to check webhook verification), so an app with no
+    // credentials configured could not start at all: not "payments are off", but "the process
+    // exits". The error was also the wrong shape of true — it named config/payments.ts for an
+    // app that had deliberately configured nothing.
+    //
+    // Asking an empty manager for a driver is still an error, and `driver()` says so.
     const names = [...this.#drivers.keys()];
-    if (names.length === 0) {
-      throw new Error('[payments] No drivers configured. Add a provider to config/payments.ts.');
-    }
-    this.#defaultName = options.defaultName ?? names[0]!;
+    this.#defaultName = options.defaultName ?? names[0] ?? '';
     this.#subscriptionsConfig = options.subscriptions;
     this.#store = options.store;
   }
@@ -107,6 +115,14 @@ export class PaymentsManager {
     const { name: resolved, method, unrouted } = this.#resolveName(methodOrName);
     const driver = this.#drivers.get(resolved);
     if (!driver) {
+      // No providers at all is its own message. "Driver \"\" is not configured. Available
+      // drivers: (none)" is technically true and tells the reader nothing about what to do.
+      if (this.#drivers.size === 0) {
+        throw new Error(
+          '[payments] No payment providers are configured. Add one to `providers` in ' +
+            'config/payments.ts — the application booted fine without any, but this call needs one.',
+        );
+      }
       throw new Error(
         `[payments] Driver "${resolved}" is not configured. ` +
           `Available drivers: ${[...this.#drivers.keys()].join(', ') || '(none)'}.`,

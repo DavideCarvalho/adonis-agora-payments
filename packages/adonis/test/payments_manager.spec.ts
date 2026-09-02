@@ -159,8 +159,16 @@ describe('PaymentsManager', () => {
     expect(() => manager.driver('nope')).toThrow(/not configured|neither a configured provider/);
   });
 
-  it('throws when no drivers are configured', () => {
-    expect(() => makeManager([]).driver()).toThrow(/No drivers configured/);
+  /**
+   * Zero providers is a legitimate state. The constructor used to throw, and the provider
+   * resolves the manager during boot — so an app with no credentials configured could not
+   * START, which is a different thing from "payments are off". Building is fine; ASKING an
+   * empty manager for a driver is the error.
+   */
+  it('builds with no drivers, and refuses only when one is asked for', () => {
+    const manager = makeManager([]);
+    expect(manager.drivers.size).toBe(0);
+    expect(() => manager.driver()).toThrow(/No payment providers are configured/);
   });
 
   it('resolves drivers from config factories', async () => {

@@ -6,6 +6,7 @@ import {
   createManagedSubscription,
   cycleIdempotencyKey,
   renewDueManagedSubscriptions,
+  resumeManagedSubscription,
 } from '../src/billing/managed_subscriptions.js';
 import type { PaymentsDriver } from '../src/driver.js';
 import { gatewaySubscriptionLifecycle } from '../src/subscription_lifecycle.js';
@@ -138,6 +139,51 @@ describe('managed subscriptions', () => {
       now: new Date('2026-02-10T00:00:00Z'),
     });
     expect(retried[0]).toMatchObject({ result: 'charged' });
+  });
+
+  /**
+   * The counterpart of `cancel({ atPeriodEnd: true })`, and the reason that flag is a flag
+   * rather than a terminal state: "you can change your mind until the period ends" needs a
+   * way to act on it. Without this the only route back was a second subscription, which
+   * charges again for a period already paid.
+   */
+  it('resumes a subscription scheduled to cancel at period end', async () => {
+    const driver = new ChargeOnlyDriver();
+    const billing = store();
+    const created = await createManagedSubscription(driver, billing, {
+      customerId: 'cus_1',
+      planId: 'p',
+      amount: 100,
+      cycle: 'MONTHLY',
+      startDate: '2026-01-10',
+    });
+
+    await cancelManagedSubscription(billing, created.id, { atPeriodEnd: true });
+    await resumeManagedSubscription(billing, created.id);
+
+    const outcomes = await renewDueManagedSubscriptions(() => driver, billing, {
+      now: new Date('2026-02-10T00:00:00Z'),
+    });
+    // Renova de novo, em vez de terminar: é isso que "mudei de ideia" significa.
+    expect(outcomes[0]).toMatchObject({ result: 'charged' });
+  });
+
+  it('refuses to resume a subscription that already ended', async () => {
+    const driver = new ChargeOnlyDriver();
+    const billing = store();
+    const created = await createManagedSubscription(driver, billing, {
+      customerId: 'cus_1',
+      planId: 'p',
+      amount: 100,
+      cycle: 'MONTHLY',
+      startDate: '2026-01-10',
+    });
+
+    await cancelManagedSubscription(billing, created.id);
+
+    // Restartar em silêncio poria o cliente de volta num débito recorrente que ele terminou —
+    // o inverso do erro que este método existe pra corrigir.
+    await expect(resumeManagedSubscription(billing, created.id)).rejects.toThrow(/not active/);
   });
 
   it('cancels without touching the gateway', async () => {

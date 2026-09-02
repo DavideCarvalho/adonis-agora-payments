@@ -44,6 +44,7 @@ export {
   createManagedSubscription,
   cycleIdempotencyKey,
   renewDueManagedSubscriptions,
+  resumeManagedSubscription,
   updateManagedSubscription,
 } from './billing/managed_subscriptions.js';
 export type { MeteredBill, MeteredBillLine, MeterRate } from './billing/metered_bill.js';

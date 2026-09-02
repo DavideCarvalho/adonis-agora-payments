@@ -4,6 +4,7 @@ import {
   createManagedSubscription,
   type RenewalOutcome,
   renewDueManagedSubscriptions,
+  resumeManagedSubscription,
   updateManagedSubscription,
 } from './billing/managed_subscriptions.js';
 import type { CreateSubscriptionInput, PaymentsDriver } from './driver.js';
@@ -118,6 +119,28 @@ export class SubscriptionsApi {
     await cancelManagedSubscription(this.#deps.store(), id, {
       ...(options.atPeriodEnd !== undefined ? { atPeriodEnd: options.atPeriodEnd } : {}),
     });
+  }
+
+  /**
+   * Undo a cancel-at-period-end, putting the subscription back on renewal.
+   *
+   * Managed mode only: a gateway-owned subscription that was cancelled at the gateway is
+   * gone, and there is no portable "un-cancel" across gateways to hide behind this name.
+   * Saying so is better than a method that works on one provider and silently does nothing on
+   * the next.
+   */
+  async resume(id: string, options: { via?: string; managed?: boolean } = {}): Promise<void> {
+    const driver = this.#deps.resolveDriver(options.via);
+    const mode = this.#deps.mode(driver.provider, options.managed);
+
+    if (mode === 'gateway') {
+      throw new Error(
+        `[payments] Resuming a subscription is managed-mode only — "${driver.provider}" owns this ` +
+          'one, and no gateway exposes a portable un-cancel. Create a new subscription instead.',
+      );
+    }
+
+    await resumeManagedSubscription(this.#deps.store(), id);
   }
 
   /** Re-price or re-describe. In managed mode it takes effect on the next cycle. */

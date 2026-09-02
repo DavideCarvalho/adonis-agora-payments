@@ -113,6 +113,106 @@ describe('LucidBillingStore (integration)', () => {
     });
   });
 
+  /**
+   * Managed subscriptions against real SQL, which is the only place this can be checked.
+   * The in-memory store filters an array in JavaScript; here the same question is a WHERE
+   * over a boolean and a timestamp, on the columns the published migration actually creates.
+   */
+  describe('managed subscriptions', () => {
+    const base = {
+      provider: 'woovi',
+      customerId: 'cus_managed',
+      status: 'active',
+      planId: 'plan_managed',
+      amount: 9900,
+      currency: 'brl',
+      cycle: 'MONTHLY',
+      method: 'pix',
+      externalReference: 'sub:local-1',
+    };
+
+    it('stores a subscription with no gateway id at all', async () => {
+      const row = await store.createManagedSubscription({
+        ...base,
+        currentPeriodStart: new Date('2026-01-10T00:00:00.000Z'),
+        currentPeriodEnd: new Date('2026-02-10T00:00:00.000Z'),
+        nextChargeAt: new Date('2026-02-10T00:00:00.000Z'),
+      });
+
+      // `gateway_id` is UNIQUE and was typed `string` — a managed row has none, and more than
+      // one of them has to be able to coexist. A NULL does not collide in a unique index; an
+      // invented placeholder would have, on the second subscription.
+      expect(row.gatewayId).toBeNull();
+      const reread = await store.findSubscriptionById(row.id);
+      expect(reread?.amount).toBe(9900);
+      expect(reread?.externalReference).toBe('sub:local-1');
+
+      const second = await store.createManagedSubscription({
+        ...base,
+        currentPeriodStart: new Date('2026-01-11T00:00:00.000Z'),
+        currentPeriodEnd: new Date('2026-02-11T00:00:00.000Z'),
+        nextChargeAt: new Date('2026-02-11T00:00:00.000Z'),
+      });
+      expect(second.id).not.toBe(row.id);
+    });
+
+    it('returns only what is due, oldest first, and never a gateway-owned row', async () => {
+      const due = await store.createManagedSubscription({
+        ...base,
+        currentPeriodStart: new Date('2026-02-01T00:00:00.000Z'),
+        currentPeriodEnd: new Date('2026-03-01T00:00:00.000Z'),
+        nextChargeAt: new Date('2026-03-01T00:00:00.000Z'),
+      });
+      const notYet = await store.createManagedSubscription({
+        ...base,
+        currentPeriodStart: new Date('2026-02-01T00:00:00.000Z'),
+        currentPeriodEnd: new Date('2027-01-01T00:00:00.000Z'),
+        nextChargeAt: new Date('2027-01-01T00:00:00.000Z'),
+      });
+      // A gateway-owned subscription renews itself; charging it here would double-bill.
+      await store.saveSubscription({
+        provider: 'asaas',
+        customerId: 'cus_gw',
+        planId: 'plan_gw',
+        gatewayId: 'sub_gateway_owned',
+        status: 'active',
+      });
+
+      const rows = await store.listDueManagedSubscriptions(
+        new Date('2026-03-02T00:00:00.000Z'),
+        10,
+      );
+      const ids = rows.map((row) => row.id);
+      expect(ids).toContain(due.id);
+      expect(ids).not.toContain(notYet.id);
+      expect(rows.every((row) => row.managed === true)).toBe(true);
+    });
+
+    it('stops renewing when nextChargeAt is cleared', async () => {
+      const row = await store.createManagedSubscription({
+        ...base,
+        currentPeriodStart: new Date('2026-04-01T00:00:00.000Z'),
+        currentPeriodEnd: new Date('2026-05-01T00:00:00.000Z'),
+        nextChargeAt: new Date('2026-05-01T00:00:00.000Z'),
+      });
+
+      // `null` has to reach the column as NULL. If the patch treated it as "leave alone",
+      // a cancelled subscription would keep coming back due and charging forever.
+      await store.updateManagedSubscription(row.id, {
+        status: 'canceled',
+        nextChargeAt: null,
+        endsAt: new Date('2026-05-01T00:00:00.000Z'),
+      });
+
+      const rows = await store.listDueManagedSubscriptions(
+        new Date('2026-06-01T00:00:00.000Z'),
+        10,
+      );
+      expect(rows.map((r) => r.id)).not.toContain(row.id);
+      expect((await store.findSubscriptionById(row.id))?.status).toBe('canceled');
+    });
+  });
+
   describe('webhook ledger', () => {
     const event = (gatewayEventId: string, type: string) => ({
       gatewayEventId,

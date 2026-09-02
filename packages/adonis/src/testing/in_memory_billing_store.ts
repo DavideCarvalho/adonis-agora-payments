@@ -9,6 +9,8 @@ import {
   type CustomerListQuery,
   type DisputeDeadlineQuery,
   type DisputeListItem,
+  type ManagedSubscriptionInput,
+  type ManagedSubscriptionPatch,
   OPEN_DISPUTE_STATUSES,
   type OpenDisputeQuery,
   type PaymentListItem,
@@ -108,7 +110,8 @@ export interface InMemoryCustomerRow {
 /** A minimal in-memory row shape (mirrors the Lucid models' columns). */
 export interface InMemorySubscriptionRow {
   id: string;
-  gatewayId: string;
+  /** `null` on a managed subscription — nothing was created at the gateway. */
+  gatewayId: string | null;
   provider: string;
   customerId: string;
   status: string;
@@ -118,6 +121,18 @@ export interface InMemorySubscriptionRow {
   payload: Record<string, unknown>;
   /** Insertion timestamp — the Lucid row has one, and the list query orders by it. */
   createdAt: Date;
+  // Managed-subscription fields. Null on a gateway-mode row.
+  managed?: boolean | null;
+  amount?: number | null;
+  currency?: string | null;
+  cycle?: string | null;
+  method?: string | null;
+  description?: string | null;
+  externalReference?: string | null;
+  currentPeriodStart?: Date | null;
+  currentPeriodEnd?: Date | null;
+  nextChargeAt?: Date | null;
+  cancelAtPeriodEnd?: boolean | null;
 }
 
 export interface InMemoryPaymentRow {
@@ -396,6 +411,83 @@ export class InMemoryBillingStore
 
   async findSubscriptionByGatewayId(gatewayId: string): Promise<InMemorySubscriptionRow | null> {
     return this.subscriptions.get(gatewayId) ?? null;
+  }
+
+  // ── Managed subscriptions ──────────────────────────────────────────────────────────
+  //
+  // Kept in their own map because `subscriptions` is keyed by GATEWAY id, and these have
+  // none. Keying them by a made-up one would make `findSubscriptionByGatewayId` answer for a
+  // subscription no gateway has ever heard of.
+  managedSubscriptions: Map<string, InMemorySubscriptionRow> = new Map();
+
+  async createManagedSubscription(sub: ManagedSubscriptionInput): Promise<InMemorySubscriptionRow> {
+    const row: InMemorySubscriptionRow = {
+      id: `sub_${this.#nextId++}`,
+      gatewayId: null,
+      provider: sub.provider,
+      customerId: sub.customerId,
+      status: sub.status,
+      planId: sub.planId,
+      trialEndsAt: null,
+      endsAt: null,
+      payload: sub.payload ?? {},
+      createdAt: new Date(),
+      managed: true,
+      amount: sub.amount,
+      currency: sub.currency,
+      cycle: sub.cycle,
+      method: sub.method ?? null,
+      description: sub.description ?? null,
+      externalReference: sub.externalReference ?? null,
+      currentPeriodStart: sub.currentPeriodStart,
+      currentPeriodEnd: sub.currentPeriodEnd,
+      nextChargeAt: sub.nextChargeAt,
+      cancelAtPeriodEnd: false,
+    };
+    this.managedSubscriptions.set(row.id, row);
+    return row;
+  }
+
+  async findSubscriptionById(id: string): Promise<InMemorySubscriptionRow | null> {
+    const managed = this.managedSubscriptions.get(id);
+    if (managed !== undefined) return managed;
+    for (const row of this.subscriptions.values()) {
+      if (row.id === id) return row;
+    }
+    return null;
+  }
+
+  async updateManagedSubscription(
+    id: string,
+    patch: ManagedSubscriptionPatch,
+  ): Promise<InMemorySubscriptionRow | null> {
+    const row = this.managedSubscriptions.get(id);
+    if (row === undefined) return null;
+
+    if (patch.status !== undefined) row.status = patch.status;
+    if (patch.amount !== undefined) row.amount = patch.amount;
+    if (patch.description !== undefined) row.description = patch.description;
+    if (patch.cycle !== undefined) row.cycle = patch.cycle;
+    if (patch.currentPeriodStart !== undefined) row.currentPeriodStart = patch.currentPeriodStart;
+    if (patch.currentPeriodEnd !== undefined) row.currentPeriodEnd = patch.currentPeriodEnd;
+    // `null` means "stop renewing", so absence is the only thing that means "leave alone".
+    if (patch.nextChargeAt !== undefined) row.nextChargeAt = patch.nextChargeAt;
+    if (patch.cancelAtPeriodEnd !== undefined) row.cancelAtPeriodEnd = patch.cancelAtPeriodEnd;
+    if (patch.endsAt !== undefined) row.endsAt = patch.endsAt;
+    return row;
+  }
+
+  async listDueManagedSubscriptions(now: Date, limit: number): Promise<InMemorySubscriptionRow[]> {
+    return [...this.managedSubscriptions.values()]
+      .filter(
+        (row) =>
+          row.status === 'active' &&
+          row.nextChargeAt !== null &&
+          row.nextChargeAt !== undefined &&
+          row.nextChargeAt.getTime() <= now.getTime(),
+      )
+      .sort((a, b) => (a.nextChargeAt!.getTime() < b.nextChargeAt!.getTime() ? -1 : 1))
+      .slice(0, limit);
   }
 
   async savePayment(payment: {

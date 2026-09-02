@@ -13,6 +13,7 @@ import type { PolarDriverConfig } from './drivers/polar.js';
 import type { RazorpayDriverConfig } from './drivers/razorpay.js';
 import type { SquareDriverConfig } from './drivers/square.js';
 import type { InvoiceProvider } from './invoice/invoice_provider.js';
+import type { SubscriptionsConfig } from './subscription_mode.js';
 import type { InvoiceOptions, PaymentMethodName } from './types.js';
 import type { WebhookHandlerService } from './webhook_handlers.js';
 
@@ -334,6 +335,18 @@ export interface PaymentsConfig {
   allowUnverifiedWebhooks?: boolean | string[];
   /** Invoice emission settings. */
   invoice?: InvoiceSectionConfig;
+  /**
+   * Who drives subscriptions — the gateway, or this library. See {@link SubscriptionsConfig}.
+   *
+   * ```ts
+   * subscriptions: {
+   *   mode: 'gateway',                  // default for everyone
+   *   providers: { woovi: 'managed' },  // ...except Woovi, which cannot cancel or update
+   * }
+   * ```
+   */
+  subscriptions?: SubscriptionsConfig;
+
   /** Billing (subscription) layer settings. */
   billing?: {
     /**

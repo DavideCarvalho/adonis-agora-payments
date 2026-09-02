@@ -24,9 +24,16 @@ export class BillingSubscription extends BaseModel {
   @column({ isPrimary: true })
   declare id: string;
 
-  /** Gateway subscription id (Stripe `sub_...`, Asaas `sub_...`, Woovi `globalID`). */
+  /**
+   * Gateway subscription id (Stripe `sub_...`, Asaas `sub_...`, Woovi `globalID`).
+   *
+   * `null` on a managed subscription: the library owns that recurrence and never created
+   * anything at the gateway, so there is no id to hold. The column has always been nullable
+   * — the type said otherwise, which also blocked the free-plan case where a row exists and
+   * no gateway subscription does.
+   */
   @column()
-  declare gatewayId: string;
+  declare gatewayId: string | null;
 
   @column()
   declare provider: string;
@@ -48,6 +55,66 @@ export class BillingSubscription extends BaseModel {
 
   @column({ serializeAs: null })
   declare payload: Record<string, unknown>;
+
+  // ── Managed subscriptions (`subscriptions.mode: 'managed'`) ─────────────────────────
+  //
+  // Null on a gateway-mode row, where the gateway holds all of this and is the truth. On a
+  // managed one there is no gateway subscription to ask, so the recurrence is described
+  // here and each cycle is issued as an ordinary charge.
+
+  /** Whether this library drives the recurrence rather than the gateway. */
+  @column()
+  declare managed: boolean | null;
+
+  /**
+   * Amount per cycle, integer minor units — same unit as `billing_payments.amount`.
+   *
+   * `consume` for the same reason it is on that column: `BIGINT` comes back from
+   * node-postgres as a STRING, because reading beyond 2^53 would lose precision silently.
+   * Without it the renewal runner hands `'9900'` to `driver.charge({ amount })` — a string
+   * where every driver expects a number, straight into the request that moves money.
+   * `Number()` is safe here specifically: these are minor units, and 2^53 of them is ninety
+   * trillion reais.
+   */
+  @column({ consume: (value: unknown) => (value === null ? null : Number(value)) })
+  declare amount: number | null;
+
+  @column()
+  declare currency: string | null;
+
+  /** `MONTHLY`, `YEARLY`, … — the cycle the period is advanced by on each renewal. */
+  @column()
+  declare cycle: string | null;
+
+  /** Payment method each cycle's charge goes out on (`pix`, `credit_card`, …). */
+  @column()
+  declare method: string | null;
+
+  @column()
+  declare description: string | null;
+
+  /**
+   * The app's own reference, copied onto every cycle's charge.
+   *
+   * This is what makes managed mode route webhooks without any per-gateway special case: a
+   * renewal arrives as a normal payment carrying the app's reference, exactly like a one-off.
+   */
+  @column()
+  declare externalReference: string | null;
+
+  @column.dateTime()
+  declare currentPeriodStart: DateTime | null;
+
+  @column.dateTime()
+  declare currentPeriodEnd: DateTime | null;
+
+  /** When the next cycle is due. `null` once the subscription stops renewing. */
+  @column.dateTime()
+  declare nextChargeAt: DateTime | null;
+
+  /** Cancel requested, but the paid period is not over — stop renewing, keep access. */
+  @column()
+  declare cancelAtPeriodEnd: boolean | null;
 
   @column.dateTime({ autoCreate: true })
   declare createdAt: DateTime;

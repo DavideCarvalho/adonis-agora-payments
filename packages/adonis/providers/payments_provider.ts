@@ -24,7 +24,12 @@ import {
 } from '../src/diagnostics.js';
 import { InvoiceManager, resolveInvoiceProviders } from '../src/invoice/invoice_manager.js';
 import { PaymentsManager, resolveDrivers } from '../src/payments_manager.js';
-import { setBillingStore, setPayments, setWebhookDispatcher } from '../src/services/main.js';
+import {
+  getBillingStore,
+  setBillingStore,
+  setPayments,
+  setWebhookDispatcher,
+} from '../src/services/main.js';
 import {
   assertWebhookHandlerTypes,
   type DiscoveredWebhookHandler,
@@ -66,6 +71,11 @@ export default class PaymentsProvider {
         ...(invoices !== undefined ? { invoices } : {}),
         ...(config.methods !== undefined ? { methods: config.methods } : {}),
         ...(config.default !== undefined ? { defaultName: config.default } : {}),
+        ...(config.subscriptions !== undefined ? { subscriptions: config.subscriptions } : {}),
+        // Lazy on purpose: this runs before the billing layer is built in `boot()`, so
+        // resolving the store here would either fail or force billing on apps that route
+        // every subscription to the gateway and never need it.
+        store: () => getBillingStore(),
       });
       // Hand the manager to the lazy `services/main` singleton so `getPayments()` works.
       setPayments(manager);

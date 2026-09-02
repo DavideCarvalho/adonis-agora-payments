@@ -93,6 +93,7 @@ If you sell "access until the end of the period", keep that end date in your own
 yourself.
 
 </ProviderCase>
+
 <ProviderCase for="Woovi">
 
 **Pix Automático — recurring Pix, no card.** The payer approves a recurring authorization and each
@@ -106,11 +107,19 @@ const subscription = await getPayments().driver('pix').createSubscription({
   cycle: 'MONTHLY',
   startDate: '2026-09-15',        // ← only the day is used: dayGenerateCharge = 15
   externalReference: `sub:${local.id}`,
-  // Woovi builds the subscription with an INLINE customer, not a customer id.
+  // Woovi builds the subscription with an INLINE customer, not a customer id — and Pix
+  // Automático is a bank mandate, so the ADDRESS is required too.
   customer: {
     name: user.fullName,
     email: user.email,
     taxId: user.cpfCnpj,
+    address: {
+      zipcode: user.zipcode,
+      street: user.street,
+      number: user.number,
+      city: user.city,
+      state: user.state,
+    },
   },
 })
 ```
@@ -183,6 +192,38 @@ the manager will tell you so before any request goes out.
 
 </ProviderCase>
 </ProviderSwitch>
+
+## Who owns the recurrence
+
+Everything above is **gateway mode**: the gateway holds the subscription and charges it. That is
+the default, and for Stripe or Asaas it is usually what you want — their dashboards, their
+dunning, their retries.
+
+It stops being a choice when the gateway cannot do the job. Woovi/OpenPix has no cancel and no
+update: `capabilities.subscriptionLifecycle` says so, and `payments.subscriptions().cancel()`
+refuses rather than pretending. The way out is **managed mode**, where this library owns the
+recurrence and only ever asks the gateway for a charge — something every gateway can do.
+
+```ts title="config/payments.ts"
+subscriptions: {
+  mode: 'gateway',                  // default for everyone
+  providers: { woovi: 'managed' },  // ...except Woovi, which cannot cancel or update
+}
+```
+
+Per call wins over per provider, which wins over the global default:
+
+```ts
+await getPayments().subscriptions().create({ via: 'pix', managed: true, /* ... */ })
+```
+
+In managed mode cancelling is a local write, re-pricing takes effect on the next cycle, and every
+cycle's charge carries your `externalReference` — so a renewal reaches your webhook handler
+looking like any other payment, with no per-gateway lookup.
+
+Nothing renews on its own. Point a schedule at `node ace payments:renew`; run it more often than
+your shortest cycle. Cycles are keyed idempotently by subscription and period, so an overlapping
+run cannot double-charge, and a failed charge stays due instead of skipping the customer's month.
 
 ## The differences at a glance
 

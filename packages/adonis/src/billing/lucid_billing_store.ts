@@ -11,6 +11,8 @@ import {
   type CustomerListQuery,
   type DisputeDeadlineQuery,
   type DisputeListItem,
+  type ManagedSubscriptionInput,
+  type ManagedSubscriptionPatch,
   OPEN_DISPUTE_STATUSES,
   type OpenDisputeQuery,
   type PaymentListItem,
@@ -472,6 +474,80 @@ export class LucidBillingStore
     row.payload = sub.payload ?? {};
     await row.save();
     return row;
+  }
+
+  async createManagedSubscription(sub: ManagedSubscriptionInput): Promise<SubscriptionInstance> {
+    await this.#ready();
+    const row = new this.#subscriptionModel() as SubscriptionInstance;
+    // No `gatewayId`: nothing was created at the gateway. It stays null, which is why the
+    // column is nullable and `findSubscriptionByGatewayId` can never reach this row.
+    row.gatewayId = null;
+    row.provider = sub.provider;
+    row.customerId = sub.customerId;
+    row.status = sub.status;
+    row.planId = sub.planId;
+    row.managed = true;
+    row.amount = sub.amount;
+    row.currency = sub.currency;
+    row.cycle = sub.cycle;
+    row.method = sub.method ?? null;
+    row.description = sub.description ?? null;
+    row.externalReference = sub.externalReference ?? null;
+    row.currentPeriodStart = DateTime.fromJSDate(sub.currentPeriodStart);
+    row.currentPeriodEnd = DateTime.fromJSDate(sub.currentPeriodEnd);
+    row.nextChargeAt = sub.nextChargeAt ? DateTime.fromJSDate(sub.nextChargeAt) : null;
+    row.cancelAtPeriodEnd = false;
+    row.payload = sub.payload ?? {};
+    await row.save();
+    return row;
+  }
+
+  async findSubscriptionById(id: string): Promise<SubscriptionInstance | null> {
+    await this.#ready();
+    return (await this.#subscriptionModel.find(id)) as SubscriptionInstance | null;
+  }
+
+  async updateManagedSubscription(
+    id: string,
+    patch: ManagedSubscriptionPatch,
+  ): Promise<SubscriptionInstance | null> {
+    await this.#ready();
+    const row = (await this.#subscriptionModel.find(id)) as SubscriptionInstance | null;
+    if (row === null) return null;
+
+    if (patch.status !== undefined) row.status = patch.status;
+    if (patch.amount !== undefined) row.amount = patch.amount;
+    if (patch.description !== undefined) row.description = patch.description;
+    if (patch.cycle !== undefined) row.cycle = patch.cycle;
+    if (patch.currentPeriodStart !== undefined) {
+      row.currentPeriodStart = DateTime.fromJSDate(patch.currentPeriodStart);
+    }
+    if (patch.currentPeriodEnd !== undefined) {
+      row.currentPeriodEnd = DateTime.fromJSDate(patch.currentPeriodEnd);
+    }
+    // `null` is a MEANING here (stop renewing), not "leave alone" — hence the explicit
+    // `undefined` check rather than a truthiness one.
+    if (patch.nextChargeAt !== undefined) {
+      row.nextChargeAt = patch.nextChargeAt ? DateTime.fromJSDate(patch.nextChargeAt) : null;
+    }
+    if (patch.cancelAtPeriodEnd !== undefined) row.cancelAtPeriodEnd = patch.cancelAtPeriodEnd;
+    if (patch.endsAt !== undefined) {
+      row.endsAt = patch.endsAt ? DateTime.fromJSDate(patch.endsAt) : null;
+    }
+    await row.save();
+    return row;
+  }
+
+  async listDueManagedSubscriptions(now: Date, limit: number): Promise<SubscriptionInstance[]> {
+    await this.#ready();
+    return (await this.#subscriptionModel
+      .query()
+      .where('managed', true)
+      .where('status', 'active')
+      .whereNotNull('next_charge_at')
+      .where('next_charge_at', '<=', DateTime.fromJSDate(now).toSQL() ?? now.toISOString())
+      .orderBy('next_charge_at', 'asc')
+      .limit(limit)) as SubscriptionInstance[];
   }
 
   async listSubscriptions(query: BillingListQuery): Promise<SubscriptionListItem[]> {

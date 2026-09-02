@@ -85,6 +85,10 @@ export interface ManagedSubscriptionInput {
 /** The fields a managed subscription can change after creation. */
 export interface ManagedSubscriptionPatch {
   status?: string;
+  /** `null` clears the failure — a renewal that worked erases the streak. */
+  lastRenewalError?: string | null;
+  lastRenewalAttemptAt?: Date | null;
+  renewalFailureCount?: number;
   amount?: number;
   description?: string | null;
   cycle?: string;
@@ -111,6 +115,32 @@ export interface SubscriptionListItem {
   trialEndsAt: Date | null;
   endsAt: Date | null;
   createdAt: Date | null;
+  /**
+   * Whether the library drives this recurrence. `true` means there is NO gateway subscription
+   * to open in a gateway dashboard — everything below is the only description of it there is.
+   */
+  managed: boolean;
+  /** Amount per cycle, integer minor units. `null` on a gateway-owned row. */
+  amount: number | null;
+  currency: string | null;
+  cycle: string | null;
+  currentPeriodEnd: Date | null;
+  /** When the next cycle is due. `null` once it stops renewing. */
+  nextChargeAt: Date | null;
+  cancelAtPeriodEnd: boolean;
+  /** Why the last renewal attempt failed. `null` when the last one worked. */
+  lastRenewalError: string | null;
+  lastRenewalAttemptAt: Date | null;
+  /** Consecutive failed renewals. */
+  renewalFailureCount: number;
+}
+
+/** One `(cycle, total)` line — what {@link BillingStore.subscriptionAmountByCycle} answers. */
+export interface SubscriptionCycleTotal {
+  cycle: string;
+  /** Sum of `amount` across the subscriptions on this cycle, integer minor units. */
+  total: number;
+  count: number;
 }
 
 /** One `billing_webhook_events` row, normalized for reading. See {@link PaymentListItem}. */
@@ -207,6 +237,15 @@ export interface BillingCountQuery {
   createdBefore?: Date;
   /** Only rows created at or AFTER this instant — "within the last N", for recency checks. */
   createdAfter?: Date;
+  /** Only library-managed subscriptions (or only gateway-owned ones). */
+  managed?: boolean;
+  /**
+   * Only subscriptions whose next cycle was due BEFORE this instant — "the renewal runner
+   * should have charged this and did not". The check that notices a dead cron.
+   */
+  nextChargeBefore?: Date;
+  /** Only subscriptions with at least this many consecutive failed renewals. */
+  minRenewalFailures?: number;
 }
 
 /**
@@ -488,6 +527,15 @@ export interface BillingStore<
 
   /** How many subscriptions match a status and/or a creation window. */
   countSubscriptions(query: BillingCountQuery): Promise<number>;
+
+  /**
+   * Sum of `amount` grouped by billing cycle, for computing recurring revenue.
+   *
+   * Grouped rather than summed to one number because normalising a yearly amount to a monthly
+   * one is a business decision (divide by 12) that belongs above the store, not inside a SQL
+   * expression written once per dialect.
+   */
+  subscriptionAmountByCycle(query: BillingCountQuery): Promise<SubscriptionCycleTotal[]>;
 
   // ── Payments ─────────────────────────────────────────────────────────────────────
 

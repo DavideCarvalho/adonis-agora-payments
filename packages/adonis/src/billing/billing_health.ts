@@ -31,6 +31,15 @@ const DEFAULT_DISPUTE_DUE_WITHIN = 72 * 60 * 60 * 1000;
  */
 const DEFAULT_REJECTED_WITHIN = 24 * 60 * 60 * 1000;
 
+/**
+ * Folga antes de considerar uma renovação atrasada.
+ *
+ * Duas horas, e não minutos: o runner é chamado por um cron, e um cron de hora em hora
+ * deixa uma janela normal de até uma hora. Um limiar mais curto acenderia o alerta em toda
+ * virada de hora — e um alerta que pisca sozinho é um alerta que ninguém lê.
+ */
+const DEFAULT_OVERDUE_RENEWAL_AFTER = 2 * 60 * 60 * 1000;
+
 /** How many closing windows the report NAMES. The count is unbounded; this is the list. */
 const DISPUTE_DEADLINE_SAMPLE = 20;
 
@@ -53,6 +62,8 @@ export interface BillingHealthOptions {
   disputeDueWithin?: number;
   /** The window rejected deliveries are counted over. Default 24 h. */
   rejectedWithin?: number;
+  /** How late a managed renewal must be before it counts as overdue. Default 2 h. */
+  overdueRenewalAfter?: number;
   /** Overridable clock — the tests pass a fixed instant. Defaults to now. */
   now?: Date;
 }
@@ -64,7 +75,9 @@ export interface BillingHealthCheck {
     | 'unconfirmed_payments'
     | 'disputes_due'
     | 'open_disputes'
-    | 'rejected_deliveries';
+    | 'rejected_deliveries'
+    | 'overdue_renewals'
+    | 'failing_renewals';
   label: string;
   count: number;
   /** `true` when `count` is zero — every check here is a "should be nothing" check. */
@@ -138,6 +151,7 @@ export async function billingHealth(
   const failedWithin = options.failedWithin ?? DEFAULT_FAILED_WITHIN;
   const disputeDueWithin = options.disputeDueWithin ?? DEFAULT_DISPUTE_DUE_WITHIN;
   const rejectedWithin = options.rejectedWithin ?? DEFAULT_REJECTED_WITHIN;
+  const overdueRenewalAfter = options.overdueRenewalAfter ?? DEFAULT_OVERDUE_RENEWAL_AFTER;
   const since = (ms: number) => new Date(now.getTime() - ms);
   // The store's deadline read takes HOURS; every other threshold here is milliseconds.
   const withinHours = disputeDueWithin / 3_600_000;
@@ -152,6 +166,8 @@ export async function billingHealth(
     openDisputeCount,
     openDisputes,
     rejected,
+    overdueRenewals,
+    failingRenewals,
   ] = await Promise.all([
     store.countWebhookEvents({ status: 'received', createdBefore: since(stuckAfter) }),
     store.countWebhookEvents({ status: 'failed', createdAfter: since(failedWithin) }),
@@ -169,9 +185,37 @@ export async function billingHealth(
       action: AUDIT_ACTIONS.webhookRejected,
       createdAfter: since(rejectedWithin),
     }),
+    // Assinaturas gerenciadas que já deviam ter sido cobradas e não foram.
+    store.countSubscriptions({
+      status: 'active',
+      managed: true,
+      nextChargeBefore: since(overdueRenewalAfter),
+    }),
+    store.countSubscriptions({ status: 'active', managed: true, minRenewalFailures: 1 }),
   ]);
 
   const checks: BillingHealthCheck[] = [
+    {
+      key: 'overdue_renewals',
+      label: `Managed subscriptions due to be charged over ${formatDuration(overdueRenewalAfter)} ago`,
+      count: overdueRenewals,
+      healthy: overdueRenewals === 0,
+      // A checagem que percebe um cron morto. Renovação gerenciada só acontece porque algo
+      // chama `payments:renew`; se esse algo para, nada renova, nada falha e nada avisa — a
+      // receita simplesmente deixa de entrar, e a primeira notícia é um cliente reclamando de
+      // acesso que continuou funcionando de graça.
+      hint: 'Nothing is renewing them. `payments:renew` is not running — check the cron/scheduler that calls it; the charges themselves are idempotent, so a late run is safe.',
+    },
+    {
+      key: 'failing_renewals',
+      label: 'Managed subscriptions whose last renewal charge failed',
+      count: failingRenewals,
+      healthy: failingRenewals === 0,
+      // Distinta da de cima de propósito: aqui o runner ESTÁ rodando e o gateway recusa. Uma
+      // falha não muda nada na linha (o período não avança), então sem este contador uma
+      // assinatura falhando há uma semana parecia igual a uma vencendo pela primeira vez.
+      hint: "The runner is working and the gateway is refusing. Read `lastRenewalError` on each subscription — expired Pix authorizations and declined cards look identical from here, and dunning is the application's policy.",
+    },
     {
       key: 'stuck_webhooks',
       label: `Events claimed but unfinished for over ${formatDuration(stuckAfter)}`,

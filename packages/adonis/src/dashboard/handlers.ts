@@ -65,6 +65,23 @@ export interface Deps {
    * recorded honestly as "unattributed" rather than invented.
    */
   actor?: string;
+  /**
+   * O que cada gateway configurado SABE fazer, por nome de provider.
+   *
+   * Sem isto o console oferecia botões que não podiam funcionar: todo pagamento Pix via
+   * Woovi mostrava "Refund", e o OpenPix não tem estorno por API — o operador descobria
+   * clicando. Ausente quando o `PaymentsManager` não está alcançável; aí a UI volta a mostrar
+   * as ações, que é o comportamento anterior e melhor que esconder tudo por falta de dado.
+   */
+  capabilities?: Record<string, ProviderCapabilities>;
+}
+
+/** O que um gateway sabe fazer, como o console precisa saber. */
+export interface ProviderCapabilities {
+  refunds: boolean;
+  disputes: boolean;
+  /** Se a assinatura pode ser cancelada NO GATEWAY. Irrelevante no modo gerenciado. */
+  cancelSubscription: boolean;
 }
 
 /** The two things this console can CHANGE. See `actions.ts`. */
@@ -438,7 +455,11 @@ interface OwnerJson {
  * `ensureCustomer`, is the only thing tying it to an app user. `null` when the payment has no
  * customer id, or when nothing mapped it.
  */
-function paymentJson(row: PaymentListItem, owner: OwnerJson | null) {
+function paymentJson(
+  row: PaymentListItem,
+  owner: OwnerJson | null,
+  capabilities?: Record<string, ProviderCapabilities>,
+) {
   return {
     id: row.id,
     gatewayId: row.gatewayId,
@@ -456,9 +477,17 @@ function paymentJson(row: PaymentListItem, owner: OwnerJson | null) {
     owner,
     paidAt: iso(row.paidAt),
     createdAt: iso(row.createdAt),
-    /** Whether the Refund button is offered for this row. The SPA must not have to re-derive
-     *  the server's rule, because the two disagreeing means a button that always errors. */
-    refundable: row.status === REFUNDABLE_STATUS,
+    /**
+     * Whether the Refund button is offered for this row. The SPA must not have to re-derive
+     * the server's rule, because the two disagreeing means a button that always errors.
+     *
+     * Status was the whole rule, and it was half of it: Woovi/OpenPix has no refund API at
+     * all, so every paid Pix row offered a Refund that could only ever fail — the operator
+     * found out by clicking. When capabilities are unknown (no reachable manager) the button
+     * is still offered, which is the previous behaviour and better than hiding a working
+     * action because a lookup was unavailable.
+     */
+    refundable: row.status === REFUNDABLE_STATUS && capabilities?.[row.provider]?.refunds !== false,
   };
 }
 
@@ -521,7 +550,7 @@ export async function payments(deps: Deps, req: ApiRequest): Promise<ApiResponse
   const owners = await ownersFor(deps.store, filtered.rows);
   return ok({
     payments: filtered.rows.map((row) =>
-      paymentJson(row, (row.customerId && owners.get(row.customerId)) || null),
+      paymentJson(row, (row.customerId && owners.get(row.customerId)) || null, deps.capabilities),
     ),
     page: pageEnvelope(page, filtered),
     statuses: PAYMENT_STATUSES,
@@ -580,7 +609,11 @@ export async function paymentDetail(deps: Deps, req: ApiRequest): Promise<ApiRes
   ]);
 
   return ok({
-    payment: paymentJson(row, (row.customerId && owners.get(row.customerId)) || null),
+    payment: paymentJson(
+      row,
+      (row.customerId && owners.get(row.customerId)) || null,
+      deps.capabilities,
+    ),
     // Filtered here rather than in the store: `listDisputes` has no payment filter, and adding
     // one for a page that is already bounded would be a second read to maintain. A dispute list
     // this long on one install is itself the emergency.
@@ -634,10 +667,32 @@ export async function subscriptions(deps: Deps, req: ApiRequest): Promise<ApiRes
       trialEndsAt: iso(row.trialEndsAt),
       endsAt: iso(row.endsAt),
       createdAt: iso(row.createdAt),
+      // Numa linha GERENCIADA não há `gatewayId` para abrir no painel do gateway, então isto
+      // é a única descrição da assinatura que existe. Sem estes campos a tela mostrava um id
+      // nulo e nada sobre quanto cobra ou quando.
+      managed: row.managed,
+      amount: row.amount,
+      currency: row.currency,
+      cycle: row.cycle,
+      currentPeriodEnd: iso(row.currentPeriodEnd),
+      nextChargeAt: iso(row.nextChargeAt),
+      cancelAtPeriodEnd: row.cancelAtPeriodEnd,
+      lastRenewalError: row.lastRenewalError,
+      lastRenewalAttemptAt: iso(row.lastRenewalAttemptAt),
+      renewalFailureCount: row.renewalFailureCount,
     })),
     page: pageEnvelope(page, filtered),
     statuses: SUBSCRIPTION_STATUSES,
-    counts: { past_due: pastDue },
+    counts: {
+      past_due: pastDue,
+      // Quantas estão falhando a renovação AGORA, no total e não na página. O mesmo motivo do
+      // `past_due`: é o número que decide a manhã de quem opera.
+      failing_renewals: await deps.store.countSubscriptions({
+        status: 'active',
+        managed: true,
+        minRenewalFailures: 1,
+      }),
+    },
   });
 }
 
@@ -841,7 +896,13 @@ export async function providers(deps: Deps): Promise<ApiResponse> {
   // The event-type vocabulary, from the DATA for the same reason the provider list is: the types
   // an install actually receives are a handful, the ones this package can emit are many, and a
   // filter offering twenty that return nothing hides the three that do not.
-  return ok({ providers: [...names].sort(), eventTypes: [...types].sort() });
+  return ok({
+    providers: [...names].sort(),
+    eventTypes: [...types].sort(),
+    // `{}` e não ausente: o cliente distingue "nenhum gateway sabe estornar" de "não deu para
+    // perguntar" olhando a chave do provider, não a existência do objeto.
+    capabilities: deps.capabilities ?? {},
+  });
 }
 
 /** The dispute statuses that mean the matter is FINISHED — `DISPUTE_STATUSES` minus the open

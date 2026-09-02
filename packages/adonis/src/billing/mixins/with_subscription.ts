@@ -116,6 +116,24 @@ export class BillingSubscription extends BaseModel {
   @column()
   declare cancelAtPeriodEnd: boolean | null;
 
+  /**
+   * Why the last renewal attempt failed, and when. `null` once one succeeds.
+   *
+   * A failed cycle does not advance the period, so the subscription stays due and is retried
+   * — which is right, and also why the failure was invisible: nothing changed. These three
+   * are the only record that a charge is repeatedly not going through, and what the console's
+   * "failing renewals" list reads.
+   */
+  @column()
+  declare lastRenewalError: string | null;
+
+  @column.dateTime()
+  declare lastRenewalAttemptAt: DateTime | null;
+
+  /** Consecutive failures. Reset to 0 on the first success — it measures a streak, not a total. */
+  @column()
+  declare renewalFailureCount: number | null;
+
   @column.dateTime({ autoCreate: true })
   declare createdAt: DateTime;
 

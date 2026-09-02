@@ -353,6 +353,17 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   await addColumn(db, dialect, 'billing_subscriptions', 'next_charge_at', t.timestamp);
   await addColumn(db, dialect, 'billing_subscriptions', 'cancel_at_period_end', 'BOOLEAN');
 
+  // 0.9.0 — o que a renovação gerenciada deixou para trás.
+  //
+  // `renewDue` devolvia `{ result: 'failed', error }` e o app logava. Nada persistia, então
+  // ninguém conseguia perguntar "quais assinaturas estão falhando, e há quanto tempo" — o
+  // ledger de webhook responde isso para entregas, e a renovação não tinha equivalente.
+  // Três colunas, não uma tabela: a pergunta operacional é sobre o ESTADO ATUAL de cada
+  // assinatura, não sobre o histórico de cada tentativa.
+  await addColumn(db, dialect, 'billing_subscriptions', 'last_renewal_error', 'VARCHAR(500)');
+  await addColumn(db, dialect, 'billing_subscriptions', 'last_renewal_attempt_at', t.timestamp);
+  await addColumn(db, dialect, 'billing_subscriptions', 'renewal_failure_count', 'INTEGER');
+
   // ── Indexes ───────────────────────────────────────────────────────────────────────────
   //
   // Last, and that is load-bearing twice over. Every table above has to exist, and so does

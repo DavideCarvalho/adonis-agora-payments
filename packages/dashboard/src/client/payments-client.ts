@@ -116,6 +116,17 @@ export interface SubscriptionRow {
   trialEndsAt: string | null;
   endsAt: string | null;
   createdAt: string | null;
+  /** `true` quando a recorrência é da biblioteca — não há assinatura no gateway. */
+  managed: boolean;
+  amount: number | null;
+  currency: string | null;
+  cycle: string | null;
+  currentPeriodEnd: string | null;
+  nextChargeAt: string | null;
+  cancelAtPeriodEnd: boolean;
+  lastRenewalError: string | null;
+  lastRenewalAttemptAt: string | null;
+  renewalFailureCount: number;
 }
 
 export interface WebhookEventRow {
@@ -173,7 +184,9 @@ export interface HealthCheck {
     | 'unconfirmed_payments'
     | 'disputes_due'
     | 'open_disputes'
-    | 'rejected_deliveries';
+    | 'rejected_deliveries'
+    | 'overdue_renewals'
+    | 'failing_renewals';
   label: string;
   count: number;
   healthy: boolean;
@@ -275,7 +288,7 @@ export interface SubscriptionsPage {
   page: Page;
   statuses: readonly string[];
   /** Whole-table counts, not page counts — `past_due` is the figure that decides the morning. */
-  counts: { past_due: number };
+  counts: { past_due: number; failing_renewals: number };
 }
 
 /**
@@ -303,6 +316,18 @@ export interface ProvidersList {
   /** The event types this install has actually RECEIVED, for the ledger's type filter. Same
    *  reason as `providers`: a filter offering types that return nothing hides the ones that do. */
   eventTypes: string[];
+  /**
+   * O que cada gateway sabe fazer, por nome. `{}` quando não foi possível perguntar ao
+   * manager — a UI trata ausência como "mostra a ação", que é o comportamento anterior.
+   */
+  capabilities: Record<string, ProviderCapabilities>;
+}
+
+/** O que um gateway suporta, para o console não oferecer botão que sempre falha. */
+export interface ProviderCapabilities {
+  refunds: boolean;
+  disputes: boolean;
+  cancelSubscription: boolean;
 }
 
 export interface RefundResult {

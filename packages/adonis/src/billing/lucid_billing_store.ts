@@ -17,6 +17,7 @@ import {
   type OpenDisputeQuery,
   type PaymentListItem,
   type PaymentListQuery,
+  type SubscriptionCycleTotal,
   type SubscriptionListItem,
   type WebhookEventBreakdownLine,
   type WebhookEventListItem,
@@ -193,6 +194,19 @@ function auditItem(row: AuditEventInstance): AuditEventListItem {
  * to the bundled ones) and writes through them, so custom models/composed mixins keep
  * working with the same store.
  */
+/**
+ * O subconjunto do query builder do Lucid que os filtros de assinatura usam.
+ *
+ * Estrutural em vez do tipo do Lucid porque `count()`/`sum()` devolvem builders com genéricos
+ * diferentes, e o filtro é o mesmo nos dois — tipar pelo que é CHAMADO evita um cast por
+ * chamada sem afrouxar nada que importe.
+ */
+interface SubscriptionQuery {
+  where(column: string, value: unknown): SubscriptionQuery;
+  where(column: string, operator: string, value: unknown): SubscriptionQuery;
+  whereNotNull(column: string): SubscriptionQuery;
+}
+
 export class LucidBillingStore
   implements
     BillingStore<
@@ -568,16 +582,69 @@ export class LucidBillingStore
       trialEndsAt: toDate(row.trialEndsAt),
       endsAt: toDate(row.endsAt),
       createdAt: toDate(row.createdAt),
+      // Sem estes campos o console não sabe dizer quanto uma assinatura GERENCIADA cobra nem
+      // quando vem a próxima — e numa linha gerenciada não há `gatewayId` para abrir no painel
+      // do gateway e descobrir. Era a lista inteira mostrando um id nulo e nada mais.
+      managed: row.managed === true,
+      amount: row.amount ?? null,
+      currency: row.currency ?? null,
+      cycle: row.cycle ?? null,
+      currentPeriodEnd: toDate(row.currentPeriodEnd),
+      nextChargeAt: toDate(row.nextChargeAt),
+      cancelAtPeriodEnd: row.cancelAtPeriodEnd === true,
+      lastRenewalError: row.lastRenewalError ?? null,
+      lastRenewalAttemptAt: toDate(row.lastRenewalAttemptAt),
+      renewalFailureCount: row.renewalFailureCount ?? 0,
     }));
+  }
+
+  /** Os filtros que `countSubscriptions` e `subscriptionAmountByCycle` compartilham. */
+  #applySubscriptionFilters(builder: SubscriptionQuery, query: BillingCountQuery): void {
+    if (query.status !== undefined) builder.where('status', query.status);
+    if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
+    if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
+    if (query.managed !== undefined) builder.where('managed', query.managed);
+    if (query.nextChargeBefore !== undefined) {
+      // `whereNotNull` junto: `next_charge_at` nulo é "não renova mais", e num comparador SQL
+      // isso não é "menor que agora" — é NULL, que sai do resultado. Explícito para o leitor.
+      builder.whereNotNull('next_charge_at').where('next_charge_at', '<', query.nextChargeBefore);
+    }
+    if (query.minRenewalFailures !== undefined) {
+      builder.where('renewal_failure_count', '>=', query.minRenewalFailures);
+    }
   }
 
   async countSubscriptions(query: BillingCountQuery): Promise<number> {
     await this.#ready();
     const builder = this.#subscriptionModel.query().count('* as total').pojo();
-    if (query.status !== undefined) builder.where('status', query.status);
-    if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
-    if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
+    this.#applySubscriptionFilters(builder as unknown as SubscriptionQuery, query);
     return toCount(await builder);
+  }
+
+  async subscriptionAmountByCycle(query: BillingCountQuery): Promise<SubscriptionCycleTotal[]> {
+    await this.#ready();
+    const builder = this.#subscriptionModel
+      .query()
+      .select('cycle')
+      .sum('amount as total')
+      .count('* as count')
+      .groupBy('cycle')
+      .pojo();
+    this.#applySubscriptionFilters(builder as unknown as SubscriptionQuery, query);
+    const rows = (await builder) as unknown as {
+      cycle: string | null;
+      total: string | number | null;
+      count: string | number | null;
+    }[];
+    return rows
+      .filter((row): row is typeof row & { cycle: string } => typeof row.cycle === 'string')
+      .map((row) => ({
+        cycle: row.cycle,
+        // `SUM` de BIGINT volta como STRING no node-postgres, pela mesma razão que `amount`
+        // volta: acima de 2^53 a precisão se perderia em silêncio.
+        total: Number(row.total ?? 0),
+        count: Number(row.count ?? 0),
+      }));
   }
 
   async findSubscriptionByGatewayId(gatewayId: string): Promise<SubscriptionInstance | null> {

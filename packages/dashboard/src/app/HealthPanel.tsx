@@ -20,7 +20,10 @@ import { Badge } from './ui/badge';
 export function HealthPanel({
   onNavigate,
 }: {
-  onNavigate: (screen: 'payments' | 'webhooks' | 'disputes' | 'activity', status?: string) => void;
+  onNavigate: (
+    screen: 'payments' | 'webhooks' | 'disputes' | 'activity' | 'subscriptions',
+    status?: string,
+  ) => void;
 }) {
   const query = useQuery({
     queryKey: ['health'],

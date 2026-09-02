@@ -188,6 +188,81 @@ describe('LucidBillingStore (integration)', () => {
       expect(rows.every((row) => row.managed === true)).toBe(true);
     });
 
+    /**
+     * `SUM` de `BIGINT` volta do node-postgres como STRING, pela mesma razão que `amount`
+     * volta: acima de 2^53 a precisão se perderia em silêncio. Sem o `Number()` o MRR viraria
+     * concatenação de strings — e o store in-memory, que soma números, nunca veria isso.
+     */
+    it('soma por ciclo em NÚMERO, não em string', async () => {
+      const at = (iso: string) => new Date(iso);
+      for (const amount of [10_000, 20_000]) {
+        await store.createManagedSubscription({
+          ...base,
+          amount,
+          cycle: 'MONTHLY',
+          currentPeriodStart: at('2026-07-01T00:00:00.000Z'),
+          currentPeriodEnd: at('2026-08-01T00:00:00.000Z'),
+          nextChargeAt: at('2026-08-01T00:00:00.000Z'),
+        });
+      }
+      await store.createManagedSubscription({
+        ...base,
+        amount: 120_000,
+        cycle: 'YEARLY',
+        currentPeriodStart: at('2026-07-01T00:00:00.000Z'),
+        currentPeriodEnd: at('2027-07-01T00:00:00.000Z'),
+        nextChargeAt: at('2027-07-01T00:00:00.000Z'),
+      });
+
+      const lines = await store.subscriptionAmountByCycle({ status: 'active', managed: true });
+      const monthly = lines.find((line) => line.cycle === 'MONTHLY');
+      // Por DELTA e por tipo: o banco de integração é compartilhado entre os testes deste
+      // bloco, então o total absoluto carrega o que os anteriores criaram. O que este teste
+      // prova é o tipo (número, não string concatenada) e a contribuição destas linhas.
+      expect(typeof monthly?.total).toBe('number');
+      expect(monthly?.total ?? 0).toBeGreaterThanOrEqual(30_000);
+      expect(lines.find((line) => line.cycle === 'YEARLY')?.total).toBe(120_000);
+    });
+
+    /** O filtro por trás do check "o cron de renovação morreu". */
+    it('conta as vencidas, e não conta as que pararam de renovar', async () => {
+      const horizon = new Date('2026-07-01T00:00:00.000Z');
+      const before = await store.countSubscriptions({
+        status: 'active',
+        managed: true,
+        nextChargeBefore: horizon,
+      });
+      const overdue = await store.createManagedSubscription({
+        ...base,
+        currentPeriodStart: new Date('2026-05-01T00:00:00.000Z'),
+        currentPeriodEnd: new Date('2026-06-01T00:00:00.000Z'),
+        nextChargeAt: new Date('2026-06-01T00:00:00.000Z'),
+      });
+      // `next_charge_at` nulo é "não renova mais" — e em SQL isso NÃO é "menor que agora",
+      // é NULL, que sai do resultado. O `whereNotNull` explícito é o que garante isso.
+      await store.updateManagedSubscription(
+        (
+          await store.createManagedSubscription({
+            ...base,
+            currentPeriodStart: new Date('2026-05-01T00:00:00.000Z'),
+            currentPeriodEnd: new Date('2026-06-01T00:00:00.000Z'),
+            nextChargeAt: new Date('2026-06-01T00:00:00.000Z'),
+          })
+        ).id,
+        { nextChargeAt: null },
+      );
+
+      const after = await store.countSubscriptions({
+        status: 'active',
+        managed: true,
+        nextChargeBefore: horizon,
+      });
+      // +1, não +2: as duas venceram, mas uma teve `next_charge_at` zerado — "não renova
+      // mais" não é "vencida", e em SQL isso é NULL, que sai do resultado.
+      expect(after - before).toBe(1);
+      expect((await store.findSubscriptionById(overdue.id))?.id).toBe(overdue.id);
+    });
+
     it('stops renewing when nextChargeAt is cleared', async () => {
       const row = await store.createManagedSubscription({
         ...base,

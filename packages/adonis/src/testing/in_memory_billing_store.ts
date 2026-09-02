@@ -15,6 +15,7 @@ import {
   type OpenDisputeQuery,
   type PaymentListItem,
   type PaymentListQuery,
+  type SubscriptionCycleTotal,
   type SubscriptionListItem,
   type WebhookEventBreakdownLine,
   type WebhookEventListItem,
@@ -133,6 +134,9 @@ export interface InMemorySubscriptionRow {
   currentPeriodEnd?: Date | null;
   nextChargeAt?: Date | null;
   cancelAtPeriodEnd?: boolean | null;
+  lastRenewalError?: string | null;
+  lastRenewalAttemptAt?: Date | null;
+  renewalFailureCount?: number | null;
 }
 
 export interface InMemoryPaymentRow {
@@ -382,8 +386,20 @@ export class InMemoryBillingStore
     return row;
   }
 
+  /**
+   * As DUAS famílias de assinatura: as do gateway (chaveadas por `gatewayId`) e as
+   * gerenciadas (chaveadas pelo id local).
+   *
+   * A listagem varria só a primeira, então uma assinatura gerenciada não aparecia no console
+   * nem era contada — invisível exatamente no modo em que não há painel de gateway para
+   * consultar em vez disso.
+   */
+  #allSubscriptions(): InMemorySubscriptionRow[] {
+    return [...this.subscriptions.values(), ...this.managedSubscriptions.values()];
+  }
+
   async listSubscriptions(query: BillingListQuery): Promise<SubscriptionListItem[]> {
-    const matching = [...this.subscriptions.values()].filter(
+    const matching = this.#allSubscriptions().filter(
       (row) =>
         (query.status === undefined || row.status === query.status) &&
         (query.provider === undefined || row.provider === query.provider),
@@ -398,15 +414,55 @@ export class InMemoryBillingStore
       trialEndsAt: row.trialEndsAt,
       endsAt: row.endsAt,
       createdAt: row.createdAt,
+      managed: row.managed === true,
+      amount: row.amount ?? null,
+      currency: row.currency ?? null,
+      cycle: row.cycle ?? null,
+      currentPeriodEnd: row.currentPeriodEnd ?? null,
+      nextChargeAt: row.nextChargeAt ?? null,
+      cancelAtPeriodEnd: row.cancelAtPeriodEnd === true,
+      lastRenewalError: row.lastRenewalError ?? null,
+      lastRenewalAttemptAt: row.lastRenewalAttemptAt ?? null,
+      renewalFailureCount: row.renewalFailureCount ?? 0,
     }));
   }
 
   async countSubscriptions(query: BillingCountQuery): Promise<number> {
     let count = 0;
-    for (const row of this.subscriptions.values()) {
-      if (this.#matchesCount(row, query)) count += 1;
+    for (const row of this.#allSubscriptions()) {
+      if (this.#matchesCount(row, query) && this.#matchesSubscriptionCount(row, query)) count += 1;
     }
     return count;
+  }
+
+  /** Os filtros de assinatura que `#matchesCount` (genérico a todas as tabelas) não conhece. */
+  #matchesSubscriptionCount(row: InMemorySubscriptionRow, query: BillingCountQuery): boolean {
+    if (query.managed !== undefined && (row.managed === true) !== query.managed) return false;
+    if (query.nextChargeBefore !== undefined) {
+      // Nulo é "não renova mais", e isso NÃO é "vencido".
+      if (!row.nextChargeAt) return false;
+      if (row.nextChargeAt >= query.nextChargeBefore) return false;
+    }
+    if (
+      query.minRenewalFailures !== undefined &&
+      (row.renewalFailureCount ?? 0) < query.minRenewalFailures
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  async subscriptionAmountByCycle(query: BillingCountQuery): Promise<SubscriptionCycleTotal[]> {
+    const totals = new Map<string, { total: number; count: number }>();
+    for (const row of this.#allSubscriptions()) {
+      if (!this.#matchesCount(row, query) || !this.#matchesSubscriptionCount(row, query)) continue;
+      if (!row.cycle) continue;
+      const line = totals.get(row.cycle) ?? { total: 0, count: 0 };
+      line.total += row.amount ?? 0;
+      line.count += 1;
+      totals.set(row.cycle, line);
+    }
+    return [...totals.entries()].map(([cycle, line]) => ({ cycle, ...line }));
   }
 
   async findSubscriptionByGatewayId(gatewayId: string): Promise<InMemorySubscriptionRow | null> {
@@ -474,6 +530,13 @@ export class InMemoryBillingStore
     if (patch.nextChargeAt !== undefined) row.nextChargeAt = patch.nextChargeAt;
     if (patch.cancelAtPeriodEnd !== undefined) row.cancelAtPeriodEnd = patch.cancelAtPeriodEnd;
     if (patch.endsAt !== undefined) row.endsAt = patch.endsAt;
+    if (patch.lastRenewalError !== undefined) row.lastRenewalError = patch.lastRenewalError;
+    if (patch.lastRenewalAttemptAt !== undefined) {
+      row.lastRenewalAttemptAt = patch.lastRenewalAttemptAt;
+    }
+    if (patch.renewalFailureCount !== undefined) {
+      row.renewalFailureCount = patch.renewalFailureCount;
+    }
     return row;
   }
 

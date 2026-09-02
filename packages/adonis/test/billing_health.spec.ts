@@ -34,7 +34,12 @@ describe('billingHealth', () => {
 
     const report = await billingHealth(store, { now: NOW });
     expect(report.healthy).toBe(true);
-    expect(report.checks.map((check) => check.count)).toEqual([0, 0, 0, 0, 0, 0]);
+    // Por chave, e não por posição: a lista cresce, e um array de zeros não diz QUAL check
+    // sumiu quando quebra.
+    expect(report.checks.every((check) => check.count === 0)).toBe(true);
+    expect(report.checks.map((check) => check.key)).toEqual(
+      expect.arrayContaining(['overdue_renewals', 'failing_renewals']),
+    );
     expect(report.failures).toEqual([]);
     expect(report.deadlines).toEqual([]);
     expect(report.openDisputes).toEqual([]);

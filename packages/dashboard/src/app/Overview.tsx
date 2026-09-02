@@ -22,7 +22,7 @@ const PERIODS: ReadonlyArray<{ value: PeriodPreset; label: string }> = [
  * R$ 1.234,56 or `R$ 12,00` for twelve subscriptions, so the distinction is made HERE, by key,
  * rather than guessed from the number.
  */
-const MONEY_METRICS = new Set(['revenue', 'net_revenue']);
+const MONEY_METRICS = new Set(['revenue', 'net_revenue', 'mrr']);
 
 function isMoneyMetric(metric: OverviewMetric): boolean {
   return MONEY_METRICS.has(metric.key);
@@ -50,6 +50,13 @@ const STAT_COPY: Record<string, { label: string; hint: string }> = {
     label: 'Active subscriptions',
     hint: 'Includes trialing. Not windowed — a live count.',
   },
+  mrr: {
+    label: 'Recurring revenue (MRR)',
+    // Diz o recorte em voz alta: as duas de cima olham o que ENTROU na janela, esta olha o
+    // que entra por mês enquanto nada mudar. E só as gerenciadas, porque numa assinatura do
+    // gateway o preço vive lá — somar as duas daria metade da verdade como se fosse o total.
+    hint: 'Library-managed subscriptions only, normalised to a month. Not windowed.',
+  },
 };
 
 /** `Usage · api_calls` reads better as its meter name once it is under a "Usage" heading. */
@@ -75,7 +82,10 @@ export function Overview({
   onNavigate,
 }: {
   /** Jump to the screen that shows a failing check's actual rows. */
-  onNavigate: (screen: 'payments' | 'webhooks' | 'disputes' | 'activity', status?: string) => void;
+  onNavigate: (
+    screen: 'payments' | 'webhooks' | 'disputes' | 'activity' | 'subscriptions',
+    status?: string,
+  ) => void;
 }) {
   const [period, setPeriod] = useState<PeriodPreset>('30d');
   const query = useQuery({

@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { paymentsClient } from '../client/payments-client';
-import { formatCount, formatDay, formatDaysUntil, formatWhen } from './money';
+import { formatCents, formatCount, formatDay, formatDaysUntil, formatWhen } from './money';
 import { Pager, Panel, QueryState, ScanNotice } from './shell';
 import {
   subscriptionIsBilling,
@@ -92,6 +92,8 @@ export function Subscriptions({ initialStatus }: { initialStatus?: string | unde
               <th className="px-4 py-2 font-normal">Plan</th>
               <th className="px-4 py-2 font-normal">Customer</th>
               <th className="px-4 py-2 font-normal">Provider</th>
+              <th className="px-4 py-2 font-normal">Amount</th>
+              <th className="px-4 py-2 font-normal">Next charge</th>
               <th className="px-4 py-2 font-normal">Trial ends</th>
               <th className="px-4 py-2 font-normal">Period ends</th>
               <th className="px-4 py-2 font-normal">Started</th>
@@ -123,6 +125,35 @@ export function Subscriptions({ initialStatus }: { initialStatus?: string | unde
                 <td className="mono px-4 py-2 text-zinc-400">{row.customerId ?? '—'}</td>
                 <td className="px-4 py-2">
                   <Badge variant="provider">{row.provider}</Badge>
+                  {/* Uma assinatura gerenciada não tem o que abrir no painel do gateway — o
+                      operador precisa saber disso ANTES de ir procurar lá. */}
+                  {row.managed && (
+                    <span className="ml-2 text-[10px] uppercase tracking-wider text-zinc-600">
+                      managed
+                    </span>
+                  )}
+                </td>
+                <td className="mono px-4 py-2 text-zinc-300">
+                  {row.amount === null
+                    ? '—'
+                    : `${formatCents(row.amount, row.currency ?? 'BRL')}${
+                        row.cycle ? ` / ${row.cycle.toLowerCase()}` : ''
+                      }`}
+                </td>
+                <td className="mono px-4 py-2 text-zinc-500">
+                  {row.lastRenewalError ? (
+                    // A falha ganha a célula da PRÓXIMA cobrança porque é isso que ela
+                    // significa: não vai haver uma até alguém resolver. Uma renovação que
+                    // falha não muda mais nada na linha — sem isto, "falhando há uma semana"
+                    // e "vence amanhã" eram visualmente idênticas.
+                    <span className="text-bad" title={row.lastRenewalError}>
+                      failed ×{row.renewalFailureCount}
+                    </span>
+                  ) : row.cancelAtPeriodEnd ? (
+                    <span className="text-zinc-600">cancels at period end</span>
+                  ) : (
+                    <WhenCell iso={row.nextChargeAt} />
+                  )}
                 </td>
                 <td className="mono px-4 py-2 text-zinc-500">
                   <WhenCell iso={row.trialEndsAt} />

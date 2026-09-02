@@ -9,7 +9,7 @@ import type { Health, HealthCheck } from '../client/payments-client';
  * sends someone to a screen full of healthy rows and teaches them to distrust the number.
  */
 export interface HealthTarget {
-  screen: 'payments' | 'webhooks' | 'disputes' | 'activity';
+  screen: 'payments' | 'webhooks' | 'disputes' | 'activity' | 'subscriptions';
   /**
    * The filter that isolates exactly the rows the check counted, or `undefined` when the target
    * screen already opens on them — the disputes screen leads with the closing windows, so
@@ -42,6 +42,12 @@ export function healthTarget(key: HealthCheck['key']): HealthTarget {
       // alike, so seeding any single one of them would hide part of what it just counted. The
       // panel names the actual rows underneath instead.
       return { screen: 'disputes', label: 'Show every dispute' };
+    case 'overdue_renewals':
+      // Sem status: uma renovação atrasada está `active` — o problema é a DATA, não o estado.
+      // Filtrar por status esconderia exatamente as linhas que este check acabou de contar.
+      return { screen: 'subscriptions', label: 'Show the subscriptions due' };
+    case 'failing_renewals':
+      return { screen: 'subscriptions', label: 'Show the failing subscriptions' };
     case 'rejected_deliveries':
       // Rejected deliveries are not ledger rows — that is the whole point of the check — so
       // this must not land on the webhook-events screen, which would show none of them.

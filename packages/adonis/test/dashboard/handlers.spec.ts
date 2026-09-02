@@ -347,7 +347,9 @@ describe('health', () => {
       failures: unknown[];
     };
     expect(body.healthy).toBe(true);
-    expect(body.checks).toHaveLength(6);
+    // Sem número mágico: a contagem muda toda vez que um check nasce, e o que este teste
+    // quer dizer é "tudo em zero", não "existem exatamente seis".
+    expect(body.checks.every((check) => check.count === 0 && check.healthy)).toBe(true);
     expect(body.checks.map((c) => c.key)).toContain('disputes_due');
     expect(body.checks.every((c) => c.count === 0 && c.healthy)).toBe(true);
     expect(body.failures).toEqual([]);

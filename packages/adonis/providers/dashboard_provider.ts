@@ -24,6 +24,7 @@ import {
   type ResolvedPaymentsDashboardConfig,
   resolveConfig,
 } from '../src/dashboard/define_config.js';
+import type { ProviderCapabilities } from '../src/dashboard/handlers.js';
 import {
   type ApiRequest,
   type ApiResponse,
@@ -48,6 +49,7 @@ import { contentTypeFor, renderIndexHtml } from '../src/dashboard/spa.js';
 import type { BillingHandlers, PaymentsConfig } from '../src/define_config.js';
 import { PaymentsManager } from '../src/payments_manager.js';
 import { getBillingStore } from '../src/services/main.js';
+import { gatewayPerforms } from '../src/subscription_lifecycle.js';
 import type { WebhookEvent } from '../src/types.js';
 import {
   discoverWebhookHandlers,
@@ -145,6 +147,7 @@ export default class PaymentsDashboardProvider {
     const json = (
       handler: (d: Deps, req: ApiRequest) => Promise<ApiResponse>,
       needsActions = false,
+      needsCapabilities = false,
     ) => {
       return async (ctx: HttpContext) => {
         const guard = await this.enforce(config, ctx, 'api');
@@ -171,6 +174,7 @@ export default class PaymentsDashboardProvider {
             // Resolved lazily and only for the routes that need it: a console whose payments
             // manager is unreachable must still serve every read.
             ...(needsActions ? { actions: await this.actions(store) } : {}),
+            ...(await this.capabilityDeps(needsCapabilities)),
           };
           const result = await handler(deps, toApiRequest(ctx));
           return ctx.response.status(result.status).json(result.body);
@@ -184,12 +188,14 @@ export default class PaymentsDashboardProvider {
 
     router.get(`${apiBase}/health`, json(health)).as('payments_dashboard.health');
     router.get(`${apiBase}/overview`, json(overview)).as('payments_dashboard.overview');
-    router.get(`${apiBase}/payments`, json(payments)).as('payments_dashboard.payments');
+    router
+      .get(`${apiBase}/payments`, json(payments, false, true))
+      .as('payments_dashboard.payments');
     // Registered AFTER the collection route and before the refund `POST`, and the ordering is
     // only cosmetic here — `/payments` and `/payments/:gatewayId` cannot shadow each other — but
     // it keeps the read routes reading top-down.
     router
-      .get(`${apiBase}/payments/:gatewayId`, json(paymentDetail))
+      .get(`${apiBase}/payments/:gatewayId`, json(paymentDetail, false, true))
       .as('payments_dashboard.payments.show');
     router.get(`${apiBase}/customers`, json(customers)).as('payments_dashboard.customers');
     router.get(`${apiBase}/audit`, json(auditEvents)).as('payments_dashboard.audit');
@@ -203,7 +209,12 @@ export default class PaymentsDashboardProvider {
     router
       .get(`${apiBase}/webhook-events`, json(webhookEvents))
       .as('payments_dashboard.webhook_events');
-    router.get(`${apiBase}/providers`, json(providers)).as('payments_dashboard.providers');
+    // `needsCapabilities`: é a única rota que precisa do manager só para LER o que os drivers
+    // suportam. Resolvê-lo em toda leitura pagaria o custo em páginas que não usam o dado.
+    router
+      // `false, true` = não precisa das ações, precisa das capabilities.
+      .get(`${apiBase}/providers`, json(providers, false, true))
+      .as('payments_dashboard.providers');
 
     // The console's only WRITE routes. `POST` is load-bearing, not stylistic: registering either of
     // these as a `GET` would put "refund this customer" behind a link a prefetcher can follow.
@@ -233,6 +244,40 @@ export default class PaymentsDashboardProvider {
    * booting", and caching THAT would disable both buttons for the life of the process.
    */
   private actionsCache: Partial<DashboardActions> | undefined;
+
+  /**
+   * O que cada gateway configurado sabe fazer, para o console não oferecer o que falha.
+   *
+   * `undefined` quando o manager não está alcançável — a UI volta a mostrar as ações, que é o
+   * comportamento anterior e melhor do que esconder tudo por falta de dado.
+   */
+  /** O spread de `capabilities` só quando há valor — `exactOptionalPropertyTypes` é estrito. */
+  private async capabilityDeps(
+    needed: boolean,
+  ): Promise<{ capabilities?: Record<string, ProviderCapabilities> }> {
+    if (!needed) return {};
+    const capabilities = await this.capabilities();
+    return capabilities === undefined ? {} : { capabilities };
+  }
+
+  private async capabilities(): Promise<Record<string, ProviderCapabilities> | undefined> {
+    let manager: PaymentsManager;
+    try {
+      manager = await this.app.container.make(PaymentsManager);
+    } catch {
+      return undefined;
+    }
+
+    const capabilities: Record<string, ProviderCapabilities> = {};
+    for (const [name, driver] of manager.drivers) {
+      capabilities[name] = {
+        refunds: driver.capabilities?.refunds === true,
+        disputes: driver.capabilities?.disputes === true,
+        cancelSubscription: gatewayPerforms(driver, 'cancel'),
+      };
+    }
+    return capabilities;
+  }
 
   private async actions(store: BillingStore): Promise<Partial<DashboardActions>> {
     if (this.actionsCache) return this.actionsCache;

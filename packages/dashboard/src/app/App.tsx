@@ -63,8 +63,10 @@ export function App() {
    * `status` is optional because one check has no filter to seed: the disputes screen already
    * opens on the closing windows the check counted, so there is nothing to narrow.
    */
-  const focusRows = (screen: 'payments' | 'webhooks' | 'disputes' | 'activity', status?: string) =>
-    navigate({ screen, status });
+  const focusRows = (
+    screen: 'payments' | 'webhooks' | 'disputes' | 'activity' | 'subscriptions',
+    status?: string,
+  ) => navigate({ screen, status });
 
   /** "Which of these charges are this user's" — the jump the console could not make at all
    *  before, because a payment row carried the gateway's customer id and nothing else. */

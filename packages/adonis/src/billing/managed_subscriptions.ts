@@ -221,13 +221,20 @@ export async function renewDueManagedSubscriptions(
         periodStart,
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       // Period untouched on purpose: it stays due and is retried, rather than silently
       // rolling forward a month the customer never paid for.
-      outcomes.push({
-        subscriptionId: row.id,
-        result: 'failed',
-        error: error instanceof Error ? error.message : String(error),
+      //
+      // But the failure IS recorded, and that is the difference between "retried" and
+      // "invisible": because nothing about the row changes on a failure, a subscription that
+      // has been failing for a week looked exactly like one due for the first time. These
+      // three fields are what the console reads to say which ones, and for how long.
+      await store.updateManagedSubscription(row.id, {
+        lastRenewalError: message.slice(0, RENEWAL_ERROR_MAX_LENGTH),
+        lastRenewalAttemptAt: now,
+        renewalFailureCount: (row.renewalFailureCount ?? 0) + 1,
       });
+      outcomes.push({ subscriptionId: row.id, result: 'failed', error: message });
       continue;
     }
 
@@ -235,6 +242,11 @@ export async function renewDueManagedSubscriptions(
       currentPeriodStart: periodStart,
       currentPeriodEnd: periodEnd,
       nextChargeAt: periodEnd,
+      // Zera a série: o contador mede uma SEQUÊNCIA de falhas, não um total histórico. Uma
+      // assinatura que falhou três vezes em março e vem pagando desde então não é um problema.
+      lastRenewalError: null,
+      lastRenewalAttemptAt: now,
+      renewalFailureCount: 0,
     });
     outcomes.push({ subscriptionId: row.id, result: 'charged' });
   }
@@ -305,6 +317,9 @@ export async function updateManagedSubscription(
   await store.updateManagedSubscription(id, patch);
 }
 
+/** `VARCHAR(500)`: a gateway error can be a paragraph, and the column is not a log. */
+const RENEWAL_ERROR_MAX_LENGTH = 500;
+
 /** The subset of a stored row this module reads, whatever the store implementation is. */
 interface ManagedRow {
   id: string;
@@ -317,6 +332,7 @@ interface ManagedRow {
   externalReference?: string | null;
   currentPeriodEnd?: Date | { toJSDate(): Date } | null;
   cancelAtPeriodEnd?: boolean | null;
+  renewalFailureCount?: number | null;
 }
 
 /** Lucid hands back a Luxon `DateTime`; the in-memory store a `Date`. Accept both. */

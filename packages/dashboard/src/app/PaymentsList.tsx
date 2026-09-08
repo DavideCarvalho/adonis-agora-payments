@@ -221,11 +221,11 @@ export function PaymentsList({
             ))}
           </tbody>
         </table>
-        <ScanNotice pagination={query.data?.pagination} noun="payments" />
+        <ScanNotice meta={query.data?.meta} noun="payments" />
         <Pager
-          page={query.data?.pagination.page ?? page}
-          size={query.data?.pagination.size ?? PAGE_SIZE}
-          count={query.data?.pagination.count ?? 0}
+          page={query.data?.meta.page ?? page}
+          size={query.data?.meta.size ?? PAGE_SIZE}
+          count={query.data?.meta.count ?? 0}
           onPage={setPage}
         />
       </QueryState>

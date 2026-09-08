@@ -34,7 +34,10 @@ What changed, concretely:
 - `clampLimit`/`clampOffset` → `clampSize`/`clampPage`, plus `listOffset(page, size)` for stores
   that need the SQL offset.
 - Dashboard JSON API: lists read `?page=1&size=25` instead of `?limit=25&offset=0`, and echo the
-  paging back under `pagination: { page, size, count, … }` instead of `page: { limit, offset, … }`.
-  `count === size` is still the only "there might be more" signal.
+  paging back under `meta: { page, size, count, … }` instead of `page: { limit, offset, … }`.
+  `count === size` is still the only "there might be more" signal. `meta` is Lucid's own spelling —
+  `.paginate()` answers `{ meta, data }` — and it is the envelope key every `@adonis-agora` console
+  now uses.
 - Dashboard SPA: `paymentsClient` list options take `{ page, size }`, the `Page` wire type is now
-  `Pagination`, and the `Pager` control is page-based (`page`/`size`/`onPage`).
+  `ListMeta` and every list response carries it as `meta`, and the `Pager` control is page-based
+  (`page`/`size`/`onPage`). `ScanNotice` takes a `meta` prop.

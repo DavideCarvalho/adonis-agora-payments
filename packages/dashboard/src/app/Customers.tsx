@@ -119,9 +119,9 @@ export function Customers({ onOpenPayments }: { onOpenPayments?: (customerId: st
           </tbody>
         </table>
         <Pager
-          page={query.data?.pagination.page ?? page}
-          size={query.data?.pagination.size ?? PAGE_SIZE}
-          count={query.data?.pagination.count ?? 0}
+          page={query.data?.meta.page ?? page}
+          size={query.data?.meta.size ?? PAGE_SIZE}
+          count={query.data?.meta.count ?? 0}
           onPage={setPage}
         />
       </QueryState>

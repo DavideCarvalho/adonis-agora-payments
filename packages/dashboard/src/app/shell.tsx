@@ -82,17 +82,17 @@ export function QueryState<T>({
  * good news when it is really an unfinished search.
  */
 export function ScanNotice({
-  pagination,
+  meta,
   noun,
 }: {
-  pagination: { scanned: number; truncated: boolean } | undefined;
+  meta: { scanned: number; truncated: boolean } | undefined;
   noun: string;
 }) {
-  if (pagination === undefined || !pagination.truncated) return null;
+  if (meta === undefined || !meta.truncated) return null;
   return (
     <p className="border-t border-warn/30 bg-warn/[0.06] px-4 py-2 text-[11px] text-amber-300">
-      Searched the {pagination.scanned} most recent {noun} for this gateway and stopped there.
-      Narrow the status filter to look further back.
+      Searched the {meta.scanned} most recent {noun} for this gateway and stopped there. Narrow the
+      status filter to look further back.
     </p>
   );
 }

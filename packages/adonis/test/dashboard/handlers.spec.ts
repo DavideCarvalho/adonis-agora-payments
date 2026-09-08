@@ -175,11 +175,11 @@ describe('payments', () => {
     const res = await payments(deps(store), req());
     const body = res.body as {
       payments: Array<{ gatewayId: string; amount: number; paidAt: string | null }>;
-      pagination: { page: number; size: number; count: number };
+      meta: { page: number; size: number; count: number };
     };
     expect(body.payments.map((p) => p.gatewayId)).toEqual(['pi_3', 'pi_2', 'pi_1']);
     expect(body.payments[0]?.amount).toBe(1);
-    expect(body.pagination).toEqual({
+    expect(body.meta).toEqual({
       page: 1,
       size: 50,
       count: 3,
@@ -214,7 +214,7 @@ describe('payments', () => {
     const store = await seed();
     const first = await payments(deps(store), req({ page: '1', size: '2' }));
     const second = await payments(deps(store), req({ page: '2', size: '2' }));
-    expect((first.body as { pagination: { count: number } }).pagination).toEqual({
+    expect((first.body as { meta: { count: number } }).meta).toEqual({
       page: 1,
       size: 2,
       count: 2,
@@ -222,7 +222,7 @@ describe('payments', () => {
       truncated: false,
     });
     // count < size is the client's "no more pages" signal.
-    expect((second.body as { pagination: { count: number } }).pagination.count).toBe(1);
+    expect((second.body as { meta: { count: number } }).meta.count).toBe(1);
     // The second page is the NEXT rows, never a repeat of the first.
     expect(
       (second.body as { payments: Array<{ gatewayId: string }> }).payments.map((p) => p.gatewayId),
@@ -232,14 +232,14 @@ describe('payments', () => {
   it('caps an absurd size instead of selecting the table', async () => {
     const store = await seed();
     const res = await payments(deps(store), req({ size: '100000' }));
-    expect((res.body as { pagination: { size: number } }).pagination.size).toBe(200);
+    expect((res.body as { meta: { size: number } }).meta.size).toBe(200);
   });
 
   it('ignores a garbage page/size rather than returning nothing', async () => {
     const store = await seed();
     const res = await payments(deps(store), req({ size: 'lots', page: '-5' }));
-    const body = res.body as { pagination: { page: number; size: number }; payments: unknown[] };
-    expect(body.pagination).toEqual({
+    const body = res.body as { meta: { page: number; size: number }; payments: unknown[] };
+    expect(body.meta).toEqual({
       page: 1,
       size: 50,
       count: 3,
@@ -523,10 +523,10 @@ describe('provider filter', () => {
     const res = await payments(deps(store), req({ provider: 'asaas' }));
     const body = res.body as {
       payments: Array<{ gatewayId: string; provider: string }>;
-      pagination: { count: number; truncated: boolean };
+      meta: { count: number; truncated: boolean };
     };
     expect(body.payments.map((p) => p.gatewayId)).toEqual(['pi_2']);
-    expect(body.pagination.truncated).toBe(false);
+    expect(body.meta.truncated).toBe(false);
   });
 
   it('composes with the status filter instead of replacing it', async () => {
@@ -571,17 +571,17 @@ describe('provider filter', () => {
     const res = await payments(deps(store), req({ provider: 'asaas' }));
     const body = res.body as {
       payments: unknown[];
-      pagination: { scanned: number; truncated: boolean };
+      meta: { scanned: number; truncated: boolean };
     };
     expect(body.payments).toHaveLength(0);
-    expect(body.pagination.scanned).toBe(PROVIDER_SCAN_CAP);
-    expect(body.pagination.truncated).toBe(true);
+    expect(body.meta.scanned).toBe(PROVIDER_SCAN_CAP);
+    expect(body.meta.truncated).toBe(true);
   });
 
   it('never claims truncation for an unfiltered page', async () => {
     const store = await seed();
     const res = await payments(deps(store), req());
-    expect((res.body as { pagination: { truncated: boolean } }).pagination.truncated).toBe(false);
+    expect((res.body as { meta: { truncated: boolean } }).meta.truncated).toBe(false);
   });
 });
 
@@ -875,7 +875,7 @@ describe('disputes', () => {
     res.body as {
       disputes: Array<{ gatewayId: string; evidenceDueBy: string | null; amount: number | null }>;
       dueWithin?: { hours: number; total: number };
-      pagination: { page: number; size: number; count: number };
+      meta: { page: number; size: number; count: number };
       statuses: readonly string[];
     };
 

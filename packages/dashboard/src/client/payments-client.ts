@@ -221,8 +221,11 @@ export interface Health {
  * `{ page, size }` — 1-based page, `size` rows per page — intentionally mirrors
  * `@adonis-agora/filter`'s pagination shape, which every `@adonis-agora` library now speaks.
  * Structural match only; this package depends on no filter package.
+ *
+ * It travels under the `meta` key, which is Lucid's own spelling (`.paginate()` answers
+ * `{ meta, data }`) and the one every `@adonis-agora` console reads.
  */
-export interface Pagination {
+export interface ListMeta {
   /** 1-based page number the server served. */
   page: number;
   /** Rows per page the server clamped the request to. */
@@ -238,7 +241,7 @@ export interface Pagination {
 
 export interface PaymentsPage {
   payments: PaymentRow[];
-  pagination: Pagination;
+  meta: ListMeta;
   statuses: readonly string[];
   currency: string;
   /** The lookup filters the server applied, echoed back so an empty page can say "no payment
@@ -273,27 +276,27 @@ export interface PaymentDetail {
 
 export interface AuditPage {
   audit: AuditRow[];
-  pagination: { page: number; size: number; count: number };
+  meta: { page: number; size: number; count: number };
   /** The actions the filter offers. A UI list, not a whitelist — an app may record its own. */
   actions: readonly string[];
 }
 
 export interface CustomersPage {
   customers: CustomerRow[];
-  /** Narrower than {@link Pagination}: every filter here is a column the store applies, so there
+  /** Narrower than {@link ListMeta}: every filter here is a column the store applies, so there
    *  is no bounded scan and therefore no `scanned`/`truncated` caveat to report. */
-  pagination: { page: number; size: number; count: number };
+  meta: { page: number; size: number; count: number };
 }
 
 export interface WebhookEventsPage {
   events: WebhookEventRow[];
-  pagination: Pagination;
+  meta: ListMeta;
   statuses: readonly string[];
 }
 
 export interface SubscriptionsPage {
   subscriptions: SubscriptionRow[];
-  pagination: Pagination;
+  meta: ListMeta;
   statuses: readonly string[];
   /** Whole-table counts, not page counts — `past_due` is the figure that decides the morning. */
   counts: { past_due: number; failing_renewals: number };
@@ -302,7 +305,7 @@ export interface SubscriptionsPage {
 /**
  * A page of disputes.
  *
- * `pagination` is NARROWER than {@link Pagination} on purpose: the store filters disputes by provider on a
+ * `meta` is NARROWER than {@link ListMeta} on purpose: the store filters disputes by provider on a
  * column, so there is no bounded scan behind this list and therefore no `scanned`/`truncated` to
  * report. Claiming those here would be claiming a caveat that does not apply.
  *
@@ -312,7 +315,7 @@ export interface SubscriptionsPage {
  */
 export interface DisputesPage {
   disputes: DisputeRow[];
-  pagination: { page: number; size: number; count: number };
+  meta: { page: number; size: number; count: number };
   statuses: readonly string[];
   dueWithin?: { hours: number; total: number };
 }

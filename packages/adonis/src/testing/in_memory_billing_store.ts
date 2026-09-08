@@ -21,7 +21,7 @@ import {
   type WebhookEventListItem,
   type WebhookEventListQuery,
 } from '../billing/billing_store.js';
-import { clampLimit, clampOffset } from '../billing/list_query.js';
+import { clampSize, listOffset } from '../billing/list_query.js';
 
 /** Is this status one that still needs an answer? Shares the constant with the Lucid store. */
 function isOpenDispute(status: string): boolean {
@@ -281,8 +281,8 @@ export class InMemoryBillingStore
     const sorted = [...rows]
       .reverse()
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-    const offset = clampOffset(query.offset);
-    return sorted.slice(offset, offset + clampLimit(query.limit));
+    const offset = listOffset(query.page, query.size);
+    return sorted.slice(offset, offset + clampSize(query.size));
   }
 
   async saveCustomer(customer: {
@@ -750,12 +750,12 @@ export class InMemoryBillingStore
       // Soonest first — the priority order, not the arrival order. The only list here that
       // is not newest-first, and it mirrors the Lucid store's `order by evidence_due_by asc`.
       .sort((a, b) => (a.evidenceDueBy?.getTime() ?? 0) - (b.evidenceDueBy?.getTime() ?? 0));
-    const offset = clampOffset(query.offset);
-    return matching.slice(offset, offset + clampLimit(query.limit)).map(disputeItem);
+    const offset = listOffset(query.page, query.size);
+    return matching.slice(offset, offset + clampSize(query.size)).map(disputeItem);
   }
 
   async countDisputesDueWithin(
-    query: Omit<DisputeDeadlineQuery, 'limit' | 'offset'>,
+    query: Omit<DisputeDeadlineQuery, 'page' | 'size'>,
   ): Promise<number> {
     return this.#dueWithin(query).length;
   }
@@ -767,7 +767,7 @@ export class InMemoryBillingStore
    * and dropping it the moment it expires would make the alert go quiet exactly when it
    * became true. Rows with no deadline are excluded — nothing to be late for.
    */
-  #dueWithin(query: Omit<DisputeDeadlineQuery, 'limit' | 'offset'>): InMemoryDisputeRow[] {
+  #dueWithin(query: Omit<DisputeDeadlineQuery, 'page' | 'size'>): InMemoryDisputeRow[] {
     const now = query.now ?? this.#now();
     const cutoff = now.getTime() + query.withinHours * 3_600_000;
     return [...this.disputes.values()].filter(
@@ -789,8 +789,8 @@ export class InMemoryBillingStore
       // Oldest FIRST — mirrors the Lucid store's `order by created_at asc`. With no deadline
       // to rank on, how long a dispute has gone unanswered is the only priority left.
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
-    const offset = clampOffset(query.offset);
-    return matching.slice(offset, offset + clampLimit(query.limit)).map(disputeItem);
+    const offset = listOffset(query.page, query.size);
+    return matching.slice(offset, offset + clampSize(query.size)).map(disputeItem);
   }
 
   async countOpenDisputes(query: { provider?: string }): Promise<number> {
@@ -935,7 +935,7 @@ export class InMemoryBillingStore
 
   async listWebhookEventsForPayment(
     paymentGatewayId: string,
-    query: { limit?: number } = {},
+    query: { size?: number } = {},
   ): Promise<WebhookEventListItem[]> {
     if (paymentGatewayId === '') return [];
     // Mirrors the Lucid store's `CAST(payload AS TEXT) LIKE '%id%'`, substring semantics and
@@ -944,7 +944,7 @@ export class InMemoryBillingStore
     const matching = [...this.webhookEvents.values()].filter((row) =>
       JSON.stringify(row.payload).includes(paymentGatewayId),
     );
-    return this.#page(matching, query.limit === undefined ? {} : { limit: query.limit }).map(
+    return this.#page(matching, query.size === undefined ? {} : { size: query.size }).map(
       webhookEventItem,
     );
   }

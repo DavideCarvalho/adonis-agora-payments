@@ -37,13 +37,12 @@ export function WebhookEvents({ initialStatus }: { initialStatus?: string | unde
   const [status, setStatus] = useState<string | undefined>(initialStatus ?? 'failed');
   const [provider, setProvider] = useState<string | undefined>(undefined);
   const [type, setType] = useState<string | undefined>(undefined);
-  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState(1);
   const queryClient = useQueryClient();
 
   const query = useQuery({
-    queryKey: ['webhook-events', status, provider, type, offset],
-    queryFn: () =>
-      paymentsClient.webhookEvents({ status, provider, type, limit: PAGE_SIZE, offset }),
+    queryKey: ['webhook-events', status, provider, type, page],
+    queryFn: () => paymentsClient.webhookEvents({ status, provider, type, size: PAGE_SIZE, page }),
   });
 
   const retry = useMutation({
@@ -57,7 +56,7 @@ export function WebhookEvents({ initialStatus }: { initialStatus?: string | unde
   const rows = query.data?.events ?? [];
   const refilter = (apply: () => void) => {
     apply();
-    setOffset(0);
+    setPage(1);
   };
 
   return (
@@ -163,12 +162,12 @@ export function WebhookEvents({ initialStatus }: { initialStatus?: string | unde
             })}
           </tbody>
         </table>
-        <ScanNotice page={query.data?.page} noun="events" />
+        <ScanNotice pagination={query.data?.pagination} noun="events" />
         <Pager
-          limit={query.data?.page.limit ?? PAGE_SIZE}
-          offset={query.data?.page.offset ?? offset}
-          count={query.data?.page.count ?? 0}
-          onOffset={setOffset}
+          page={query.data?.pagination.page ?? page}
+          size={query.data?.pagination.size ?? PAGE_SIZE}
+          count={query.data?.pagination.count ?? 0}
+          onPage={setPage}
         />
       </QueryState>
     </Panel>

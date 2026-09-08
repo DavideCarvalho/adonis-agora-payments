@@ -95,8 +95,8 @@ describe('customer registry (integration)', () => {
       await store.saveCustomer({ gatewayId: `cus_bulk_${i}`, provider: 'woovi' });
     }
 
-    const first = await store.listCustomers({ provider: 'woovi', limit: 2 });
-    const second = await store.listCustomers({ provider: 'woovi', limit: 2, offset: 2 });
+    const first = await store.listCustomers({ provider: 'woovi', size: 2 });
+    const second = await store.listCustomers({ provider: 'woovi', size: 2, page: 2 });
     expect(first).toHaveLength(2);
     expect(second).toHaveLength(2);
     expect(new Set([...first, ...second].map((row) => row.gatewayId)).size).toBe(4);

@@ -148,7 +148,7 @@ describe('listagem: assinatura gerenciada', () => {
     const billing = store();
     const created = await seed(billing, driver, '2026-01-10');
 
-    const rows = await billing.listSubscriptions({ limit: 10 });
+    const rows = await billing.listSubscriptions({ size: 10 });
     const row = rows.find((candidate) => candidate.id === created.id);
 
     expect(row).toBeDefined();

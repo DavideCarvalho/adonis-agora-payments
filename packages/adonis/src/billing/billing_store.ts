@@ -208,8 +208,15 @@ export interface DisputeDeadlineQuery {
   now?: Date;
   /** Exact provider match. Omit for every provider. */
   provider?: string;
-  limit?: number;
-  offset?: number;
+  /**
+   * 1-based page number (default `1`). Mirrors `@adonis-agora/filter`'s `FilterInput.page`.
+   */
+  page?: number;
+  /**
+   * Rows per page — defaults to `BILLING_LIST_DEFAULT_SIZE` (50), capped at
+   * `BILLING_LIST_MAX_SIZE` (200). Mirrors `@adonis-agora/filter`'s `FilterInput.size`.
+   */
+  size?: number;
 }
 
 /**
@@ -313,8 +320,15 @@ export interface CustomerListQuery extends BillingListQuery {
 export interface OpenDisputeQuery {
   /** Exact provider match. Omit for every provider. */
   provider?: string;
-  limit?: number;
-  offset?: number;
+  /**
+   * 1-based page number (default `1`). Mirrors `@adonis-agora/filter`'s `FilterInput.page`.
+   */
+  page?: number;
+  /**
+   * Rows per page — defaults to `BILLING_LIST_DEFAULT_SIZE` (50), capped at
+   * `BILLING_LIST_MAX_SIZE` (200). Mirrors `@adonis-agora/filter`'s `FilterInput.size`.
+   */
+  size?: number;
 }
 
 /**
@@ -376,14 +390,28 @@ export interface AuditEventQuery {
   createdAfter?: Date;
   /** Only rows created strictly BEFORE this instant. */
   createdBefore?: Date;
-  limit?: number;
-  offset?: number;
+  /**
+   * 1-based page number (default `1`). Mirrors `@adonis-agora/filter`'s `FilterInput.page`.
+   */
+  page?: number;
+  /**
+   * Rows per page — defaults to `BILLING_LIST_DEFAULT_SIZE` (50), capped at
+   * `BILLING_LIST_MAX_SIZE` (200). Mirrors `@adonis-agora/filter`'s `FilterInput.size`.
+   */
+  size?: number;
 }
 
 /** The same filter without a page — the count a health check alerts on. */
-export type AuditEventCountQuery = Omit<AuditEventQuery, 'limit' | 'offset'>;
+export type AuditEventCountQuery = Omit<AuditEventQuery, 'page' | 'size'>;
 
-/** Filter + page for the two list queries. `limit`/`offset` are applied after the filter. */
+/**
+ * Filter + page for the two list queries. `page`/`size` are applied after the filter.
+ *
+ * The paging half of this shape intentionally MIRRORS `@adonis-agora/filter`'s
+ * `FilterInput.page`/`.size` (1-based page, `size` rows per page) so every `@adonis-agora`
+ * library exposes the same pagination interface. Structural match only — this package does not
+ * depend on `@adonis-agora/filter`.
+ */
 export interface BillingListQuery {
   /** Exact status match. Omit for every status. */
   status?: string;
@@ -395,8 +423,15 @@ export interface BillingListQuery {
    * had to page the whole table and filter in memory.
    */
   provider?: string;
-  limit?: number;
-  offset?: number;
+  /**
+   * 1-based page number (default `1`). Mirrors `@adonis-agora/filter`'s `FilterInput.page`.
+   */
+  page?: number;
+  /**
+   * Rows per page — defaults to `BILLING_LIST_DEFAULT_SIZE` (50), capped at
+   * `BILLING_LIST_MAX_SIZE` (200). Mirrors `@adonis-agora/filter`'s `FilterInput.size`.
+   */
+  size?: number;
 }
 
 /**
@@ -701,7 +736,7 @@ export interface BillingStore<
    * derived from a capped page saturates at the cap — which reads as "200 disputes" forever
    * and, worse, would report a healthy zero if the page limit were ever misapplied.
    */
-  countDisputesDueWithin(query: Omit<DisputeDeadlineQuery, 'limit' | 'offset'>): Promise<number>;
+  countDisputesDueWithin(query: Omit<DisputeDeadlineQuery, 'page' | 'size'>): Promise<number>;
 
   /**
    * Every dispute that still needs an answer, oldest FIRST — deadline or no deadline.
@@ -773,7 +808,7 @@ export interface BillingStore<
    * nothing links a ledger row to a payment, because the link lives inside the stored payload.
    *
    * So this is a SUBSTRING match over the payload, and both of that decision's costs are real:
-   * it is an unindexed scan (bounded by `limit`, newest first, which is why the bound is not
+   * it is an unindexed scan (bounded by `size`, newest first, which is why the bound is not
    * optional in spirit even though it has a default), and a gateway id that happens to be a
    * substring of some other identifier in another delivery will match. It is offered anyway
    * because the alternative on the table today is nothing at all. The honest fix is a
@@ -783,7 +818,7 @@ export interface BillingStore<
    */
   listWebhookEventsForPayment(
     paymentGatewayId: string,
-    query?: { limit?: number },
+    query?: { size?: number },
   ): Promise<WebhookEventListItem[]>;
 
   /**

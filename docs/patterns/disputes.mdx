@@ -153,14 +153,14 @@ import { OPEN_DISPUTE_STATUSES } from '@adonis-agora/payments'
 
 // The windows closing in the next three days, soonest first. Only OPEN disputes that
 // actually carry a deadline — a dispute with none is never in this list.
-const closing = await store.listDisputesDueWithin({ withinHours: 72, limit: 20 })
+const closing = await store.listDisputesDueWithin({ withinHours: 72, size: 20 })
 
 // The count behind it, unbounded by any page — a count taken off a capped page
 // saturates at the cap and reads as the same number forever.
 const total = await store.countDisputesDueWithin({ withinHours: 72 })
 
 // The log: newest first, filterable by status and provider.
-const warnings = await store.listDisputes({ status: 'warning', limit: 50 })
+const warnings = await store.listDisputes({ status: 'warning', size: 50 })
 
 // The dispute a payment currently has open, if any — status in OPEN_DISPUTE_STATUSES.
 const open = await store.findOpenDisputeByPayment(payment.gatewayId)

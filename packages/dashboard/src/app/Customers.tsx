@@ -24,12 +24,12 @@ const PAGE_SIZE = 50;
 export function Customers({ onOpenPayments }: { onOpenPayments?: (customerId: string) => void }) {
   const [provider, setProvider] = useState<string | undefined>(undefined);
   const [owner, setOwner] = useState('');
-  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState(1);
 
   const ownerId = owner.trim() === '' ? undefined : owner.trim();
   const query = useQuery({
-    queryKey: ['customers', provider, ownerId, offset],
-    queryFn: () => paymentsClient.customers({ provider, ownerId, limit: PAGE_SIZE, offset }),
+    queryKey: ['customers', provider, ownerId, page],
+    queryFn: () => paymentsClient.customers({ provider, ownerId, size: PAGE_SIZE, page }),
   });
 
   const rows = query.data?.customers ?? [];
@@ -44,7 +44,7 @@ export function Customers({ onOpenPayments }: { onOpenPayments?: (customerId: st
             value={provider}
             onChange={(v) => {
               setProvider(v);
-              setOffset(0);
+              setPage(1);
             }}
           />
           <label className="flex items-center gap-2 text-[11px] text-zinc-500">
@@ -54,7 +54,7 @@ export function Customers({ onOpenPayments }: { onOpenPayments?: (customerId: st
               value={owner}
               onChange={(event) => {
                 setOwner(event.target.value);
-                setOffset(0);
+                setPage(1);
               }}
               placeholder="4102"
               className="mono w-32 rounded-sm border border-line bg-panel px-2 py-1 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-brand focus:outline-hidden"
@@ -119,10 +119,10 @@ export function Customers({ onOpenPayments }: { onOpenPayments?: (customerId: st
           </tbody>
         </table>
         <Pager
-          limit={query.data?.page.limit ?? PAGE_SIZE}
-          offset={query.data?.page.offset ?? offset}
-          count={query.data?.page.count ?? 0}
-          onOffset={setOffset}
+          page={query.data?.pagination.page ?? page}
+          size={query.data?.pagination.size ?? PAGE_SIZE}
+          count={query.data?.pagination.count ?? 0}
+          onPage={setPage}
         />
       </QueryState>
     </Panel>

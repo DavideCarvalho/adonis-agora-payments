@@ -84,11 +84,11 @@ export function Disputes({ initialStatus }: { initialStatus?: string | undefined
  */
 function ClosingWindows() {
   const [hours, setHours] = useState(DEFAULT_DUE_WITHIN_HOURS);
-  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState(1);
 
   const query = useQuery({
-    queryKey: ['disputes', 'due-within', hours, offset],
-    queryFn: () => paymentsClient.disputes({ dueWithin: hours, limit: PAGE_SIZE, offset }),
+    queryKey: ['disputes', 'due-within', hours, page],
+    queryFn: () => paymentsClient.disputes({ dueWithin: hours, size: PAGE_SIZE, page }),
   });
 
   const rows = query.data?.disputes ?? [];
@@ -109,7 +109,7 @@ function ClosingWindows() {
           onChange={(value) => {
             setHours(Number(value));
             // A different horizon is a different list; page 3 of "3 days" is not page 3 of "30".
-            setOffset(0);
+            setPage(1);
           }}
         />
       }
@@ -165,10 +165,10 @@ function ClosingWindows() {
           </tbody>
         </table>
         <Pager
-          limit={query.data?.page.limit ?? PAGE_SIZE}
-          offset={query.data?.page.offset ?? offset}
-          count={query.data?.page.count ?? 0}
-          onOffset={setOffset}
+          page={query.data?.pagination.page ?? page}
+          size={query.data?.pagination.size ?? PAGE_SIZE}
+          count={query.data?.pagination.count ?? 0}
+          onPage={setPage}
         />
       </QueryState>
     </Panel>
@@ -180,18 +180,18 @@ function ClosingWindows() {
 function DisputeLog({ initialStatus }: { initialStatus?: string | undefined }) {
   const [status, setStatus] = useState<string | undefined>(initialStatus);
   const [provider, setProvider] = useState<string | undefined>(undefined);
-  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState(1);
 
   const query = useQuery({
-    queryKey: ['disputes', 'log', status, provider, offset],
-    queryFn: () => paymentsClient.disputes({ status, provider, limit: PAGE_SIZE, offset }),
+    queryKey: ['disputes', 'log', status, provider, page],
+    queryFn: () => paymentsClient.disputes({ status, provider, size: PAGE_SIZE, page }),
   });
 
   const rows = query.data?.disputes ?? [];
   const [resolving, setResolving] = useState<DisputeRow | null>(null);
   const refilter = (apply: () => void) => {
     apply();
-    setOffset(0);
+    setPage(1);
   };
 
   return (
@@ -267,10 +267,10 @@ function DisputeLog({ initialStatus }: { initialStatus?: string | undefined }) {
           </tbody>
         </table>
         <Pager
-          limit={query.data?.page.limit ?? PAGE_SIZE}
-          offset={query.data?.page.offset ?? offset}
-          count={query.data?.page.count ?? 0}
-          onOffset={setOffset}
+          page={query.data?.pagination.page ?? page}
+          size={query.data?.pagination.size ?? PAGE_SIZE}
+          count={query.data?.pagination.count ?? 0}
+          onPage={setPage}
         />
       </QueryState>
       {resolving !== null && (

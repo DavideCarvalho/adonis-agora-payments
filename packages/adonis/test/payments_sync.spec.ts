@@ -300,7 +300,7 @@ describe('payments:sync --subscriptions', () => {
 
     await runReconcile(store, subscriptionDriver({ sub_1: remoteSubscription() }));
 
-    const rows = await store.listSubscriptions({ limit: 10 });
+    const rows = await store.listSubscriptions({ size: 10 });
     expect(rows[0]?.amount).toBe(9_900);
     expect(rows[0]?.cycle).toBe('MONTHLY');
   });
@@ -347,7 +347,7 @@ describe('payments:sync --subscriptions', () => {
 
     const logs = await runReconcile(store, subscriptionDriver({}));
 
-    const rows = await store.listSubscriptions({ limit: 10 });
+    const rows = await store.listSubscriptions({ size: 10 });
     expect(rows[0]?.status).toBe('active');
     expect(logs.some((line) => line.includes('not found at the gateway'))).toBe(true);
   });
@@ -374,7 +374,7 @@ describe('payments:sync --subscriptions', () => {
       }),
     );
 
-    const rows = await store.listSubscriptions({ limit: 10 });
+    const rows = await store.listSubscriptions({ size: 10 });
     expect(rows[0]?.amount).toBe(14_900);
   });
 });

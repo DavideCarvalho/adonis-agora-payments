@@ -43,7 +43,7 @@ export function PaymentsList({
 } = {}) {
   const [status, setStatus] = useState<string | undefined>(initialStatus);
   const [provider, setProvider] = useState<string | undefined>(undefined);
-  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState(1);
   const [refunding, setRefunding] = useState<PaymentRow | null>(null);
   // Uncontrolled fallback for a caller that does not route the detail dialog (a test, a host
   // embedding just this screen). `App` always does.
@@ -63,15 +63,15 @@ export function PaymentsList({
 
   const term = submitted.trim() === '' ? undefined : submitted.trim();
   const query = useQuery({
-    queryKey: ['payments', status, provider, term, initialCustomerId, offset],
+    queryKey: ['payments', status, provider, term, initialCustomerId, page],
     queryFn: async () => {
       if (term === undefined) {
         return paymentsClient.payments({
           status,
           provider,
           customerId: initialCustomerId,
-          limit: PAGE_SIZE,
-          offset,
+          size: PAGE_SIZE,
+          page,
         });
       }
       // Both keys, in that order: `externalReference` is the id the app itself chose, so it is
@@ -80,20 +80,20 @@ export function PaymentsList({
       const byReference = await paymentsClient.payments({
         provider,
         reference: term,
-        limit: PAGE_SIZE,
-        offset,
+        size: PAGE_SIZE,
+        page,
       });
       if (byReference.payments.length > 0) return byReference;
-      return paymentsClient.payments({ provider, gatewayId: term, limit: PAGE_SIZE, offset });
+      return paymentsClient.payments({ provider, gatewayId: term, size: PAGE_SIZE, page });
     },
   });
 
   const rows = query.data?.payments ?? [];
-  // A filter change makes the current offset meaningless — page 3 of "all" is not page 3 of
+  // A filter change makes the current page meaningless — page 3 of "all" is not page 3 of
   // "failed", nor page 3 of "asaas".
   const refilter = (apply: () => void) => {
     apply();
-    setOffset(0);
+    setPage(1);
   };
 
   return (
@@ -221,12 +221,12 @@ export function PaymentsList({
             ))}
           </tbody>
         </table>
-        <ScanNotice page={query.data?.page} noun="payments" />
+        <ScanNotice pagination={query.data?.pagination} noun="payments" />
         <Pager
-          limit={query.data?.page.limit ?? PAGE_SIZE}
-          offset={query.data?.page.offset ?? offset}
-          count={query.data?.page.count ?? 0}
-          onOffset={setOffset}
+          page={query.data?.pagination.page ?? page}
+          size={query.data?.pagination.size ?? PAGE_SIZE}
+          count={query.data?.pagination.count ?? 0}
+          onPage={setPage}
         />
       </QueryState>
 

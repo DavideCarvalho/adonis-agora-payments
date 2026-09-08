@@ -345,7 +345,7 @@ describe('LucidBillingStore (integration)', () => {
     });
 
     it('pages the ledger newest first', async () => {
-      const page = await store.listWebhookEvents({ limit: 2 });
+      const page = await store.listWebhookEvents({ size: 2 });
       expect(page).toHaveLength(2);
       expect(page[0]?.createdAt?.getTime()).toBeGreaterThanOrEqual(
         page[1]?.createdAt?.getTime() ?? 0,
@@ -457,7 +457,7 @@ describe('LucidBillingStore (integration)', () => {
     });
 
     it('carries the reference on the normalized list item', async () => {
-      const listed = await store.listPayments({ status: 'paid', limit: 100 });
+      const listed = await store.listPayments({ status: 'paid', size: 100 });
       expect(listed.find((row) => row.gatewayId === 'pay_retry')?.externalReference).toBe(
         'order-reused',
       );
@@ -617,9 +617,7 @@ describe('LucidBillingStore (integration)', () => {
       expect(due.map((row) => row.gatewayId)).toEqual(['dp_soon', 'dp_mid']);
       expect(await store.countDisputesDueWithin({ withinHours: 24, now })).toBe(2);
       // The count is what the exit code is decided on: it must not be capped by a page.
-      expect((await store.listDisputesDueWithin({ withinHours: 24, now, limit: 1 })).length).toBe(
-        1,
-      );
+      expect((await store.listDisputesDueWithin({ withinHours: 24, now, size: 1 })).length).toBe(1);
       expect(await store.countDisputesDueWithin({ withinHours: 24, now, provider: 'adyen' })).toBe(
         1,
       );

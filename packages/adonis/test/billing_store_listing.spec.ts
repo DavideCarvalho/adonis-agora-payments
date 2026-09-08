@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { BILLING_LIST_MAX_LIMIT, clampLimit, clampOffset } from '../src/billing/list_query.js';
+import {
+  BILLING_LIST_MAX_SIZE,
+  clampPage,
+  clampSize,
+  listOffset,
+} from '../src/billing/list_query.js';
 import { InMemoryBillingStore } from '../src/testing/in_memory_billing_store.js';
 
 /**
@@ -85,7 +90,7 @@ describe('listPayments', () => {
     expect(await store.listPayments({ status: 'nonexistent' })).toEqual([]);
   });
 
-  it('pages with limit and offset', async () => {
+  it('pages with page and size', async () => {
     const store = storeWithClock();
     for (const id of ['a', 'b', 'c', 'd']) {
       await store.savePayment({
@@ -96,12 +101,12 @@ describe('listPayments', () => {
         currency: 'BRL',
       });
     }
-    expect((await store.listPayments({ limit: 2 })).map((r) => r.gatewayId)).toEqual(['d', 'c']);
-    expect((await store.listPayments({ limit: 2, offset: 2 })).map((r) => r.gatewayId)).toEqual([
+    expect((await store.listPayments({ size: 2 })).map((r) => r.gatewayId)).toEqual(['d', 'c']);
+    expect((await store.listPayments({ size: 2, page: 2 })).map((r) => r.gatewayId)).toEqual([
       'b',
       'a',
     ]);
-    expect(await store.listPayments({ limit: 2, offset: 10 })).toEqual([]);
+    expect(await store.listPayments({ size: 2, page: 6 })).toEqual([]);
   });
 
   it('does not return an upserted payment twice', async () => {
@@ -194,24 +199,35 @@ describe('listWebhookEvents', () => {
       'a',
     ]);
     expect(
-      (await store.listWebhookEvents({ limit: 1, offset: 1 })).map((e) => e.gatewayEventId),
+      (await store.listWebhookEvents({ size: 1, page: 2 })).map((e) => e.gatewayEventId),
     ).toEqual(['b']);
   });
 });
 
 describe('paging bounds', () => {
-  it('defaults, floors and caps the limit', () => {
-    expect(clampLimit(undefined)).toBe(50);
-    expect(clampLimit(0)).toBe(50);
-    expect(clampLimit(-1)).toBe(50);
-    expect(clampLimit(Number.NaN)).toBe(50);
-    expect(clampLimit(10.9)).toBe(10);
-    expect(clampLimit(1_000_000)).toBe(BILLING_LIST_MAX_LIMIT);
+  it('defaults, floors and caps the size', () => {
+    expect(clampSize(undefined)).toBe(50);
+    expect(clampSize(0)).toBe(50);
+    expect(clampSize(-1)).toBe(50);
+    expect(clampSize(Number.NaN)).toBe(50);
+    expect(clampSize(10.9)).toBe(10);
+    expect(clampSize(1_000_000)).toBe(BILLING_LIST_MAX_SIZE);
   });
 
-  it('floors a negative offset to zero', () => {
-    expect(clampOffset(undefined)).toBe(0);
-    expect(clampOffset(-3)).toBe(0);
-    expect(clampOffset(7.9)).toBe(7);
+  it('clamps the page to the 1-based first page', () => {
+    expect(clampPage(undefined)).toBe(1);
+    expect(clampPage(0)).toBe(1);
+    expect(clampPage(-3)).toBe(1);
+    expect(clampPage(Number.NaN)).toBe(1);
+    expect(clampPage(7.9)).toBe(7);
+  });
+
+  it('turns a page into the 0-based SQL offset callers never see', () => {
+    expect(listOffset(undefined, undefined)).toBe(0);
+    expect(listOffset(1, 25)).toBe(0);
+    expect(listOffset(3, 25)).toBe(50);
+    // A page below 1 and a garbage size both fall back to the defaults, never to a negative
+    // offset — the one value that would make a store throw instead of returning a page.
+    expect(listOffset(0, 0)).toBe(0);
   });
 });

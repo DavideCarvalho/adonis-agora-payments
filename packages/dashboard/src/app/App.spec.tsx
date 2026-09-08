@@ -56,7 +56,7 @@ function stubApi(): void {
                 events: [],
                 audit: [],
                 counts: { past_due: 0 },
-                page: { limit: 50, offset: 0, count: 0, scanned: 0, truncated: false },
+                pagination: { page: 1, size: 50, count: 0, scanned: 0, truncated: false },
               };
     return { ok: true, status: 200, statusText: 'OK', json: async () => body } as Response;
   }) as typeof globalThis.fetch;

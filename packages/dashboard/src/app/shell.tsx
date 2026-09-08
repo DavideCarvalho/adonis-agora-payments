@@ -82,48 +82,53 @@ export function QueryState<T>({
  * good news when it is really an unfinished search.
  */
 export function ScanNotice({
-  page,
+  pagination,
   noun,
 }: {
-  page: { scanned: number; truncated: boolean } | undefined;
+  pagination: { scanned: number; truncated: boolean } | undefined;
   noun: string;
 }) {
-  if (page === undefined || !page.truncated) return null;
+  if (pagination === undefined || !pagination.truncated) return null;
   return (
     <p className="border-t border-warn/30 bg-warn/[0.06] px-4 py-2 text-[11px] text-amber-300">
-      Searched the {page.scanned} most recent {noun} for this gateway and stopped there. Narrow the
-      status filter to look further back.
+      Searched the {pagination.scanned} most recent {noun} for this gateway and stopped there.
+      Narrow the status filter to look further back.
     </p>
   );
 }
 
 /**
- * Offset paging.
+ * Page paging.
  *
- * `count === limit` is the ONLY signal that another page might exist — the server never counts the
+ * `page` is 1-BASED and `size` is the page size — the same `{ page, size }` pair the API takes and
+ * echoes, which every `@adonis-agora` library now speaks (see `@adonis-agora/filter`). The row
+ * range shown is derived here; no 0-based offset crosses the wire.
+ *
+ * `count === size` is the ONLY signal that another page might exist — the server never counts the
  * full match set — so "Next" is enabled on exactly that and the control never claims a total it
  * does not have.
  */
 export function Pager({
-  limit,
-  offset,
+  page,
+  size,
   count,
-  onOffset,
+  onPage,
 }: {
-  limit: number;
-  offset: number;
+  page: number;
+  size: number;
   count: number;
-  onOffset: (offset: number) => void;
+  onPage: (page: number) => void;
 }) {
-  const maybeMore = count === limit;
+  const maybeMore = count === size;
+  const first = (page - 1) * size;
   return (
     <div className="flex items-center justify-between border-t border-line px-4 py-2 text-xs text-zinc-500">
-      <span className="mono tnum">{count === 0 ? '0' : `${offset + 1}–${offset + count}`}</span>
+      <span className="mono tnum">{count === 0 ? '0' : `${first + 1}–${first + count}`}</span>
       <span className="flex gap-1">
         <button
           type="button"
-          disabled={offset === 0}
-          onClick={() => onOffset(Math.max(0, offset - limit))}
+          disabled={page <= 1}
+          onClick={() => onPage(Math.max(1, page - 1))}
           className="rounded-sm border border-line px-2 py-1 text-zinc-300 enabled:hover:bg-panel-2 disabled:opacity-40"
         >
           Previous
@@ -131,7 +136,7 @@ export function Pager({
         <button
           type="button"
           disabled={!maybeMore}
-          onClick={() => onOffset(offset + limit)}
+          onClick={() => onPage(page + 1)}
           className="rounded-sm border border-line px-2 py-1 text-zinc-300 enabled:hover:bg-panel-2 disabled:opacity-40"
         >
           Next

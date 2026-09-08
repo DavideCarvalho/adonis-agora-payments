@@ -467,14 +467,14 @@ The SPA is a client of a plain API, and so can you be — the same guard covers 
 | --- | --- | --- |
 | `GET <path>/api/health` | — | the `billingHealth` checks plus the failure breakdown |
 | `GET <path>/api/overview` | `period`, `from`, `to` | `billingOverview` metrics for the period |
-| `GET <path>/api/payments` | `status`, `provider`, `reference`, `gatewayId`, `customerId`, `limit`, `offset` | a page of payments, newest first, each with `externalReference`, `refundedAmount` and an `owner` |
+| `GET <path>/api/payments` | `status`, `provider`, `reference`, `gatewayId`, `customerId`, `page`, `size` | a page of payments, newest first, each with `externalReference`, `refundedAmount` and an `owner` |
 | `GET <path>/api/payments/:gatewayId` | — | one payment: current state, owner, disputes, ledger rows naming it (with `events.matchedBy`), and its audit rows |
-| `GET <path>/api/customers` | `provider`, `ownerType`, `ownerId`, `gatewayId`, `limit`, `offset` | a page of the owner mapping, newest first |
-| `GET <path>/api/disputes` | `status`, `provider`, `limit`, `offset` | a page of disputes, newest first |
-| `GET <path>/api/disputes` | `dueWithin` (hours), `provider`, `limit`, `offset` | only the OPEN windows closing inside the horizon, soonest first, plus the full `dueWithin.total` |
-| `GET <path>/api/subscriptions` | `status`, `provider`, `limit`, `offset` | a page of subscriptions, plus the whole-table `past_due` count |
-| `GET <path>/api/webhook-events` | `status`, `provider`, `type`, `limit`, `offset` | a page of the ledger, newest first |
-| `GET <path>/api/audit` | `action`, `actor`, `provider`, `subjectType`, `subjectId`, `limit`, `offset` | the audit trail, newest first, plus the action filter list |
+| `GET <path>/api/customers` | `provider`, `ownerType`, `ownerId`, `gatewayId`, `page`, `size` | a page of the owner mapping, newest first |
+| `GET <path>/api/disputes` | `status`, `provider`, `page`, `size` | a page of disputes, newest first |
+| `GET <path>/api/disputes` | `dueWithin` (hours), `provider`, `page`, `size` | only the OPEN windows closing inside the horizon, soonest first, plus the full `dueWithin.total` |
+| `GET <path>/api/subscriptions` | `status`, `provider`, `page`, `size` | a page of subscriptions, plus the whole-table `past_due` count |
+| `GET <path>/api/webhook-events` | `status`, `provider`, `type`, `page`, `size` | a page of the ledger, newest first |
+| `GET <path>/api/audit` | `action`, `actor`, `provider`, `subjectType`, `subjectId`, `page`, `size` | the audit trail, newest first, plus the action filter list |
 | `GET <path>/api/providers` | — | the gateways **and the event types** present in your data |
 | `POST <path>/api/payments/:gatewayId/refund` | `{ amount? }` | the gateway's refund; `amount` is integer minor units |
 | `POST <path>/api/disputes/:gatewayId/resolve` | `{ status, outcome?, note? }` | the closed dispute plus the audit row; sends nothing to a gateway |
@@ -484,15 +484,19 @@ The SPA is a client of a plain API, and so can you be — the same guard covers 
 three payment lookups are exact matches. The response echoes them back under `filters`, so the SPA
 can say "no payment carries reference X" rather than "no payments".
 
-Paging is clamped (50 by default, 200 maximum), so an unbounded `limit` from a query string cannot
-select the whole table. A provider-filtered page also reports `scanned` and `truncated`. The
-customers and audit pages report neither, because every filter they offer is a column the store
-applies — there is no bounded scan behind them to warn about.
+Paging is `?page=1&size=25` — `page` is **1-based**, `size` is the page size — the same shape
+`@adonis-agora/filter` takes, so every Agora console reads the same query string. Each list echoes
+it back under `pagination` (`{ page, size, count, … }`); `count === size` is the only "there might
+be more" signal, because nothing here counts the full match set. `size` is clamped (50 by default,
+200 maximum), so an unbounded page size from a query string cannot select the whole table. A
+provider-filtered page also reports `scanned` and `truncated`. The customers and audit pages report
+neither, because every filter they offer is a column the store applies — there is no bounded scan
+behind them to warn about.
 
 `?dueWithin` with no value uses the same 72-hour horizon `payments:health` alerts on, so the console
 and the cron agree about "soon". A value that is present and unreadable answers `400` rather than
 quietly falling back to the default — you would have no way to tell which question you asked. The
-`dueWithin.total` beside the page is a separate count, unbounded by `limit`: a full page says
+`dueWithin.total` beside the page is a separate count, unbounded by `size`: a full page says
 nothing about how many more windows are closing, and that number is the one you plan the day around.
 
 The action responses distinguish their failures rather than collapsing them into `500`: `404` for a

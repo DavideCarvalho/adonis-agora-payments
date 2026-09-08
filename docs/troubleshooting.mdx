@@ -269,7 +269,7 @@ the ledger deduplicates on the gateway event id, which is exactly what it is for
 them directly:
 
 ```ts
-const stuck = await store.listDisputes({ status: 'won', limit: 200 })
+const stuck = await store.listDisputes({ status: 'won', size: 200 })
 // then, for each, confirm at the gateway and put the payment row back:
 //   await store.savePayment({ ...existing fields..., status: 'paid' })
 ```

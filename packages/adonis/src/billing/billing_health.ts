@@ -176,11 +176,11 @@ export async function billingHealth(
     // Counted separately from the list, and unbounded: a count taken from a capped page
     // saturates at the cap, and this number is what the exit code is decided on.
     store.countDisputesDueWithin({ withinHours, now }),
-    store.listDisputesDueWithin({ withinHours, now, limit: DISPUTE_DEADLINE_SAMPLE }),
+    store.listDisputesDueWithin({ withinHours, now, size: DISPUTE_DEADLINE_SAMPLE }),
     // No window and no deadline: an open dispute is unanswered however old it is, and on a
     // gateway that publishes no deadline this is the ONLY read that can see it at all.
     store.countOpenDisputes({}),
-    store.listOpenDisputes({ limit: OPEN_DISPUTE_SAMPLE }),
+    store.listOpenDisputes({ size: OPEN_DISPUTE_SAMPLE }),
     store.countAuditEvents({
       action: AUDIT_ACTIONS.webhookRejected,
       createdAfter: since(rejectedWithin),

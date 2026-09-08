@@ -291,9 +291,10 @@ async function pageBy<T extends { provider: string }>(
   };
 }
 
-/** The paging envelope every list endpoint echoes back, in the same `{ page, size }` terms the
- *  request used. */
-function pageEnvelope<T>(paging: Paging, filtered: FilteredPage<T>) {
+/** The `meta` envelope every list endpoint echoes back, in the same `{ page, size }` terms the
+ *  request used. `meta` is Lucid's own spelling for it (`.paginate()` answers `{ meta, data }`),
+ *  and the key every `@adonis-agora` console reads. */
+function listMeta<T>(paging: Paging, filtered: FilteredPage<T>) {
   return {
     page: paging.page,
     size: paging.size,
@@ -435,7 +436,7 @@ export async function disputes(deps: Deps, req: ApiRequest): Promise<ApiResponse
     return ok({
       disputes: rows.map(disputeJson),
       dueWithin: { hours: withinHours, total },
-      pagination: { page: paging.page, size: paging.size, count: rows.length },
+      meta: { page: paging.page, size: paging.size, count: rows.length },
       statuses: DISPUTE_STATUSES,
     });
   }
@@ -448,7 +449,7 @@ export async function disputes(deps: Deps, req: ApiRequest): Promise<ApiResponse
   });
   return ok({
     disputes: rows.map(disputeJson),
-    pagination: { page: paging.page, size: paging.size, count: rows.length },
+    meta: { page: paging.page, size: paging.size, count: rows.length },
     statuses: DISPUTE_STATUSES,
   });
 }
@@ -571,7 +572,7 @@ export async function payments(deps: Deps, req: ApiRequest): Promise<ApiResponse
     payments: filtered.rows.map((row) =>
       paymentJson(row, (row.customerId && owners.get(row.customerId)) || null, deps.capabilities),
     ),
-    pagination: pageEnvelope(paging, filtered),
+    meta: listMeta(paging, filtered),
     statuses: PAYMENT_STATUSES,
     currency: deps.currency,
     /** Echoed so the SPA can render "no payment carries reference X" rather than "no payments". */
@@ -700,7 +701,7 @@ export async function subscriptions(deps: Deps, req: ApiRequest): Promise<ApiRes
       lastRenewalAttemptAt: iso(row.lastRenewalAttemptAt),
       renewalFailureCount: row.renewalFailureCount,
     })),
-    pagination: pageEnvelope(paging, filtered),
+    meta: listMeta(paging, filtered),
     statuses: SUBSCRIPTION_STATUSES,
     counts: {
       past_due: pastDue,
@@ -744,7 +745,7 @@ export async function webhookEvents(deps: Deps, req: ApiRequest): Promise<ApiRes
   );
   return ok({
     events: filtered.rows.map(webhookEventJson),
-    pagination: pageEnvelope(paging, filtered),
+    meta: listMeta(paging, filtered),
     statuses: WEBHOOK_EVENT_STATUSES,
   });
 }
@@ -838,7 +839,7 @@ export async function customers(deps: Deps, req: ApiRequest): Promise<ApiRespons
     // No `scanned`/`truncated`: every filter here is a column the store applies, so there is no
     // bounded scan behind this list and claiming the caveat would be claiming one that does not
     // apply. Same reason the disputes page reports a narrower envelope.
-    pagination: { page: paging.page, size: paging.size, count: rows.length },
+    meta: { page: paging.page, size: paging.size, count: rows.length },
   });
 }
 
@@ -884,7 +885,7 @@ export async function auditEvents(deps: Deps, req: ApiRequest): Promise<ApiRespo
   return ok({
     audit: rows.map(auditJson),
     // Column filters throughout, so no bounded scan and no `truncated` caveat to claim.
-    pagination: { page: paging.page, size: paging.size, count: rows.length },
+    meta: { page: paging.page, size: paging.size, count: rows.length },
     actions: AUDIT_ACTION_FILTERS,
   });
 }

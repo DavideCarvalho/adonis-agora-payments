@@ -231,9 +231,9 @@ describe('payments dashboard API (integration)', () => {
           createdAt: string | null;
           customerId: string | null;
         }>;
-        pagination: { page: number; size: number; count: number };
+        meta: { page: number; size: number; count: number };
       };
-      expect(body.pagination.count).toBe(5);
+      expect(body.meta.count).toBe(5);
       const recent = body.payments.find((p) => p.gatewayId === 'pi_recent');
       expect(recent?.amount).toBe(123456);
       expect(recent?.currency).toBe('BRL');
@@ -277,9 +277,9 @@ describe('payments dashboard API (integration)', () => {
       const res = await webhookEvents(deps(), req());
       const body = res.body as {
         events: Array<{ gatewayEventId: string; createdAt: string | null; error: string | null }>;
-        pagination: { count: number };
+        meta: { count: number };
       };
-      expect(body.pagination.count).toBe(3);
+      expect(body.meta.count).toBe(3);
       expect(body.events.map((e) => e.gatewayEventId).sort()).toEqual([
         'evt_done',
         'evt_failed',
@@ -463,14 +463,14 @@ describe('payments dashboard API (integration)', () => {
       const res = await payments(deps(), req({ provider: 'asaas' }));
       const body = res.body as {
         payments: Array<{ gatewayId: string; provider: string }>;
-        pagination: { truncated: boolean };
+        meta: { truncated: boolean };
       };
       expect(body.payments.map((p) => p.gatewayId).sort()).toEqual([
         'pi_ancient',
         'pi_unconfirmed',
       ]);
       expect(body.payments.every((p) => p.provider === 'asaas')).toBe(true);
-      expect(body.pagination.truncated).toBe(false);
+      expect(body.meta.truncated).toBe(false);
     });
 
     it('narrows real subscription rows to one gateway', async () => {

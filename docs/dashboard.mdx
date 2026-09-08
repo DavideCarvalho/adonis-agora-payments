@@ -486,12 +486,13 @@ can say "no payment carries reference X" rather than "no payments".
 
 Paging is `?page=1&size=25` — `page` is **1-based**, `size` is the page size — the same shape
 `@adonis-agora/filter` takes, so every Agora console reads the same query string. Each list echoes
-it back under `pagination` (`{ page, size, count, … }`); `count === size` is the only "there might
-be more" signal, because nothing here counts the full match set. `size` is clamped (50 by default,
-200 maximum), so an unbounded page size from a query string cannot select the whole table. A
-provider-filtered page also reports `scanned` and `truncated`. The customers and audit pages report
-neither, because every filter they offer is a column the store applies — there is no bounded scan
-behind them to warn about.
+it back under `meta` (`{ page, size, count, … }`) — Lucid's own spelling, since `.paginate()`
+answers `{ meta, data }`, and the key every Agora console reads. `count === size` is the only
+"there might be more" signal, because nothing here counts the full match set. `size` is clamped
+(50 by default, 200 maximum), so an unbounded page size from a query string cannot select the
+whole table. A provider-filtered page also reports `scanned` and `truncated`. The customers and
+audit pages report neither, because every filter they offer is a column the store applies — there
+is no bounded scan behind them to warn about.
 
 `?dueWithin` with no value uses the same 72-hour horizon `payments:health` alerts on, so the console
 and the cron agree about "soon". A value that is present and unreadable answers `400` rather than

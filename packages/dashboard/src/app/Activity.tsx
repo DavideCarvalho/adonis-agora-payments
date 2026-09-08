@@ -39,11 +39,11 @@ const ACTION_LABEL: Record<string, string> = {
  */
 export function Activity({ initialAction }: { initialAction?: string | undefined } = {}) {
   const [action, setAction] = useState<string | undefined>(initialAction);
-  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState(1);
 
   const query = useQuery({
-    queryKey: ['audit', action, offset],
-    queryFn: () => paymentsClient.audit({ action, limit: PAGE_SIZE, offset }),
+    queryKey: ['audit', action, page],
+    queryFn: () => paymentsClient.audit({ action, size: PAGE_SIZE, page }),
   });
 
   const rows = query.data?.audit ?? [];
@@ -59,7 +59,7 @@ export function Activity({ initialAction }: { initialAction?: string | undefined
           value={action}
           onChange={(value) => {
             setAction(value);
-            setOffset(0);
+            setPage(1);
           }}
         />
       }
@@ -103,10 +103,10 @@ export function Activity({ initialAction }: { initialAction?: string | undefined
           </tbody>
         </table>
         <Pager
-          limit={query.data?.page.limit ?? PAGE_SIZE}
-          offset={query.data?.page.offset ?? offset}
-          count={query.data?.page.count ?? 0}
-          onOffset={setOffset}
+          page={query.data?.pagination.page ?? page}
+          size={query.data?.pagination.size ?? PAGE_SIZE}
+          count={query.data?.pagination.count ?? 0}
+          onPage={setPage}
         />
       </QueryState>
     </Panel>

@@ -42,18 +42,18 @@ const STATUS_OPTIONS: ReadonlyArray<{ value: string | undefined; label: string }
 export function Subscriptions({ initialStatus }: { initialStatus?: string | undefined } = {}) {
   const [status, setStatus] = useState<string | undefined>(initialStatus ?? 'past_due');
   const [provider, setProvider] = useState<string | undefined>(undefined);
-  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState(1);
 
   const query = useQuery({
-    queryKey: ['subscriptions', status, provider, offset],
-    queryFn: () => paymentsClient.subscriptions({ status, provider, limit: PAGE_SIZE, offset }),
+    queryKey: ['subscriptions', status, provider, page],
+    queryFn: () => paymentsClient.subscriptions({ status, provider, size: PAGE_SIZE, page }),
   });
 
   const rows = query.data?.subscriptions ?? [];
   const pastDue = query.data?.counts.past_due ?? 0;
   const refilter = (apply: () => void) => {
     apply();
-    setOffset(0);
+    setPage(1);
   };
 
   return (
@@ -166,12 +166,12 @@ export function Subscriptions({ initialStatus }: { initialStatus?: string | unde
             ))}
           </tbody>
         </table>
-        <ScanNotice page={query.data?.page} noun="subscriptions" />
+        <ScanNotice pagination={query.data?.pagination} noun="subscriptions" />
         <Pager
-          limit={query.data?.page.limit ?? PAGE_SIZE}
-          offset={query.data?.page.offset ?? offset}
-          count={query.data?.page.count ?? 0}
-          onOffset={setOffset}
+          page={query.data?.pagination.page ?? page}
+          size={query.data?.pagination.size ?? PAGE_SIZE}
+          count={query.data?.pagination.count ?? 0}
+          onPage={setPage}
         />
       </QueryState>
     </Panel>

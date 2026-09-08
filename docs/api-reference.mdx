@@ -582,7 +582,7 @@ order oldest first. On a gateway that publishes no deadline they are the only re
 chargeback at all.
 
 `listWebhookEventsForPayment` is a `CAST(payload AS TEXT) LIKE` scan: unindexed, able to over-match,
-and blind to a delivery that never stored the id. It is bounded by `limit`, newest first, and never
+and blind to a delivery that never stored the id. It is bounded by `size`, newest first, and never
 returns the payload. The dashboard reports `events.matchedBy: 'payload-substring'` beside the
 result rather than presenting it as a history.
 
@@ -617,8 +617,10 @@ answers exactly what `revenue` does, because no refund was ever recorded to subt
 [Idempotency](/docs/payments/concepts/idempotency).
 </Callout>
 
-The list reads take `BillingListQuery` — `{ status?, provider?, limit?, offset? }` — and three of
-them extend it:
+The list reads take `BillingListQuery` — `{ status?, provider?, page?, size? }` — and three of
+them extend it. `page` is **1-based** (default `1`) and `size` is the page size: the same pagination
+shape `@adonis-agora/filter` takes, so every Agora library pages the same way. The 0-based SQL
+offset is computed inside the store and never appears in a query type:
 
 ```ts
 interface PaymentListQuery extends BillingListQuery {
@@ -634,7 +636,7 @@ Every one of those is an **exact** match, never a prefix or a substring: they ar
 `order-4` returning `order-42` is a wrong answer to a question about money.
 
 The count reads take `BillingCountQuery` — `{ status?, createdBefore?, createdAfter? }`. Paging is clamped
-(`BILLING_LIST_DEFAULT_LIMIT` 50, `BILLING_LIST_MAX_LIMIT` 200). Every list returns a normalized
+(`BILLING_LIST_DEFAULT_SIZE` 50, `BILLING_LIST_MAX_SIZE` 200). Every list returns a normalized
 plain shape — `CustomerListItem`, `PaymentListItem`, `SubscriptionListItem`, `DisputeListItem`,
 `WebhookEventListItem` — never the implementation's row type, so a reader never depends on Lucid.
 
@@ -646,8 +648,8 @@ interface DisputeDeadlineQuery {
   withinHours: number      // 72 = "everything due in the next three days"
   now?: Date               // overridable clock
   provider?: string
-  limit?: number
-  offset?: number
+  page?: number           // 1-based, like every other list read
+  size?: number
 }
 
 const OPEN_DISPUTE_STATUSES = ['warning', 'open', 'under_review']

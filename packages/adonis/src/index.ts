@@ -32,8 +32,8 @@ export {
   withSubscription,
 } from './billing/index.js';
 export {
-  BILLING_LIST_DEFAULT_LIMIT,
-  BILLING_LIST_MAX_LIMIT,
+  BILLING_LIST_DEFAULT_SIZE,
+  BILLING_LIST_MAX_SIZE,
 } from './billing/list_query.js';
 export type { BillingModels } from './billing/lucid_billing_store.js';
 export { LucidBillingStore, lucidBillingStore } from './billing/lucid_billing_store.js';

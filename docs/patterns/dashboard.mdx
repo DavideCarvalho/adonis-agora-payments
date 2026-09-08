@@ -126,7 +126,7 @@ your dashboard working when someone points `billing.store` somewhere else:
 
 ```ts
 // Which charges failed, and when
-const failed = await store.listPayments({ status: 'failed', limit: 20 })
+const failed = await store.listPayments({ status: 'failed', size: 20 })
 
 // How many charges were created and never confirmed
 const stranded = await store.countPayments({ status: 'pending', createdBefore: twoHoursAgo })
@@ -137,17 +137,17 @@ const breakdown = await store.webhookEventBreakdown({ status: 'failed', createdA
 
 // Chargeback windows closing in the next three days, soonest first — and the unbounded
 // count behind them, because a count read off a capped page saturates at the cap.
-const closing = await store.listDisputesDueWithin({ withinHours: 72, limit: 20 })
+const closing = await store.listDisputesDueWithin({ withinHours: 72, size: 20 })
 const closingTotal = await store.countDisputesDueWithin({ withinHours: 72 })
 
 // Every dispute, newest first — including the ones that carry no deadline and therefore
 // never appear above. `status` takes any DisputeStatus; OPEN_DISPUTE_STATUSES is the
 // unresolved set.
-const disputes = await store.listDisputes({ status: 'warning', limit: 50 })
+const disputes = await store.listDisputes({ status: 'warning', size: 50 })
 
 // Unanswered disputes, OLDEST first, deadline or no deadline. On a gateway that publishes
 // none, this is the only read that can see a chargeback at all.
-const unanswered = await store.listOpenDisputes({ limit: 20 })
+const unanswered = await store.listOpenDisputes({ size: 20 })
 const unansweredTotal = await store.countOpenDisputes({})
 
 // One payment by YOUR id, and the owner behind a page of them in one read.
@@ -155,7 +155,7 @@ const [payment] = await store.listPayments({ externalReference: 'order-1042' })
 const owners = await store.listCustomersByGatewayIds(rows.map((row) => row.customerId))
 
 // Deliveries the endpoint refused — invisible in the ledger, because they never became one.
-const rejected = await store.listAuditEvents({ action: 'webhook.rejected', limit: 20 })
+const rejected = await store.listAuditEvents({ action: 'webhook.rejected', size: 20 })
 ```
 
 The full read API is listed under [Reading the billing tables](/docs/payments/billing#reading-the-billing-tables),

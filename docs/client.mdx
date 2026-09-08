@@ -443,11 +443,11 @@ reference. Then resolve the caller's own customer first and scan **their** payme
 const customer = await this.store.findCustomerByOwner('User', String(user.id), 'asaas')
 if (!customer) return response.status(403).json({ error: 'forbidden' })
 
-const recent = await this.store.listPayments({ limit: 50 })
+const recent = await this.store.listPayments({ size: 50 })
 const payment = recent.find((row) => row.customerId === customer.gatewayId && row.status !== 'pending')
 ```
 
-That is a scan, not an indexed read, and it is behind a polled URL — cap the `limit`, and prefer
+That is a scan, not an indexed read, and it is behind a polled URL — cap the `size`, and prefer
 storing `payment.id` on your order at charge time. It is here because "I never stored the gateway
 id" is a real state, not because it is the good path.
 

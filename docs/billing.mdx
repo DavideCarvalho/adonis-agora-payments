@@ -68,7 +68,7 @@ await store.listCustomersByGatewayIds(['cus_1', 'cus_2']) // a page of owners in
 
 await store.findPaymentByGatewayId(gatewayId)          // one payment, by the GATEWAY's id
 await store.findPaymentByExternalReference('order-1042') // ...or by YOURS
-await store.listPayments({ status: 'failed', limit: 20 })
+await store.listPayments({ status: 'failed', size: 20 })
 await store.listPayments({ externalReference: 'order-1042' }) // exact, never a prefix
 await store.listPayments({ gatewayId: 'pay_1abc' })
 await store.listPayments({ customerId: 'cus_123' })
@@ -76,11 +76,11 @@ await store.countPayments({ status: 'pending', createdBefore: cutoff })
 
 await store.findDisputeByGatewayId('dp_1Nx4')            // one dispute, by the DISPUTE's id
 await store.findOpenDisputeByPayment('pi_3Qx7')         // ...or the open one against a payment
-await store.listDisputes({ status: 'open', limit: 20 })
+await store.listDisputes({ status: 'open', size: 20 })
 await store.countDisputes({ status: 'open' })
 await store.listDisputesDueWithin({ withinHours: 72 })  // the windows closing soonest, first
 await store.countDisputesDueWithin({ withinHours: 72 })
-await store.listOpenDisputes({ limit: 20 })            // unanswered, oldest first — no deadline needed
+await store.listOpenDisputes({ size: 20 })             // unanswered, oldest first — no deadline needed
 await store.countOpenDisputes({})
 
 await store.findWebhookEventByGatewayEventId(eventId)  // one ledger row, with its error
@@ -90,7 +90,7 @@ await store.listWebhookEventsForPayment('pay_1abc')    // a payload SUBSTRING sc
 await store.webhookEventBreakdown({ status: 'failed' }) // grouped by provider + type
 
 await store.recordAuditEvent({ action: 'payment.refunded', actor: 'ana@acme.com' })
-await store.listAuditEvents({ action: 'webhook.rejected', limit: 20 })
+await store.listAuditEvents({ action: 'webhook.rejected', size: 20 })
 await store.countAuditEvents({ action: 'webhook.rejected', createdAfter: cutoff })
 
 await store.revenue({ from, to })                       // cents, GROSS  — subtracts no refund
@@ -129,7 +129,7 @@ nothing links a ledger row to a payment, because the link lives inside the store
 So this read is a `CAST(payload AS TEXT) LIKE` scan, and all three of its costs are real: it is
 **unindexed**, it can **over-match** (a gateway id that happens to be a substring of some other
 identifier in an unrelated delivery), and it **cannot see** a delivery that never stored the id.
-It is bounded by `limit`, newest first. The dashboard's per-payment view reports
+It is bounded by `size`, newest first. The dashboard's per-payment view reports
 `events.matchedBy: 'payload-substring'` on the wire and on screen rather than presenting the result
 as a history.
 
@@ -267,7 +267,7 @@ pulled back.
 
 ```ts
 // Every unanswered dispute — warning, open, under_review — deadline or no deadline.
-for (const dispute of await store.listOpenDisputes({ limit: 20 })) {
+for (const dispute of await store.listOpenDisputes({ size: 20 })) {
   console.log(dispute.gatewayId, dispute.status, dispute.createdAt)
 }
 await store.countOpenDisputes({})              // what the `open_disputes` health check alerts on
@@ -377,7 +377,7 @@ Reading it back:
 ```ts
 await store.findCustomerByOwner('User', String(user.id), 'stripe')
 await store.findCustomerByGatewayId('cus_123')
-await store.listCustomers({ provider: 'stripe', limit: 50 })
+await store.listCustomers({ provider: 'stripe', size: 50 })
 ```
 
 `provider` is part of the owner lookup rather than an optional filter: one user may legitimately have

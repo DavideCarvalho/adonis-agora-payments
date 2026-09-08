@@ -50,13 +50,13 @@ function stubApi(options: { due?: DisputeRow[]; total?: number; log?: DisputeRow
       ? {
           disputes: options.due ?? [],
           dueWithin: { hours: 72, total: options.total ?? (options.due ?? []).length },
-          page: { limit: 50, offset: 0, count: (options.due ?? []).length },
+          pagination: { page: 1, size: 50, count: (options.due ?? []).length },
           statuses: [],
         }
       : url.includes('/disputes')
         ? {
             disputes: options.log ?? [],
-            page: { limit: 50, offset: 0, count: (options.log ?? []).length },
+            pagination: { page: 1, size: 50, count: (options.log ?? []).length },
             statuses: [],
           }
         : { providers: ['stripe', 'asaas'] };
@@ -109,7 +109,7 @@ describe('what the screen leads with', () => {
     const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map((call) =>
       String(call[0]),
     );
-    expect(calls).toContain('/pd/api/disputes?dueWithin=72&limit=50&offset=0');
+    expect(calls).toContain('/pd/api/disputes?dueWithin=72&page=1&size=50');
   });
 
   it('counts the windows with the server’s unbounded total, not the page it fit', async () => {

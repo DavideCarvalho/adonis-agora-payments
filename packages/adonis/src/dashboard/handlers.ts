@@ -10,10 +10,10 @@ import {
   type PaymentListItem,
 } from '../billing/billing_store.js';
 import {
-  BILLING_LIST_DEFAULT_LIMIT,
-  BILLING_LIST_MAX_LIMIT,
-  clampLimit,
-  clampOffset,
+  BILLING_LIST_DEFAULT_SIZE,
+  BILLING_LIST_MAX_SIZE,
+  clampPage,
+  clampSize,
 } from '../billing/list_query.js';
 import type { RefundAction, ReplayAction } from './actions.js';
 import { resolvePeriod } from './period.js';
@@ -94,7 +94,7 @@ export interface DashboardActions {
 export interface ApiRequest {
   /** Route params, e.g. `{ gatewayId: 'pi_123' }`. */
   params: Record<string, string | undefined>;
-  /** Parsed query string, e.g. `{ status: 'failed', limit: '20' }`. */
+  /** Parsed query string, e.g. `{ status: 'failed', page: '2', size: '20' }`. */
   query: Record<string, string | string[] | undefined>;
   /** Parsed JSON body (for the POST actions). */
   body?: unknown;
@@ -210,14 +210,27 @@ function intQuery(value: string | string[] | undefined): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-/** The paging the request asked for, already clamped — echoed back so the client can tell whether
- *  another page might exist (`count === limit` is the only "there might be more" signal; nothing
- *  here counts the full match set). */
-function pageOf(req: ApiRequest): { limit: number; offset: number } {
+/**
+ * The paging the request asked for, already clamped.
+ *
+ * `?page=` is 1-BASED and `?size=` is the page size, mirroring `@adonis-agora/filter`'s
+ * `FilterInput.page`/`.size` so every console in the ecosystem takes the same query string.
+ * The 0-based SQL offset lives in `list_query.ts` and never crosses this boundary.
+ *
+ * Echoed back so the client can tell whether another page might exist (`count === size` is the
+ * only "there might be more" signal; nothing here counts the full match set).
+ */
+function pageOf(req: ApiRequest): Paging {
   return {
-    limit: clampLimit(intQuery(req.query.limit)),
-    offset: clampOffset(intQuery(req.query.offset)),
+    page: clampPage(intQuery(req.query.page)),
+    size: clampSize(intQuery(req.query.size)),
   };
+}
+
+/** One clamped page request: 1-based `page`, `size` rows. */
+interface Paging {
+  page: number;
+  size: number;
 }
 
 /** `Date | null` -> ISO string | null, so every timestamp crosses the wire the same way. */
@@ -240,32 +253,37 @@ interface FilteredPage<T> {
  * run out of rows, or hit {@link PROVIDER_SCAN_CAP}.
  */
 async function pageBy<T extends { provider: string }>(
-  fetch: (limit: number, offset: number) => Promise<T[]>,
-  page: { limit: number; offset: number },
+  fetch: (size: number, page: number) => Promise<T[]>,
+  paging: Paging,
   provider: string | undefined,
 ): Promise<FilteredPage<T>> {
   if (provider === undefined) {
-    const rows = await fetch(page.limit, page.offset);
+    const rows = await fetch(paging.size, paging.page);
     return { rows, scanned: rows.length, truncated: false };
   }
 
-  const wanted = page.offset + page.limit;
+  // The scan walks the table in MAX-SIZE pages of its own — the requested page is a window over
+  // the matches, not over the rows, so the two page numbers are unrelated and the row offset of
+  // the window is computed here rather than asked of the store.
+  const skip = (paging.page - 1) * paging.size;
+  const wanted = skip + paging.size;
   const matched: T[] = [];
   let scanned = 0;
+  let scanPage = 1;
   let exhausted = false;
 
   while (matched.length < wanted && scanned < PROVIDER_SCAN_CAP && !exhausted) {
-    const chunk = Math.min(BILLING_LIST_MAX_LIMIT, PROVIDER_SCAN_CAP - scanned);
-    const rows = await fetch(chunk, scanned);
+    const rows = await fetch(BILLING_LIST_MAX_SIZE, scanPage);
     scanned += rows.length;
-    if (rows.length < chunk) exhausted = true;
+    scanPage += 1;
+    if (rows.length < BILLING_LIST_MAX_SIZE) exhausted = true;
     for (const row of rows) {
       if (row.provider === provider) matched.push(row);
     }
   }
 
   return {
-    rows: matched.slice(page.offset, wanted),
+    rows: matched.slice(skip, wanted),
     scanned,
     // Only a scan that stopped SHORT is truncated. Filling the page or reaching the end of the
     // table are both complete answers.
@@ -273,11 +291,12 @@ async function pageBy<T extends { provider: string }>(
   };
 }
 
-/** The paging envelope every list endpoint echoes back. */
-function pageEnvelope<T>(page: { limit: number; offset: number }, filtered: FilteredPage<T>) {
+/** The paging envelope every list endpoint echoes back, in the same `{ page, size }` terms the
+ *  request used. */
+function pageEnvelope<T>(paging: Paging, filtered: FilteredPage<T>) {
   return {
-    limit: page.limit,
-    offset: page.offset,
+    page: paging.page,
+    size: paging.size,
     count: filtered.rows.length,
     scanned: filtered.scanned,
     truncated: filtered.truncated,
@@ -384,7 +403,7 @@ function disputeJson(row: DisputeListItem) {
 export async function disputes(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
   const status = filterQuery(req.query.status);
   const provider = filterQuery(req.query.provider);
-  const page = pageOf(req);
+  const paging = pageOf(req);
   // `firstQuery`, not `filterQuery`: a bare `?dueWithin` (no value) is a request for the work
   // list at the DEFAULT horizon, not an absent filter. A value that is present and unreadable
   // is a `400` — silently falling back to the default would answer a different question than
@@ -403,8 +422,8 @@ export async function disputes(deps: Deps, req: ApiRequest): Promise<ApiResponse
       withinHours,
       ...(now !== undefined ? { now } : {}),
       ...(provider !== undefined ? { provider } : {}),
-      limit: page.limit,
-      offset: page.offset,
+      page: paging.page,
+      size: paging.size,
     });
     // The full count, not `rows.length`: a page that fills says nothing about how many more
     // windows are closing, and that number is the one an operator plans their day around.
@@ -416,7 +435,7 @@ export async function disputes(deps: Deps, req: ApiRequest): Promise<ApiResponse
     return ok({
       disputes: rows.map(disputeJson),
       dueWithin: { hours: withinHours, total },
-      page: { limit: page.limit, offset: page.offset, count: rows.length },
+      pagination: { page: paging.page, size: paging.size, count: rows.length },
       statuses: DISPUTE_STATUSES,
     });
   }
@@ -424,12 +443,12 @@ export async function disputes(deps: Deps, req: ApiRequest): Promise<ApiResponse
   const rows = await deps.store.listDisputes({
     ...(status !== undefined ? { status } : {}),
     ...(provider !== undefined ? { provider } : {}),
-    limit: page.limit,
-    offset: page.offset,
+    page: paging.page,
+    size: paging.size,
   });
   return ok({
     disputes: rows.map(disputeJson),
-    page: { limit: page.limit, offset: page.offset, count: rows.length },
+    pagination: { page: paging.page, size: paging.size, count: rows.length },
     statuses: DISPUTE_STATUSES,
   });
 }
@@ -533,18 +552,18 @@ export async function payments(deps: Deps, req: ApiRequest): Promise<ApiResponse
   const reference = filterQuery(req.query.reference) ?? filterQuery(req.query.externalReference);
   const gatewayId = filterQuery(req.query.gatewayId);
   const customerId = filterQuery(req.query.customerId);
-  const page = pageOf(req);
+  const paging = pageOf(req);
   const filtered = await pageBy(
-    (limit, offset) =>
+    (size, page) =>
       deps.store.listPayments({
         ...(status !== undefined ? { status } : {}),
         ...(reference !== undefined ? { externalReference: reference } : {}),
         ...(gatewayId !== undefined ? { gatewayId } : {}),
         ...(customerId !== undefined ? { customerId } : {}),
-        limit,
-        offset,
+        size,
+        page,
       }),
-    page,
+    paging,
     provider,
   );
   const owners = await ownersFor(deps.store, filtered.rows);
@@ -552,7 +571,7 @@ export async function payments(deps: Deps, req: ApiRequest): Promise<ApiResponse
     payments: filtered.rows.map((row) =>
       paymentJson(row, (row.customerId && owners.get(row.customerId)) || null, deps.capabilities),
     ),
-    page: pageEnvelope(page, filtered),
+    pagination: pageEnvelope(paging, filtered),
     statuses: PAYMENT_STATUSES,
     currency: deps.currency,
     /** Echoed so the SPA can render "no payment carries reference X" rather than "no payments". */
@@ -592,19 +611,19 @@ export async function paymentDetail(deps: Deps, req: ApiRequest): Promise<ApiRes
   // The LIST read, not `findPaymentByGatewayId`: that one hands back the implementation's row
   // (a Lucid model in one store, a plain object in the other) and this response needs the
   // normalized shape every other endpoint here serializes.
-  const [row] = await deps.store.listPayments({ gatewayId, limit: 1 });
+  const [row] = await deps.store.listPayments({ gatewayId, size: 1 });
   if (row === undefined) {
     return notFound(`No payment "${gatewayId}" is recorded locally.`);
   }
 
   const [owners, disputeRows, eventRows, auditRows] = await Promise.all([
     ownersFor(deps.store, [row]),
-    deps.store.listDisputes({ limit: PAYMENT_TIMELINE_LIMIT }),
-    deps.store.listWebhookEventsForPayment(gatewayId, { limit: PAYMENT_TIMELINE_LIMIT }),
+    deps.store.listDisputes({ size: PAYMENT_TIMELINE_LIMIT }),
+    deps.store.listWebhookEventsForPayment(gatewayId, { size: PAYMENT_TIMELINE_LIMIT }),
     deps.store.listAuditEvents({
       subjectType: 'payment',
       subjectId: gatewayId,
-      limit: PAYMENT_TIMELINE_LIMIT,
+      size: PAYMENT_TIMELINE_LIMIT,
     }),
   ]);
 
@@ -645,11 +664,11 @@ const PAYMENT_TIMELINE_LIMIT = 50;
 export async function subscriptions(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
   const status = filterQuery(req.query.status);
   const provider = filterQuery(req.query.provider);
-  const page = pageOf(req);
+  const paging = pageOf(req);
   const filtered = await pageBy(
-    (limit, offset) =>
-      deps.store.listSubscriptions({ ...(status !== undefined ? { status } : {}), limit, offset }),
-    page,
+    (size, page) =>
+      deps.store.listSubscriptions({ ...(status !== undefined ? { status } : {}), size, page }),
+    paging,
     provider,
   );
   // The one number that makes the filter tabs worth reading: how many are past due IN TOTAL, not
@@ -681,7 +700,7 @@ export async function subscriptions(deps: Deps, req: ApiRequest): Promise<ApiRes
       lastRenewalAttemptAt: iso(row.lastRenewalAttemptAt),
       renewalFailureCount: row.renewalFailureCount,
     })),
-    page: pageEnvelope(page, filtered),
+    pagination: pageEnvelope(paging, filtered),
     statuses: SUBSCRIPTION_STATUSES,
     counts: {
       past_due: pastDue,
@@ -711,21 +730,21 @@ export async function webhookEvents(deps: Deps, req: ApiRequest): Promise<ApiRes
   // it could not answer "did a refund event arrive at all", which is the question the ledger gets
   // read for the moment one specific charge is in doubt.
   const type = filterQuery(req.query.type);
-  const page = pageOf(req);
+  const paging = pageOf(req);
   const filtered = await pageBy(
-    (limit, offset) =>
+    (size, page) =>
       deps.store.listWebhookEvents({
         ...(status !== undefined ? { status } : {}),
         ...(type !== undefined ? { type } : {}),
-        limit,
-        offset,
+        size,
+        page,
       }),
-    page,
+    paging,
     provider,
   );
   return ok({
     events: filtered.rows.map(webhookEventJson),
-    page: pageEnvelope(page, filtered),
+    pagination: pageEnvelope(paging, filtered),
     statuses: WEBHOOK_EVENT_STATUSES,
   });
 }
@@ -805,21 +824,21 @@ export async function customers(deps: Deps, req: ApiRequest): Promise<ApiRespons
   const ownerType = filterQuery(req.query.ownerType);
   const ownerId = filterQuery(req.query.ownerId);
   const gatewayId = filterQuery(req.query.gatewayId);
-  const page = pageOf(req);
+  const paging = pageOf(req);
   const rows = await deps.store.listCustomers({
     ...(provider !== undefined ? { provider } : {}),
     ...(ownerType !== undefined ? { ownerType } : {}),
     ...(ownerId !== undefined ? { ownerId } : {}),
     ...(gatewayId !== undefined ? { gatewayId } : {}),
-    limit: page.limit,
-    offset: page.offset,
+    page: paging.page,
+    size: paging.size,
   });
   return ok({
     customers: rows.map(customerJson),
     // No `scanned`/`truncated`: every filter here is a column the store applies, so there is no
     // bounded scan behind this list and claiming the caveat would be claiming one that does not
     // apply. Same reason the disputes page reports a narrower envelope.
-    page: { limit: page.limit, offset: page.offset, count: rows.length },
+    pagination: { page: paging.page, size: paging.size, count: rows.length },
   });
 }
 
@@ -852,20 +871,20 @@ export async function auditEvents(deps: Deps, req: ApiRequest): Promise<ApiRespo
   const provider = filterQuery(req.query.provider);
   const subjectType = filterQuery(req.query.subjectType);
   const subjectId = filterQuery(req.query.subjectId);
-  const page = pageOf(req);
+  const paging = pageOf(req);
   const rows = await deps.store.listAuditEvents({
     ...(action !== undefined ? { action } : {}),
     ...(actor !== undefined ? { actor } : {}),
     ...(provider !== undefined ? { provider } : {}),
     ...(subjectType !== undefined ? { subjectType } : {}),
     ...(subjectId !== undefined ? { subjectId } : {}),
-    limit: page.limit,
-    offset: page.offset,
+    page: paging.page,
+    size: paging.size,
   });
   return ok({
     audit: rows.map(auditJson),
     // Column filters throughout, so no bounded scan and no `truncated` caveat to claim.
-    page: { limit: page.limit, offset: page.offset, count: rows.length },
+    pagination: { page: paging.page, size: paging.size, count: rows.length },
     actions: AUDIT_ACTION_FILTERS,
   });
 }
@@ -881,8 +900,8 @@ export async function auditEvents(deps: Deps, req: ApiRequest): Promise<ApiRespo
  */
 export async function providers(deps: Deps): Promise<ApiResponse> {
   const [paymentRows, subscriptionRows, breakdown] = await Promise.all([
-    deps.store.listPayments({ limit: PROVIDER_DISCOVERY_SCAN }),
-    deps.store.listSubscriptions({ limit: PROVIDER_DISCOVERY_SCAN }),
+    deps.store.listPayments({ size: PROVIDER_DISCOVERY_SCAN }),
+    deps.store.listSubscriptions({ size: PROVIDER_DISCOVERY_SCAN }),
     deps.store.webhookEventBreakdown({}),
   ]);
   const names = new Set<string>();
@@ -1246,4 +1265,4 @@ function readPaymentRow(row: unknown): {
 }
 
 /** Re-exported so the provider and the SPA agree on the default page size without duplicating it. */
-export { BILLING_LIST_DEFAULT_LIMIT };
+export { BILLING_LIST_DEFAULT_SIZE };

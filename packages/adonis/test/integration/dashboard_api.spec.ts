@@ -231,9 +231,9 @@ describe('payments dashboard API (integration)', () => {
           createdAt: string | null;
           customerId: string | null;
         }>;
-        page: { limit: number; offset: number; count: number };
+        pagination: { page: number; size: number; count: number };
       };
-      expect(body.page.count).toBe(5);
+      expect(body.pagination.count).toBe(5);
       const recent = body.payments.find((p) => p.gatewayId === 'pi_recent');
       expect(recent?.amount).toBe(123456);
       expect(recent?.currency).toBe('BRL');
@@ -250,9 +250,9 @@ describe('payments dashboard API (integration)', () => {
       expect(body.payments.map((p) => p.gatewayId)).toEqual(['pi_failed']);
     });
 
-    it('pages with limit/offset without repeating or skipping a row', async () => {
-      const first = await payments(deps(), req({ limit: '3', offset: '0' }));
-      const second = await payments(deps(), req({ limit: '3', offset: '3' }));
+    it('pages with page/size without repeating or skipping a row', async () => {
+      const first = await payments(deps(), req({ page: '1', size: '3' }));
+      const second = await payments(deps(), req({ page: '2', size: '3' }));
       const ids = (res: { body: unknown }) =>
         (res.body as { payments: Array<{ gatewayId: string }> }).payments.map((p) => p.gatewayId);
       const all = [...ids(first), ...ids(second)];
@@ -277,9 +277,9 @@ describe('payments dashboard API (integration)', () => {
       const res = await webhookEvents(deps(), req());
       const body = res.body as {
         events: Array<{ gatewayEventId: string; createdAt: string | null; error: string | null }>;
-        page: { count: number };
+        pagination: { count: number };
       };
-      expect(body.page.count).toBe(3);
+      expect(body.pagination.count).toBe(3);
       expect(body.events.map((e) => e.gatewayEventId).sort()).toEqual([
         'evt_done',
         'evt_failed',
@@ -368,7 +368,7 @@ describe('payments dashboard API (integration)', () => {
     });
 
     it('reports the full total even when the page holds one row', async () => {
-      const res = await disputes(deps(), req({ dueWithin: '24', limit: '1' }));
+      const res = await disputes(deps(), req({ dueWithin: '24', size: '1' }));
       const body = res.body as {
         disputes: unknown[];
         dueWithin: { total: number };
@@ -448,7 +448,7 @@ describe('payments dashboard API (integration)', () => {
     });
 
     it('keeps paused out of active, and counts past_due over the WHOLE table', async () => {
-      const res = await subscriptions(deps(), req({ status: 'active', limit: '1' }));
+      const res = await subscriptions(deps(), req({ status: 'active', size: '1' }));
       const body = res.body as {
         subscriptions: Array<{ gatewayId: string }>;
         counts: { past_due: number };
@@ -463,14 +463,14 @@ describe('payments dashboard API (integration)', () => {
       const res = await payments(deps(), req({ provider: 'asaas' }));
       const body = res.body as {
         payments: Array<{ gatewayId: string; provider: string }>;
-        page: { truncated: boolean };
+        pagination: { truncated: boolean };
       };
       expect(body.payments.map((p) => p.gatewayId).sort()).toEqual([
         'pi_ancient',
         'pi_unconfirmed',
       ]);
       expect(body.payments.every((p) => p.provider === 'asaas')).toBe(true);
-      expect(body.page.truncated).toBe(false);
+      expect(body.pagination.truncated).toBe(false);
     });
 
     it('narrows real subscription rows to one gateway', async () => {

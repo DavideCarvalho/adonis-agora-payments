@@ -214,11 +214,19 @@ export interface Health {
   openDisputes: DisputeRow[];
 }
 
-/** Echoed paging. `count === limit` is the ONLY "there might be more" signal: the server never
- *  counts the full match set, so there is no total to compare against. */
-export interface Page {
-  limit: number;
-  offset: number;
+/**
+ * Echoed paging. `count === size` is the ONLY "there might be more" signal: the server never
+ * counts the full match set, so there is no total to compare against.
+ *
+ * `{ page, size }` — 1-based page, `size` rows per page — intentionally mirrors
+ * `@adonis-agora/filter`'s pagination shape, which every `@adonis-agora` library now speaks.
+ * Structural match only; this package depends on no filter package.
+ */
+export interface Pagination {
+  /** 1-based page number the server served. */
+  page: number;
+  /** Rows per page the server clamped the request to. */
+  size: number;
   count: number;
   /** How many rows the server read to build this page. Equal to `count` unless a provider filter
    *  made it scan past non-matching rows. */
@@ -230,7 +238,7 @@ export interface Page {
 
 export interface PaymentsPage {
   payments: PaymentRow[];
-  page: Page;
+  pagination: Pagination;
   statuses: readonly string[];
   currency: string;
   /** The lookup filters the server applied, echoed back so an empty page can say "no payment
@@ -265,27 +273,27 @@ export interface PaymentDetail {
 
 export interface AuditPage {
   audit: AuditRow[];
-  page: { limit: number; offset: number; count: number };
+  pagination: { page: number; size: number; count: number };
   /** The actions the filter offers. A UI list, not a whitelist — an app may record its own. */
   actions: readonly string[];
 }
 
 export interface CustomersPage {
   customers: CustomerRow[];
-  /** Narrower than {@link Page}: every filter here is a column the store applies, so there is
-   *  no bounded scan and therefore no `scanned`/`truncated` caveat to report. */
-  page: { limit: number; offset: number; count: number };
+  /** Narrower than {@link Pagination}: every filter here is a column the store applies, so there
+   *  is no bounded scan and therefore no `scanned`/`truncated` caveat to report. */
+  pagination: { page: number; size: number; count: number };
 }
 
 export interface WebhookEventsPage {
   events: WebhookEventRow[];
-  page: Page;
+  pagination: Pagination;
   statuses: readonly string[];
 }
 
 export interface SubscriptionsPage {
   subscriptions: SubscriptionRow[];
-  page: Page;
+  pagination: Pagination;
   statuses: readonly string[];
   /** Whole-table counts, not page counts — `past_due` is the figure that decides the morning. */
   counts: { past_due: number; failing_renewals: number };
@@ -294,7 +302,7 @@ export interface SubscriptionsPage {
 /**
  * A page of disputes.
  *
- * `page` is NARROWER than {@link Page} on purpose: the store filters disputes by provider on a
+ * `pagination` is NARROWER than {@link Pagination} on purpose: the store filters disputes by provider on a
  * column, so there is no bounded scan behind this list and therefore no `scanned`/`truncated` to
  * report. Claiming those here would be claiming a caveat that does not apply.
  *
@@ -304,7 +312,7 @@ export interface SubscriptionsPage {
  */
 export interface DisputesPage {
   disputes: DisputeRow[];
-  page: { limit: number; offset: number; count: number };
+  pagination: { page: number; size: number; count: number };
   statuses: readonly string[];
   dueWithin?: { hours: number; total: number };
 }
@@ -562,8 +570,10 @@ export interface ListOptions {
   status?: string | undefined;
   /** Gateway name (`'stripe'`, `'asaas'`, …). Comes from `providers()`, never from a fixed list. */
   provider?: string | undefined;
-  limit?: number | undefined;
-  offset?: number | undefined;
+  /** 1-based page number, like `@adonis-agora/filter`'s `page`. Default `1` server-side. */
+  page?: number | undefined;
+  /** Rows per page, like `@adonis-agora/filter`'s `size`. Default 50, capped at 200 server-side. */
+  size?: number | undefined;
 }
 
 /** {@link ListOptions} plus the three EXACT lookups only payments have. */
@@ -588,8 +598,8 @@ export interface AuditListOptions {
   provider?: string | undefined;
   subjectType?: string | undefined;
   subjectId?: string | undefined;
-  limit?: number | undefined;
-  offset?: number | undefined;
+  page?: number | undefined;
+  size?: number | undefined;
 }
 
 export interface CustomerListOptions {
@@ -597,8 +607,8 @@ export interface CustomerListOptions {
   ownerType?: string | undefined;
   ownerId?: string | undefined;
   gatewayId?: string | undefined;
-  limit?: number | undefined;
-  offset?: number | undefined;
+  page?: number | undefined;
+  size?: number | undefined;
 }
 
 /** {@link ListOptions} plus the one filter only disputes have: a deadline horizon in HOURS. */
@@ -616,8 +626,8 @@ function listQuery(opts: ListOptions): string {
   return buildQuery({
     status: opts.status,
     provider: opts.provider,
-    limit: opts.limit,
-    offset: opts.offset,
+    page: opts.page,
+    size: opts.size,
   });
 }
 
@@ -639,8 +649,8 @@ export const paymentsClient = {
         reference: opts.reference,
         gatewayId: opts.gatewayId,
         customerId: opts.customerId,
-        limit: opts.limit,
-        offset: opts.offset,
+        page: opts.page,
+        size: opts.size,
       })}`,
     );
   },
@@ -655,8 +665,8 @@ export const paymentsClient = {
         ownerType: opts.ownerType,
         ownerId: opts.ownerId,
         gatewayId: opts.gatewayId,
-        limit: opts.limit,
-        offset: opts.offset,
+        page: opts.page,
+        size: opts.size,
       })}`,
     );
   },
@@ -673,8 +683,8 @@ export const paymentsClient = {
         provider: opts.provider,
         subjectType: opts.subjectType,
         subjectId: opts.subjectId,
-        limit: opts.limit,
-        offset: opts.offset,
+        page: opts.page,
+        size: opts.size,
       })}`,
     );
   },
@@ -687,8 +697,8 @@ export const paymentsClient = {
         status: opts.status,
         provider: opts.provider,
         type: opts.type,
-        limit: opts.limit,
-        offset: opts.offset,
+        page: opts.page,
+        size: opts.size,
       })}`,
     );
   },
@@ -707,8 +717,8 @@ export const paymentsClient = {
         status: workList ? undefined : opts.status,
         provider: opts.provider,
         dueWithin: opts.dueWithin,
-        limit: opts.limit,
-        offset: opts.offset,
+        page: opts.page,
+        size: opts.size,
       })}`,
     );
   },

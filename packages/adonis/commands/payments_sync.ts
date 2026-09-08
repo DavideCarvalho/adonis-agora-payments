@@ -7,7 +7,7 @@ import type { PaymentsDriver } from '../src/driver.js';
 import { PaymentsManager } from '../src/payments_manager.js';
 
 /** Customers pulled per page while iterating `--all`. */
-const PAGE = 100;
+const PAGE_SIZE = 100;
 
 /**
  * A gateway-sent settlement date as a `Date`, or `undefined` when there is nothing usable.
@@ -90,10 +90,10 @@ export async function reconcileSubscriptions(
   let skipped = 0;
   let missing = 0;
 
-  for (let offset = 0; ; offset += PAGE) {
+  for (let pageNumber = 1; ; pageNumber += 1) {
     const page = await store.listSubscriptions({
-      limit: PAGE,
-      offset,
+      size: PAGE_SIZE,
+      page: pageNumber,
       ...(options.provider !== undefined ? { provider: options.provider } : {}),
     });
 
@@ -154,7 +154,7 @@ export async function reconcileSubscriptions(
       updated += 1;
     }
 
-    if (page.length < PAGE) break;
+    if (page.length < PAGE_SIZE) break;
   }
 
   options.log.info(
@@ -340,14 +340,14 @@ export default class PaymentsSync extends BaseCommand {
    */
   async #listCustomers(store: BillingStore, provider?: string): Promise<string[]> {
     const ids: string[] = [];
-    for (let offset = 0; ; offset += PAGE) {
+    for (let pageNumber = 1; ; pageNumber += 1) {
       const page = await store.listCustomers({
-        limit: PAGE,
-        offset,
+        size: PAGE_SIZE,
+        page: pageNumber,
         ...(provider !== undefined ? { provider } : {}),
       });
       for (const row of page) ids.push(row.gatewayId);
-      if (page.length < PAGE) return ids;
+      if (page.length < PAGE_SIZE) return ids;
     }
   }
 }

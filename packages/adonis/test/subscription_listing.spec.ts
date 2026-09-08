@@ -58,8 +58,8 @@ describe('listSubscriptions', () => {
 
   it('pages', async () => {
     for (let i = 0; i < 5; i++) await save(`sub_${i}`, 'active');
-    expect(await store.listSubscriptions({ limit: 2 })).toHaveLength(2);
-    expect(await store.listSubscriptions({ limit: 2, offset: 4 })).toHaveLength(1);
+    expect(await store.listSubscriptions({ size: 2 })).toHaveLength(2);
+    expect(await store.listSubscriptions({ size: 2, page: 3 })).toHaveLength(1);
   });
 
   it('keeps the original creation time across an upsert', async () => {

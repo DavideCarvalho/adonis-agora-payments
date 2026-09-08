@@ -175,11 +175,17 @@ describe('payments', () => {
     const res = await payments(deps(store), req());
     const body = res.body as {
       payments: Array<{ gatewayId: string; amount: number; paidAt: string | null }>;
-      page: { limit: number; offset: number; count: number };
+      pagination: { page: number; size: number; count: number };
     };
     expect(body.payments.map((p) => p.gatewayId)).toEqual(['pi_3', 'pi_2', 'pi_1']);
     expect(body.payments[0]?.amount).toBe(1);
-    expect(body.page).toEqual({ limit: 50, offset: 0, count: 3, scanned: 3, truncated: false });
+    expect(body.pagination).toEqual({
+      page: 1,
+      size: 50,
+      count: 3,
+      scanned: 3,
+      truncated: false,
+    });
   });
 
   it('filters by status', async () => {
@@ -204,32 +210,42 @@ describe('payments', () => {
     expect(typeof row?.createdAt).toBe('string');
   });
 
-  it('pages with limit/offset and echoes the paging back', async () => {
+  it('pages with 1-based page/size and echoes the paging back', async () => {
     const store = await seed();
-    const first = await payments(deps(store), req({ limit: '2', offset: '0' }));
-    const second = await payments(deps(store), req({ limit: '2', offset: '2' }));
-    expect((first.body as { page: { count: number } }).page).toEqual({
-      limit: 2,
-      offset: 0,
+    const first = await payments(deps(store), req({ page: '1', size: '2' }));
+    const second = await payments(deps(store), req({ page: '2', size: '2' }));
+    expect((first.body as { pagination: { count: number } }).pagination).toEqual({
+      page: 1,
+      size: 2,
       count: 2,
       scanned: 2,
       truncated: false,
     });
-    // count < limit is the client's "no more pages" signal.
-    expect((second.body as { page: { count: number } }).page.count).toBe(1);
+    // count < size is the client's "no more pages" signal.
+    expect((second.body as { pagination: { count: number } }).pagination.count).toBe(1);
+    // The second page is the NEXT rows, never a repeat of the first.
+    expect(
+      (second.body as { payments: Array<{ gatewayId: string }> }).payments.map((p) => p.gatewayId),
+    ).toEqual(['pi_1']);
   });
 
-  it('caps an absurd limit instead of selecting the table', async () => {
+  it('caps an absurd size instead of selecting the table', async () => {
     const store = await seed();
-    const res = await payments(deps(store), req({ limit: '100000' }));
-    expect((res.body as { page: { limit: number } }).page.limit).toBe(200);
+    const res = await payments(deps(store), req({ size: '100000' }));
+    expect((res.body as { pagination: { size: number } }).pagination.size).toBe(200);
   });
 
-  it('ignores a garbage limit/offset rather than returning nothing', async () => {
+  it('ignores a garbage page/size rather than returning nothing', async () => {
     const store = await seed();
-    const res = await payments(deps(store), req({ limit: 'lots', offset: '-5' }));
-    const body = res.body as { page: { limit: number; offset: number }; payments: unknown[] };
-    expect(body.page).toEqual({ limit: 50, offset: 0, count: 3, scanned: 3, truncated: false });
+    const res = await payments(deps(store), req({ size: 'lots', page: '-5' }));
+    const body = res.body as { pagination: { page: number; size: number }; payments: unknown[] };
+    expect(body.pagination).toEqual({
+      page: 1,
+      size: 50,
+      count: 3,
+      scanned: 3,
+      truncated: false,
+    });
     expect(body.payments).toHaveLength(3);
   });
 });
@@ -487,7 +503,7 @@ describe('subscriptions', () => {
   it('reports the WHOLE-TABLE past_due count, not the page count', async () => {
     // Paged down to one row, the count still has to say two — it is what decides whether the
     // operator opens the tab at all.
-    const res = await subscriptions(deps(await subsStore()), req({ status: 'active', limit: '1' }));
+    const res = await subscriptions(deps(await subsStore()), req({ status: 'active', size: '1' }));
     expect((res.body as { counts: { past_due: number } }).counts.past_due).toBe(2);
   });
 
@@ -507,10 +523,10 @@ describe('provider filter', () => {
     const res = await payments(deps(store), req({ provider: 'asaas' }));
     const body = res.body as {
       payments: Array<{ gatewayId: string; provider: string }>;
-      page: { count: number; truncated: boolean };
+      pagination: { count: number; truncated: boolean };
     };
     expect(body.payments.map((p) => p.gatewayId)).toEqual(['pi_2']);
-    expect(body.page.truncated).toBe(false);
+    expect(body.pagination.truncated).toBe(false);
   });
 
   it('composes with the status filter instead of replacing it', async () => {
@@ -529,11 +545,8 @@ describe('provider filter', () => {
 
   it('pages over the FILTERED set, not the raw one', async () => {
     const store = await seed();
-    const first = await payments(deps(store), req({ provider: 'stripe', limit: '1', offset: '0' }));
-    const second = await payments(
-      deps(store),
-      req({ provider: 'stripe', limit: '1', offset: '1' }),
-    );
+    const first = await payments(deps(store), req({ provider: 'stripe', size: '1', page: '1' }));
+    const second = await payments(deps(store), req({ provider: 'stripe', size: '1', page: '2' }));
     expect((first.body as { payments: Array<{ gatewayId: string }> }).payments[0]?.gatewayId).toBe(
       'pi_3',
     );
@@ -556,16 +569,19 @@ describe('provider filter', () => {
       });
     }
     const res = await payments(deps(store), req({ provider: 'asaas' }));
-    const body = res.body as { payments: unknown[]; page: { scanned: number; truncated: boolean } };
+    const body = res.body as {
+      payments: unknown[];
+      pagination: { scanned: number; truncated: boolean };
+    };
     expect(body.payments).toHaveLength(0);
-    expect(body.page.scanned).toBe(PROVIDER_SCAN_CAP);
-    expect(body.page.truncated).toBe(true);
+    expect(body.pagination.scanned).toBe(PROVIDER_SCAN_CAP);
+    expect(body.pagination.truncated).toBe(true);
   });
 
   it('never claims truncation for an unfiltered page', async () => {
     const store = await seed();
     const res = await payments(deps(store), req());
-    expect((res.body as { page: { truncated: boolean } }).page.truncated).toBe(false);
+    expect((res.body as { pagination: { truncated: boolean } }).pagination.truncated).toBe(false);
   });
 });
 
@@ -859,7 +875,7 @@ describe('disputes', () => {
     res.body as {
       disputes: Array<{ gatewayId: string; evidenceDueBy: string | null; amount: number | null }>;
       dueWithin?: { hours: number; total: number };
-      page: { limit: number; offset: number; count: number };
+      pagination: { page: number; size: number; count: number };
       statuses: readonly string[];
     };
 
@@ -900,7 +916,7 @@ describe('disputes', () => {
   });
 
   it('reports the full number of closing windows even when the page is smaller', async () => {
-    const res = await disputes(deps(await disputeStore()), req({ dueWithin: '12', limit: '1' }));
+    const res = await disputes(deps(await disputeStore()), req({ dueWithin: '12', size: '1' }));
     const payload = body(res);
     // A page that fills says nothing about how many more windows are closing, and that number
     // is the one an operator plans their day around.

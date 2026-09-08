@@ -177,7 +177,7 @@ describe('listDisputes', () => {
   it('pages', async () => {
     const store = storeWithClock();
     for (const id of ['dp_1', 'dp_2', 'dp_3']) await open(store, id);
-    expect((await store.listDisputes({ limit: 1, offset: 1 })).map((r) => r.gatewayId)).toEqual([
+    expect((await store.listDisputes({ size: 1, page: 2 })).map((r) => r.gatewayId)).toEqual([
       'dp_2',
     ]);
   });
@@ -253,7 +253,7 @@ describe('listDisputesDueWithin', () => {
       ),
     ).toEqual(['dp_b']);
     expect(
-      (await store.listDisputesDueWithin({ withinHours: 24, now: T0, limit: 1, offset: 1 })).map(
+      (await store.listDisputesDueWithin({ withinHours: 24, now: T0, size: 1, page: 2 })).map(
         (r) => r.gatewayId,
       ),
     ).toEqual(['dp_b']);

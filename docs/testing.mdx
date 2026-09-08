@@ -179,7 +179,7 @@ await store.listDisputesDueWithin({ withinHours: 72, now: new Date('2026-08-30T0
 await store.countDisputesDueWithin({ withinHours: 72, now: new Date('2026-08-30T00:00:00Z') })
 
 // The deadline-free reads, for a gateway that publishes none.
-await store.listOpenDisputes({ limit: 20 })
+await store.listOpenDisputes({ size: 20 })
 await store.countOpenDisputes({})
 
 // And the audit trail, including what the endpoint refused.

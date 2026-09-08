@@ -23,7 +23,7 @@ import {
   type WebhookEventListItem,
   type WebhookEventListQuery,
 } from './billing_store.js';
-import { clampLimit, clampOffset } from './list_query.js';
+import { clampSize, listOffset } from './list_query.js';
 import {
   BillingAuditEvent as DefaultAuditEvent,
   BillingCustomer as DefaultCustomer,
@@ -449,8 +449,8 @@ export class LucidBillingStore
     if (query.ownerId !== undefined) builder.where('owner_id', query.ownerId);
     if (query.gatewayId !== undefined) builder.where('gateway_id', query.gatewayId);
     const rows = (await builder
-      .limit(clampLimit(query.limit))
-      .offset(clampOffset(query.offset))) as CustomerInstance[];
+      .limit(clampSize(query.size))
+      .offset(listOffset(query.page, query.size))) as CustomerInstance[];
     return rows.map(customerItem);
   }
 
@@ -579,8 +579,8 @@ export class LucidBillingStore
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.provider !== undefined) builder.where('provider', query.provider);
     const rows = (await builder
-      .limit(clampLimit(query.limit))
-      .offset(clampOffset(query.offset))) as SubscriptionInstance[];
+      .limit(clampSize(query.size))
+      .offset(listOffset(query.page, query.size))) as SubscriptionInstance[];
     return rows.map((row) => ({
       id: String(row.id),
       gatewayId: row.gatewayId,
@@ -756,8 +756,8 @@ export class LucidBillingStore
       builder.where('external_reference', query.externalReference);
     }
     const rows = (await builder
-      .limit(clampLimit(query.limit))
-      .offset(clampOffset(query.offset))) as PaymentInstance[];
+      .limit(clampSize(query.size))
+      .offset(listOffset(query.page, query.size))) as PaymentInstance[];
     return rows.map((row) => ({
       id: String(row.id),
       gatewayId: row.gatewayId,
@@ -870,8 +870,8 @@ export class LucidBillingStore
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.provider !== undefined) builder.where('provider', query.provider);
     const rows = (await builder
-      .limit(clampLimit(query.limit))
-      .offset(clampOffset(query.offset))) as DisputeInstance[];
+      .limit(clampSize(query.size))
+      .offset(listOffset(query.page, query.size))) as DisputeInstance[];
     return rows.map(disputeItem);
   }
 
@@ -901,13 +901,13 @@ export class LucidBillingStore
       .orderBy('evidence_due_by', 'asc');
     if (query.provider !== undefined) builder.where('provider', query.provider);
     const rows = (await builder
-      .limit(clampLimit(query.limit))
-      .offset(clampOffset(query.offset))) as DisputeInstance[];
+      .limit(clampSize(query.size))
+      .offset(listOffset(query.page, query.size))) as DisputeInstance[];
     return rows.map(disputeItem);
   }
 
   async countDisputesDueWithin(
-    query: Omit<DisputeDeadlineQuery, 'limit' | 'offset'>,
+    query: Omit<DisputeDeadlineQuery, 'page' | 'size'>,
   ): Promise<number> {
     await this.#ready();
     if (!(await this.#hasDisputesTable())) return 0;
@@ -933,8 +933,8 @@ export class LucidBillingStore
       .orderBy('created_at', 'asc');
     if (query.provider !== undefined) builder.where('provider', query.provider);
     const rows = (await builder
-      .limit(clampLimit(query.limit))
-      .offset(clampOffset(query.offset))) as DisputeInstance[];
+      .limit(clampSize(query.size))
+      .offset(listOffset(query.page, query.size))) as DisputeInstance[];
     return rows.map(disputeItem);
   }
 
@@ -985,8 +985,8 @@ export class LucidBillingStore
     const builder = this.#auditEventModel.query().orderBy('created_at', 'desc');
     this.#applyAuditFilters(builder, query);
     const rows = (await builder
-      .limit(clampLimit(query.limit))
-      .offset(clampOffset(query.offset))) as AuditEventInstance[];
+      .limit(clampSize(query.size))
+      .offset(listOffset(query.page, query.size))) as AuditEventInstance[];
     return rows.map(auditItem);
   }
 
@@ -1079,14 +1079,14 @@ export class LucidBillingStore
     if (query.provider !== undefined) builder.where('provider', query.provider);
     if (query.type !== undefined) builder.where('type', query.type);
     const rows = (await builder
-      .limit(clampLimit(query.limit))
-      .offset(clampOffset(query.offset))) as WebhookEventInstance[];
+      .limit(clampSize(query.size))
+      .offset(listOffset(query.page, query.size))) as WebhookEventInstance[];
     return rows.map(webhookEventItem);
   }
 
   async listWebhookEventsForPayment(
     paymentGatewayId: string,
-    query: { limit?: number } = {},
+    query: { size?: number } = {},
   ): Promise<WebhookEventListItem[]> {
     await this.#ready();
     // An empty needle would match the whole table — the timeline of "no payment at all".
@@ -1102,7 +1102,7 @@ export class LucidBillingStore
       .query()
       .whereRaw(`CAST(payload AS ${textType}) LIKE ?`, [`%${paymentGatewayId}%`])
       .orderBy('created_at', 'desc')
-      .limit(clampLimit(query.limit))) as WebhookEventInstance[];
+      .limit(clampSize(query.size))) as WebhookEventInstance[];
     return rows.map(webhookEventItem);
   }
 

@@ -124,7 +124,7 @@ describe('base resolution', () => {
 
 describe('buildQuery', () => {
   it('drops absent and empty values so `?status=` never reaches the server', () => {
-    expect(buildQuery({ status: undefined, limit: 20 })).toBe('?limit=20');
+    expect(buildQuery({ status: undefined, size: 20 })).toBe('?size=20');
     expect(buildQuery({ status: '' })).toBe('');
     expect(buildQuery({})).toBe('');
   });
@@ -153,8 +153,8 @@ describe('paymentsClient request shapes', () => {
 
   it('passes the payments status filter and paging through', async () => {
     const { calls } = stubFetch({ json: async () => ({ payments: [] }) });
-    await paymentsClient.payments({ status: 'failed', limit: 25, offset: 50 });
-    expect(calls).toEqual(['/pd/api/payments?status=failed&limit=25&offset=50']);
+    await paymentsClient.payments({ status: 'failed', page: 3, size: 25 });
+    expect(calls).toEqual(['/pd/api/payments?status=failed&page=3&size=25']);
   });
 
   it('hits the hyphenated webhook-events route', async () => {
@@ -177,14 +177,14 @@ describe('paymentsClient request shapes', () => {
 
   it('asks for the dispute LOG when no horizon is given', async () => {
     const { calls } = stubFetch({ json: async () => ({ disputes: [] }) });
-    await paymentsClient.disputes({ status: 'lost', provider: 'stripe', limit: 50, offset: 0 });
-    expect(calls).toEqual(['/pd/api/disputes?status=lost&provider=stripe&limit=50&offset=0']);
+    await paymentsClient.disputes({ status: 'lost', provider: 'stripe', page: 1, size: 50 });
+    expect(calls).toEqual(['/pd/api/disputes?status=lost&provider=stripe&page=1&size=50']);
   });
 
   it('asks for the WORK LIST with an explicit horizon in hours', async () => {
     const { calls } = stubFetch({ json: async () => ({ disputes: [] }) });
-    await paymentsClient.disputes({ dueWithin: 72, limit: 50, offset: 0 });
-    expect(calls).toEqual(['/pd/api/disputes?dueWithin=72&limit=50&offset=0']);
+    await paymentsClient.disputes({ dueWithin: 72, page: 1, size: 50 });
+    expect(calls).toEqual(['/pd/api/disputes?dueWithin=72&page=1&size=50']);
   });
 
   it('drops a status sent alongside a horizon instead of passing one the server ignores', async () => {

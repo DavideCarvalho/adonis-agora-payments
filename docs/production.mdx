@@ -312,7 +312,7 @@ To read the failures themselves — the handler's error message survives nowhere
 ledger:
 
 ```ts
-const failures = await store.listWebhookEvents({ status: 'failed', limit: 20 })
+const failures = await store.listWebhookEvents({ status: 'failed', size: 20 })
 // [{ gatewayEventId, provider, type, error, createdAt }, ...]
 ```
 

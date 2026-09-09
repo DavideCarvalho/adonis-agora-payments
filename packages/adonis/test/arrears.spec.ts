@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { arrears } from '../src/billing/arrears.js';
+import { PaymentsManager } from '../src/payments_manager.js';
 import { InMemoryBillingStore } from '../src/testing/in_memory_billing_store.js';
 
 /**
@@ -34,7 +35,7 @@ describe('arrears', () => {
     const { store } = storeAt();
     // A subscription created minutes ago has generated nothing yet. Reporting it as overdue
     // would dun a customer on their first day.
-    expect(await arrears(store, { externalReference: 'clinic-1' })).toEqual({
+    expect(await arrears({ store, externalReference: 'clinic-1' })).toEqual({
       inArrears: false,
       since: null,
       failedCount: 0,
@@ -54,7 +55,7 @@ describe('arrears', () => {
     at('2026-02-26T00:00:00Z');
     await store.savePayment(charge({ status: 'failed' }));
 
-    const status = await arrears(store, { externalReference: 'clinic-1' });
+    const status = await arrears({ store, externalReference: 'clinic-1' });
     expect(status.inArrears).toBe(true);
     expect(status.failedCount).toBe(3);
     // 05 Feb, not 26 Feb. Dating from the newest attempt resets the clock on exactly the payer
@@ -72,7 +73,7 @@ describe('arrears', () => {
     at('2026-02-14T00:00:00Z');
     await store.savePayment(charge({ paidAt: new Date('2026-02-14T00:00:00Z') }));
 
-    const status = await arrears(store, { externalReference: 'clinic-1' });
+    const status = await arrears({ store, externalReference: 'clinic-1' });
     expect(status.inArrears).toBe(false);
     expect(status.failedCount).toBe(0);
     expect(status.since).toBeNull();
@@ -92,7 +93,7 @@ describe('arrears', () => {
     at('2026-03-05T00:00:00Z');
     await store.savePayment(charge({ status: 'failed' }));
 
-    const status = await arrears(store, { externalReference: 'clinic-1' });
+    const status = await arrears({ store, externalReference: 'clinic-1' });
     expect(status.failedCount).toBe(1);
     expect(status.since?.toISOString()).toBe('2026-03-05T00:00:00.000Z');
   });
@@ -103,10 +104,10 @@ describe('arrears', () => {
     await store.savePayment(charge({ externalReference: 'clinic-1', status: 'failed' }));
     await store.savePayment(charge({ externalReference: 'clinic-12', status: 'failed' }));
 
-    const status = await arrears(store, { externalReference: 'clinic-1' });
+    const status = await arrears({ store, externalReference: 'clinic-1' });
     expect(status.failedCount).toBe(1);
     // `clinic-1` must not swallow `clinic-12`'s failures via a prefix match.
-    expect(await arrears(store, { externalReference: 'clinic-12' })).toMatchObject({
+    expect(await arrears({ store, externalReference: 'clinic-12' })).toMatchObject({
       failedCount: 1,
     });
   });
@@ -120,7 +121,36 @@ describe('arrears', () => {
     at('2026-02-20T00:00:00Z');
     await store.savePayment(charge({ status: 'pending' }));
 
-    const status = await arrears(store, { externalReference: 'clinic-1' });
+    const status = await arrears({ store, externalReference: 'clinic-1' });
     expect(status.inArrears).toBe(false);
+  });
+});
+
+describe('payments.arrears', () => {
+  it('resolves the configured store so callers never handle one', async () => {
+    // The Adonis-facing path: an application asks the manager, not a free function it has
+    // to feed a store into.
+    const store = new InMemoryBillingStore();
+    store.now = () => new Date('2026-02-05T00:00:00Z');
+    await store.savePayment({
+      gatewayId: 'pay_1',
+      provider: 'asaas',
+      status: 'failed',
+      amount: 39_000,
+      currency: 'BRL',
+      externalReference: 'clinic-1',
+    });
+
+    const manager = new PaymentsManager({ drivers: new Map(), store: () => store });
+    const status = await manager.arrears({ externalReference: 'clinic-1' });
+    expect(status.inArrears).toBe(true);
+    expect(status.failedCount).toBe(1);
+  });
+
+  it('says which config knob is missing when billing is off', async () => {
+    const manager = new PaymentsManager({ drivers: new Map() });
+    await expect(manager.arrears({ externalReference: 'clinic-1' })).rejects.toThrow(
+      /billing store/i,
+    );
   });
 });

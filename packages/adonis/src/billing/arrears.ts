@@ -40,27 +40,40 @@ const UP_TO_DATE: Arrears = {
  * Keyed by `externalReference` because that is the id the APP owns: the same value it set on
  * the subscription, echoed by the gateway onto every charge the subscription generates.
  *
+ * In an application, reach for the manager — it resolves the store from config:
+ *
  * ```ts
- * const status = await arrears(store, { externalReference: clinic.id })
+ * const status = await getPayments().arrears({ externalReference: clinic.id })
  * if (status.inArrears && status.since) notifyOverdue(clinic, status.since)
  * ```
+ *
+ * This function is the same read with the store passed explicitly, for tests and for callers
+ * holding a store directly.
  *
  * Reads at most `limit` recent charges (default 50) — a failure run longer than that is a
  * subscription nobody is collecting on, and the answer ("yes, badly") does not change.
  */
-export async function arrears(
-  /*
-   * Structurally typed on the ONE method this reads, not on `BillingStore` whole.
+export interface ArrearsQuery {
+  /** The id the APP owns — the same value it set on the subscription. */
+  externalReference: string;
+  /**
+   * The billing store to read.
    *
-   * `BillingStore`'s row generics default to the Lucid models, so a bare `BillingStore`
-   * parameter rejects `InMemoryBillingStore` — this library's OWN testing store — even
-   * though `listPayments` is byte-identical on both and independent of those generics. The
-   * narrow type also states the honest contract: this helper reads payments and nothing else.
+   * In an Adonis application you do not pass this: `payments.arrears(...)` resolves the
+   * configured store for you. It is here for tests, which inject `InMemoryBillingStore`
+   * rather than stand up a database.
+   *
+   * Structurally typed on the ONE method this reads, not on `BillingStore` whole, because
+   * that type's row generics default to the Lucid models and a bare `BillingStore` rejects
+   * `InMemoryBillingStore` — this library's own testing store.
    */
-  store: Pick<BillingStore, 'listPayments'>,
-  query: { externalReference: string; limit?: number },
-): Promise<Arrears> {
-  const payments = await store.listPayments({
+  store: Pick<BillingStore, 'listPayments'>;
+  /** How many recent charges to read. Default 50. */
+  limit?: number;
+}
+
+export async function arrears(query: ArrearsQuery): Promise<Arrears> {
+  const payments = await query.store.listPayments({
     externalReference: query.externalReference,
     size: query.limit ?? 50,
   });

@@ -17,6 +17,7 @@ import {
   type PaymentListQuery,
   type SubscriptionCycleTotal,
   type SubscriptionListItem,
+  type SubscriptionListQuery,
   type WebhookEventBreakdownLine,
   type WebhookEventListItem,
   type WebhookEventListQuery,
@@ -368,6 +369,7 @@ export class InMemoryBillingStore
     amount?: number | null;
     currency?: string | null;
     cycle?: string | null;
+    externalReference?: string | null;
     payload?: Record<string, unknown>;
   }): Promise<InMemorySubscriptionRow> {
     const existing = this.subscriptions.get(sub.gatewayId);
@@ -385,6 +387,12 @@ export class InMemoryBillingStore
       currency: sub.currency !== undefined ? sub.currency : (existing?.currency ?? null),
       cycle: sub.cycle !== undefined ? sub.cycle : (existing?.cycle ?? null),
       endsAt: sub.endsAt ?? null,
+      // Mesma regra do preço: ausente PRESERVA. Um `subscription.canceled` não repete a
+      // referência externa, e sobrescrever com null perderia o vínculo com a linha do app.
+      externalReference:
+        sub.externalReference !== undefined
+          ? sub.externalReference
+          : (existing?.externalReference ?? null),
       payload: sub.payload ?? {},
       // Preserved across upserts: a subscription's creation time is when it was FIRST
       // recorded, not when its status last changed, or every update would reorder the list.
@@ -406,11 +414,17 @@ export class InMemoryBillingStore
     return [...this.subscriptions.values(), ...this.managedSubscriptions.values()];
   }
 
-  async listSubscriptions(query: BillingListQuery): Promise<SubscriptionListItem[]> {
+  async listSubscriptions(query: SubscriptionListQuery): Promise<SubscriptionListItem[]> {
+    // O MESMO matcher do store Lucid, incluindo a igualdade exata da referência externa: se o
+    // fake divergir do real, o teste que passa aqui mente sobre produção.
     const matching = this.#allSubscriptions().filter(
       (row) =>
         (query.status === undefined || row.status === query.status) &&
-        (query.provider === undefined || row.provider === query.provider),
+        (query.provider === undefined || row.provider === query.provider) &&
+        (query.externalReference === undefined ||
+          (row.externalReference ?? null) === query.externalReference) &&
+        (query.gatewayId === undefined || row.gatewayId === query.gatewayId) &&
+        (query.customerId === undefined || row.customerId === query.customerId),
     );
     return this.#page(matching, query).map((row) => ({
       id: row.id,
@@ -419,6 +433,7 @@ export class InMemoryBillingStore
       status: row.status,
       planId: row.planId,
       customerId: row.customerId ?? null,
+      externalReference: row.externalReference ?? null,
       trialEndsAt: row.trialEndsAt,
       endsAt: row.endsAt,
       createdAt: row.createdAt,

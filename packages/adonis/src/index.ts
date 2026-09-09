@@ -1,3 +1,5 @@
+export type { Arrears } from './billing/arrears.js';
+export { arrears } from './billing/arrears.js';
 export type {
   BillingHealth,
   BillingHealthCheck,
@@ -21,6 +23,7 @@ export type {
   PaymentListItem,
   PaymentListQuery,
   SubscriptionListItem,
+  SubscriptionListQuery,
   WebhookEventBreakdownLine,
   WebhookEventListItem,
   WebhookEventListQuery,

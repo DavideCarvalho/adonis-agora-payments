@@ -298,8 +298,26 @@ export interface WooviDriverConfig {
 export interface PaymentsConfig {
   /** Name of the default payment provider (a key of `providers`). */
   default?: string;
-  /** Named payment providers, built with the {@link payments} factory. */
-  providers?: Record<string, PaymentsDriverFactory>;
+  /**
+   * Named payment providers, built with the {@link payments} factory.
+   *
+   * A slot may be `undefined`, and it is then SKIPPED rather than resolved — the way to say
+   * "this installation does not charge". That is a legitimate state: an app ships before it
+   * has a gateway, and its test suite and every developer machine run without credentials.
+   * Because drivers validate their credentials in the constructor and every declared provider
+   * is built during boot, a bare `payments.asaas({ apiKey: env.get('ASAAS_API_KEY') })` with
+   * no key does not disable payments — it stops the process from starting.
+   *
+   * ```ts
+   * providers: {
+   *   asaas: payments.when(Boolean(apiKey), () => payments.asaas({ apiKey })),
+   * }
+   * ```
+   *
+   * Asking an empty manager for a driver is still an error, raised by `driver()` at the point
+   * of use, where it names the thing the caller actually wanted.
+   */
+  providers?: Record<string, PaymentsDriverFactory | undefined>;
   /**
    * Route a payment method to a provider name (a key of `providers`). Resolves the
    * driver per method on a charge call.
@@ -465,6 +483,30 @@ export function defineConfig<const T extends PaymentsConfig>(config: T): T {
 
 /** Built-in driver factories. Each lazily imports its gateway SDK. */
 export const payments = {
+  /**
+   * Declare a provider only when it is actually configured.
+   *
+   * `payments.asaas(...)` returns a factory that the boot resolves, and the driver checks its
+   * credentials in the constructor — so a missing key is a failed boot, not a disabled
+   * gateway. Wrapping the factory defers building it, and returning `undefined` leaves the
+   * slot out of the map entirely.
+   *
+   * ```ts
+   * providers: {
+   *   asaas: payments.when(Boolean(apiKey), () => payments.asaas({ apiKey })),
+   * }
+   * ```
+   *
+   * Note the shape: `build` is a THUNK. Passing `payments.asaas({ apiKey })` directly would
+   * evaluate it before `when` could decide, which is the call this helper exists to avoid.
+   *
+   * This is for an ABSENT resource, not a weakened check. `ASAAS_WEBHOOK_TOKEN` refusing to
+   * boot is right and should stay: an empty API key means "cannot charge", while an empty
+   * webhook token means a public route accepting any POST that marks invoices as paid.
+   */
+  when(condition: boolean, build: () => PaymentsDriverFactory): PaymentsDriverFactory | undefined {
+    return condition ? build() : undefined;
+  },
   stripe(config: StripeDriverConfig): PaymentsDriverFactory {
     return async (ctx) => {
       const { StripeDriver } = await import('./drivers/stripe.js');

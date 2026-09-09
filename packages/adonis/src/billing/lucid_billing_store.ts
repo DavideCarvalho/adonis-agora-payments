@@ -19,6 +19,7 @@ import {
   type PaymentListQuery,
   type SubscriptionCycleTotal,
   type SubscriptionListItem,
+  type SubscriptionListQuery,
   type WebhookEventBreakdownLine,
   type WebhookEventListItem,
   type WebhookEventListQuery,
@@ -573,11 +574,17 @@ export class LucidBillingStore
       .limit(limit)) as SubscriptionInstance[];
   }
 
-  async listSubscriptions(query: BillingListQuery): Promise<SubscriptionListItem[]> {
+  async listSubscriptions(query: SubscriptionListQuery): Promise<SubscriptionListItem[]> {
     await this.#ready();
     const builder = this.#subscriptionModel.query().orderBy('created_at', 'desc');
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.provider !== undefined) builder.where('provider', query.provider);
+    // Igualdade exata, como em `listPayments`: um LIKE deixaria `clinic-4` casar `clinic-42`.
+    if (query.externalReference !== undefined) {
+      builder.where('external_reference', query.externalReference);
+    }
+    if (query.gatewayId !== undefined) builder.where('gateway_id', query.gatewayId);
+    if (query.customerId !== undefined) builder.where('customer_id', query.customerId);
     const rows = (await builder
       .limit(clampSize(query.size))
       .offset(listOffset(query.page, query.size))) as SubscriptionInstance[];
@@ -588,6 +595,7 @@ export class LucidBillingStore
       status: row.status,
       planId: row.planId,
       customerId: row.customerId ?? null,
+      externalReference: row.externalReference ?? null,
       trialEndsAt: toDate(row.trialEndsAt),
       endsAt: toDate(row.endsAt),
       createdAt: toDate(row.createdAt),

@@ -112,6 +112,8 @@ export interface SubscriptionListItem {
   status: string;
   planId: string;
   customerId: string | null;
+  /** The app's own id for this subscription, as {@link BillingStore.saveSubscription} stored it. */
+  externalReference: string | null;
   trialEndsAt: Date | null;
   endsAt: Date | null;
   createdAt: Date | null;
@@ -281,6 +283,28 @@ export interface PaymentListQuery extends BillingListQuery {
   /** The gateway's own payment id (`pi_...`, `pay_...`) — what the gateway's dashboard shows. */
   gatewayId?: string;
   /** The gateway's customer id — every payment recorded for one customer. */
+  customerId?: string;
+}
+
+/**
+ * Filter + page for {@link BillingStore.listSubscriptions}.
+ *
+ * Symmetric with {@link PaymentListQuery}: a subscription carries the same
+ * `externalReference` the app set when creating it, and the same exact-match rule applies —
+ * a substring match would let `clinic-4` return `clinic-42`.
+ */
+export interface SubscriptionListQuery extends BillingListQuery {
+  /**
+   * The app's own id for the subscription (`CreateSubscriptionInput.externalReference`).
+   *
+   * Answers "which subscription belongs to this customer of mine?" without the app keeping a
+   * second id column — which, before this existed, was the only way, because
+   * `findSubscriptionByGatewayId` needs an id the app can only have if it already stored one.
+   */
+  externalReference?: string;
+  /** The gateway's own subscription id — what the gateway's dashboard shows. */
+  gatewayId?: string;
+  /** The gateway's customer id — every subscription recorded for one customer. */
   customerId?: string;
 }
 
@@ -517,6 +541,17 @@ export interface BillingStore<
     customerId: string;
     status: string;
     planId: string;
+    /**
+     * The app's own id for this subscription (`CreateSubscriptionInput.externalReference`).
+     *
+     * The column, the mixin field and the Lucid store's write have existed since
+     * subscriptions did — only this contract never named it, so no caller could pass it and
+     * `listSubscriptions` never gave it back. An app that set `externalReference` on the
+     * subscription (the field's whole documented purpose: "the stable id webhook handlers use
+     * to route a subscription payment back to your local record") had to keep its own
+     * subscription-id column to answer "which subscription is this customer's?".
+     */
+    externalReference?: string | null;
     trialEndsAt?: Date | null;
     endsAt?: Date | null;
     /**
@@ -569,7 +604,7 @@ export interface BillingStore<
    * something is wrong: the operational ones are WHICH subscriptions are `past_due`, and
    * which are `paused` — a count cannot name a customer to email.
    */
-  listSubscriptions(query: BillingListQuery): Promise<SubscriptionListItem[]>;
+  listSubscriptions(query: SubscriptionListQuery): Promise<SubscriptionListItem[]>;
 
   /** How many subscriptions match a status and/or a creation window. */
   countSubscriptions(query: BillingCountQuery): Promise<number>;

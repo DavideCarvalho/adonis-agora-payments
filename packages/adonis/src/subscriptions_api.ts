@@ -70,6 +70,43 @@ export class SubscriptionsApi {
     if (mode === 'gateway') {
       this.#deps.assertGatewayCan(driver, 'create');
       const subscription = await driver.createSubscription(input);
+
+      /**
+       * Grava a linha local JÁ na criação, em vez de esperar o `subscription.created` do
+       * gateway.
+       *
+       * Duas coisas dependem disso. A primeira é o `externalReference`: ele é conhecido AQUI
+       * (o chamador acabou de passá-lo) e a maior parte dos gateways não o devolve no webhook
+       * de assinatura, então este é o único ponto do fluxo em que a lib tem o vínculo entre a
+       * assinatura e a linha do app. Sem gravá-lo, `listSubscriptions({ externalReference })`
+       * nunca acharia nada em modo gateway e o app é obrigado a manter a própria coluna de id.
+       *
+       * A segunda é a janela: até o webhook chegar — segundos no melhor caso, nunca se o
+       * endpoint estiver mal configurado — `billing_subscriptions` não tinha linha nenhuma
+       * para uma assinatura que já existe e já vai cobrar.
+       *
+       * Best-effort de propósito: a assinatura FOI criada no gateway, e falhar aqui não pode
+       * fazer o chamador acreditar que não foi. O `subscription.created` chega depois e faz
+       * upsert pelo `gatewayId` — que é o mesmo caminho que já mantinha esta tabela.
+       */
+      try {
+        await this.#deps.store().saveSubscription({
+          gatewayId: subscription.gatewayId,
+          provider: driver.provider,
+          customerId: input.customerId,
+          status: subscription.status,
+          planId: input.planId,
+          ...(input.externalReference !== undefined
+            ? { externalReference: input.externalReference }
+            : {}),
+          ...(input.amount !== undefined ? { amount: input.amount } : {}),
+          ...(currency !== undefined ? { currency } : {}),
+          ...(input.cycle !== undefined ? { cycle: input.cycle } : {}),
+        });
+      } catch {
+        // Sem store configurado (billing desligado) ou escrita falhou: o webhook reconcilia.
+      }
+
       return {
         id: subscription.gatewayId,
         mode,

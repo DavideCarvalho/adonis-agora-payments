@@ -386,6 +386,10 @@ export async function resolveDrivers(
   };
   const map = new Map<string, PaymentsDriver>();
   for (const [name, factory] of Object.entries(factories)) {
+    // An absent slot is a provider the app deliberately left out (see `payments.when`), not a
+    // misconfiguration to report. Building it here is what turns a missing credential into a
+    // process that will not start, so the skip has to happen BEFORE the factory runs.
+    if (factory === undefined) continue;
     map.set(name, await factory(ctx));
   }
   return map;

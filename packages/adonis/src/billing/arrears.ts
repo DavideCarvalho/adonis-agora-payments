@@ -49,7 +49,15 @@ const UP_TO_DATE: Arrears = {
  * subscription nobody is collecting on, and the answer ("yes, badly") does not change.
  */
 export async function arrears(
-  store: BillingStore,
+  /*
+   * Structurally typed on the ONE method this reads, not on `BillingStore` whole.
+   *
+   * `BillingStore`'s row generics default to the Lucid models, so a bare `BillingStore`
+   * parameter rejects `InMemoryBillingStore` — this library's OWN testing store — even
+   * though `listPayments` is byte-identical on both and independent of those generics. The
+   * narrow type also states the honest contract: this helper reads payments and nothing else.
+   */
+  store: Pick<BillingStore, 'listPayments'>,
   query: { externalReference: string; limit?: number },
 ): Promise<Arrears> {
   const payments = await store.listPayments({

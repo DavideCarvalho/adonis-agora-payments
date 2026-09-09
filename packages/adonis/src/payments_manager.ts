@@ -1,3 +1,4 @@
+import { type Arrears, type ArrearsQuery, arrears } from './billing/arrears.js';
 import type { BillingStore } from './billing/billing_store.js';
 import type { PaymentsConfig } from './define_config.js';
 import type { PaymentsDriver } from './driver.js';
@@ -89,6 +90,29 @@ export class PaymentsManager {
       });
     }
     return this.#subscriptionsApi;
+  }
+
+  /**
+   * Is this payer behind on their bills, and since when?
+   *
+   * The manager resolves the configured billing store, so application code never handles it:
+   *
+   * ```ts
+   * const status = await payments.arrears({ externalReference: clinic.id })
+   * ```
+   *
+   * See {@link arrears} for what the answer means — in particular why the arrears are dated
+   * from the START of the current failure run and not from the newest retry.
+   */
+  async arrears(query: Omit<ArrearsQuery, 'store'>): Promise<Arrears> {
+    const store = this.#store?.();
+    if (store === undefined) {
+      throw new Error(
+        '[payments] Reading arrears needs the billing store, and none is configured. ' +
+          'Enable `billing` in config/payments.ts.',
+      );
+    }
+    return arrears({ ...query, store });
   }
 
   /**

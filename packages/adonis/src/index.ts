@@ -1,4 +1,4 @@
-export type { Arrears } from './billing/arrears.js';
+export type { Arrears, ArrearsQuery } from './billing/arrears.js';
 export { arrears } from './billing/arrears.js';
 export type {
   BillingHealth,

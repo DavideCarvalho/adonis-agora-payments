@@ -1,3 +1,5 @@
+import './container_bindings.js';
+
 export type { Arrears, ArrearsQuery } from './billing/arrears.js';
 export { arrears } from './billing/arrears.js';
 export type {

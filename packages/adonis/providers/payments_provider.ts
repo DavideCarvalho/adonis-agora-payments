@@ -197,14 +197,22 @@ export default class PaymentsProvider {
    * The billing store from `config.billing.store`, defaulting to Lucid over the
    * published tables.
    *
-   * The resolved store is published on `services/main` (which reaches any store) and,
-   * when it is the Lucid one, bound in the container so a service can `@inject()` it
-   * like any other dependency.
+   * Bound in the container under `'payments.billingStore'`, whatever the implementation.
+   *
+   * `BillingStore` is an INTERFACE, so there is no class to use as a DI token — which is
+   * why a custom store used to be reachable only through the module-level accessor on
+   * `services/main`. A string binding is how AdonisJS itself solves this (`'lucid.db'`
+   * aliases the `Database` singleton), and it buys the two things the accessor could not:
+   * `@inject()` on the token, and `container.swap()` in tests instead of a bespoke setter.
+   *
+   * The Lucid class binding stays alongside it, so `@inject() constructor(store:
+   * LucidBillingStore)` keeps working for the default case.
    */
   async #resolveBillingStore(config: PaymentsConfig): Promise<BillingStore> {
     const store = await resolveBillingStore(config);
 
     setBillingStore(store);
+    this.app.container.singleton('payments.billingStore', () => store);
     if (isInjectableAsLucid(store)) {
       this.app.container.singleton(LucidBillingStore, () => store);
     }

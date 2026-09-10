@@ -163,6 +163,23 @@ describe('PaymentsProvider boot — webhook verification', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('binds the billing store on a container token, whatever the implementation', async () => {
+    /*
+     * `BillingStore` is an interface, so a custom store has no class to hand `@inject()`.
+     * Before this binding the only way to reach one was the module-level accessor on
+     * `services/main`, which meant no DI and no `container.swap()` — tests had to reach for
+     * a package-specific setter. The token is how AdonisJS itself handles the same case
+     * (`'lucid.db'`).
+     */
+    const custom = new InMemoryBillingStore();
+    const app = fakeApp({ ...base, billing: { store: () => custom } });
+    const provider = new PaymentsProvider(app);
+    provider.register();
+    await provider.boot();
+
+    expect(await app.container.make('payments.billingStore')).toBe(custom);
+  });
+
   it('still builds a working manager when everything is configured', async () => {
     const app = fakeApp(base);
     const provider = new PaymentsProvider(app);

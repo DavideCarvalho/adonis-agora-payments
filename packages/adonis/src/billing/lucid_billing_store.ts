@@ -466,19 +466,18 @@ export class LucidBillingStore
     return rows.map(customerItem);
   }
 
-  async saveSubscription(sub: {
-    gatewayId: string;
-    provider: string;
-    customerId: string;
-    status: string;
-    planId: string;
-    trialEndsAt?: Date | null;
-    endsAt?: Date | null;
-    amount?: number | null;
-    currency?: string | null;
-    cycle?: string | null;
-    payload?: Record<string, unknown>;
-  }): Promise<SubscriptionInstance> {
+  /*
+   * Parameter taken FROM THE CONTRACT instead of restated.
+   *
+   * It used to be an inline copy, and it drifted: `externalReference` was added to
+   * `BillingStore.saveSubscription` and never here, so the field was silently unassignable
+   * and every subscription persisted without the id its app routes on. TypeScript could not
+   * complain — a narrower parameter is allowed — so the two definitions disagreed in
+   * production while both compiled.
+   */
+  async saveSubscription(
+    sub: Parameters<BillingStore['saveSubscription']>[0],
+  ): Promise<SubscriptionInstance> {
     await this.#ready();
     const existing = await this.findSubscriptionByGatewayId(sub.gatewayId);
     const row = (existing ?? new this.#subscriptionModel()) as SubscriptionInstance;

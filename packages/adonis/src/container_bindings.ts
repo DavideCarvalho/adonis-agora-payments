@@ -1,4 +1,5 @@
 import type { BillingStore } from './billing/billing_store.js';
+import type { PaymentsManager } from './payments_manager.js';
 
 /**
  * Container bindings this package publishes.
@@ -33,5 +34,6 @@ import type { BillingStore } from './billing/billing_store.js';
 declare module '@adonisjs/core/types' {
   interface ContainerBindings {
     'payments.billingStore': BillingStore;
+    'payments.manager': PaymentsManager;
   }
 }

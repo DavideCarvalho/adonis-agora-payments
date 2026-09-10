@@ -1,7 +1,7 @@
 {
   "name": "@adonis-agora/payments",
   "version": "0.15.1",
-  "description": "Billing library for AdonisJS — 18 payment gateways behind one driver contract, with a Cashier-style subscription billing layer: Billable mixin, Lucid stores, idempotent webhook processing and an optional Durable-backed dispatcher. Part of the Agora ecosystem.",
+  "description": "Billing library for AdonisJS \u2014 18 payment gateways behind one driver contract, with a Cashier-style subscription billing layer: Billable mixin, Lucid stores, idempotent webhook processing and an optional Durable-backed dispatcher. Part of the Agora ecosystem.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -92,6 +92,16 @@
       "types": "./dist/src/webhook_security.d.ts",
       "import": "./dist/src/webhook_security.js",
       "default": "./dist/src/webhook_security.js"
+    },
+    "./services/payments": {
+      "types": "./dist/services/payments.d.ts",
+      "import": "./dist/services/payments.js",
+      "default": "./dist/services/payments.js"
+    },
+    "./services/billing_store": {
+      "types": "./dist/services/billing_store.d.ts",
+      "import": "./dist/services/billing_store.js",
+      "default": "./dist/services/billing_store.js"
     }
   },
   "files": [

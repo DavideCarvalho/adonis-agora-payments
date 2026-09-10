@@ -57,6 +57,15 @@ export default class PaymentsProvider {
   register() {
     const config = this.app.config.get<PaymentsConfig>('payments', {});
 
+    /*
+     * String alias for the manager, so `services/payments` can resolve it the way every
+     * first-party AdonisJS service module does (`'lucid.db'`, `'drive.manager'`,
+     * `'mail.manager'`). Without it the container binding is decorative: application code
+     * reaches the manager through a module-level getter, and nothing can be substituted
+     * through the container.
+     */
+    this.app.container.alias('payments.manager', PaymentsManager);
+
     this.app.container.singleton(PaymentsManager, async () => {
       // Build invoice providers first so drivers can resolve them from their ctx (a
       // charge with `invoice: true|'name'` emits through the invoice provider).

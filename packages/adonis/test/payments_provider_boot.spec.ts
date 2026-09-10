@@ -29,11 +29,27 @@ function fakeApp(config: PaymentsConfig): ApplicationService {
     // not there, which the discovery treats as "the convention is opt-in".
     makePath: (...parts: string[]) => `/nonexistent/${parts.join('/')}`,
     container: {
+      // Memoized, like the real container: `singleton` means ONE instance, and a fake that
+      // rebuilds on every `make()` quietly hides identity bugs (an alias resolving to a
+      // second manager reads as equal by value and is anything but).
       singleton: (token: unknown, factory: () => unknown) => {
-        bindings.set(token, factory);
+        let built: { value: unknown } | undefined;
+        bindings.set(token, async () => {
+          if (!built) built = { value: await factory() };
+          return built.value;
+        });
       },
       bindValue: (token: unknown, value: unknown) => {
         bindings.set(token, () => value);
+      },
+      // Aliases resolve to whatever the target resolves to, at RESOLUTION time — the target
+      // is usually bound after the alias is declared.
+      alias: (alias: unknown, target: unknown) => {
+        bindings.set(alias, () => {
+          const factory = bindings.get(target);
+          if (!factory) throw new Error(`nothing bound for alias target ${String(target)}`);
+          return factory();
+        });
       },
       make: async (token: unknown) => {
         if (token === 'router') return { post: () => ({ as: () => {} }) };
@@ -178,6 +194,23 @@ describe('PaymentsProvider boot — webhook verification', () => {
     await provider.boot();
 
     expect(await app.container.make('payments.billingStore')).toBe(custom);
+  });
+
+  it('resolves the manager through the string alias too', async () => {
+    /*
+     * `services/payments` resolves `'payments.manager'`, the way `@adonisjs/lucid`'s
+     * `services/db` resolves `Database`. Without the alias that module cannot exist, and
+     * application code is stuck calling `getPayments()` — a getter fed by a push, which is
+     * not how an Adonis app reads a service.
+     */
+    const app = fakeApp(base);
+    const provider = new PaymentsProvider(app);
+    provider.register();
+    await provider.boot();
+
+    expect(await app.container.make('payments.manager')).toBe(
+      await app.container.make(PaymentsManager),
+    );
   });
 
   it('still builds a working manager when everything is configured', async () => {

@@ -495,6 +495,19 @@ export class LucidBillingStore
     if (sub.amount !== undefined) row.amount = sub.amount;
     if (sub.currency !== undefined) row.currency = sub.currency;
     if (sub.cycle !== undefined) row.cycle = sub.cycle;
+    /*
+     * Same absent-vs-null rule as `amount` above, and it matters more here: this is the id
+     * the APP routes on. A `subscription.canceled` event carries no external reference, and
+     * writing `null` through would erase the only key `listSubscriptions({ externalReference })`
+     * can find the row by — at the exact moment an operator is looking for it.
+     *
+     * This line was MISSING while the contract, the list filter and the in-memory store all
+     * had it: `saveSubscription` accepted an `externalReference` and dropped it on the floor,
+     * so a gateway-mode subscription persisted with a null reference and became unfindable by
+     * the app that created it. The type-level work looked complete; only a test against the
+     * real store showed the write was not there.
+     */
+    if (sub.externalReference !== undefined) row.externalReference = sub.externalReference;
     row.payload = sub.payload ?? {};
     await row.save();
     return row;

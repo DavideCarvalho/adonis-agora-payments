@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 0.16.2
+
+### Patch Changes
+
+- [`2288c35`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/2288c35821ca4c56236155ca2b8c74cd9e4749b0) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Attach the `billingOverview` doc comment to the function it describes, and correct which of its metrics the `from`/`to` window actually scopes — `active_subscriptions` and `mrr` are point-in-time.
+
 ## 0.16.1
 
 ### Patch Changes

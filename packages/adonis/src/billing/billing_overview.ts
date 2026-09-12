@@ -13,13 +13,6 @@ export interface BillingOverview {
   metrics: BillingOverviewMetric[];
 }
 
-/**
- * Compute a billing overview from the store — the data foundation a billing dashboard
- * (Agora dashboard pattern) renders. Aggregates KPIs over a `from`/`to` window: revenue —
- * BOTH gross (`revenue`, the sum of paid payments) and net of refunds (`net_revenue`,
- * `amount - refunded_amount` over the same rows) — active subscriptions, and usage per meter.
- * Pure store queries (no gateway calls), so it works headless and is trivially testable.
- */
 /** Quantos meses cada ciclo cobre. O que não estiver aqui é ignorado, não chutado. */
 const MONTHS_PER_CYCLE: Record<string, number> = {
   WEEKLY: 7 / 30.44,
@@ -59,6 +52,15 @@ export function monthlyRecurringRevenue(lines: SubscriptionCycleTotal[]): number
   return Math.round(monthly);
 }
 
+/**
+ * Compute a billing overview from the store — the data foundation a billing dashboard
+ * (Agora dashboard pattern) renders. Scoped to the `from`/`to` window: revenue — BOTH gross
+ * (`revenue`, the sum of paid payments) and net of refunds (`net_revenue`,
+ * `amount - refunded_amount` over the same rows) — and usage per meter. Point-in-time, and
+ * so unaffected by the window: `active_subscriptions`, and `mrr`, the monthly recurring
+ * revenue implied by the cycle totals of the subscriptions active right now.
+ * Pure store queries (no gateway calls), so it works headless and is trivially testable.
+ */
 export async function billingOverview(
   store: BillingStore,
   options: { from: Date; to: Date },

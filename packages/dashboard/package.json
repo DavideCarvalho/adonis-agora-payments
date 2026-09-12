@@ -8,6 +8,21 @@
     "url": "git+https://github.com/DavideCarvalho/adonis-agora-payments.git",
     "directory": "packages/dashboard"
   },
+  "homepage": "https://davidecarvalho.github.io/agora/docs/payments",
+  "bugs": {
+    "url": "https://github.com/DavideCarvalho/adonis-agora-payments/issues"
+  },
+  "keywords": [
+    "adonisjs",
+    "adonis",
+    "payments",
+    "billing",
+    "subscriptions",
+    "dashboard",
+    "admin",
+    "console",
+    "agora"
+  ],
   "author": "Davi Carvalho <davi@goflip.ai>",
   "type": "module",
   "sideEffects": false,
@@ -48,16 +63,5 @@
   },
   "engines": {
     "node": ">=20.6.0"
-  },
-  "keywords": [
-    "adonisjs",
-    "adonis",
-    "payments",
-    "billing",
-    "subscriptions",
-    "dashboard",
-    "admin",
-    "console",
-    "agora"
-  ]
+  }
 }

@@ -179,7 +179,7 @@
   },
   "devDependencies": {
     "@adonis-agora/payments-dashboard": "workspace:*",
-    "@adonisjs/assembler": "8.5.1",
+    "@adonisjs/assembler": "8.5.2",
     "@adonisjs/core": "7.5.0",
     "@adonisjs/lucid": "22.4.2",
     "@mdx-js/mdx": "3.1.1",

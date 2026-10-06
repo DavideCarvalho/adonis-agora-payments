@@ -178,7 +178,8 @@ describe('AsaasInvoiceProvider.emit', () => {
     // `serviceCode` field.
     expect(body.municipalServiceCode).toBe('17.01');
     expect(body).not.toHaveProperty('serviceCode');
-    expect(body).not.toHaveProperty('municipalServiceName');
+    // Required in the schema; Asaas' own fallback is the code, made explicit.
+    expect(body.municipalServiceName).toBe('17.01');
     expect(body.taxes).toEqual({
       retainIss: false,
       iss: 2,
@@ -259,6 +260,18 @@ describe('AsaasInvoiceProvider idempotency (externalReference)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(invoice.gatewayId).toBe('inv_000000000232');
     expect(invoice.status).toBe('issued');
+  });
+
+  it('emits again when the invoice under the reference failed (ERROR)', async () => {
+    const fetchMock = stubFetch(
+      { status: 200, body: { data: [{ ...SCHEDULED, status: 'ERROR' }] } },
+      { status: 200, body: { ...SCHEDULED, id: 'inv_retry' } },
+    );
+
+    const invoice = await provider().emit({ ...BASE, externalReference: 'fee-invoice-42' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(invoice.gatewayId).toBe('inv_retry');
   });
 
   it('emits again when the only invoice under the reference was cancelled', async () => {

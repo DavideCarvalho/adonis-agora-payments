@@ -87,7 +87,7 @@ export interface InvoiceEmitInput {
   /**
    * Your own id for this invoice. Providers that support it store it, and the Asaas driver
    * also uses it for idempotency: an emit with a reference that already has a live
-   * (non-cancelled) invoice returns that invoice instead of creating a second one.
+   * (not cancelled, not failed) invoice returns that invoice instead of creating a second one.
    */
   externalReference?: string;
   /** The gateway payment this invoice is attached to, when available. */

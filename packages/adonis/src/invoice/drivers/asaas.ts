@@ -115,7 +115,7 @@ export class AsaasInvoiceProvider implements InvoiceProvider {
     // Idempotency. Asaas has no idempotency key on `POST /invoices`, but it stores and
     // filters by `externalReference`; a retry of an emit that reached Asaas (timeout,
     // crash after the response) would otherwise schedule a SECOND legal document. A
-    // cancelled note does not count — re-emitting after a cancellation is the point.
+    // cancelled or failed (`ERROR`) note does not count — re-emitting after one is the point.
     if (input.externalReference !== undefined) {
       const existing = await this.#findLiveByReference(input.externalReference);
       if (existing) return this.#mapInvoice(existing);
@@ -189,10 +189,13 @@ export class AsaasInvoiceProvider implements InvoiceProvider {
         ? { municipalServiceId: input.service.municipalServiceId }
         : {}),
       ...(municipalServiceCode !== undefined ? { municipalServiceCode } : {}),
-      // Asaas falls back to `municipalServiceCode` as the name when this is absent.
+      // Listed as required in the request schema, while its description says Asaas falls back
+      // to the code. Sending the code ourselves makes that fallback explicit.
       ...(input.service.municipalServiceName !== undefined
         ? { municipalServiceName: input.service.municipalServiceName }
-        : {}),
+        : municipalServiceCode !== undefined
+          ? { municipalServiceName: municipalServiceCode }
+          : {}),
       taxes: this.#buildTaxes(input),
     };
   }
@@ -227,7 +230,13 @@ export class AsaasInvoiceProvider implements InvoiceProvider {
     const list = await this.#request<AsaasListResponse<AsaasInvoiceResponse>>(
       `/invoices?externalReference=${encodeURIComponent(reference)}&limit=100`,
     );
-    return (list.data ?? []).find((invoice) => invoice.status !== 'CANCELED') ?? null;
+    // Cancelled and ERROR notes are terminal and not valid documents: re-emitting after
+    // either is the retry the caller is asking for.
+    return (
+      (list.data ?? []).find(
+        (invoice) => invoice.status !== 'CANCELED' && invoice.status !== 'ERROR',
+      ) ?? null
+    );
   }
 
   async #request<T>(

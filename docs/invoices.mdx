@@ -171,7 +171,7 @@ await payments.invoice('asaas').emit({
   `tax.iss` throws instead of printing a 0% on a legal document. Other keys (`nbsCode`, the
   tax-reform fields) are sent as given.
 - **Idempotency:** with `externalReference`, `emit` first lists `/invoices?externalReference=`
-  and returns the live (non-cancelled) note it finds instead of scheduling a second one.
+  and returns the live note it finds (not cancelled, not `ERROR`) instead of scheduling a second one.
 - **Scheduled is not issued:** `POST /invoices` schedules the note; it comes back `pending`.
   The city hall's answer arrives by webhook on the Asaas payments endpoint as `nfse.*`
   events: `nfse.authorized` (issued), `nfse.failed` (`INVOICE_ERROR`, with

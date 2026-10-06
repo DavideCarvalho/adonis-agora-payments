@@ -319,7 +319,8 @@ Check the [built-ins](/docs/payments/invoices#invoice-providers) first — Focus
 PlugNotas, Tecnospeed and Asaas all ship. What follows is for a municipal API none of them
 covers.
 
-The `InvoiceProvider` contract is even smaller — `emit(input)` and `find(id)`:
+The `InvoiceProvider` contract is even smaller — `emit(input)`, `find(id)` and
+`cancel(id, options?)` (throw a `[payments] … not supported` error if your provider can't cancel):
 
 ```ts title="app/services/invoices/prefeitura_driver.ts"
 import { type InvoiceProvider, type InvoiceEmitInput, type Invoice, httpRequest } from '@adonis-agora/payments'
@@ -353,6 +354,10 @@ export class PrefeituraDriver implements InvoiceProvider {
 
   async find() {
     return null
+  }
+
+  async cancel(): Promise<Invoice> {
+    throw new Error('[payments] Cancelling an invoice is not supported by the "prefeitura" invoice provider.')
   }
 }
 ```

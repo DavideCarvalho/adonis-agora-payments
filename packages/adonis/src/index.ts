@@ -193,7 +193,11 @@ export { headerValue, httpRequest, isNotFound } from './http.js';
 export type { EmitInvoiceContext, EmitInvoiceData } from './invoice/emit_invoice.js';
 export { emitInvoice, emitInvoiceIfRequested } from './invoice/emit_invoice.js';
 export { InvoiceManager, resolveInvoiceProviders } from './invoice/invoice_manager.js';
-export type { InvoiceEmitInput, InvoiceProvider } from './invoice/invoice_provider.js';
+export type {
+  InvoiceCancelOptions,
+  InvoiceEmitInput,
+  InvoiceProvider,
+} from './invoice/invoice_provider.js';
 export { currencyExponent, formatDecimal, fromDecimal, toDecimal } from './money.js';
 export { PaymentsManager, resolveDrivers } from './payments_manager.js';
 export type {
@@ -220,6 +224,7 @@ export type {
   DisputeStatus,
   Invoice,
   InvoiceOptions,
+  InvoiceTaxes,
   Money,
   MoneyAmount,
   Payment,

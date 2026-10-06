@@ -17,6 +17,8 @@ import type {
   WebhookVerificationState,
 } from '../driver.js';
 import { headerValue, httpRequest, isNotFound } from '../http.js';
+import type { AsaasInvoiceResponse } from '../invoice/drivers/asaas.js';
+import { mapAsaasInvoiceStatus } from '../invoice/drivers/asaas.js';
 import type { EmitInvoiceContext } from '../invoice/emit_invoice.js';
 import { emitInvoiceIfRequested } from '../invoice/emit_invoice.js';
 import { fromDecimal, toDecimal } from '../money.js';
@@ -161,6 +163,8 @@ interface AsaasWebhookPayload {
   event: string;
   payment?: AsaasPaymentResponse;
   subscription?: AsaasSubscriptionResponse;
+  /** The NFS-e, on the `INVOICE_*` events. */
+  invoice?: AsaasInvoiceResponse;
 }
 
 /** The envelope Asaas wraps every list endpoint in. */
@@ -928,6 +932,26 @@ export class AsaasDriver implements PaymentsDriver {
         return 'subscription.updated';
       case 'SUBSCRIPTION_DELETED':
         return 'subscription.canceled';
+      // NFS-e ("Eventos para notas fiscais"). Named `nfse.*`, not `invoice.*`: the
+      // `invoice.*` types belong to billing invoices (Stripe, Pagar.me), a different thing.
+      // The processor runs no built-in sync for them; register a handler. Emission is only
+      // final on `INVOICE_AUTHORIZED` — creating/scheduling a note is not issuing it.
+      case 'INVOICE_CREATED':
+        return 'nfse.created';
+      case 'INVOICE_UPDATED':
+        return 'nfse.updated';
+      case 'INVOICE_SYNCHRONIZED':
+        return 'nfse.synchronized';
+      case 'INVOICE_AUTHORIZED':
+        return 'nfse.authorized';
+      case 'INVOICE_ERROR':
+        return 'nfse.failed';
+      case 'INVOICE_PROCESSING_CANCELLATION':
+        return 'nfse.cancellation_processing';
+      case 'INVOICE_CANCELED':
+        return 'nfse.canceled';
+      case 'INVOICE_CANCELLATION_DENIED':
+        return 'nfse.cancellation_denied';
       default:
         return event.toLowerCase();
     }
@@ -970,6 +994,26 @@ export class AsaasDriver implements PaymentsDriver {
           : {}),
         ...(subscription.cycle !== undefined ? { cycle: subscription.cycle } : {}),
         ...(subscription.endsAt !== undefined ? { endsAt: subscription.endsAt } : {}),
+      };
+    }
+    if (payload.invoice) {
+      const invoice = payload.invoice;
+      return {
+        gatewayId: invoice.id,
+        status: mapAsaasInvoiceStatus(invoice.status),
+        providerStatus: invoice.status,
+        ...(invoice.value !== undefined
+          ? { amount: fromDecimal(Number(invoice.value), 'brl'), currency: 'brl' }
+          : {}),
+        ...(invoice.number ? { number: invoice.number } : {}),
+        ...(invoice.pdfUrl ? { pdfUrl: invoice.pdfUrl } : {}),
+        ...(invoice.xmlUrl ? { xmlUrl: invoice.xmlUrl } : {}),
+        ...(invoice.payment ? { paymentId: invoice.payment } : {}),
+        ...(invoice.customer ? { customerId: invoice.customer } : {}),
+        ...(invoice.externalReference ? { externalReference: invoice.externalReference } : {}),
+        ...(invoice.effectiveDate ? { effectiveDate: invoice.effectiveDate } : {}),
+        // Why it failed or was denied, in Asaas' (Portuguese) words.
+        ...(invoice.statusDescription ? { statusDescription: invoice.statusDescription } : {}),
       };
     }
     return {};

@@ -1,5 +1,6 @@
 import type { Invoice } from '../../types.js';
 import type { InvoiceEmitInput, InvoiceProvider } from '../invoice_provider.js';
+import { unsupportedInvoiceCancel } from './shared.js';
 
 export interface ENotasInvoiceConfig {
   /** eNotas API key. Defaults to `env.get('ENOTAS_API_KEY')`. */
@@ -84,6 +85,11 @@ export class ENotasInvoiceProvider implements InvoiceProvider {
     }
     const data = (await response.json()) as ENotasInvoiceResponse;
     return this.#mapInvoice(data);
+  }
+
+  /** Cancellation is not implemented for this provider yet. */
+  cancel(_invoiceId: string): Promise<Invoice> {
+    return Promise.reject(unsupportedInvoiceCancel(this.provider));
   }
 
   #mapInvoice(data: ENotasInvoiceResponse): Invoice {

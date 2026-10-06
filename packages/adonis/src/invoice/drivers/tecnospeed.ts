@@ -1,5 +1,6 @@
 import type { Invoice } from '../../types.js';
 import type { InvoiceEmitInput, InvoiceProvider } from '../invoice_provider.js';
+import { unsupportedInvoiceCancel } from './shared.js';
 
 export interface TecnospeedInvoiceConfig {
   /** Tecnospeed API token. Defaults to `env.get('TECNOSPEED_TOKEN')`. */
@@ -91,6 +92,11 @@ export class TecnospeedInvoiceProvider implements InvoiceProvider {
     }
     const data = (await response.json()) as TecnospeedInvoiceResponse;
     return this.#mapInvoice(data);
+  }
+
+  /** Cancellation is not implemented for this provider yet. */
+  cancel(_invoiceId: string): Promise<Invoice> {
+    return Promise.reject(unsupportedInvoiceCancel(this.provider));
   }
 
   #mapInvoice(data: TecnospeedInvoiceResponse): Invoice {

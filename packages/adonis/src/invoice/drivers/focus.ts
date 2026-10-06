@@ -1,5 +1,6 @@
 import type { Invoice } from '../../types.js';
 import type { InvoiceEmitInput, InvoiceProvider } from '../invoice_provider.js';
+import { unsupportedInvoiceCancel } from './shared.js';
 
 export interface FocusInvoiceConfig {
   /** Focus NFe API token. Defaults to `env.get('FOCUS_NFE_TOKEN')`. */
@@ -88,6 +89,11 @@ export class FocusInvoiceProvider implements InvoiceProvider {
     }
     const data = (await response.json()) as FocusInvoiceResponse;
     return this.#mapInvoice(data);
+  }
+
+  /** Cancellation is not implemented for this provider yet. */
+  cancel(_invoiceId: string): Promise<Invoice> {
+    return Promise.reject(unsupportedInvoiceCancel(this.provider));
   }
 
   #mapInvoice(data: FocusInvoiceResponse): Invoice {

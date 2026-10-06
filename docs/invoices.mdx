@@ -140,9 +140,52 @@ invoice: {
 }
 ```
 
+### Asaas NFS-e
+
+Asaas identifies the recipient by **its own ids**, never by the CPF/CNPJ: the invoice is
+attached to the Asaas charge (`payment`, filled in automatically when the charge itself went
+through Asaas) or to an Asaas customer (`customer: { gatewayId: 'cus_…' }`). With neither,
+`emit` throws.
+
+```ts
+await payments.invoice('asaas').emit({
+  customer: { taxId: '123.456.789-09', gatewayId: 'cus_000000002750' },
+  amount: 150050, // cents
+  currency: 'brl',
+  service: {
+    description: 'Consultoria patrimonial — setembro/2026',
+    cityServiceCode: '17.01',          // → municipalServiceCode
+    municipalServiceId: '1234',        // optional, from "Listar serviços municipais"
+    municipalServiceName: 'Assessoria ou consultoria',
+  },
+  tax: { iss: 2, retainIss: false, pis: 0, cofins: 0, csll: 0, inss: 0, ir: 0 },
+  effectiveDate: '2026-10-10',         // default: today in Brasília
+  deductions: 0,                       // cents; reduces the ISS base, not the total
+  observations: 'Competência 09/2026',
+  externalReference: 'fee-invoice-42', // idempotency
+})
+```
+
+- **Taxes:** Asaas requires `retainIss`, `iss`, `pis`, `cofins`, `csll`, `inss` and `ir`.
+  The retentions default to none (`false`/`0`); the **ISS rate never defaults** — a missing
+  `tax.iss` throws instead of printing a 0% on a legal document. Other keys (`nbsCode`, the
+  tax-reform fields) are sent as given.
+- **Idempotency:** with `externalReference`, `emit` first lists `/invoices?externalReference=`
+  and returns the live note it finds (not cancelled, not `ERROR`) instead of scheduling a second one.
+- **Scheduled is not issued:** `POST /invoices` schedules the note; it comes back `pending`.
+  The city hall's answer arrives by webhook on the Asaas payments endpoint as `nfse.*`
+  events: `nfse.authorized` (issued), `nfse.failed` (`INVOICE_ERROR`, with
+  `statusDescription`), `nfse.canceled`, `nfse.cancellation_denied`,
+  `nfse.cancellation_processing`, `nfse.created`, `nfse.updated`, `nfse.synchronized`.
+  The webhook processor runs no built-in sync for them — register a handler.
+- **Cancel:** `provider.cancel(id, { providerOnly? })` → `POST /invoices/{id}/cancel`
+  (`providerOnly` = Asaas' `cancelOnlyOnAsaas`). The other built-in providers throw
+  "not supported".
+
 <Callout type="info" title="Or your own">
 Five providers ship: Focus, eNotas, PlugNotas, Tecnospeed and Asaas. For anything else —
 a municipal API, a provider your accountant already uses — a custom provider is a plain
-factory implementing the `InvoiceProvider` contract (`emit(input)`, `find(id)`). See
+factory implementing the `InvoiceProvider` contract (`emit(input)`, `find(id)`,
+`cancel(id, options?)`). See
 [Custom providers](/docs/payments/custom-providers#a-custom-invoice-provider).
 </Callout>

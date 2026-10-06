@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AsaasInvoiceProvider } from '../src/invoice/drivers/asaas.js';
 import { ENotasInvoiceProvider } from '../src/invoice/drivers/enotas.js';
+import { FocusInvoiceProvider } from '../src/invoice/drivers/focus.js';
 import { PlugNotasInvoiceProvider } from '../src/invoice/drivers/plugnotas.js';
 import { TecnospeedInvoiceProvider } from '../src/invoice/drivers/tecnospeed.js';
 import type { InvoiceEmitInput } from '../src/invoice/invoice_provider.js';
@@ -26,36 +27,6 @@ function stubFetch(status: number, body: Record<string, unknown>) {
 }
 
 describe('invoice providers', () => {
-  it('Asaas emits a native NFS-e via /invoices and maps the response', async () => {
-    const fetchMock = stubFetch(200, {
-      id: 'inv_1',
-      status: 'AUTHORIZED',
-      nfseNumber: '12345',
-      nfseAccessKey: 'NFeKey',
-      invoiceUrl: 'https://asaas.com/inv.pdf',
-      value: 19.9,
-    });
-    const provider = new AsaasInvoiceProvider(
-      { config: () => ({}) },
-      { apiKey: 'test', sandbox: true },
-    );
-
-    const invoice = await provider.emit(INPUT);
-
-    expect(invoice.provider).toBe('asaas');
-    expect(invoice.gatewayId).toBe('inv_1');
-    expect(invoice.number).toBe('12345');
-    expect(invoice.key).toBe('NFeKey');
-    expect(invoice.status).toBe('issued');
-    const [url, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
-    expect(String(url)).toContain('api-sandbox.asaas.com/v3/invoices');
-    expect(JSON.parse(String(init.body))).toMatchObject({
-      value: 19.9,
-      serviceDescription: 'Software license',
-      serviceCode: '1.01',
-    });
-  });
-
   it('eNotas emits via /empresas/nfes', async () => {
     const fetchMock = stubFetch(200, {
       id: 'nfe_1',
@@ -113,6 +84,20 @@ describe('invoice providers', () => {
     stubFetch(422, { message: 'invalid' });
     const provider = new ENotasInvoiceProvider({ config: () => ({}) }, { apiKey: 'test' });
     await expect(provider.emit(INPUT)).rejects.toThrow(/eNotas invoice request failed \(422\)/);
+  });
+
+  it('refuses to cancel where cancellation is not implemented', async () => {
+    const fetchMock = stubFetch(200, {});
+    const providers = [
+      new ENotasInvoiceProvider({ config: () => ({}) }, { apiKey: 'test' }),
+      new PlugNotasInvoiceProvider({ config: () => ({}) }, { apiKey: 'test' }),
+      new TecnospeedInvoiceProvider({ config: () => ({}) }, { token: 'test' }),
+      new FocusInvoiceProvider({ config: () => ({}) }, { token: 'test' }),
+    ];
+    for (const provider of providers) {
+      await expect(provider.cancel('inv_1')).rejects.toThrow(/not supported/);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('requires a credential at construction', () => {

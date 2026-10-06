@@ -22,6 +22,9 @@ function fakeProvider(name: string): InvoiceProvider {
       return invoice;
     },
     find: async () => null,
+    cancel: async () => {
+      throw new Error('not used');
+    },
   };
 }
 

@@ -421,6 +421,31 @@ export interface WebhookEvent<T = unknown> {
  * })
  * ```
  */
+/**
+ * Tax configuration of a service invoice. The named fields are the ones Asaas' NFS-e API
+ * requires (rates in percent, e.g. `iss: 2` = 2%); providers that use other names read
+ * their own keys from the same object, which is why it stays open.
+ */
+export interface InvoiceTaxes {
+  /** Whether the service taker withholds the ISS. */
+  retainIss?: boolean;
+  /** ISS rate (%). */
+  iss?: number;
+  /** PIS rate (%). */
+  pis?: number;
+  /** COFINS rate (%). */
+  cofins?: number;
+  /** CSLL rate (%). */
+  csll?: number;
+  /** INSS rate (%). */
+  inss?: number;
+  /** IR rate (%). */
+  ir?: number;
+  /** NBS code (Nomenclatura Brasileira de Serviços). */
+  nbsCode?: string;
+  [key: string]: unknown;
+}
+
 export interface InvoiceOptions {
   /** Named invoice provider (a key of `invoice.providers`). Defaults to `invoice.default`. */
   provider?: string;
@@ -431,16 +456,30 @@ export interface InvoiceOptions {
     code?: string;
     /** Municipal service code (código de serviço municipal). */
     cityServiceCode?: string;
+    /** The provider's own id of the municipal service (Asaas: `municipalServiceId`). */
+    municipalServiceId?: string;
+    /** The municipal service's name (Asaas: `municipalServiceName`). */
+    municipalServiceName?: string;
   };
   /** Tax configuration. Falls back to `invoice.defaults.tax`. */
-  tax?: Record<string, unknown>;
+  tax?: InvoiceTaxes;
   /** Invoice recipient. Defaults to the billing customer's data. */
   customer?: {
     name?: string;
     taxId?: string;
     email?: string;
     address?: Record<string, unknown>;
+    /** The customer's id at the invoice provider (Asaas: `cus_…`). */
+    gatewayId?: string;
   };
+  /** Issue date (`YYYY-MM-DD`). */
+  effectiveDate?: string;
+  /** Deductions in the currency's smallest unit (reduce the ISS base, not the total). */
+  deductions?: number;
+  /** Free-text observations printed on the invoice. */
+  observations?: string;
+  /** Your own id for this invoice; the Asaas provider uses it for idempotency. */
+  externalReference?: string;
   /** Extra provider-specific fields. */
   metadata?: Record<string, unknown>;
 }

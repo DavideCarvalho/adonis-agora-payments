@@ -71,6 +71,12 @@ export async function emitInvoice(
       ...(overrides.service !== undefined ? overrides.service : {}),
     },
     ...(overrides.tax !== undefined ? { tax: overrides.tax } : {}),
+    ...(overrides.effectiveDate !== undefined ? { effectiveDate: overrides.effectiveDate } : {}),
+    ...(overrides.deductions !== undefined ? { deductions: overrides.deductions } : {}),
+    ...(overrides.observations !== undefined ? { observations: overrides.observations } : {}),
+    ...(overrides.externalReference !== undefined
+      ? { externalReference: overrides.externalReference }
+      : {}),
     ...(data.payment !== undefined ? { payment: data.payment } : {}),
     ...(overrides.metadata !== undefined ? { metadata: overrides.metadata } : {}),
   });

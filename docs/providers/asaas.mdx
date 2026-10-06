@@ -29,6 +29,9 @@ native NFS-e.
 - **Invoices**: **native NFS-e** — configure `invoice.asaas({ apiKey })` as the invoice
   provider so `invoice: true` emits through Asaas itself (or use automatic emission per
   subscription in the dashboard; the `invoice` option also works through any provider).
+  The note is attached to the Asaas charge or customer id, needs `tax.iss`, and its
+  outcome arrives here as `nfse.*` webhook events — see
+  [Asaas NFS-e](/docs/payments/invoices#asaas-nfs-e).
 - **Splits**: marketplace-style — pass `split` on the charge to share it across wallets
   (`walletId` + `percentualValue` and/or `fixedValue`).
 - **Requires** a customer for every charge and subscription.

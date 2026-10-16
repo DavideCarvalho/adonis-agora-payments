@@ -565,8 +565,8 @@ interface BillingStore {
   listAuditEvents(query: AuditEventQuery): Promise<AuditEventListItem[]>
   countAuditEvents(query: AuditEventCountQuery): Promise<number>
 
-  recordUsage(event): Promise<UsageEventRow>
-  usageReport(query): Promise<Array<{ meter: string; quantity: number }>>
+  recordUsage(event): Promise<UsageEventRow>       // event.scope?: { type, id }
+  usageReport(query): Promise<Array<{ meter: string; quantity: number }>> // query.scope?: { type, id }
 }
 
 const AUDIT_ACTIONS = {
@@ -710,6 +710,17 @@ meteredBillForSubscription(store, { subscriptionId, from, to, rates }): Promise<
 interface MeterRate     { meter: string; rate: number; included?: number }
 interface MeteredBillLine { meter: string; quantity: number; billable: number; amount: number }
 interface MeteredBill   { lines: MeteredBillLine[]; total: number }
+
+// Quotas — also as payments.usage().{ record, total, remaining, period }
+usageTotal(store, { meter, scope?, subscriptionId?, customerId?, period? }): Promise<number>
+usageRemaining(store, { ...same, limit }): Promise<UsageAllowance>
+usagePeriodFor(subscriptionRow, at?): { from: Date; to: Date }
+
+type UsagePeriod = { from?: Date; to?: Date } | { subscription: string; at?: Date }
+interface UsageAllowance {
+  meter: string; used: number; limit: number; remaining: number; exceeded: boolean
+  from: Date | null; to: Date | null
+}
 ```
 
 Usage for a meter with no matching rate is ignored rather than billed at zero.

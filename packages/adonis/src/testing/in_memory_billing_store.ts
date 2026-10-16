@@ -18,6 +18,7 @@ import {
   type SubscriptionCycleTotal,
   type SubscriptionListItem,
   type SubscriptionListQuery,
+  type UsageScope,
   type WebhookEventBreakdownLine,
   type WebhookEventListItem,
   type WebhookEventListQuery,
@@ -216,6 +217,8 @@ export interface InMemoryUsageEventRow {
   id: string;
   subscriptionId: string | null;
   customerId: string | null;
+  scopeType: string | null;
+  scopeId: string | null;
   meter: string;
   quantity: number;
   metadata?: Record<string, unknown>;
@@ -995,6 +998,7 @@ export class InMemoryBillingStore
   async recordUsage(event: {
     subscriptionId?: string | null;
     customerId?: string;
+    scope?: UsageScope | null;
     meter: string;
     quantity: number;
     metadata?: Record<string, unknown>;
@@ -1004,6 +1008,8 @@ export class InMemoryBillingStore
       id: `usage_${this.#nextId++}`,
       subscriptionId: event.subscriptionId ?? null,
       customerId: event.customerId ?? null,
+      scopeType: event.scope?.type ?? null,
+      scopeId: event.scope?.id ?? null,
       meter: event.meter,
       quantity: event.quantity,
       ...(event.metadata !== undefined ? { metadata: event.metadata } : {}),
@@ -1016,6 +1022,7 @@ export class InMemoryBillingStore
   async usageReport(query: {
     subscriptionId?: string;
     customerId?: string;
+    scope?: UsageScope;
     meter?: string;
     from?: Date;
     to?: Date;
@@ -1025,6 +1032,12 @@ export class InMemoryBillingStore
       if (query.subscriptionId !== undefined && row.subscriptionId !== query.subscriptionId)
         continue;
       if (query.customerId !== undefined && row.customerId !== query.customerId) {
+        continue;
+      }
+      if (
+        query.scope !== undefined &&
+        (row.scopeType !== query.scope.type || row.scopeId !== query.scope.id)
+      ) {
         continue;
       }
       if (query.meter !== undefined && row.meter !== query.meter) continue;

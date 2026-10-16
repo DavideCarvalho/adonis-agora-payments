@@ -20,6 +20,7 @@ import {
   type SubscriptionCycleTotal,
   type SubscriptionListItem,
   type SubscriptionListQuery,
+  type UsageScope,
   type WebhookEventBreakdownLine,
   type WebhookEventListItem,
   type WebhookEventListQuery,
@@ -1176,6 +1177,7 @@ export class LucidBillingStore
   async recordUsage(event: {
     subscriptionId?: string | null;
     customerId?: string;
+    scope?: UsageScope | null;
     meter: string;
     quantity: number;
     metadata?: Record<string, unknown>;
@@ -1185,6 +1187,8 @@ export class LucidBillingStore
     const row = new this.#usageEventModel() as UsageEventInstance;
     row.subscriptionId = event.subscriptionId ?? null;
     row.customerId = event.customerId ?? null;
+    row.scopeType = event.scope?.type ?? null;
+    row.scopeId = event.scope?.id ?? null;
     row.meter = event.meter;
     row.quantity = event.quantity;
     row.metadata = event.metadata ?? {};
@@ -1196,6 +1200,7 @@ export class LucidBillingStore
   async usageReport(query: {
     subscriptionId?: string;
     customerId?: string;
+    scope?: UsageScope;
     meter?: string;
     from?: Date;
     to?: Date;
@@ -1207,8 +1212,14 @@ export class LucidBillingStore
       .sum('quantity as quantity')
       .groupBy('meter')
       .pojo();
+    // Every filter combines, as in InMemoryBillingStore — dropping `customerId` when a
+    // subscription is given would over-count in production and not in tests.
     if (query.subscriptionId !== undefined) builder.where('subscription_id', query.subscriptionId);
-    else if (query.customerId !== undefined) builder.where('customer_id', query.customerId);
+    if (query.customerId !== undefined) builder.where('customer_id', query.customerId);
+    // Both halves, always: a scope id is only unique within its type.
+    if (query.scope !== undefined) {
+      builder.where('scope_type', query.scope.type).where('scope_id', query.scope.id);
+    }
     if (query.meter !== undefined) builder.where('meter', query.meter);
     if (query.from !== undefined) builder.where('recorded_at', '>=', query.from);
     if (query.to !== undefined) builder.where('recorded_at', '<', query.to);

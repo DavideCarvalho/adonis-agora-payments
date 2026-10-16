@@ -33,14 +33,25 @@ const DAYS_PER_CYCLE: Partial<Record<ManagedCycle, number>> = {
  * the customer agreed to. Clamping keeps 31 January → 28 February → 31 March.
  */
 export function advancePeriod(from: Date, cycle: string): Date {
+  return advancePeriodBy(from, cycle, 1);
+}
+
+/**
+ * The instant `count` whole cycles after `from`, clamped the same way as {@link advancePeriod}.
+ *
+ * Computed from the ANCHOR in one step rather than by calling `advancePeriod` `count` times:
+ * chained clamps compound — 31 January → 28 February → 28 March — while anchored arithmetic
+ * keeps 31 January → 28 February → 31 March, which is the date the customer agreed to.
+ */
+export function advancePeriodBy(from: Date, cycle: string, count: number): Date {
   const days = DAYS_PER_CYCLE[cycle as ManagedCycle];
   if (days !== undefined) {
     const next = new Date(from.getTime());
-    next.setUTCDate(next.getUTCDate() + days);
+    next.setUTCDate(next.getUTCDate() + days * count);
     return next;
   }
 
-  const months = MONTHS_PER_CYCLE[cycle as ManagedCycle] ?? 1;
+  const months = (MONTHS_PER_CYCLE[cycle as ManagedCycle] ?? 1) * count;
   const day = from.getUTCDate();
   // Day 1 first, so the intermediate value cannot overflow the target month while we set it.
   const next = new Date(from.getTime());
@@ -336,7 +347,7 @@ interface ManagedRow {
 }
 
 /** Lucid hands back a Luxon `DateTime`; the in-memory store a `Date`. Accept both. */
-function toDate(value: Date | { toJSDate(): Date } | null | undefined): Date | null {
+export function toDate(value: Date | { toJSDate(): Date } | null | undefined): Date | null {
   if (value === null || value === undefined) return null;
   return value instanceof Date ? value : value.toJSDate();
 }

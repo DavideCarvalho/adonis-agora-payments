@@ -129,6 +129,29 @@ describe('createBillingTables (integration)', () => {
     );
   });
 
+  it('upgrades a usage ledger that predates the scope columns', async () => {
+    // The pre-0.18.0 shape of `billing_usage_events`: no scope, no scoped index. Usage rows
+    // already in it must survive the upgrade and simply read as unscoped.
+    await database.db.rawQuery('DROP INDEX IF EXISTS billing_usage_scope_meter_idx');
+    await database.db.rawQuery('ALTER TABLE billing_usage_events DROP COLUMN scope_type');
+    await database.db.rawQuery('ALTER TABLE billing_usage_events DROP COLUMN scope_id');
+    await database.db.rawQuery(
+      `INSERT INTO billing_usage_events (id, subscription_id, meter, quantity, recorded_at, updated_at)
+       VALUES ('legacy-usage', 'sub_legacy', 'api_calls', 5, NOW(), NOW())`,
+    );
+
+    await createBillingTables(database.db.connection());
+
+    expect(await columnsOf('billing_usage_events')).toEqual(
+      expect.arrayContaining(['scope_type', 'scope_id']),
+    );
+    expect(await indexesOf('billing_usage_events')).toContain('billing_usage_scope_meter_idx');
+    const legacy = (await database.db.rawQuery(
+      `SELECT scope_type, scope_id, quantity FROM billing_usage_events WHERE id = 'legacy-usage'`,
+    )) as { rows: Array<{ scope_type: string | null; scope_id: string | null; quantity: number }> };
+    expect(legacy.rows).toEqual([{ scope_type: null, scope_id: null, quantity: 5 }]);
+  });
+
   it('drops everything it created', async () => {
     await dropBillingTables(database.db.connection());
     expect(await existingTables()).toEqual([]);

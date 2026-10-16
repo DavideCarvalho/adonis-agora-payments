@@ -436,6 +436,28 @@ describe('LucidBillingStore (integration)', () => {
       expect(await usageTotal(store, { meter: 'ai_chat', scope: project })).toBe(5);
     });
 
+    it('combines subscriptionId and customerId like InMemoryBillingStore does', async () => {
+      await store.recordUsage({
+        subscriptionId: 'sub_shared',
+        customerId: 'cus_a',
+        meter: 'ai_chat',
+        quantity: 2,
+        recordedAt: ago(1 * hour),
+      });
+      await store.recordUsage({
+        subscriptionId: 'sub_shared',
+        customerId: 'cus_b',
+        meter: 'ai_chat',
+        quantity: 9,
+        recordedAt: ago(1 * hour),
+      });
+
+      // Both filters apply: the other customer's 9 must not count.
+      expect(
+        await store.usageReport({ subscriptionId: 'sub_shared', customerId: 'cus_a' }),
+      ).toEqual([{ meter: 'ai_chat', quantity: 2 }]);
+    });
+
     it('meters a free plan: rows with no gateway id coexist and anchor the quota window', async () => {
       // A freemium tier: a subscription row exists, nothing was created at a gateway. The
       // `UNIQUE` on `gateway_id` must admit any number of NULLs.

@@ -1212,8 +1212,10 @@ export class LucidBillingStore
       .sum('quantity as quantity')
       .groupBy('meter')
       .pojo();
+    // Every filter combines, as in InMemoryBillingStore — dropping `customerId` when a
+    // subscription is given would over-count in production and not in tests.
     if (query.subscriptionId !== undefined) builder.where('subscription_id', query.subscriptionId);
-    else if (query.customerId !== undefined) builder.where('customer_id', query.customerId);
+    if (query.customerId !== undefined) builder.where('customer_id', query.customerId);
     // Both halves, always: a scope id is only unique within its type.
     if (query.scope !== undefined) {
       builder.where('scope_type', query.scope.type).where('scope_id', query.scope.id);

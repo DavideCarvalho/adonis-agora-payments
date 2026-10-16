@@ -143,7 +143,11 @@ export class BillingSubscription extends BaseModel {
 
 /** Instância composta pelo mixin {@link withSubscription}. */
 export interface SubscriptionRow {
-  gatewayId: string;
+  /**
+   * `null` when no gateway subscription backs the row — a free plan, a local trial without a
+   * card, an admin-granted courtesy. See {@link BillingSubscription.gatewayId}.
+   */
+  gatewayId: string | null;
   provider: string;
   status: string;
   planId: string;
@@ -173,8 +177,11 @@ export function withSubscription() {
     superclass: Model,
   ): SubscriptionMixinClass<Model> => {
     class SubscriptionMixin extends superclass {
+      // Nullable for the same reason as on `BillingSubscription`: the column always was, and
+      // a free-plan row has no gateway subscription to point at. `UNIQUE` admits any number of
+      // NULLs on every dialect supported here, so N free rows coexist.
       @column()
-      declare gatewayId: string;
+      declare gatewayId: string | null;
 
       @column()
       declare provider: string;

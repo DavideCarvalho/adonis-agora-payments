@@ -483,10 +483,44 @@ const report = await store.usageReport({
 // [{ meter: 'api_calls', quantity: 412 }]
 ```
 
-`usageReport` filters by `subscriptionId`, `customerId`, `meter`, and a `from`/`to` window,
-aggregating `quantity` per meter — the input to a usage-based invoice or overage charge.
+`usageReport` filters by `subscriptionId`, `customerId`, `scope`, `meter`, and a `from`/`to`
+window, aggregating `quantity` per meter — the input to a usage-based invoice or overage charge.
 `billing_usage_events` is created with the rest of the schema, so there is nothing to run
 first; the in-memory store mirrors it for tests.
+
+### Metering a project, a workspace, a site — `scope`
+
+When the billed unit is an application resource rather than the subscription or the customer —
+a project shared by several members, a workspace, an environment — record it as a `scope`. It is
+stored in two indexed columns (`scope_type`, `scope_id`), not in `metadata`, and it narrows the
+other filters rather than replacing them:
+
+```ts
+await store.recordUsage({
+  subscriptionId: owner.subscriptionId,
+  scope: { type: 'project', id: project.id },
+  meter: 'ai_chat',
+  quantity: 1,
+})
+```
+
+`payments.usage()` reads it back against a quota, over the subscription's current billing cycle:
+
+```ts
+const { used, remaining, exceeded } = await getPayments().usage().remaining({
+  meter: 'ai_chat',
+  scope: { type: 'project', id: project.id },
+  limit: 50, // the plan's quota — plans stay in your own catalog
+  period: { subscription: owner.subscriptionId },
+})
+```
+
+`period: { subscription }` takes the row's stored current period when it is current, and
+otherwise steps by its `cycle` from the period start (or `createdAt`). That is what makes a
+**free plan** work: a `billing_subscriptions` row with `gatewayId: null` — nothing at any gateway,
+nothing renewing it — still resets its quota every cycle. For a gateway-owned subscription the
+derived window is an approximation of the gateway's own; pass `period: { from, to }` when you
+need it exact. `usage().total(...)` is the same read without a limit.
 
 ### Pricing a period — `meteredBill`
 

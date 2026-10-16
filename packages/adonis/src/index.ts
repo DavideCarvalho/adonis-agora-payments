@@ -26,6 +26,7 @@ export type {
   PaymentListQuery,
   SubscriptionListItem,
   SubscriptionListQuery,
+  UsageScope,
   WebhookEventBreakdownLine,
   WebhookEventListItem,
   WebhookEventListQuery,
@@ -45,6 +46,7 @@ export { LucidBillingStore, lucidBillingStore } from './billing/lucid_billing_st
 export type { ManagedCycle, RenewalOutcome } from './billing/managed_subscriptions.js';
 export {
   advancePeriod,
+  advancePeriodBy,
   cancelManagedSubscription,
   createManagedSubscription,
   cycleIdempotencyKey,
@@ -70,6 +72,19 @@ export {
   dropBillingTables,
   truncateBillingTables,
 } from './billing/schema.js';
+export type {
+  UsageAllowance,
+  UsageApi,
+  UsagePeriod,
+  UsageQuery,
+  UsageStore,
+} from './billing/usage.js';
+export {
+  createUsageApi,
+  usagePeriodFor,
+  usageRemaining,
+  usageTotal,
+} from './billing/usage.js';
 /**
  * The shapes a driver normalizes `event.data` onto. Exported because an app's own webhook
  * handler receives a `WebhookEvent` and needs to read `externalReference` off its payload —

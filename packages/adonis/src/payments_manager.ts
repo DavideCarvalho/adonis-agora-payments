@@ -1,5 +1,6 @@
 import { type Arrears, type ArrearsQuery, arrears } from './billing/arrears.js';
 import type { BillingStore } from './billing/billing_store.js';
+import { createUsageApi, type UsageApi } from './billing/usage.js';
 import type { PaymentsConfig } from './define_config.js';
 import type { PaymentsDriver } from './driver.js';
 import type { InvoiceManager } from './invoice/invoice_manager.js';
@@ -113,6 +114,36 @@ export class PaymentsManager {
       );
     }
     return arrears({ ...query, store });
+  }
+
+  /**
+   * Record metered usage and read it back against a quota, per subscription, per customer or
+   * per application resource (`scope`), over a subscription's billing cycle:
+   *
+   * ```ts
+   * const usage = getPayments().usage()
+   * await usage.record({ meter: 'ai_chat', quantity: 1, scope: { type: 'project', id } })
+   * const { remaining } = await usage.remaining({
+   *   meter: 'ai_chat',
+   *   scope: { type: 'project', id },
+   *   limit: plan.aiChatLimit,
+   *   period: { subscription: owner.subscriptionId },
+   * })
+   * ```
+   *
+   * The store is resolved on each call, not here, so asking for the API never fails on its own.
+   */
+  usage(): UsageApi {
+    return createUsageApi(() => {
+      const store = this.#store?.();
+      if (store === undefined) {
+        throw new Error(
+          '[payments] Metered usage needs the billing store, and none is configured. ' +
+            'Enable `billing` in config/payments.ts.',
+        );
+      }
+      return store;
+    });
   }
 
   /**

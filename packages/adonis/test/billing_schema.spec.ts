@@ -82,6 +82,26 @@ describe('createBillingTables', () => {
     expect(alter, 'the column must be added before it is indexed').toBeLessThan(index);
   });
 
+  it('carries the usage scope columns to an existing install, then indexes them', async () => {
+    // 0.18.0. `billing_usage_events` shipped without `scope_type`/`scope_id`, so an existing
+    // install only gets them through the ALTER phase — and the scoped index must come after.
+    const db = fakeDb('postgres');
+    await createBillingTables(db);
+
+    const alters = ['scope_type', 'scope_id'].map((column) =>
+      db.sql.indexOf(
+        `ALTER TABLE billing_usage_events ADD COLUMN IF NOT EXISTS ${column} VARCHAR(255)`,
+      ),
+    );
+    const index = db.sql.indexOf(
+      'CREATE INDEX IF NOT EXISTS billing_usage_scope_meter_idx ON billing_usage_events (scope_type, scope_id, meter)',
+    );
+
+    for (const alter of alters) expect(alter).toBeGreaterThanOrEqual(0);
+    expect(index, 'no scoped usage index').toBeGreaterThanOrEqual(0);
+    expect(Math.max(...alters)).toBeLessThan(index);
+  });
+
   it('creates every table before touching any of them', async () => {
     // Three phases, in this order: CREATE TABLE, then the late-column ALTERs, then the
     // indexes. Both of the other orderings were written first and both failed against a real

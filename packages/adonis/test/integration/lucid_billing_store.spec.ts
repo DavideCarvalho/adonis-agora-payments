@@ -1,5 +1,8 @@
+import { DateTime } from 'luxon';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { LucidBillingStore } from '../../src/billing/lucid_billing_store.js';
+import { BillingSubscription } from '../../src/billing/mixins/with_subscription.js';
+import { usageRemaining, usageTotal } from '../../src/billing/usage.js';
 import { WebhookProcessor } from '../../src/billing/webhook_processor.js';
 import { createReplayAction } from '../../src/dashboard/actions.js';
 import { createIntegrationDatabase, type IntegrationDatabase } from './harness.js';
@@ -391,6 +394,108 @@ describe('LucidBillingStore (integration)', () => {
       ]);
     });
   });
+  describe('usage scoped to an application resource', () => {
+    it('sums a scope on both halves, through the scoped index columns', async () => {
+      const project = { type: 'project', id: 'proj_1' };
+      await store.recordUsage({
+        subscriptionId: 'sub_owner',
+        scope: project,
+        meter: 'ai_chat',
+        quantity: 2,
+        recordedAt: ago(1 * hour),
+      });
+      await store.recordUsage({
+        subscriptionId: 'sub_owner',
+        scope: project,
+        meter: 'ai_chat',
+        quantity: 3,
+        recordedAt: ago(1 * hour),
+      });
+      // Same id, different type: must not leak into the project's total.
+      await store.recordUsage({
+        scope: { type: 'workspace', id: 'proj_1' },
+        meter: 'ai_chat',
+        quantity: 50,
+        recordedAt: ago(1 * hour),
+      });
+      await store.recordUsage({
+        subscriptionId: 'sub_owner',
+        scope: { type: 'project', id: 'proj_2' },
+        meter: 'ai_chat',
+        quantity: 7,
+        recordedAt: ago(1 * hour),
+      });
+
+      expect(await store.usageReport({ scope: project })).toEqual([
+        { meter: 'ai_chat', quantity: 5 },
+      ]);
+      // The scope narrows the subscription's usage rather than replacing it.
+      expect(await store.usageReport({ subscriptionId: 'sub_owner', meter: 'ai_chat' })).toEqual([
+        { meter: 'ai_chat', quantity: 12 },
+      ]);
+      expect(await usageTotal(store, { meter: 'ai_chat', scope: project })).toBe(5);
+    });
+
+    it('meters a free plan: rows with no gateway id coexist and anchor the quota window', async () => {
+      // A freemium tier: a subscription row exists, nothing was created at a gateway. The
+      // `UNIQUE` on `gateway_id` must admit any number of NULLs.
+      const free = await BillingSubscription.create({
+        gatewayId: null,
+        provider: 'local',
+        status: 'active',
+        planId: 'free',
+        customerId: 'cus_free_1',
+        cycle: 'MONTHLY',
+        currentPeriodStart: DateTime.fromJSDate(new Date('2026-06-15T00:00:00.000Z')),
+        currentPeriodEnd: DateTime.fromJSDate(new Date('2026-07-15T00:00:00.000Z')),
+        payload: {},
+      });
+      await BillingSubscription.create({
+        gatewayId: null,
+        provider: 'local',
+        status: 'active',
+        planId: 'free',
+        customerId: 'cus_free_2',
+        payload: {},
+      });
+
+      const freeRows = await store.listSubscriptions({ customerId: 'cus_free_1' });
+      expect(freeRows.map((row) => row.gatewayId)).toEqual([null]);
+
+      const project = { type: 'project', id: 'proj_free' };
+      // Nothing renews a free row, so its stored period is long stale by `now` (27 August):
+      // the window steps by the cycle from the anchor — 15 August to 15 September.
+      await store.recordUsage({
+        scope: project,
+        meter: 'ai_chat',
+        quantity: 40,
+        recordedAt: new Date('2026-08-10T00:00:00.000Z'),
+      });
+      await store.recordUsage({
+        scope: project,
+        meter: 'ai_chat',
+        quantity: 8,
+        recordedAt: new Date('2026-08-20T00:00:00.000Z'),
+      });
+
+      const allowance = await usageRemaining(store, {
+        meter: 'ai_chat',
+        scope: project,
+        limit: 10,
+        period: { subscription: free.id, at: now },
+      });
+      expect(allowance).toEqual({
+        meter: 'ai_chat',
+        used: 8,
+        limit: 10,
+        remaining: 2,
+        exceeded: false,
+        from: new Date('2026-08-15T00:00:00.000Z'),
+        to: new Date('2026-09-15T00:00:00.000Z'),
+      });
+    });
+  });
+
   describe('external reference', () => {
     it('round-trips the column and finds the payment by the app’s own id', async () => {
       await store.savePayment({

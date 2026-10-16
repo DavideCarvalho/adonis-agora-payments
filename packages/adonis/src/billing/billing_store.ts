@@ -62,6 +62,18 @@ export interface CustomerListItem {
   createdAt: Date | null;
 }
 
+/**
+ * The application resource a usage event is metered against, when that is neither the
+ * subscription nor the customer — `{ type: 'project', id: project.id }`.
+ *
+ * Generic on purpose: the library does not know the app's domain, and the pair lets several
+ * kinds of scope coexist under one subscription.
+ */
+export interface UsageScope {
+  type: string;
+  id: string;
+}
+
 /** A library-owned subscription at creation time. */
 export interface ManagedSubscriptionInput {
   provider: string;
@@ -916,20 +928,33 @@ export interface BillingStore<
 
   // ── Metered usage ────────────────────────────────────────────────────────────────
 
-  /** Record one metered-usage event (a metered subscription's consumption). */
+  /**
+   * Record one metered-usage event (a metered subscription's consumption).
+   *
+   * `scope` attributes it to an application resource — a project, a workspace, a site — when
+   * the billed unit is neither the subscription nor the customer. It is recorded ALONGSIDE
+   * them, not instead: a project's usage can still carry the owner's subscription id.
+   */
   recordUsage(event: {
     subscriptionId?: string | null;
     customerId?: string;
+    scope?: UsageScope | null;
     meter: string;
     quantity: number;
     metadata?: Record<string, unknown>;
     recordedAt?: Date;
   }): Promise<UsageEventRow>;
 
-  /** Aggregate metered usage by meter, filtered by subscription/customer/meter/window. */
+  /**
+   * Aggregate metered usage by meter, filtered by subscription/customer/scope/meter/window.
+   *
+   * `scope` is exact on BOTH halves and combines with the other filters: `{ type: 'project',
+   * id: 'p1' }` never matches a `workspace` whose id happens to be `p1`.
+   */
   usageReport(query: {
     subscriptionId?: string;
     customerId?: string;
+    scope?: UsageScope;
     meter?: string;
     from?: Date;
     to?: Date;

@@ -297,6 +297,8 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
       id VARCHAR(36) PRIMARY KEY,
       subscription_id VARCHAR(255),
       customer_id VARCHAR(255),
+      scope_type VARCHAR(255),
+      scope_id VARCHAR(255),
       meter VARCHAR(255),
       quantity INTEGER DEFAULT 1,
       metadata ${t.json},
@@ -363,6 +365,17 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   await addColumn(db, dialect, 'billing_subscriptions', 'last_renewal_error', 'VARCHAR(500)');
   await addColumn(db, dialect, 'billing_subscriptions', 'last_renewal_attempt_at', t.timestamp);
   await addColumn(db, dialect, 'billing_subscriptions', 'renewal_failure_count', 'INTEGER');
+
+  // 0.18.0 — usage metered against something that is neither the subscription nor the
+  // customer: a project shared by several members, a workspace, an environment, a site. Before
+  // this the only place to put it was `metadata`, and aggregating meant `metadata->>'projectId'`
+  // — unindexed, and spelled differently on every dialect this package supports.
+  //
+  // A generic `(type, id)` pair rather than a `project_id`: the library has no business knowing
+  // the app's domain, and a pair lets several kinds of scope coexist under one subscription.
+  // Nullable: an app that meters per subscription or per customer never sets them.
+  await addColumn(db, dialect, 'billing_usage_events', 'scope_type', 'VARCHAR(255)');
+  await addColumn(db, dialect, 'billing_usage_events', 'scope_id', 'VARCHAR(255)');
 
   // ── Indexes ───────────────────────────────────────────────────────────────────────────
   //
@@ -449,6 +462,15 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
     'billing_usage_customer_meter_idx',
     'billing_usage_events',
     'customer_id, meter',
+  );
+  // The scoped read — "how much of this meter has THIS project used" — names exactly these
+  // three columns. Needs the 0.18.0 ALTERs above on an older install.
+  await createIndex(
+    db,
+    dialect,
+    'billing_usage_scope_meter_idx',
+    'billing_usage_events',
+    'scope_type, scope_id, meter',
   );
   // The renewal runner's working set: every tick asks "which managed subscriptions are due".
   // Unindexed, that is a full scan of every subscription ever created, on a schedule.

@@ -30,6 +30,18 @@ export class BillingUsageEvent extends BaseModel {
   @column()
   declare customerId: string | null;
 
+  /**
+   * What KIND of application resource this usage is metered against — `'project'`,
+   * `'workspace'`, `'site'`, … — when it is neither the subscription nor the customer.
+   * Free text: the library never interprets it. Paired with {@link scopeId}.
+   */
+  @column()
+  declare scopeType: string | null;
+
+  /** The id of that resource, in the app's own id space. Paired with {@link scopeType}. */
+  @column()
+  declare scopeId: string | null;
+
   /** The meter name, e.g. `'api_calls'`, `'storage_gb'`, `'messages'`. */
   @column()
   declare meter: string;

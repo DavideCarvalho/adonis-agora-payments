@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 0.19.1
+
+### Patch Changes
+
+- [#146](https://github.com/DavideCarvalho/adonis-agora-payments/pull/146) [`c071147`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/c071147d5e455ad3514055db5fb1c19c4279f79a) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Ship a README. The package listed `README.md` in `files` but had none, so its npm page was empty.
+
 ## 0.19.0
 
 ### Minor Changes

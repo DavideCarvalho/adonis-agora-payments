@@ -62,6 +62,11 @@ const payment = await payments.driver('pix').charge({
 Gateways, webhooks, subscriptions and billing, invoices, testing and production notes:
 **https://davidecarvalho.github.io/agora/docs/payments**
 
+## Sponsors
+
+Every Agora library is MIT and stays free. The work is funded by partners and
+sponsors — [become one](https://davidecarvalho.github.io/agora/partners).
+
 ## License
 
 MIT

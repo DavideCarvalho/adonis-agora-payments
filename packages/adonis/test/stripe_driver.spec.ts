@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const stripeMock = vi.hoisted(() => ({
   paymentIntents: { create: vi.fn(), retrieve: vi.fn() },
@@ -11,13 +11,18 @@ const stripeMock = vi.hoisted(() => ({
   webhooks: { constructEvent: vi.fn() },
 }));
 
-vi.mock('stripe', () => ({
+/** The API version the mocked SDK speaks — what `Stripe.API_VERSION` answers. */
+const stripeApi = vi.hoisted(() => ({ version: '2026-08-26.dahlia' }));
+
+vi.mock('stripe', () => {
   // vitest 4 gives mocks JS semantics: the driver does `new Stripe(...)`, and an arrow function
   // is not constructible, so the implementation has to be a plain function.
-  default: vi.fn(function Stripe() {
+  const Stripe = vi.fn(function Stripe() {
     return stripeMock;
-  }),
-}));
+  });
+  Object.defineProperty(Stripe, 'API_VERSION', { get: () => stripeApi.version });
+  return { default: Stripe };
+});
 
 import { StripeDriver } from '../src/drivers/stripe.js';
 
@@ -109,30 +114,47 @@ describe('StripeDriver', () => {
     });
   });
 
-  it('names the Stripe payment method type the charge asked for', async () => {
-    const driver = makeDriver();
+  // stripe-node 23 speaks the 2026-09-30 API, which dropped `payment_method_types` from
+  // PaymentIntent creation for `allowed_payment_method_types`; older SDKs only know the first.
+  describe.each([
+    ['2026-08-26.dahlia', 'stripe-node 22', 'payment_method_types', 'allowed_payment_method_types'],
+    ['2026-09-30.endive', 'stripe-node 23', 'allowed_payment_method_types', 'payment_method_types'],
+  ])('on API %s (%s)', (version, _sdk, field, otherField) => {
+    beforeEach(() => {
+      stripeApi.version = version;
+    });
+    afterEach(() => {
+      stripeApi.version = '2026-08-26.dahlia';
+    });
 
-    for (const [method, type] of [
-      ['pix', 'pix'],
-      ['boleto', 'boleto'],
-      ['credit_card', 'card'],
-    ] as const) {
-      stripeMock.paymentIntents.create.mockResolvedValue(intent({ payment_method_types: [type] }));
-      await driver.charge({ customerId: 'cus_1', amount: 1990, method });
-      const params = stripeMock.paymentIntents.create.mock.lastCall![0];
-      expect(params.payment_method_types).toEqual([type]);
-    }
-  });
+    it(`names the Stripe payment method type the charge asked for in \`${field}\``, async () => {
+      const driver = makeDriver();
 
-  it('leaves the method to the account defaults when the charge names none', async () => {
-    stripeMock.paymentIntents.create.mockResolvedValue(intent());
-    const driver = makeDriver();
+      for (const [method, type] of [
+        ['pix', 'pix'],
+        ['boleto', 'boleto'],
+        ['credit_card', 'card'],
+      ] as const) {
+        stripeMock.paymentIntents.create.mockResolvedValue(
+          intent({ payment_method_types: [type] }),
+        );
+        await driver.charge({ customerId: 'cus_1', amount: 1990, method });
+        const params = stripeMock.paymentIntents.create.mock.lastCall![0];
+        expect(params[field]).toEqual([type]);
+        expect(params).not.toHaveProperty(otherField);
+      }
+    });
 
-    await driver.charge({ customerId: 'cus_1', amount: 1990 });
+    it('leaves the method to the account defaults when the charge names none', async () => {
+      stripeMock.paymentIntents.create.mockResolvedValue(intent());
+      const driver = makeDriver();
 
-    expect(stripeMock.paymentIntents.create.mock.calls[0]![0]).not.toHaveProperty(
-      'payment_method_types',
-    );
+      await driver.charge({ customerId: 'cus_1', amount: 1990 });
+
+      const params = stripeMock.paymentIntents.create.mock.calls[0]![0];
+      expect(params).not.toHaveProperty('payment_method_types');
+      expect(params).not.toHaveProperty('allowed_payment_method_types');
+    });
   });
 
   it('maps the Pix QR code and instructions page off next_action', async () => {

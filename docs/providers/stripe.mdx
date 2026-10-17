@@ -7,8 +7,11 @@ icon: Landmark
 import { Callout } from 'fumadocs-ui/components/callout';
 
 - **Methods**: pix, credit_card, boleto, undefined. The charge's `method` becomes the
-  intent's `payment_method_types` (`pix` → `pix`, `boleto` → `boleto`, `credit_card` →
-  `card`), so the gateway creates what you asked for. Routing alone does not do it:
+  method the intent is restricted to (`pix` → `pix`, `boleto` → `boleto`, `credit_card` →
+  `card`), so the gateway creates what you asked for. The field follows the Stripe API
+  version of the `stripe` package you installed: `payment_method_types` on stripe 17–22,
+  `allowed_payment_method_types` on stripe 23 (API `2026-09-30`), which dropped the former
+  from intent creation. Routing alone does not do it:
   `payments.driver('pix')` picks the provider, `method: 'pix'` on the charge picks the
   method. Omit `method` and the intent falls back to the account's dynamic payment
   methods — Stripe's own default. Pix and boleto have to be enabled on a Brazilian Stripe
@@ -281,7 +284,7 @@ subscription exists, it will bill again, and it grants nothing today.
 ## Payment methods
 
 `supportedMethods` is unchanged (`pix`, `credit_card`, `boleto`, `undefined`): those are
-the methods `charge()` can actually pin onto `payment_method_types`. Stripe has no single
+the methods `charge()` can actually pin onto the intent. Stripe has no single
 type for "a bank transfer" — it has iDEAL, Bancontact, EPS, P24, BLIK and a new one most
 quarters — so routing by the wider categories would promise an instrument this call cannot
 choose. Ask for one of those with `metadata` and Stripe's dashboard settings instead.

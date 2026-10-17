@@ -194,7 +194,7 @@ export class PaymentsManager {
     }
     // Routing picked the provider; it must also reach the charge. Without this the method
     // is only ever set when the CALLER repeats it — `driver('pix').charge({ method: 'pix' })`
-    // — and every driver that varies by method (Stripe's `payment_method_types`, Asaas' and
+    // — and every driver that varies by method (Stripe's method restriction, Asaas' and
     // AbacatePay's `billingType`) silently fell back to the gateway's dashboard default. A
     // charge routed as Pix could come back a card.
     // `resolved` is the CONFIG KEY, not `driver.provider` — `config.methods` is written in

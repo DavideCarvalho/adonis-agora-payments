@@ -1,6 +1,6 @@
 {
   "name": "@adonis-agora/payments-react",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "React hook for @adonis-agora/payments — poll a Pix or boleto charge until the gateway's webhook settles it, with backoff, a stop condition and no polling in a background tab. Part of the Agora ecosystem.",
   "license": "MIT",
   "repository": {

@@ -148,6 +148,33 @@ export function normalizeStripeCycle(interval: string, count: number): string | 
   return undefined;
 }
 
+/**
+ * `payment_method_types`: how API versions before 2026-09-30 hold a PaymentIntent to a method.
+ * The stripe-node 23 types no longer list it, so it is spelled out here.
+ */
+type LegacyMethodRestriction = { payment_method_types: string[] };
+
+type MethodRestriction =
+  | LegacyMethodRestriction
+  | Required<Pick<Stripe.PaymentIntentCreateParams, 'allowed_payment_method_types'>>;
+
+/** The API version that removed `payment_method_types` in favour of `allowed_payment_method_types`. */
+const ALLOWED_METHOD_TYPES_SINCE = '2026-09-30';
+
+/**
+ * The method restriction the API version understands. The driver talks to Stripe in the version
+ * of the SDK the app installed (`stripe` is a peer, and the client pins none), and the API that
+ * stripe-node 23 speaks (`2026-09-30.endive`) dropped `payment_method_types` from PaymentIntent
+ * creation: sending it there would fail every charge that names a method. Older versions never
+ * knew `allowed_payment_method_types`. API versions are `YYYY-MM-DD.<name>`, so the date compares
+ * as a string.
+ */
+function methodRestrictionFor(apiVersion: string): (types: string[]) => MethodRestriction {
+  return apiVersion.slice(0, 10) >= ALLOWED_METHOD_TYPES_SINCE
+    ? (types) => ({ allowed_payment_method_types: types })
+    : (types) => ({ payment_method_types: types });
+}
+
 export class StripeDriver implements PaymentsDriver {
   readonly provider = 'stripe';
   readonly supportedMethods = ['pix', 'credit_card', 'boleto', 'undefined'] as const;
@@ -157,6 +184,8 @@ export class StripeDriver implements PaymentsDriver {
   #currency: string;
   #webhookSecret: string | undefined;
   #invoiceCtx: EmitInvoiceContext;
+  /** Holds a PaymentIntent to the given method types, in the installed SDK's API dialect. */
+  #restrictMethods: (types: string[]) => MethodRestriction;
 
   constructor(ctx: EmitInvoiceContext, config: StripeDriverConfig) {
     this.#invoiceCtx = ctx;
@@ -169,6 +198,7 @@ export class StripeDriver implements PaymentsDriver {
       );
     }
     this.#stripe = new Stripe(apiKey);
+    this.#restrictMethods = methodRestrictionFor(Stripe.API_VERSION);
     // The constructor (not the factory) enforces this, because `./drivers/stripe` is a
     // public entry point too — this is the one boundary every path crosses.
     this.#currency = requireCurrency('stripe', config.currency);
@@ -218,17 +248,17 @@ export class StripeDriver implements PaymentsDriver {
   // ── Payments ─────────────────────────────────────────────────────────────────────────
 
   async charge(input: ChargeInput): Promise<Payment> {
-    // Without `payment_method_types` Stripe creates the intent with whatever the account's
+    // Without a method restriction Stripe creates the intent with whatever the account's
     // dashboard defaults are, so a charge routed as Pix could come back a card.
     const methodType = this.#mapMethodToStripe(input.method);
-    const params: Stripe.PaymentIntentCreateParams = {
+    const params: Stripe.PaymentIntentCreateParams & Partial<LegacyMethodRestriction> = {
       amount: input.amount,
       currency: input.currency ?? this.#currency,
       ...(input.customerId !== undefined ? { customer: input.customerId } : {}),
       ...(input.description !== undefined ? { description: input.description } : {}),
       ...(input.paymentMethodId !== undefined ? { payment_method: input.paymentMethodId } : {}),
       ...(input.card !== undefined ? { payment_method: input.card.token } : {}),
-      ...(methodType !== undefined ? { payment_method_types: [methodType] } : {}),
+      ...(methodType !== undefined ? this.#restrictMethods([methodType]) : {}),
       ...(input.metadata !== undefined
         ? { metadata: input.metadata as Record<string, string> }
         : {}),

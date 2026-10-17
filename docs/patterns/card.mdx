@@ -209,7 +209,7 @@ installment. See [Subscriptions](/docs/payments/patterns/subscriptions).
 | `card.remoteIp` | **ignored** | → `remoteIp` (the payer's IP) |
 | Customer required | no | **yes** |
 | Your reference lands in | `metadata.external_reference` | `externalReference` |
-| Method is | explicit `payment_method_types` on the intent | inferred → `billingType: CREDIT_CARD` |
+| Method is | explicit on the intent (`payment_method_types`, or `allowed_payment_method_types` on stripe 23) | inferred → `billingType: CREDIT_CARD` |
 | Debit card | no | yes (`debit_card`) |
 | Refunds | yes | yes |
 
@@ -289,7 +289,7 @@ Woovi driver with no method to validate, and the failure moves to the gateway's 
 `driver('credit_card')` does one more thing a provider name does not: it returns the driver
 **bound** to that method, so `charge()` and `createSubscription()` get `method: 'credit_card'`
 filled in without you repeating it. That matters here, because every driver that varies by method
-reads it off the charge — Stripe's `payment_method_types`, Asaas' `billingType` — and without it the
+reads it off the charge — Stripe's method restriction on the intent, Asaas' `billingType` — and without it the
 charge falls back to whatever the gateway's dashboard defaults are. A method you pass explicitly
 still wins — unless `config.methods` routes it somewhere else, in which case the call is refused
 rather than sent to the wrong gateway. Routing is a default, not an override, and never a

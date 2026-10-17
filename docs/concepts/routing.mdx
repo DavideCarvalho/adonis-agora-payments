@@ -47,7 +47,7 @@ getPayments().driver('pix').charge({ amount: 1990 })
 // reaches the driver as { amount: 1990, method: 'pix' }
 ```
 
-Every driver that varies by method reads it off the charge — Stripe's `payment_method_types`, Asaas'
+Every driver that varies by method reads it off the charge — Stripe's method restriction on the intent, Asaas'
 and AbacatePay's `billingType` — so before this, a charge routed as Pix was created with whatever the
 gateway's dashboard defaults are. It read as working and could come back a card.
 

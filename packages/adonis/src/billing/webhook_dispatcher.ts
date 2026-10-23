@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { PACKAGE_ORIGIN } from '../package_origin.js';
 import type { WebhookEvent } from '../types.js';
 import type { WebhookProcessor } from './webhook_processor.js';
 
@@ -63,7 +64,13 @@ export interface WebhookDispatcherOptions {
  * — which is exactly what `'auto'` selects — that was every webhook, forever.
  */
 export interface DurableEngineLike {
-  register(name: string, version: string, fn: (ctx: unknown, input: never) => Promise<void>): void;
+  register(
+    name: string,
+    version: string,
+    fn: (ctx: unknown, input: never) => Promise<void>,
+    /** `origin` stamps every run with this package's name (durable >= 0.36; older engines ignore it). */
+    opts?: { origin?: string },
+  ): void;
   start(name: string, input: unknown, runId: string): Promise<unknown>;
 }
 
@@ -275,6 +282,7 @@ export class WebhookDispatcher {
         this.#accepted = Math.max(0, this.#accepted - 1);
         await this.#track(processor.process((input as { event: WebhookEvent }).event));
       },
+      { origin: PACKAGE_ORIGIN },
     );
     this.#registered = true;
   }

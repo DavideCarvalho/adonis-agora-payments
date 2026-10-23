@@ -152,16 +152,24 @@ describe('WebhookDispatcher — durable', () => {
   /** An engine with durable's registry semantics: `start` an unregistered name and it throws. */
   class FakeEngine {
     registered = new Map<string, (ctx: unknown, input: never) => Promise<void>>();
-    started: Array<{ name: string; input: unknown; runId: string }> = [];
+    origins = new Map<string, string | undefined>();
+    started: Array<{ name: string; input: unknown; runId: string; origin?: string }> = [];
 
-    register(name: string, _version: string, fn: (ctx: unknown, input: never) => Promise<void>) {
+    register(
+      name: string,
+      _version: string,
+      fn: (ctx: unknown, input: never) => Promise<void>,
+      opts?: { origin?: string },
+    ) {
       this.registered.set(name, fn);
+      this.origins.set(name, opts?.origin);
     }
 
     async start(name: string, input: unknown, runId: string) {
       const fn = this.registered.get(name);
       if (!fn) throw new Error(`workflow ${name} is not registered`);
-      this.started.push({ name, input, runId });
+      // Durable stamps the run's `origin` from its registration.
+      this.started.push({ name, input, runId, origin: this.origins.get(name) });
       // Durable runs the body out of band; running it here is what lets the test assert the
       // event actually reached the processor rather than merely being accepted.
       await fn(undefined, input as never);
@@ -191,6 +199,20 @@ describe('WebhookDispatcher — durable', () => {
     expect(result.dispatched).toBe(1);
     expect([...engine.registered.keys()]).toEqual(['payments-webhook']);
     expect(engine.started).toHaveLength(1);
+  });
+
+  it("stamps the run's origin with this package's name", async () => {
+    const store = new InMemoryBillingStore();
+    const engine = new FakeEngine();
+    const dispatcher = new WebhookDispatcher({
+      processor: new WebhookProcessor({ store }),
+      mode: 'durable',
+      durableEngine: async () => engine,
+    });
+
+    await dispatcher.dispatchAll(event('evt_origin'));
+
+    expect(engine.started.map((run) => run.origin)).toEqual(['@adonis-agora/payments']);
   });
 
   it('runs the event through the processor and writes the ledger', async () => {

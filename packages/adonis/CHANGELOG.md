@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 0.20.1
+
+### Patch Changes
+
+- [#163](https://github.com/DavideCarvalho/adonis-agora-payments/pull/163) [`578cd73`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/578cd73c4b137847287a999f32d640b7e400b790) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - The durable `payments-webhook` workflow is now registered with `origin: '@adonis-agora/payments'`, so its runs are stamped with the package name and the durable console's ORIGIN facet separates them from the app's own runs. Engines older than `@adonis-agora/durable` 0.36 ignore the option.
+
 ## 0.20.0
 
 ### Minor Changes

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   RefundAction,
   RefundOutcome,
@@ -555,10 +555,17 @@ describe('provider filter', () => {
     );
   });
 
-  it('says so when the scan gave up rather than reporting a confident empty page', async () => {
-    // "No Asaas payments" and "no Asaas payments in the last thousand rows" are different
-    // answers, and only one of them is safe to act on.
+  it("finds a gateway's rows behind more than a scan's worth of other gateways", async () => {
+    // The filter is the store's, so an Asaas payment older than a thousand Stripe ones is still
+    // on the page rather than reported as "none in the rows scanned".
     const store = new InMemoryBillingStore();
+    await store.savePayment({
+      gatewayId: 'pay_old',
+      provider: 'asaas',
+      status: 'paid',
+      amount: 1,
+      currency: 'BRL',
+    });
     for (let i = 0; i < PROVIDER_SCAN_CAP + 5; i += 1) {
       await store.savePayment({
         gatewayId: `pi_${i}`,
@@ -568,14 +575,32 @@ describe('provider filter', () => {
         currency: 'BRL',
       });
     }
+    const listPayments = vi.spyOn(store, 'listPayments');
     const res = await payments(deps(store), req({ provider: 'asaas' }));
     const body = res.body as {
-      payments: unknown[];
+      payments: Array<{ gatewayId: string }>;
       meta: { scanned: number; truncated: boolean };
     };
-    expect(body.payments).toHaveLength(0);
-    expect(body.meta.scanned).toBe(PROVIDER_SCAN_CAP);
-    expect(body.meta.truncated).toBe(true);
+    expect(body.payments.map((p) => p.gatewayId)).toEqual(['pay_old']);
+    expect(body.meta.truncated).toBe(false);
+    expect(listPayments).toHaveBeenCalledTimes(1);
+    expect(listPayments.mock.calls[0]?.[0]).toMatchObject({ provider: 'asaas' });
+  });
+
+  it('hands the provider to the store on every filtered list', async () => {
+    const store = await seed();
+    const spies = [
+      vi.spyOn(store, 'listPayments'),
+      vi.spyOn(store, 'listSubscriptions'),
+      vi.spyOn(store, 'listWebhookEvents'),
+    ];
+    await payments(deps(store), req({ provider: 'stripe' }));
+    await subscriptions(deps(store), req({ provider: 'stripe' }));
+    await webhookEvents(deps(store), req({ provider: 'stripe' }));
+    for (const spy of spies) {
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0]?.[0]).toMatchObject({ provider: 'stripe' });
+    }
   });
 
   it('never claims truncation for an unfiltered page', async () => {

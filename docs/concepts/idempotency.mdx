@@ -41,6 +41,17 @@ const second = await processor.process(event)   // false — redelivery, no-op
 
 That boolean is the whole contract, and it is worth asserting in your tests.
 
+The claim is the `INSERT` itself, on the unique `gateway_event_id`. Two deliveries of the same event
+arriving at the same moment — a gateway retrying while the first attempt is still running is
+routine — race on that constraint: exactly one inserts and runs, and the other reads the row back
+and answers as a redelivery. Re-claiming a `failed` row is a single `UPDATE … WHERE status =
+'failed'`, so of two concurrent retries only one gets it.
+
+Mercado Pago and Mollie have to fetch the resource a notification names before they can build the
+event. With a webhook secret configured, the mounted route reads the event id from the signed body
+first and answers a redelivery of an event already `received` or `processed` without that fetch.
+Without a secret the fetch is what authenticates the call, so the delivery is parsed in full.
+
 ## A failed event is claimable again
 
 There are three ledger states, and the difference between two of them is what makes retries work:

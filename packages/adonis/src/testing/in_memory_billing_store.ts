@@ -9,6 +9,7 @@ import {
   type CustomerListQuery,
   type DisputeDeadlineQuery,
   type DisputeListItem,
+  type DisputeListQuery,
   type ManagedSubscriptionInput,
   type ManagedSubscriptionPatch,
   OPEN_DISPUTE_STATUSES,
@@ -169,6 +170,12 @@ export interface InMemoryWebhookEventRow {
   payload: Record<string, unknown>;
   /** The normalized event this delivery carried — what the dashboard's retry replays. */
   normalized: Record<string, unknown> | null;
+  /**
+   * The payment this delivery is about, as the Lucid store records it: the normalized
+   * `gatewayId` on a `payment.*` event, `''` on any other. Absent or `null` — a `payment.*` event
+   * that normalized no id, or a row set by hand — is found by payload substring instead.
+   */
+  paymentGatewayId?: string | null;
   error: string | null;
   /** Insertion timestamp — the Lucid rows have one, and the list queries order by it. */
   createdAt: Date;
@@ -229,6 +236,13 @@ export interface InMemoryUsageEventRow {
  * In-memory {@link BillingStore} for tests — no database required. Mirrors the shape of
  * the Lucid models so the billing layer behaves identically.
  */
+/** The Lucid store's `payment_gateway_id` rule — see `paymentGatewayIdOf` there. */
+function paymentGatewayIdOf(type: string, normalized: unknown): string | null {
+  if (!type.startsWith('payment.')) return '';
+  const gatewayId = (normalized as { gatewayId?: unknown } | null | undefined)?.gatewayId;
+  return typeof gatewayId === 'string' && gatewayId !== '' ? gatewayId : null;
+}
+
 export class InMemoryBillingStore
   implements
     BillingStore<
@@ -746,11 +760,12 @@ export class InMemoryBillingStore
     return found;
   }
 
-  async listDisputes(query: BillingListQuery): Promise<DisputeListItem[]> {
+  async listDisputes(query: DisputeListQuery): Promise<DisputeListItem[]> {
     const matching = [...this.disputes.values()].filter(
       (row) =>
         (query.status === undefined || row.status === query.status) &&
-        (query.provider === undefined || row.provider === query.provider),
+        (query.provider === undefined || row.provider === query.provider) &&
+        (query.paymentGatewayId === undefined || row.paymentGatewayId === query.paymentGatewayId),
     );
     return this.#page(matching, query).map(disputeItem);
   }
@@ -912,6 +927,7 @@ export class InMemoryBillingStore
         typeof normalized === 'object' && normalized !== null && !Array.isArray(normalized)
           ? (normalized as Record<string, unknown>)
           : null,
+      paymentGatewayId: paymentGatewayIdOf(event.type, normalized),
       error: null,
       createdAt: now,
       updatedAt: now,
@@ -956,11 +972,12 @@ export class InMemoryBillingStore
     query: { size?: number } = {},
   ): Promise<WebhookEventListItem[]> {
     if (paymentGatewayId === '') return [];
-    // Mirrors the Lucid store's `CAST(payload AS TEXT) LIKE '%id%'`, substring semantics and
-    // all — including the false positives. A test that matched more precisely here than the
-    // database can would be testing a store nobody ships.
+    // Mirrors the Lucid store: equality on the recorded payment id, and the payload substring
+    // match — false positives and all — only for a row that has none recorded.
     const matching = [...this.webhookEvents.values()].filter((row) =>
-      JSON.stringify(row.payload).includes(paymentGatewayId),
+      row.paymentGatewayId === undefined || row.paymentGatewayId === null
+        ? JSON.stringify(row.payload).includes(paymentGatewayId)
+        : row.paymentGatewayId === paymentGatewayId,
     );
     return this.#page(matching, query.size === undefined ? {} : { size: query.size }).map(
       webhookEventItem,

@@ -145,7 +145,9 @@ describe('createBillingTables (integration)', () => {
     expect(await columnsOf('billing_usage_events')).toEqual(
       expect.arrayContaining(['scope_type', 'scope_id']),
     );
-    expect(await indexesOf('billing_usage_events')).toContain('billing_usage_scope_meter_idx');
+    expect(await indexesOf('billing_usage_events')).toContain(
+      'billing_usage_scope_meter_recorded_idx',
+    );
     const legacy = (await database.db.rawQuery(
       `SELECT scope_type, scope_id, quantity FROM billing_usage_events WHERE id = 'legacy-usage'`,
     )) as { rows: Array<{ scope_type: string | null; scope_id: string | null; quantity: number }> };

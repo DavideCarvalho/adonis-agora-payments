@@ -581,10 +581,11 @@ above them: they take every dispute in `OPEN_DISPUTE_STATUSES` regardless of `ev
 order oldest first. On a gateway that publishes no deadline they are the only reads that can see a
 chargeback at all.
 
-`listWebhookEventsForPayment` is a `CAST(payload AS TEXT) LIKE` scan: unindexed, able to over-match,
-and blind to a delivery that never stored the id. It is bounded by `size`, newest first, and never
-returns the payload. The dashboard reports `events.matchedBy: 'payload-substring'` beside the
-result rather than presenting it as a history.
+`listWebhookEventsForPayment` matches the `payment_gateway_id` each ledger row records on the way in
+— the normalized `gatewayId` of a `payment.*` event — through an index. Rows recorded before that
+column existed are found by a `CAST(payload AS TEXT) LIKE` scan of their stored payload instead,
+which can over-match. It is bounded by `size`, newest first, and never returns the payload. The
+dashboard reports `events.matchedBy: 'payment-gateway-id'` beside the result.
 
 `recordAuditEvent` answers `null` on an install whose `billing_audit_events` table is not there yet
 — the audit row is additional to an action that already happened, so a missing table skips the note

@@ -113,7 +113,7 @@ export function PaymentDetail({ gatewayId, onClose }: { gatewayId: string; onClo
               title="Deliveries naming this payment"
               empty="No stored delivery names this payment."
               count={query.data.events.rows.length}
-              caveat={`Found by ${query.data.events.matchedBy} — an unindexed scan over the stored payload. It can match a delivery that merely mentions this id, and it cannot see one that never stored it.`}
+              caveat={`Found by ${query.data.events.matchedBy} — the payment each delivery was recorded for. Deliveries recorded before that was kept are found by their stored payload instead, which can include one that merely mentions this id.`}
             >
               <ul className="mt-2 flex flex-col gap-1.5">
                 {query.data.events.rows.map((event) => (

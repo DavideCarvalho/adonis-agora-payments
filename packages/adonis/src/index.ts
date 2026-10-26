@@ -21,6 +21,7 @@ export type {
   CustomerListQuery,
   DisputeDeadlineQuery,
   DisputeListItem,
+  DisputeListQuery,
   OpenDisputeQuery,
   PaymentListItem,
   PaymentListQuery,

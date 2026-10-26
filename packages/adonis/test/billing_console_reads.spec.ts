@@ -171,6 +171,29 @@ describe('ledger reads', () => {
     expect(rows.map((row) => row.gatewayEventId).sort()).toEqual(['evt_1', 'evt_2']);
   });
 
+  it('matches the payment each delivery was recorded for, not every payload that names it', async () => {
+    const record = (
+      id: string,
+      type: string,
+      gatewayId: string,
+      payload: Record<string, unknown>,
+    ) =>
+      store.recordWebhookEvent({
+        gatewayEventId: id,
+        provider: 'asaas',
+        type,
+        payload,
+        normalized: { gatewayId, amount: 1, currency: 'BRL' },
+      });
+    await record('evt_1', 'payment.succeeded', 'pay_9', { payment: { id: 'pay_9' } });
+    await record('evt_2', 'payment.disputed', 'pay_9', {});
+    await record('evt_3', 'payment.succeeded', 'pay_other', { note: 'replaces pay_9' });
+    await record('evt_4', 'subscription.updated', 'sub_1', { lastPayment: 'pay_9' });
+
+    const rows = await store.listWebhookEventsForPayment('pay_9');
+    expect(rows.map((row) => row.gatewayEventId).sort()).toEqual(['evt_1', 'evt_2']);
+  });
+
   it('returns nothing for an empty payment id rather than the whole table', async () => {
     await deliver('evt_1', 'payment.succeeded', { payment: { id: 'pay_9' } });
     expect(await store.listWebhookEventsForPayment('')).toEqual([]);

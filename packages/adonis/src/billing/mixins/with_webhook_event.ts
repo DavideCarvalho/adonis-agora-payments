@@ -51,6 +51,14 @@ export class BillingWebhookEvent extends BaseModel {
   @column({ serializeAs: null })
   declare normalized: Record<string, unknown> | null;
 
+  /**
+   * The payment this delivery is about — the normalized event's `gatewayId` on a `payment.*`
+   * event, `''` on any other. `null` on rows recorded before the column existed, and on a
+   * `payment.*` event that normalized no id.
+   */
+  @column({ serializeAs: null })
+  declare paymentGatewayId: string | null;
+
   /** Error message when processing failed. */
   @column({ serializeAs: null })
   declare error: string | null;

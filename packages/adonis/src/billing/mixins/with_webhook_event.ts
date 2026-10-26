@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { BaseModel, beforeCreate, column } from '@adonisjs/lucid/orm';
 import type { DateTime } from 'luxon';
+import { jsonColumn } from './json_column.js';
 
 /**
  * The Lucid model backing the `billing_webhook_events` table — the idempotency ledger.
@@ -41,7 +42,7 @@ export class BillingWebhookEvent extends BaseModel {
   @column()
   declare status: 'received' | 'processed' | 'failed';
 
-  @column({ serializeAs: null })
+  @column({ ...jsonColumn, serializeAs: null })
   declare payload: Record<string, unknown>;
 
   /**
@@ -54,7 +55,7 @@ export class BillingWebhookEvent extends BaseModel {
    * `null` on rows written before an earlier schema ran; the
    * retry says so rather than replaying half an event.
    */
-  @column({ serializeAs: null })
+  @column({ ...jsonColumn, serializeAs: null })
   declare normalized: Record<string, unknown> | null;
 
   /**

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { NormalizeConstructor } from '@adonisjs/core/types/helpers';
 import { BaseModel, beforeCreate, column } from '@adonisjs/lucid/orm';
 import type { DateTime } from 'luxon';
+import { jsonColumn } from './json_column.js';
 
 /**
  * The Lucid model backing the `billing_payments` table. Mirrors the gateway payment —
@@ -87,7 +88,7 @@ export class BillingPayment extends BaseModel {
   @column({ consume: (value: unknown) => (value === null ? null : Number(value)) })
   declare refundedAmount: number | null;
 
-  @column({ serializeAs: null })
+  @column({ ...jsonColumn, serializeAs: null })
   declare payload: Record<string, unknown>;
 
   @column.dateTime({ autoCreate: true })
@@ -160,7 +161,7 @@ export function withPayment() {
       @column({ consume: (value: unknown) => (value === null ? null : Number(value)) })
       declare refundedAmount: number | null;
 
-      @column({ serializeAs: null })
+      @column({ ...jsonColumn, serializeAs: null })
       declare payload: Record<string, unknown>;
 
       @column.dateTime({ autoCreate: true })

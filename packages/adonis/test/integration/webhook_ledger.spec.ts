@@ -21,6 +21,7 @@ describe('webhook ledger (integration)', () => {
   let database: IntegrationDatabase;
   let store: LucidBillingStore;
   const statements: string[] = [];
+  const bindings: unknown[][] = [];
 
   const paymentSucceeded = (id: string, gatewayId: string): WebhookEvent => ({
     id,
@@ -44,7 +45,10 @@ describe('webhook ledger (integration)', () => {
     const connection = database.db.connection();
     const clients = new Set([connection.getWriteClient(), connection.getReadClient()]);
     for (const client of clients) {
-      client.on('query', (query: { sql: string }) => statements.push(query.sql));
+      client.on('query', (query: { sql: string; bindings?: unknown[] }) => {
+        statements.push(query.sql);
+        bindings.push(query.bindings ?? []);
+      });
     }
   });
 
@@ -74,6 +78,7 @@ describe('webhook ledger (integration)', () => {
       refundedAmount: 0,
     });
     statements.length = 0;
+    bindings.length = 0;
   });
 
   describe('concurrent duplicate deliveries', () => {
@@ -222,6 +227,30 @@ describe('webhook ledger (integration)', () => {
     const ledger = rows[2] as { id: string };
     await store.markWebhookProcessed(ledger.id);
     expect((await ledgerRow('evt_pk'))?.status).toBe('processed');
+  });
+
+  it('writes JSON columns to Postgres exactly as the driver serializes them, and reads objects', async () => {
+    // What reaches the wire is knex's own serialization of the object; the column hooks that
+    // SQLite needs must leave it alone here.
+    const payloads = [{ payment: { id: 'pay_json', refunds: [] } }, { payment: { refunds: [1] } }];
+    for (const [i, payload] of payloads.entries()) {
+      await store.savePayment({
+        gatewayId: 'pay_json',
+        provider: 'asaas',
+        status: i === 0 ? 'pending' : 'paid',
+        amount: 1,
+        currency: 'BRL',
+        payload,
+      });
+    }
+    const writes = statements
+      .map((sql, i) => ({ sql, bindings: bindings[i] ?? [] }))
+      .filter(({ sql }) => /^(insert into|update) "billing_payments"/.test(sql));
+    expect(writes.map(({ sql }) => sql.split(' ')[0])).toEqual(['insert', 'update']);
+    // knex serializes an INSERT's object itself; an UPDATE's reaches the `pg` driver as the object.
+    expect(writes[0]?.bindings).toContain(JSON.stringify(payloads[0]));
+    expect(writes[1]?.bindings).toContainEqual(payloads[1]);
+    expect((await store.findPaymentByGatewayId('pay_json'))?.payload).toEqual(payloads[1]);
   });
 
   it('processes a new payment.succeeded delivery in four round trips', async () => {

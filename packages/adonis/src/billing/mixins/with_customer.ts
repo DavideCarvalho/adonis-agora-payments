@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { BaseModel, beforeCreate, column } from '@adonisjs/lucid/orm';
 import type { DateTime } from 'luxon';
+import { jsonColumn } from './json_column.js';
 
 /**
  * The Lucid model backing the `billing_customers` table — the polymorphic mapping between
@@ -60,7 +61,7 @@ export class BillingCustomer extends BaseModel {
   @column()
   declare taxId: string | null;
 
-  @column({ serializeAs: null })
+  @column({ ...jsonColumn, serializeAs: null })
   declare metadata: Record<string, unknown> | null;
 
   @column.dateTime({ autoCreate: true })

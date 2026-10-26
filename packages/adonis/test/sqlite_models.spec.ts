@@ -20,10 +20,13 @@ import type { WebhookEvent } from '../src/types.js';
 /**
  * The default models against a real SQLite.
  *
- * Every billing id is a uuid generated in a `beforeCreate` hook. On SQLite an INSERT reports the
- * numeric rowid, and a model that lets Lucid take the primary key from the INSERT result ends up
- * holding that rowid instead of its uuid — so every later `where id = ?` misses the row, and a
- * webhook is never marked processed or failed.
+ * Two things SQLite does differently from Postgres and MySQL, both of which broke the ledger:
+ *
+ * - Every billing id is a uuid generated in a `beforeCreate` hook, and an INSERT reports the
+ *   numeric rowid. A model that lets Lucid take the primary key from the INSERT result holds that
+ *   rowid instead of its uuid, so every later `where id = ?` misses the row.
+ * - JSON columns are `TEXT`. The driver cannot bind an object in an UPDATE, and reads come back as
+ *   the JSON string.
  */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -74,35 +77,97 @@ describe('default models on SQLite', () => {
   });
 
   it('marks a webhook whose handler threw failed, and lets the retry re-run it', async () => {
-    // An app-defined type, so the built-in sync writes no payment row and the retry exercises
-    // only the ledger.
-    const event: WebhookEvent = {
-      id: 'evt_bad',
-      provider: 'asaas',
-      type: 'invoice.issued',
-      data: { invoice: 'inv_1' },
-      raw: { invoice: 'inv_1' },
-    };
     let attempts = 0;
     const processor = new WebhookProcessor({
       store,
       handlers: {
-        'invoice.issued': () => {
+        'payment.succeeded': () => {
           attempts += 1;
           if (attempts === 1) throw new Error('downstream unavailable');
         },
       },
     });
 
-    await expect(processor.process(event)).rejects.toThrow('downstream unavailable');
+    await expect(processor.process(paymentSucceeded('evt_bad', 'pay_bad'))).rejects.toThrow(
+      'downstream unavailable',
+    );
     const failed = await store.listWebhookEvents({ status: 'failed' });
     expect(failed.map((row) => [row.gatewayEventId, row.error])).toEqual([
       ['evt_bad', 'downstream unavailable'],
     ]);
 
-    expect(await processor.process(event)).toBe(true);
+    // The retry re-runs the built-in sync, which UPDATEs the payment row the first attempt wrote.
+    expect(await processor.process(paymentSucceeded('evt_bad', 'pay_bad'))).toBe(true);
     expect(attempts).toBe(2);
     expect((await store.findWebhookEventByGatewayEventId('evt_bad'))?.status).toBe('processed');
+  });
+
+  it('applies payment.updated to a recorded payment and round-trips its JSON', async () => {
+    const processor = new WebhookProcessor({ store });
+    await processor.process(paymentSucceeded('evt_paid', 'pay_upd'));
+    const raw = { payment: { id: 'pay_upd', refunds: [{ value: 50 }] }, note: 'partial' };
+
+    expect(
+      await processor.process({
+        id: 'evt_upd',
+        provider: 'asaas',
+        type: 'payment.updated',
+        data: { gatewayId: 'pay_upd', amount: 19900, currency: 'BRL', refundedAmount: 50 },
+        raw,
+      }),
+    ).toBe(true);
+
+    const payment = await store.findPaymentByGatewayId('pay_upd');
+    expect(payment?.payload).toEqual(raw);
+    expect(Number(payment?.refundedAmount)).toBe(50);
+    const ledger = await BillingWebhookEvent.findBy('gateway_event_id', 'evt_upd');
+    expect(ledger?.payload).toEqual(raw);
+    expect(ledger?.normalized).toMatchObject({ gatewayId: 'pay_upd', refundedAmount: 50 });
+  });
+
+  it('round-trips every JSON column as an object, through an insert and an update', async () => {
+    const customer = await store.saveCustomer({
+      gatewayId: 'cus_json',
+      provider: 'asaas',
+      metadata: { plan: 'pro', tags: ['a', 'b'] },
+    });
+    await store.saveCustomer({
+      gatewayId: 'cus_json',
+      provider: 'asaas',
+      metadata: { plan: 'max' },
+    });
+    expect((await BillingCustomer.find(customer.id))?.metadata).toEqual({ plan: 'max' });
+
+    const subscription = {
+      gatewayId: 'sub_json',
+      provider: 'asaas',
+      customerId: 'cus_json',
+      status: 'active',
+      planId: 'plan_1',
+    };
+    await store.saveSubscription({ ...subscription, payload: { v: 1 } });
+    await store.saveSubscription({ ...subscription, payload: { v: 2 } });
+    expect((await store.findSubscriptionByGatewayId('sub_json'))?.payload).toEqual({ v: 2 });
+
+    const dispute = { gatewayId: 'dp_json', paymentGatewayId: 'pay_x', provider: 'asaas' };
+    await store.saveDispute({ ...dispute, status: 'open', payload: { stage: 'open' } });
+    await store.saveDispute({ ...dispute, status: 'won', payload: { stage: 'won' } });
+    expect((await store.findDisputeByGatewayId('dp_json'))?.payload).toEqual({ stage: 'won' });
+
+    const usage = await store.recordUsage({
+      meter: 'tokens',
+      quantity: 3,
+      metadata: { model: 'x' },
+    });
+    expect((await BillingUsageEvent.find(usage.id))?.metadata).toEqual({ model: 'x' });
+
+    const audit = await store.recordAuditEvent({ action: 'refund', metadata: { reason: 'dup' } });
+    expect((await BillingAuditEvent.find(audit?.id as string))?.metadata).toEqual({
+      reason: 'dup',
+    });
+    expect((await store.listAuditEvents({ action: 'refund' }))[0]?.metadata).toEqual({
+      reason: 'dup',
+    });
   });
 
   it('keeps the generated uuid on every model after it is saved', async () => {

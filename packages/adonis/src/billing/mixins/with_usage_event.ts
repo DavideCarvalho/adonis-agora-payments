@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { BaseModel, beforeCreate, column } from '@adonisjs/lucid/orm';
 import type { DateTime } from 'luxon';
+import { jsonColumn } from './json_column.js';
 
 /**
  * The Lucid model backing the `billing_usage_events` table — a metered subscription's
@@ -56,7 +57,7 @@ export class BillingUsageEvent extends BaseModel {
   @column()
   declare quantity: number;
 
-  @column({ serializeAs: null })
+  @column({ ...jsonColumn, serializeAs: null })
   declare metadata: Record<string, unknown>;
 
   @column.dateTime({ autoCreate: true })

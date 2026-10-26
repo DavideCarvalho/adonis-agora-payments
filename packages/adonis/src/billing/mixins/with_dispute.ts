@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { BaseModel, beforeCreate, column } from '@adonisjs/lucid/orm';
 import type { DateTime } from 'luxon';
+import { jsonColumn } from './json_column.js';
 
 /**
  * The Lucid model backing the `billing_disputes` table — the only place a chargeback's
@@ -98,7 +99,7 @@ export class BillingDispute extends BaseModel {
   @column.dateTime()
   declare closedAt: DateTime | null;
 
-  @column({ serializeAs: null })
+  @column({ ...jsonColumn, serializeAs: null })
   declare payload: Record<string, unknown>;
 
   @column.dateTime({ autoCreate: true })

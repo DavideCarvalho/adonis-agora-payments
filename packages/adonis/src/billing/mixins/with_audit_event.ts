@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { BaseModel, beforeCreate, column } from '@adonisjs/lucid/orm';
 import type { DateTime } from 'luxon';
+import { jsonColumn } from './json_column.js';
 
 /**
  * The Lucid model backing the `billing_audit_events` table — what HAPPENED to this install
@@ -72,7 +73,7 @@ export class BillingAuditEvent extends BaseModel {
   @column()
   declare message: string | null;
 
-  @column()
+  @column({ ...jsonColumn })
   declare metadata: Record<string, unknown> | null;
 
   @column.dateTime({ autoCreate: true })

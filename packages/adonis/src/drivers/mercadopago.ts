@@ -548,6 +548,30 @@ export class MercadoPagoDriver implements PaymentsDriver {
     return this.#webhookSecret !== undefined ? 'configured' : 'unconfigured';
   }
 
+  /**
+   * The notification's ledger id, read without fetching the resource it names — but only once
+   * the `x-signature` check has passed. With no `webhookSecret` the fetch is all that vouches for
+   * the call, so the delivery is parsed in full.
+   */
+  webhookEventIds(
+    rawBody: string,
+    headers: Record<string, string | string[] | undefined>,
+  ): readonly string[] | undefined {
+    if (this.#webhookSecret === undefined) return undefined;
+    try {
+      return [this.#eventId(this.#verified(rawBody, headers))];
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** The ledger id `parseWebhook` gives a notification. */
+  #eventId(payload: MercadoPagoNotification): string {
+    if (payload.id !== undefined) return String(payload.id);
+    const resourceId = payload.data?.id === undefined ? '' : String(payload.data.id);
+    return `${payload.action ?? payload.type ?? ''}-${resourceId}`;
+  }
+
   async parseWebhook(
     rawBody: string,
     headers: Record<string, string | string[] | undefined>,
@@ -556,7 +580,7 @@ export class MercadoPagoDriver implements PaymentsDriver {
     const type = payload.type ?? '';
     const resourceId = payload.data?.id === undefined ? '' : String(payload.data.id);
     const event: WebhookEvent = {
-      id: payload.id !== undefined ? String(payload.id) : `${payload.action ?? type}-${resourceId}`,
+      id: this.#eventId(payload),
       provider: this.provider,
       type: this.#mapWebhookType(type),
       createdAt: payload.date_created ?? new Date().toISOString(),

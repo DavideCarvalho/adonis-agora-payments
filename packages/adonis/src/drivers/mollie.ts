@@ -594,6 +594,28 @@ export class MollieDriver implements PaymentsDriver {
     return this.#webhookSecret !== undefined ? 'configured' : 'unsupported';
   }
 
+  /**
+   * A next-gen event's own id, read without fetching the payment it names — only when the
+   * `X-Mollie-Signature` check has passed, since a signed envelope is the only body whose id is
+   * vouched for locally. A classic id-only body has no event id until the payment is fetched,
+   * so it is parsed in full.
+   */
+  webhookEventIds(
+    rawBody: string,
+    headers: Record<string, string | string[] | undefined>,
+  ): readonly string[] | undefined {
+    if (this.#webhookSecret === undefined) return undefined;
+    try {
+      this.#verifySignature(rawBody, headerValue(headers, 'x-mollie-signature'));
+      const envelope = this.#parseEventPayload(rawBody);
+      if (envelope?.id === undefined || envelope.id === '') return undefined;
+      if (envelope.entityId === undefined || envelope.entityId === '') return undefined;
+      return [envelope.id];
+    } catch {
+      return undefined;
+    }
+  }
+
   async parseWebhook(
     rawBody: string,
     headers: Record<string, string | string[] | undefined>,

@@ -256,6 +256,22 @@ export interface PaymentsDriver {
     rawBody: string,
     headers: Record<string, string | string[] | undefined>,
   ): WebhookEvent | WebhookEvent[] | Promise<WebhookEvent | WebhookEvent[]>;
+
+  /**
+   * The ids {@link parseWebhook} would give this delivery's events, read WITHOUT calling the
+   * gateway — so the mounted route can answer a redelivery of events the ledger has already
+   * taken without fetching anything.
+   *
+   * Optional, and only for a driver whose `parseWebhook` makes a gateway call. Answer
+   * `undefined` whenever the ids cannot be both known and authenticated locally: no signing
+   * secret configured, an id derived from the fetched resource, a body that does not verify.
+   * The route then parses the delivery in full, exactly as it would without this method, so a
+   * forged or malformed delivery is still refused by `parseWebhook`.
+   */
+  webhookEventIds?(
+    rawBody: string,
+    headers: Record<string, string | string[] | undefined>,
+  ): readonly string[] | undefined;
 }
 
 // ── Input types ─────────────────────────────────────────────────────────────────────────

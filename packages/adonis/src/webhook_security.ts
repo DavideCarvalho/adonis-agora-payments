@@ -1,4 +1,11 @@
-import { createHash, createHmac, verify as cryptoVerify, timingSafeEqual } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  createPublicKey,
+  verify as cryptoVerify,
+  type KeyObject,
+  timingSafeEqual,
+} from 'node:crypto';
 import { reportWebhookVerification } from './diagnostics.js';
 import { headerValue } from './http.js';
 
@@ -71,6 +78,31 @@ export function verifyHmacOverPayload(
 }
 
 /**
+ * Parsed public keys, by the configured string. A driver verifies every delivery against the
+ * same key, so it is decoded once rather than per webhook. A key that fails to parse is not
+ * cached: it throws on every call, as it would uncached. Bounded, oldest out first, for an app
+ * that builds a driver per tenant.
+ */
+const publicKeys = new Map<string, KeyObject>();
+const PUBLIC_KEY_CACHE_SIZE = 32;
+
+function parsedPublicKey(publicKey: string): KeyObject {
+  let key = publicKeys.get(publicKey);
+  if (key === undefined) {
+    const pem = publicKey.includes('-----BEGIN')
+      ? publicKey
+      : Buffer.from(publicKey, 'base64').toString('utf8');
+    key = createPublicKey(pem);
+    if (publicKeys.size >= PUBLIC_KEY_CACHE_SIZE) {
+      const oldest = publicKeys.keys().next().value;
+      if (oldest !== undefined) publicKeys.delete(oldest);
+    }
+    publicKeys.set(publicKey, key);
+  }
+  return key;
+}
+
+/**
  * Verify Woovi's recommended `x-webhook-signature`: an RSA-SHA256 signature made with
  * Woovi's private key, verified here against the public key published at
  * `GET /api/v1/webhook/public-keys`. The key may be pasted as PEM or as the base64 of a
@@ -85,13 +117,10 @@ export function verifyRsaSha256Signature(
     reportWebhookVerification('rsa-sha256', false);
     return false;
   }
-  const pem = publicKey.includes('-----BEGIN')
-    ? publicKey
-    : Buffer.from(publicKey, 'base64').toString('utf8');
   const ok = cryptoVerify(
     'RSA-SHA256',
     Buffer.from(rawBody, 'utf8'),
-    pem,
+    parsedPublicKey(publicKey),
     Buffer.from(signature, 'base64'),
   );
   reportWebhookVerification('rsa-sha256', ok);

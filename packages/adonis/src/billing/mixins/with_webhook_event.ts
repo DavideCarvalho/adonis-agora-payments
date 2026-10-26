@@ -9,6 +9,12 @@ import type { DateTime } from 'luxon';
  */
 export class BillingWebhookEvent extends BaseModel {
   /**
+   * The hook below assigns the id, so Lucid must not overwrite it with what the INSERT reports.
+   * On SQLite that is the numeric rowid, and every later `where id = ?` would miss the row.
+   */
+  static override selfAssignPrimaryKey = true;
+
+  /**
    * The `id` column is a `uuid` with no database-side default (see the published
    * migration), so nothing but this hook fills it. Generating it here rather than in the
    * migration keeps every supported dialect working — `gen_random_uuid()` is Postgres-only

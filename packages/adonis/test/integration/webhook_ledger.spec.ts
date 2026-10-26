@@ -199,6 +199,31 @@ describe('webhook ledger (integration)', () => {
     });
   });
 
+  it('keeps the generated uuid as the id of every saved row', async () => {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    const rows = [
+      await store.saveCustomer({ gatewayId: 'cus_pk', provider: 'asaas' }),
+      await store.savePayment({
+        gatewayId: 'pay_pk',
+        provider: 'asaas',
+        status: 'paid',
+        amount: 1,
+        currency: 'BRL',
+      }),
+      await store.recordWebhookEvent({
+        gatewayEventId: 'evt_pk',
+        provider: 'asaas',
+        type: 'payment.succeeded',
+        payload: {},
+      }),
+      await store.recordUsage({ meter: 'tokens', quantity: 1 }),
+    ];
+    for (const row of rows) expect(String(row?.id)).toMatch(uuid);
+    const ledger = rows[2] as { id: string };
+    await store.markWebhookProcessed(ledger.id);
+    expect((await ledgerRow('evt_pk'))?.status).toBe('processed');
+  });
+
   it('processes a new payment.succeeded delivery in four round trips', async () => {
     // Claim (INSERT), the payment upsert (SELECT + INSERT), mark processed (UPDATE).
     const processor = new WebhookProcessor({ store });

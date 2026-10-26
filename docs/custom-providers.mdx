@@ -229,6 +229,39 @@ id with no status and no signature, so the only way to learn what happened — o
 call is genuine at all — is an authenticated fetch of that payment. The mounted route
 awaits `parseWebhook`.
 
+### Skipping the fetch on a redelivery
+
+A driver whose `parseWebhook` calls the gateway pays that call on every redelivery too, only for the
+ledger to discard the event. The optional `webhookEventIds(rawBody, headers)` lets the route skip it:
+return the ids `parseWebhook` **would** give this delivery's events, read from the body alone. The
+mounted route asks it before `parseWebhook`; when every id is already in the ledger as `received` or
+`processed`, it answers `200 { received: true }` and `parseWebhook` is never called. An unseen id, a
+`failed` one, `undefined`, a throw or a store error all fall through to the normal path.
+
+```ts
+webhookEventIds(rawBody: string, headers: Record<string, string | string[] | undefined>) {
+  if (this.#webhookSecret === undefined) return undefined   // nothing to authenticate with
+  try {
+    return [this.#eventId(this.#verified(rawBody, headers))]  // same id parseWebhook builds
+  } catch {
+    return undefined                                        // let parseWebhook refuse it
+  }
+}
+```
+
+Two rules keep it safe:
+
+- **Only after a local signature check.** An id read from an unverified body would let a forged
+  request that names a known id be answered `200`, skipping the `400` and the `webhook.rejected`
+  audit row it should earn. Return `undefined` when there is no secret, when the body does not
+  verify, or when the id is only known once the resource is fetched.
+- **Exactly the ids `parseWebhook` produces.** A different id never matches the ledger, and the
+  method then costs a lookup and saves nothing.
+
+Leave it out when the gateway call **is** the verification — PayPal's `verify-webhook-signature`,
+Mollie's classic id-only callback, Mercado Pago without a secret. A driver without the method is
+parsed in full on every delivery.
+
 ## Disputes — the two optional methods
 
 `findDispute` and `submitDisputeEvidence` are the only optional members of the contract,

@@ -99,7 +99,10 @@ What you get back is a fully populated event — status, amount, currency and yo
 ```
 
 One extra API call per notification is Mercado Pago's design, not an inefficiency of the
-driver; the mounted `/payments/webhook/mercadopago` route pays it for you. **A failed fetch
+driver; the mounted `/payments/webhook/mercadopago` route pays it for you. With `webhookSecret`
+configured, a **redelivery** skips it: the route reads the notification's id from the signed body
+and, when the ledger already holds that event as `received` or `processed`, answers `200` without
+fetching. A failed or unseen event, and every delivery without a secret, is fetched as above. **A failed fetch
 throws**, so the route answers 400 and Mercado Pago retries — reporting a status the
 gateway did not confirm would be worse than a retry.
 

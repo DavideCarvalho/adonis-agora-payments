@@ -31,7 +31,7 @@ Seven tables:
 | `billing_customers` | the polymorphic mapping between your rows and their gateway customers — **opt-in** (see below) |
 | `billing_subscriptions` | subscriptions — `status`, `plan_id`, `trial_ends_at`, `ends_at` |
 | `billing_payments` | every payment, keyed by **gateway id**, indexed on `external_reference` — **your** id for the charge — and carrying `refunded_amount` |
-| `billing_webhook_events` | the **idempotency ledger**, keyed by gateway event id, storing the raw payload *and* the normalized event |
+| `billing_webhook_events` | the **idempotency ledger**, keyed by gateway event id, storing the raw payload *and* the normalized event, plus `payment_gateway_id` — the payment a `payment.*` event is about (`''` on any other event) |
 | `billing_disputes` | chargebacks and pre-chargeback alerts, keyed by the **dispute's** gateway id — and `evidence_due_by`, the deadline to answer |
 | `billing_usage_events` | metered consumption, one row per event — the input to [usage-based billing](#usage-based-billing--metered-subscriptions) |
 | `billing_audit_events` | what a human or the endpoint *did*, which no other table keeps — see [The audit trail](#the-audit-trail) |
@@ -39,8 +39,19 @@ Seven tables:
 `createBillingTables` also carries columns added *after* their table shipped, as guarded
 `ALTER`s: `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists, so an
 install upgrading from an earlier version would otherwise keep the old columns and fail on
-the first query naming a new one. `ensureSchema()` is public on `LucidBillingStore` for an
-app that turned `autoCreateSchema` off and wants it in a seeder.
+the first query naming a new one. Indexes are carried the same way, including dropping the ones a
+wider index replaced — see [Indexes, and what an upgrade builds](/docs/payments/production#indexes-and-what-an-upgrade-builds)
+for the list and what building them costs on a large table. `ensureSchema()` is public on
+`LucidBillingStore` for an app that turned `autoCreateSchema` off and wants it in a seeder.
+
+The DDL targets Postgres, MySQL and SQLite. On SQLite the JSON columns are `TEXT`; the ready-made
+models serialize `payload`, `metadata` and `normalized` to a string on write and parse it on read
+there (on Postgres and MySQL the value passes through untouched), and they set
+`selfAssignPrimaryKey`, so the uuid generated in `beforeCreate` is kept rather than replaced by the
+rowid SQLite's `INSERT` reports. The `withPayment()` and `withSubscription()` mixins treat their
+`payload` column the same way. A model you pass in `models` inherits both by extending the
+ready-made one; a model written from scratch for SQLite needs the same two things, or later updates
+by `id` match nothing.
 
 `billing_webhook_events` is the heart: it's what makes every redelivery a no-op instead of a
 double-grant.

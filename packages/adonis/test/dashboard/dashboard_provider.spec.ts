@@ -474,6 +474,141 @@ describe('page routes are refused with the access-denied page', () => {
     expect(recorded.body).toBeUndefined();
   });
 
+  describe('the dashboard-gate contract (boolean | { allowed, reason })', () => {
+    // A decision OBJECT is truthy: a guard written as `if (!(await authorize(ctx)))` would let
+    // `{ allowed: false }` straight through. These pin that it denies, on both surfaces.
+    const API = '/payments/api/health';
+    const cases: Array<{
+      name: string;
+      authorize: NonNullable<PaymentsDashboardConfig['authorize']>;
+      status: 401 | 403;
+      error: 'unauthorized' | 'forbidden';
+      heading: string;
+    }> = [
+      {
+        name: '{ allowed: false }',
+        authorize: () => ({ allowed: false }),
+        status: 403,
+        error: 'forbidden',
+        heading: '<h1>Access denied</h1>',
+      },
+      {
+        name: "reason 'forbidden'",
+        authorize: async () => ({ allowed: false, reason: 'forbidden' }),
+        status: 403,
+        error: 'forbidden',
+        heading: '<h1>Access denied</h1>',
+      },
+      {
+        name: "reason 'unauthenticated'",
+        authorize: () => ({ allowed: false, reason: 'unauthenticated' }),
+        status: 401,
+        error: 'unauthorized',
+        heading: '<h1>',
+      },
+      {
+        name: 'bare false',
+        authorize: () => false,
+        status: 403,
+        error: 'forbidden',
+        heading: '<h1>Access denied</h1>',
+      },
+      {
+        name: 'a throwing hook',
+        authorize: () => {
+          throw new Error('auth backend down');
+        },
+        status: 403,
+        error: 'forbidden',
+        heading: '<h1>Access denied</h1>',
+      },
+    ];
+
+    for (const c of cases) {
+      it(`${c.name} -> ${c.status} page`, async () => {
+        const recorded: Recorded = { headers: {} };
+        await (await pageHandler({ authorize: c.authorize }))(fakeCtx(recorded));
+        expect(recorded.status).toBe(c.status);
+        expect(recorded.headers['content-type']).toBe('text/html; charset=utf-8');
+        expect(recorded.body).toContain(c.heading);
+      });
+
+      it(`${c.name} -> ${c.status} JSON on the API`, async () => {
+        const recorded: Recorded = { headers: {} };
+        await (await pageHandler({ authorize: c.authorize }, API))(fakeCtx(recorded));
+        expect(recorded.status).toBe(c.status);
+        expect(recorded.body).toEqual({ error: c.error });
+      });
+    }
+
+    it('hands the matching reason to an accessDenied renderer', async () => {
+      const seen: unknown[] = [];
+      const recorded: Recorded = { headers: {} };
+      await (
+        await pageHandler({
+          authorize: () => ({ allowed: false, reason: 'unauthenticated' }),
+          accessDenied: (info) => {
+            seen.push(info);
+            return '<p>x</p>';
+          },
+        })
+      )(fakeCtx(recorded));
+      expect(seen[0]).toMatchObject({ status: 401, reason: 'unauthenticated' });
+      expect(recorded.status).toBe(401);
+    });
+
+    for (const [name, authorize] of [
+      ['true', () => true],
+      ['{ allowed: true }', () => ({ allowed: true })],
+    ] as const) {
+      it(`${name} lets the API request through`, async () => {
+        const recorded: Recorded = { headers: {} };
+        await (await pageHandler({ authorize }, API))(fakeCtx(recorded));
+        expect(recorded.status).not.toBe(401);
+        expect(recorded.status).not.toBe(403);
+        expect(recorded.body).not.toEqual({ error: 'forbidden' });
+      });
+    }
+
+    it('keeps a redirect the hook wrote even when it answers { allowed: false } (page and API)', async () => {
+      for (const pattern of ['/payments', API]) {
+        const recorded: Recorded = { headers: {} };
+        await (
+          await pageHandler(
+            {
+              authorize: (c) => {
+                (c.response as unknown as { header(n: string, v: string): void }).header(
+                  'location',
+                  '/login',
+                );
+                return { allowed: false, reason: 'unauthenticated' };
+              },
+            },
+            pattern,
+          )
+        )(fakeCtx(recorded));
+        expect(recorded.headers.location).toBe('/login');
+        expect(recorded.status).toBeUndefined();
+        expect(recorded.body).toBeUndefined();
+      }
+    });
+
+    it('still runs the session step after a passing decision', async () => {
+      const recorded: Recorded = { headers: {} };
+      await (
+        await pageHandler(
+          {
+            authorize: () => ({ allowed: true }),
+            dashboardAuth: { secret: 's'.repeat(32), login: () => null },
+          },
+          API,
+        )
+      )(fakeCtx(recorded));
+      expect(recorded.status).toBe(401);
+      expect(recorded.body).toMatchObject({ error: 'unauthorized', auth: { modes: ['login'] } });
+    });
+  });
+
   it('puts the CSP nonce on the inline <style> when the host exposes one', async () => {
     const recorded: Recorded = { headers: {} };
     await (await pageHandler({ authorize: () => false }))(fakeCtx(recorded, { nonce: 'n0nce' }));

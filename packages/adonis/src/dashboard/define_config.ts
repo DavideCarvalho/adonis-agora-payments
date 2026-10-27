@@ -9,6 +9,9 @@ import {
   type ResolvedDashboardAuth,
   resolveDashboardAuth,
 } from './auth.js';
+import type { AuthorizeResult } from './authorize_decision.js';
+
+export type { AuthorizeDecision, AuthorizeResult } from './authorize_decision.js';
 
 /**
  * The function form of {@link PaymentsDashboardConfig.accessDenied}: render (or answer) a refused
@@ -24,13 +27,22 @@ export type AccessDeniedOption = GenericAccessDeniedOption<HttpContext>;
 
 /**
  * Authorization guard for the dashboard. Runs before every dashboard route
- * (API + HTML). Return `true` to allow the request, `false` to deny it (the
- * provider replies `403`). May be async (e.g. an auth lookup).
+ * (API + HTML). May be async (e.g. an auth lookup). Answer with:
+ *
+ * - `true` / `{ allowed: true }` — let the request through;
+ * - `{ allowed: false, reason: 'unauthenticated' }` — nobody is signed in: `401`;
+ * - `{ allowed: false, reason: 'forbidden' }`, `{ allowed: false }` or `false` — `403`.
+ *
+ * A hook that throws is a `403`. A hook that already answered the request (wrote a
+ * redirect — e.g. to your login page) keeps that answer; the provider writes nothing.
+ * Page requests get the access-denied HTML page with the matching status; API requests
+ * get `{ error: 'unauthorized' | 'forbidden' }`.
  *
  * It receives the AdonisJS {@link HttpContext}, so it can read the session,
- * a bearer token, an IP allow-list, etc.
+ * a bearer token, an IP allow-list, etc. `@adonis-agora/authz`'s `authorizeByRoles`
+ * fits here as-is.
  */
-export type AuthorizeHook = (ctx: HttpContext) => boolean | Promise<boolean>;
+export type AuthorizeHook = (ctx: HttpContext) => AuthorizeResult | Promise<AuthorizeResult>;
 
 /** Shape of `config/payments_dashboard.ts`. */
 export interface PaymentsDashboardConfig {

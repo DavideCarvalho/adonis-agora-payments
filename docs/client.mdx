@@ -44,7 +44,7 @@ export default defineConfig({
 | --- | --- | --- |
 | `enabled` | `false` | When `false`, no route is registered at all. |
 | `path` | `'/payments/client'` | Route prefix. The endpoint is `<path>/status`. |
-| `authorize` | a resolved user | Is this request allowed at all. A denial is `401`. |
+| `authorize` | a resolved user | Is this request allowed at all — a boolean or `{ allowed, reason? }`. A denial is `401`; `{ allowed: false, reason: 'forbidden' }` is `403`. |
 | `owner` | `{ type: 'User', id: user.id }` | Who is asking. `null` is a `401`. |
 | `authorizeReference` | the customer registry | May this caller see THIS payment. A denial is `403`. |
 | `resolveReference` | unset | Escape hatch: map a reference that is neither your `externalReference` nor a gateway id. |
@@ -74,6 +74,7 @@ this small cannot leak a column somebody adds to `billing_payments` later withou
 | --- | --- |
 | `400` | No `reference` in the query string, or a blank one. |
 | `401` | No caller could be resolved, or `authorize` said no. |
+| `403` | `authorize` answered `{ allowed: false, reason: 'forbidden' }`. |
 | `403` | A caller was resolved and does not own this reference. |
 | `404` | No payment row for that reference — **including a charge whose webhook has not landed yet**. |
 | `503` | The billing layer is off in this deployment. |

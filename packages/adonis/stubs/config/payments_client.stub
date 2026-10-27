@@ -15,6 +15,8 @@ import { defineConfig } from '@adonis-agora/payments/client'
  *
  * - \`authorize\`          — is this request allowed at all (default: there is a
  *                          resolved user on \`ctx.auth\`; no user is a 401).
+ *                          Returns a boolean or \`{ allowed, reason? }\`; only
+ *                          \`reason: 'forbidden'\` turns a denial into a 403.
  * - \`owner\`              — who is asking (default: \`{ type: 'User', id: user.id }\`).
  * - \`authorizeReference\` — may this caller see THIS payment. The default checks
  *                          the payment's gateway customer against the one the owner

@@ -9,6 +9,8 @@ import { defineConfig } from '@adonis-agora/payments/dashboard'
  * By default the dashboard is open OUTSIDE production, and in production it
  * requires a bearer token equal to \`PAYMENTS_DASHBOARD_TOKEN\` (deny if unset).
  * Replace \`authorize\` with your own guard (session, role, IP allow-list, …).
+ * It returns \`true\`/\`false\` or \`{ allowed, reason?: 'unauthenticated' | 'forbidden' }\`:
+ * \`unauthenticated\` is a 401, any other denial (or a throw) a 403.
  *
  * Set \`enabled: false\` to remove it entirely — no routes are registered at all.
  *

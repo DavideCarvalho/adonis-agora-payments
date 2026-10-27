@@ -1,5 +1,6 @@
 import type { HttpContext } from '@adonisjs/core/http';
 import type { BillingStore } from '../billing/billing_store.js';
+import { resolveAuthorizeResult } from '../dashboard/authorize_decision.js';
 import type { ClientPayment, ResolvedPaymentsClientConfig } from './define_config.js';
 
 /**
@@ -166,7 +167,14 @@ export async function paymentStatus(
   const trimmed = reference.trim();
 
   // ── 1. The caller, before the reference. ───────────────────────────────────────────
-  if (!(await config.authorize(ctx))) return unauthorized();
+  // Never `if (!(await config.authorize(ctx)))`: a `{ allowed: false }` decision is truthy.
+  // An explicit `reason: 'forbidden'` is a 403; every other denial keeps this endpoint's 401.
+  const answer = await config.authorize(ctx);
+  if (!resolveAuthorizeResult(answer).allowed) {
+    return typeof answer === 'object' && answer?.reason === 'forbidden'
+      ? forbidden()
+      : unauthorized();
+  }
   const owner = await config.owner(ctx);
   if (!owner) return unauthorized();
 

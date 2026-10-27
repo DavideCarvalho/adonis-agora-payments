@@ -41,6 +41,13 @@ export {
   SESSION_COOKIE_NAME,
   sanitizeReturnTo,
 } from './auth.js';
+// The dashboard-gate contract shared (by copy) with every @adonis-agora console.
+export type {
+  AuthorizeDecision,
+  AuthorizeResult,
+  ResolvedAuthorizeResult,
+} from './authorize_decision.js';
+export { resolveAuthorizeResult, runAuthorize } from './authorize_decision.js';
 export type {
   AccessDeniedOption,
   AccessDeniedRenderer,

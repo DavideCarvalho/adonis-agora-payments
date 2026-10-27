@@ -1,5 +1,6 @@
 import type { HttpContext } from '@adonisjs/core/http';
 import type { BillingStore } from '../billing/billing_store.js';
+import type { AuthorizeResult } from '../dashboard/authorize_decision.js';
 
 /**
  * The app-side row a payment belongs to — the same `{ type, id }` pair
@@ -22,8 +23,12 @@ export interface ClientPayment {
   paidAt: Date | null;
 }
 
-/** Whether this request may talk to the client endpoint at all. */
-export type ClientAuthorizeHook = (ctx: HttpContext) => boolean | Promise<boolean>;
+/**
+ * Whether this request may talk to the client endpoint at all. Same answer shape as the
+ * dashboard's `authorize` — a boolean or an `AuthorizeDecision` — so `@adonis-agora/authz`'s
+ * `authorizeByRoles` fits both. Only `true` / `{ allowed: true }` passes.
+ */
+export type ClientAuthorizeHook = (ctx: HttpContext) => AuthorizeResult | Promise<AuthorizeResult>;
 
 /** Who is asking. `null` denies the request (`401`). */
 export type ClientOwnerHook = (
@@ -76,7 +81,9 @@ export interface PaymentsClientConfig {
   path?: string;
   /**
    * Is this request allowed at all. Defaults to "there is a resolved user" — read
-   * structurally off `ctx.auth` (see {@link resolveRequestUser}). A denial is `401`.
+   * structurally off `ctx.auth` (see {@link resolveRequestUser}). A denial (`false`,
+   * `{ allowed: false }`, `reason: 'unauthenticated'`) is `401`; an explicit
+   * `{ allowed: false, reason: 'forbidden' }` is `403`.
    */
   authorize?: ClientAuthorizeHook;
   /**

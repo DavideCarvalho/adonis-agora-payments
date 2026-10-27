@@ -321,7 +321,7 @@ export default defineConfig({
 | `enabled` | `true` | When `false`, no routes are registered at all. |
 | `path` | `'/payments'` | Route prefix. The HTML serves at the root; the JSON API at `<path>/api`. |
 | `currency` | `'BRL'` | ISO 4217 code the money columns render in. Does not change what is stored. |
-| `authorize` | see below | Per-request guard: `(ctx: HttpContext) => boolean \| Promise<boolean>`. |
+| `authorize` | see below | Per-request guard: `(ctx: HttpContext) => AuthorizeResult \| Promise<AuthorizeResult>` — a boolean or `{ allowed, reason? }`. |
 | `dashboardAuth` | absent | Opt-in session layer on top of `authorize`. The console's **Sign out** link exists only when this is set — it is the only configuration that registers a `<path>/logout` route. |
 
 ### Authorization
@@ -331,13 +331,32 @@ equal to `PAYMENTS_DASHBOARD_TOKEN`, compared in constant time, and **denies whe
 unset** — it fails closed. The token is read from an `Authorization: Bearer <token>` header, an
 `x-payments-token` header, or a `?token=` query param.
 
-Replace it with your own guard; a denied request gets a `403` — JSON for an API call, the
-[access-denied page](#the-access-denied-page) for a browser:
+Replace it with your own guard. It answers with a boolean or an `AuthorizeDecision` — the same
+contract every Agora console takes:
+
+```ts
+interface AuthorizeDecision {
+  allowed: boolean
+  reason?: 'unauthenticated' | 'forbidden'
+}
+type AuthorizeResult = boolean | AuthorizeDecision
+```
+
+| The hook answers | Status |
+| --- | --- |
+| `true` or `{ allowed: true }` | let through |
+| `{ allowed: false, reason: 'unauthenticated' }` | `401` |
+| `{ allowed: false, reason: 'forbidden' }`, `{ allowed: false }` or `false` | `403` |
+| it throws | `403` |
+| it already answered (wrote a redirect) | that answer, untouched |
+
+A denial is JSON for an API call (`{ "error": "unauthorized" }` / `{ "error": "forbidden" }`), the
+[access-denied page](#the-access-denied-page) with the matching status for a browser:
 
 ```ts
 export default defineConfig({
   authorize: async (ctx) => {
-    await ctx.auth.check()
+    if (!(await ctx.auth.check())) return { allowed: false, reason: 'unauthenticated' }
     return ctx.auth.user?.isAdmin === true
   },
 })
@@ -363,7 +382,8 @@ guard in front of it.
 
 ### The access-denied page
 
-A refused **API** request gets JSON (`403 { "error": "forbidden" }`, or
+A refused **API** request gets JSON (`403 { "error": "forbidden" }`, `401 { "error": "unauthorized" }`
+when `authorize` said `reason: 'unauthenticated'`, or
 `401 { "error": "unauthorized", "auth": { "modes": [...] } }` without a session) — that is what
 the console's own `fetch` calls expect. A refused **page** navigation — the console shell, its
 assets, or the Mode-A-only "open this from your app" case — gets a real page instead: a dark card

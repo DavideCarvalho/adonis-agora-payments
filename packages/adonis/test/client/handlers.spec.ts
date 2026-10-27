@@ -80,6 +80,29 @@ describe('payment status handler', () => {
     spy.mockRestore();
   });
 
+  it('refuses a { allowed: false } decision — a truthy object is still a denial', async () => {
+    const result = await call(ana, 'pay_ana', { authorize: () => ({ allowed: false }) });
+    expect(result.status).toBe(401);
+    expect(result.body).toEqual({ error: 'unauthorized' });
+  });
+
+  it("maps reason 'unauthenticated' to 401 and 'forbidden' to 403", async () => {
+    const unauthenticated = await call(ana, 'pay_ana', {
+      authorize: () => ({ allowed: false, reason: 'unauthenticated' }),
+    });
+    expect(unauthenticated.status).toBe(401);
+    const forbidden = await call(ana, 'pay_ana', {
+      authorize: async () => ({ allowed: false, reason: 'forbidden' }),
+    });
+    expect(forbidden.status).toBe(403);
+    expect(forbidden.body).toEqual({ error: 'forbidden' });
+  });
+
+  it('lets a { allowed: true } decision through to the owner check', async () => {
+    const result = await call(ana, 'pay_ana', { authorize: () => ({ allowed: true }) });
+    expect(result.status).toBe(200);
+  });
+
   it('refuses when authorize passes but no owner can be resolved', async () => {
     // A real shape: a guard that authenticates a machine token with no user row behind it.
     const result = await call(ana, 'pay_ana', { authorize: () => true, owner: () => null });

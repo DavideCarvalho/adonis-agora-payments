@@ -19,6 +19,7 @@ import {
   SESSION_COOKIE_NAME,
   sanitizeReturnTo,
 } from '../src/dashboard/auth.js';
+import { runAuthorize } from '../src/dashboard/authorize_decision.js';
 import {
   type PaymentsDashboardConfig,
   type ResolvedPaymentsDashboardConfig,
@@ -116,6 +117,7 @@ export default class PaymentsDashboardProvider {
 
   /** Warn once so a throwing `login`/`session` hook doesn't spam the logs on every failed attempt. */
   private warnedOnHookThrow = false;
+  private warnedOnAuthorizeThrow = false;
 
   async boot() {
     const config = resolveConfig(
@@ -498,6 +500,18 @@ export default class PaymentsDashboardProvider {
       .as('payments_dashboard.logout');
   }
 
+  private async warnAuthorizeThrow(hookError: unknown): Promise<void> {
+    if (this.warnedOnAuthorizeThrow) return;
+    this.warnedOnAuthorizeThrow = true;
+    const message = hookError instanceof Error ? hookError.message : String(hookError);
+    try {
+      const logger = await this.app.container.make('logger');
+      logger.warn(`payments dashboard authorize hook threw; treating as denial (403). ${message}`);
+    } catch {
+      // Logging is best-effort: a missing logger must not turn the 403 into a 500.
+    }
+  }
+
   private async warnHookThrow(hookError: unknown): Promise<void> {
     if (hookError === undefined || this.warnedOnHookThrow) return;
     this.warnedOnHookThrow = true;
@@ -510,8 +524,11 @@ export default class PaymentsDashboardProvider {
    * Run the guards for a dashboard resource. Composes the `authorize` hook (bearer token/custom)
    * with the optional `dashboardAuth` session guard — BOTH must pass:
    *
-   * 1. `authorize` fails -> `403`: the built-in (or host-customised) access-denied PAGE for a
-   *    `page` request, `{ error: 'forbidden' }` JSON for an `api` request.
+   * 1. `authorize` denies -> `401` when it answered `{ allowed: false, reason: 'unauthenticated' }`,
+   *    `403` otherwise (`false`, `{ allowed: false }`, `reason: 'forbidden'`, or a thrown hook):
+   *    the built-in (or host-customised) access-denied PAGE for a `page` request,
+   *    `{ error: 'unauthorized' | 'forbidden' }` JSON for an `api` request. A hook that already
+   *    answered (a redirect, a queued body) keeps its answer.
    * 2. `dashboardAuth` configured AND no valid session -> for a `page` request, redirect `302` to
    *    the login page (Mode B) carrying a sanitized `returnTo`, or the `401` "open this console
    *    from your app" page (Mode A only); for an `api` request,
@@ -528,12 +545,16 @@ export default class PaymentsDashboardProvider {
     ctx: HttpContext,
     mode: 'page' | 'api',
   ): Promise<{ allowed: boolean; actor?: string }> {
-    const allowed = await config.authorize(ctx);
-    if (!allowed) {
+    // Never `if (!(await config.authorize(ctx)))`: a `{ allowed: false }` decision is truthy.
+    const decision = await runAuthorize(config.authorize, ctx);
+    if (!decision.allowed) {
+      if (decision.hookError !== undefined) await this.warnAuthorizeThrow(decision.hookError);
       if (mode === 'page') {
-        await this.denyPage(ctx, config, { status: 403, reason: 'forbidden' });
-      } else if (!ctx.response.getHeader('location')) {
-        ctx.response.status(403).json({ error: 'forbidden' });
+        await this.denyPage(ctx, config, { status: decision.status, reason: decision.reason });
+      } else if (!responseAnswered(ctx)) {
+        ctx.response
+          .status(decision.status)
+          .json({ error: decision.status === 401 ? 'unauthorized' : 'forbidden' });
       }
       return { allowed: false };
     }

@@ -320,6 +320,12 @@ export interface SubscriptionListQuery extends BillingListQuery {
   customerId?: string;
 }
 
+/** Filter + page for {@link BillingStore.listDisputes}. */
+export interface DisputeListQuery extends BillingListQuery {
+  /** The disputed payment's gateway id — every dispute filed against one payment. Exact match. */
+  paymentGatewayId?: string;
+}
+
 /** Filter + page for {@link BillingStore.listWebhookEvents}. */
 export interface WebhookEventListQuery extends BillingListQuery {
   /**
@@ -751,10 +757,10 @@ export interface BillingStore<
   findOpenDisputeByPayment(paymentGatewayId: string): Promise<DisputeRow | null>;
 
   /**
-   * Page through recorded disputes, newest first, `status`/`provider` filters — the same
-   * shape as {@link listPayments}, and normalized for the same reason.
+   * Page through recorded disputes, newest first, `status`/`provider`/`paymentGatewayId`
+   * filters — the same shape as {@link listPayments}, and normalized for the same reason.
    */
-  listDisputes(query: BillingListQuery): Promise<DisputeListItem[]>;
+  listDisputes(query: DisputeListQuery): Promise<DisputeListItem[]>;
 
   /** How many disputes match a status and/or a creation window. */
   countDisputes(query: BillingCountQuery): Promise<number>;
@@ -854,12 +860,11 @@ export interface BillingStore<
    * payments table. The ledger does have one — every delivery that moved the row is in it — but
    * nothing links a ledger row to a payment, because the link lives inside the stored payload.
    *
-   * So this is a SUBSTRING match over the payload, and both of that decision's costs are real:
-   * it is an unindexed scan (bounded by `size`, newest first, which is why the bound is not
-   * optional in spirit even though it has a default), and a gateway id that happens to be a
-   * substring of some other identifier in another delivery will match. It is offered anyway
-   * because the alternative on the table today is nothing at all. The honest fix is a
-   * `payment_gateway_id` column the PROCESSOR fills on the way in; see the changeset.
+   * So the link is recorded on the way in: each ledger row keeps the normalized `gatewayId` of
+   * the `payment.*` event it carried, and this is an indexed equality on it, newest first,
+   * bounded by `size`. Rows recorded before that column existed have nothing to compare, so
+   * those alone are still found by a SUBSTRING match over their stored payload — unindexed, and
+   * able to match a delivery that merely mentions the id.
    *
    * Never returns the payload itself — the same rule the rest of this console follows.
    */

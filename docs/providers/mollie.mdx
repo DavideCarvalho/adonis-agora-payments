@@ -132,6 +132,11 @@ events keep their own Mollie event id, which is already stable and unique. An ev
 a resource that is not a payment (a payment link, a sales invoice) is reported from the
 envelope without a fetch, for an app handler to pick up.
 
+A signed **redelivery** is not fetched: once the signature checks out, the route reads the event id
+from the envelope and, when the ledger already holds it as `received` or `processed`, answers `200`
+without calling Mollie. A classic id-only callback has no event id until the payment is fetched, so
+it is fetched every time.
+
 ## Payment methods
 
 `PaymentMethodName` names **categories**, not brands — enumerating iDEAL, Bancontact, EPS,

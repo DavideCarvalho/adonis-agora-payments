@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { BaseModel, beforeCreate, column } from '@adonisjs/lucid/orm';
 import type { DateTime } from 'luxon';
+import { jsonColumn } from './json_column.js';
 
 /**
  * The Lucid model backing the `billing_webhook_events` table — the idempotency ledger.
@@ -8,6 +9,12 @@ import type { DateTime } from 'luxon';
  * webhook is never processed twice.
  */
 export class BillingWebhookEvent extends BaseModel {
+  /**
+   * The hook below assigns the id, so Lucid must not overwrite it with what the INSERT reports.
+   * On SQLite that is the numeric rowid, and every later `where id = ?` would miss the row.
+   */
+  static override selfAssignPrimaryKey = true;
+
   /**
    * The `id` column is a `uuid` with no database-side default (see the published
    * migration), so nothing but this hook fills it. Generating it here rather than in the
@@ -35,7 +42,7 @@ export class BillingWebhookEvent extends BaseModel {
   @column()
   declare status: 'received' | 'processed' | 'failed';
 
-  @column({ serializeAs: null })
+  @column({ ...jsonColumn, serializeAs: null })
   declare payload: Record<string, unknown>;
 
   /**
@@ -48,8 +55,16 @@ export class BillingWebhookEvent extends BaseModel {
    * `null` on rows written before an earlier schema ran; the
    * retry says so rather than replaying half an event.
    */
-  @column({ serializeAs: null })
+  @column({ ...jsonColumn, serializeAs: null })
   declare normalized: Record<string, unknown> | null;
+
+  /**
+   * The payment this delivery is about — the normalized event's `gatewayId` on a `payment.*`
+   * event, `''` on any other. `null` on rows recorded before the column existed, and on a
+   * `payment.*` event that normalized no id.
+   */
+  @column({ serializeAs: null })
+  declare paymentGatewayId: string | null;
 
   /** Error message when processing failed. */
   @column({ serializeAs: null })

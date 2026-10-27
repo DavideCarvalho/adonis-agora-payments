@@ -5,12 +5,12 @@ import {
   type AuditEventListItem,
   type AuditEventQuery,
   type BillingCountQuery,
-  type BillingListQuery,
   type BillingStore,
   type CustomerListItem,
   type CustomerListQuery,
   type DisputeDeadlineQuery,
   type DisputeListItem,
+  type DisputeListQuery,
   type ManagedSubscriptionInput,
   type ManagedSubscriptionPatch,
   OPEN_DISPUTE_STATUSES,
@@ -135,6 +135,40 @@ function normalizedColumn(value: unknown): Record<string, unknown> | null {
   if (value === null || value === undefined) return null;
   if (typeof value !== 'object' || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
+}
+
+/**
+ * What a ledger row records in `payment_gateway_id`: the normalized `gatewayId` of a
+ * `payment.*` event — payment and dispute events both key on the payment — and `''` for an event
+ * about anything else. A `payment.*` event that normalized no id stays `NULL`, so the timeline
+ * still finds it the way it finds rows recorded before the column existed.
+ */
+function paymentGatewayIdOf(
+  type: string,
+  normalized: Record<string, unknown> | null,
+): string | null {
+  if (!type.startsWith('payment.')) return '';
+  const gatewayId = normalized?.gatewayId;
+  return typeof gatewayId === 'string' && gatewayId !== '' ? gatewayId : null;
+}
+
+/** Whether a driver error is a unique-constraint violation, on any dialect this store runs on. */
+function isUniqueViolation(error: unknown): boolean {
+  const e = error as { code?: unknown; errno?: unknown; message?: unknown } | null;
+  if (e === null || typeof e !== 'object') return false;
+  // Postgres `unique_violation`, MySQL `ER_DUP_ENTRY`, SQLite `SQLITE_CONSTRAINT_UNIQUE`.
+  if (e.code === '23505' || e.code === 'ER_DUP_ENTRY' || e.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+    return true;
+  }
+  if (e.errno === 1062) return true;
+  return typeof e.message === 'string' && /UNIQUE constraint failed/i.test(e.message);
+}
+
+/** The affected-row count of a query-builder `update`, which drivers report as a number or a
+ *  one-element array. */
+function affectedRows(result: unknown): number {
+  const first = Array.isArray(result) ? result[0] : result;
+  return Number(first ?? 0);
 }
 
 type CustomerInstance = InstanceType<typeof DefaultCustomer>;
@@ -884,12 +918,15 @@ export class LucidBillingStore
     return row as DisputeInstance | null;
   }
 
-  async listDisputes(query: BillingListQuery): Promise<DisputeListItem[]> {
+  async listDisputes(query: DisputeListQuery): Promise<DisputeListItem[]> {
     await this.#ready();
     if (!(await this.#hasDisputesTable())) return [];
     const builder = this.#disputeModel.query().orderBy('created_at', 'desc');
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.provider !== undefined) builder.where('provider', query.provider);
+    if (query.paymentGatewayId !== undefined) {
+      builder.where('payment_gateway_id', query.paymentGatewayId);
+    }
     const rows = (await builder
       .limit(clampSize(query.size))
       .offset(listOffset(query.page, query.size))) as DisputeInstance[];
@@ -1047,18 +1084,6 @@ export class LucidBillingStore
     normalized?: unknown;
   }): Promise<WebhookEventInstance | null> {
     await this.#ready();
-    const existing = await this.#webhookEventModel.findBy('gateway_event_id', event.gatewayEventId);
-    if (existing) {
-      // A previous attempt failed: claim it again so the retry re-runs. Anything
-      // else (in flight, or already processed) is a redelivery — stop here.
-      if (existing.status !== 'failed') return null;
-      existing.status = 'received';
-      existing.error = null;
-      // `payload` and `normalized` are deliberately NOT touched here: the retry re-claims
-      // this row precisely to read back what the original delivery recorded.
-      await existing.save();
-      return existing;
-    }
     const row = new this.#webhookEventModel() as WebhookEventInstance;
     row.gatewayEventId = event.gatewayEventId;
     row.provider = event.provider;
@@ -1069,28 +1094,75 @@ export class LucidBillingStore
     if (normalized !== null && (await this.#hasColumn(this.#webhookEventModel, 'normalized'))) {
       row.normalized = normalized;
     }
+    if (await this.#hasColumn(this.#webhookEventModel, 'payment_gateway_id')) {
+      row.paymentGatewayId = paymentGatewayIdOf(event.type, normalized);
+    }
     row.error = null;
-    await row.save();
-    return row;
+    // The INSERT is the claim: the unique `gateway_event_id` lets exactly one of several
+    // concurrent deliveries of the same event through, and every other one lands below.
+    try {
+      await row.save();
+      return row;
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const existing = (await this.#webhookEventModel.findBy(
+        'gateway_event_id',
+        event.gatewayEventId,
+      )) as WebhookEventInstance | null;
+      if (existing === null) throw error;
+      return this.#reclaimFailed(existing);
+    }
+  }
+
+  /**
+   * A previous attempt failed: claim it again so the retry re-runs. Anything else (in flight,
+   * or already processed) is a redelivery, answered `null`.
+   *
+   * Conditional on `status = 'failed'` in the UPDATE itself, so of two retries racing for the
+   * same failed row exactly one gets it back. `payload` and `normalized` are not touched: the
+   * retry re-claims this row precisely to read back what the original delivery recorded.
+   */
+  async #reclaimFailed(existing: WebhookEventInstance): Promise<WebhookEventInstance | null> {
+    if (existing.status !== 'failed') return null;
+    const claimed = await this.#updateWebhookEvent(
+      existing.id,
+      { status: 'received', error: null },
+      'failed',
+    );
+    if (!claimed) return null;
+    existing.status = 'received';
+    existing.error = null;
+    return existing;
+  }
+
+  /**
+   * One `UPDATE` by primary key, optionally only while the row is in `whenStatus`. Answers
+   * whether a row changed. `updatedAt` is stamped here because a query-builder update skips
+   * the model's `autoUpdate`.
+   */
+  async #updateWebhookEvent(
+    id: string,
+    fields: { status: string; error?: string | null },
+    whenStatus?: string,
+  ): Promise<boolean> {
+    const query = this.#webhookEventModel.query().where('id', id);
+    if (whenStatus !== undefined) query.where('status', whenStatus);
+    const format = query.client.dialect.dateTimeFormat;
+    const result: unknown = await query.update({
+      ...fields,
+      updatedAt: DateTime.now().toFormat(format),
+    });
+    return affectedRows(result) > 0;
   }
 
   async markWebhookProcessed(id: string): Promise<void> {
     await this.#ready();
-    const row = await this.#webhookEventModel.find(id);
-    if (row) {
-      row.status = 'processed';
-      await row.save();
-    }
+    await this.#updateWebhookEvent(id, { status: 'processed' });
   }
 
   async markWebhookFailed(id: string, error: string): Promise<void> {
     await this.#ready();
-    const row = await this.#webhookEventModel.find(id);
-    if (row) {
-      row.status = 'failed';
-      row.error = error;
-      await row.save();
-    }
+    await this.#updateWebhookEvent(id, { status: 'failed', error });
   }
 
   async listWebhookEvents(query: WebhookEventListQuery): Promise<WebhookEventListItem[]> {
@@ -1112,6 +1184,32 @@ export class LucidBillingStore
     await this.#ready();
     // An empty needle would match the whole table — the timeline of "no payment at all".
     if (paymentGatewayId === '') return [];
+    const size = clampSize(query.size);
+    if (!(await this.#hasColumn(this.#webhookEventModel, 'payment_gateway_id'))) {
+      return (await this.#payloadMentioning(paymentGatewayId, size, false)).map(webhookEventItem);
+    }
+    // Rows recorded with the column are an indexed equality. Rows recorded before it existed
+    // (`NULL`) can only be found in their payload; the `IS NULL` keeps that scan to them.
+    const [recorded, older] = await Promise.all([
+      this.#webhookEventModel
+        .query()
+        .where('payment_gateway_id', paymentGatewayId)
+        .orderBy('created_at', 'desc')
+        .limit(size) as unknown as Promise<WebhookEventInstance[]>,
+      this.#payloadMentioning(paymentGatewayId, size, true),
+    ]);
+    return [...recorded, ...older]
+      .sort((a, b) => b.createdAt.toMillis() - a.createdAt.toMillis())
+      .slice(0, size)
+      .map(webhookEventItem);
+  }
+
+  /** The ledger rows whose stored payload contains `needle`, newest first. */
+  async #payloadMentioning(
+    needle: string,
+    size: number,
+    onlyUnlinked: boolean,
+  ): Promise<WebhookEventInstance[]> {
     // The payload column's type differs per dialect (JSONB / JSON / TEXT) and only one of the
     // three can be compared to a string directly, so it is cast. MySQL spells the text type
     // `CHAR`; Postgres and SQLite take `TEXT`.
@@ -1119,12 +1217,12 @@ export class LucidBillingStore
       this.#webhookEventModel.query().client as unknown as LucidDatabase,
     );
     const textType = /mysql|mariadb/i.test(dialect ?? '') ? 'CHAR' : 'TEXT';
-    const rows = (await this.#webhookEventModel
-      .query()
-      .whereRaw(`CAST(payload AS ${textType}) LIKE ?`, [`%${paymentGatewayId}%`])
+    const builder = this.#webhookEventModel.query();
+    if (onlyUnlinked) builder.whereNull('payment_gateway_id');
+    return (await builder
+      .whereRaw(`CAST(payload AS ${textType}) LIKE ?`, [`%${needle}%`])
       .orderBy('created_at', 'desc')
-      .limit(clampSize(query.size))) as WebhookEventInstance[];
-    return rows.map(webhookEventItem);
+      .limit(size)) as WebhookEventInstance[];
   }
 
   async findWebhookEventByGatewayEventId(

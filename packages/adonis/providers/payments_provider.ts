@@ -22,6 +22,7 @@ import {
   runWithPaymentsTrace,
   webhookVerificationOutcome,
 } from '../src/diagnostics.js';
+import type { PaymentsDriver } from '../src/driver.js';
 import { InvoiceManager, resolveInvoiceProviders } from '../src/invoice/invoice_manager.js';
 import { PaymentsManager, resolveDrivers } from '../src/payments_manager.js';
 import {
@@ -331,6 +332,36 @@ export default class PaymentsProvider {
 }
 
 /**
+ * Whether every event in this delivery is already in the ledger and not `failed` — a
+ * redelivery the processor would skip anyway. Asked before `parseWebhook` only of a driver that
+ * can name its events without calling the gateway (`webhookEventIds`); a `failed` or unseen
+ * event, or any doubt, is `false`, and the delivery is parsed as usual.
+ */
+async function isKnownRedelivery(
+  driver: PaymentsDriver,
+  rawBody: string,
+  headers: Record<string, string | string[] | undefined>,
+  store: Partial<Pick<BillingStore, 'findWebhookEventByGatewayEventId'>> | undefined,
+): Promise<boolean> {
+  if (
+    driver.webhookEventIds === undefined ||
+    store?.findWebhookEventByGatewayEventId === undefined
+  ) {
+    return false;
+  }
+  const find = store.findWebhookEventByGatewayEventId.bind(store);
+  try {
+    const ids = driver.webhookEventIds(rawBody, headers);
+    if (ids === undefined || ids.length === 0) return false;
+    const rows = await Promise.all(ids.map((id) => find(id)));
+    return rows.every((row) => row !== null && row.status !== 'failed');
+  } catch {
+    // A read that failed proves nothing either way; the full path reports the real error.
+    return false;
+  }
+}
+
+/**
  * One webhook delivery, from raw body to HTTP status — the body of the mounted
  * `POST /payments/webhook/:provider` route.
  *
@@ -343,8 +374,14 @@ export async function handleWebhookDelivery(
   deps: {
     manager: PaymentsManager;
     dispatcher?: WebhookDispatcher | undefined;
-    /** Where a REFUSED delivery is recorded. Absent when the billing layer is off. */
-    store?: Pick<BillingStore, 'recordAuditEvent'> | undefined;
+    /**
+     * Where a REFUSED delivery is recorded, and where a redelivery is recognized before the
+     * driver calls its gateway. Absent when the billing layer is off.
+     */
+    store?:
+      | (Pick<BillingStore, 'recordAuditEvent'> &
+          Partial<Pick<BillingStore, 'findWebhookEventByGatewayEventId'>>)
+      | undefined;
   },
 ): Promise<unknown> {
   const provider = String(ctx.params.provider);
@@ -374,6 +411,14 @@ export async function handleWebhookDelivery(
     try {
       const driver = deps.manager.driver(provider);
       const rawBody = ctx.request.raw() ?? '';
+      if (await isKnownRedelivery(driver, rawBody, ctx.request.headers(), deps.store)) {
+        publishWebhookVerification({
+          provider,
+          ...webhookVerificationOutcome(frame),
+          durationMs: Date.now() - startedAt,
+        });
+        return ctx.response.status(200).json({ received: true });
+      }
       // Awaited: `parseWebhook` may be async. A gateway whose callback carries only an
       // id (Mollie) has to fetch the payment to know what happened, and that fetch is
       // also the only thing authenticating the call.

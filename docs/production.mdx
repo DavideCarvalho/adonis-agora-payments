@@ -349,10 +349,12 @@ written before it.
 migration you already ran does not run again. So with `autoCreateSchema: false`, an upgrade needs a
 **new** migration calling `createBillingTables` once more, in the same deploy as the code. Skipping
 that does not always fail loudly: the store probes for `billing_payments.external_reference`,
-`billing_payments.refunded_amount`, `billing_webhook_events.normalized` and the `billing_disputes`
-and `billing_audit_events` tables before using them, and skips what is not there — so references
-stop being stored, partial refunds stop being recorded, disputes and rejected deliveries go
-unwritten, and `payments:health` reports a healthy zero over a table that does not exist. The probe
+`billing_payments.refunded_amount`, `billing_webhook_events.normalized`,
+`billing_webhook_events.payment_gateway_id` and the `billing_disputes` and `billing_audit_events`
+tables before using them, and skips what is not there — so references stop being stored, partial
+refunds stop being recorded, a payment's timeline falls back to scanning every stored payload,
+disputes and rejected deliveries go unwritten, and `payments:health` reports a healthy zero over a
+table that does not exist. The probe
 answers once per process and is cached, so **restart** after running the DDL.
 
 `autoCreateSchema: false` does reach a store you built yourself with `billing.store` (including
@@ -370,6 +372,35 @@ persistence layer it did not build.
 and it is what makes redeliveries safe. Do not prune it aggressively. A gateway can redeliver an event days later, and a pruned id is an id
 that will be processed a second time. Ninety days is a reasonable floor; longer if your gateway's
 replay window is longer.
+
+### Indexes, and what an upgrade builds
+
+The indexes are part of the same DDL: `createBillingTables` creates each one if it is missing and
+drops the ones a wider index has made redundant, on every dialect (MySQL has no `IF EXISTS` on
+either statement, so there a duplicate or a missing index is tolerated instead). What they serve:
+
+| Index | Read it serves |
+| --- | --- |
+| `billing_usage_{subscription,customer,scope}_meter_recorded_idx` — owner, `meter`, `recorded_at` | `usage().remaining()` and every per-owner usage window: a range scan over the window, not a read of every row the owner ever recorded |
+| `billing_usage_recorded_meter_idx` — `recorded_at, meter` | the overview's usage figures (every meter, one window) |
+| `billing_webhook_events_payment_idx` — `payment_gateway_id, created_at` | a payment's ledger timeline |
+| `(status, created_at)` and `(created_at)` on payments and webhook events, `(status, created_at)` on subscriptions | the console's newest-first pages, status filters and status counts |
+| `billing_payments_status_paid_idx` — `status, paid_at` | `revenue()` / `netRevenue()` over a settlement window |
+
+The three older usage indexes — `billing_usage_subscription_meter_idx`,
+`billing_usage_customer_meter_idx` and `billing_usage_scope_meter_idx` — are leading prefixes of
+the `…_recorded_idx` ones and are dropped once those exist.
+
+`CREATE INDEX` here is the plain, non-concurrent statement, so on an install with a large
+`billing_usage_events` or `billing_webhook_events` table the first boot after an upgrade (or the
+migration, with `autoCreateSchema: false`) holds writes to that table while the index builds. On a
+big table, run that migration in a quiet window — or build the indexes yourself first under the
+same names (`CREATE INDEX CONCURRENTLY` on Postgres); `createBillingTables` skips any that already
+exist.
+
+`billing_webhook_events.payment_gateway_id` is not backfilled: rows recorded before it existed are
+`NULL`, and a payment's timeline finds those by a payload substring scan limited to the `NULL` rows.
+That scan shrinks as old rows age out of the ledger.
 
 ## Secrets
 

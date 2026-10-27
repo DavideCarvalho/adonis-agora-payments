@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { BaseModel, beforeCreate, column } from '@adonisjs/lucid/orm';
 import type { DateTime } from 'luxon';
+import { jsonColumn } from './json_column.js';
 
 /**
  * The Lucid model backing the `billing_disputes` table — the only place a chargeback's
@@ -18,6 +19,12 @@ import type { DateTime } from 'luxon';
  */
 export class BillingDispute extends BaseModel {
   static override table = 'billing_disputes';
+
+  /**
+   * The hook below assigns the id, so Lucid must not overwrite it with what the INSERT reports.
+   * On SQLite that is the numeric rowid, and every later `where id = ?` would miss the row.
+   */
+  static override selfAssignPrimaryKey = true;
 
   /**
    * The `id` column is a `uuid` with no database-side default (see the published
@@ -92,7 +99,7 @@ export class BillingDispute extends BaseModel {
   @column.dateTime()
   declare closedAt: DateTime | null;
 
-  @column({ serializeAs: null })
+  @column({ ...jsonColumn, serializeAs: null })
   declare payload: Record<string, unknown>;
 
   @column.dateTime({ autoCreate: true })

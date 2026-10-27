@@ -139,22 +139,23 @@ nothing else.
 ### One payment in full
 
 Clicking a row opens `GET <path>/api/payments/:gatewayId` — the current state, the owner, the
-disputes filed against it, the ledger rows whose stored delivery names it, and who refunded it from
-this console.
+disputes filed against it, the ledger rows recorded for it, and who refunded it from this console.
+The disputes are read with `listDisputes({ paymentGatewayId })`, so every dispute on the payment is
+listed however many newer ones exist elsewhere; a custom store that ignores that filter still gets
+the right rows, just from a page of the newest disputes overall.
 
 <Callout type="warn" title="It is not a history, and it does not claim to be">
 `billing_payments` is a single mutable row upserted in place. Its earlier states are recorded
 nowhere, so "what changed on this payment, and when?" has no answer here.
 
-The ledger strand in particular is a `CAST(payload AS TEXT) LIKE` scan over the stored payloads,
-because nothing links a ledger row to a payment — the link lives *inside* the payload. The response
-says so on the wire (`events.matchedBy: 'payload-substring'`) and the panel says so on screen: it is
-**unindexed**, it can **over-match** a delivery that merely mentions the id, and it **cannot see** a
-delivery that never stored it. Reading "3 events" as "exactly the 3 events that touched this
-payment" is the mistake that caveat exists to stop.
+The ledger strand lists the deliveries recorded for this payment: every ledger row keeps the
+normalized `gatewayId` of the `payment.*` event it carried in `payment_gateway_id`, and the strand
+is an indexed equality on it (`events.matchedBy: 'payment-gateway-id'`). Rows recorded before that
+column existed have nothing to compare, so those alone are found by a `CAST(payload AS TEXT) LIKE`
+scan of their stored payload — which can **over-match** a delivery that merely mentions the id. The
+panel says so on screen.
 
-No history table was invented for this. The honest fix is a `payment_gateway_id` column the
-**processor** fills on the way in — a write path this does not touch.
+No history table was invented for this: the strand is the ledger, read by payment.
 </Callout>
 
 The stored payload itself is still never returned. The timeline says an event arrived and what type
@@ -490,9 +491,9 @@ it back under `meta` (`{ page, size, count, … }`) — Lucid's own spelling, si
 answers `{ meta, data }`, and the key every Agora console reads. `count === size` is the only
 "there might be more" signal, because nothing here counts the full match set. `size` is clamped
 (50 by default, 200 maximum), so an unbounded page size from a query string cannot select the
-whole table. A provider-filtered page also reports `scanned` and `truncated`. The customers and
-audit pages report neither, because every filter they offer is a column the store applies — there
-is no bounded scan behind them to warn about.
+whole table. Every filter, `provider` included, is a column the store applies, so no page is a
+bounded scan: the payments, subscriptions and webhook-event pages still carry `scanned` (the rows
+returned) and `truncated` (always `false`) for clients that read them.
 
 `?dueWithin` with no value uses the same 72-hour horizon `payments:health` alerts on, so the console
 and the cron agree about "soon". A value that is present and unreadable answers `400` rather than

@@ -40,7 +40,7 @@ function stubApi(): void {
               refundable: false,
             },
             disputes: [],
-            events: { rows: [], matchedBy: 'payload-substring' },
+            events: { rows: [], matchedBy: 'payment-gateway-id' },
             audit: [],
             currency: 'BRL',
           }

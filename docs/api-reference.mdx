@@ -218,6 +218,12 @@ interface PaymentsDriver {
     rawBody: string,
     headers: Record<string, string | string[] | undefined>,
   ): WebhookEvent | WebhookEvent[] | Promise<WebhookEvent | WebhookEvent[]>
+
+  // Optional. The ledger ids parseWebhook would produce, read without calling the gateway.
+  webhookEventIds?(
+    rawBody: string,
+    headers: Record<string, string | string[] | undefined>,
+  ): readonly string[] | undefined
 }
 ```
 
@@ -228,6 +234,14 @@ events**, because Adyen's `notificationItems` and Efí's `pix` are lists in the 
 event is still the normal answer and a driver whose gateway sends one should keep returning one.
 And a driver returning N events must have **verified all N** — Adyen's HMAC lives in each item, so
 checking the first and trusting the rest is a forgery hole.
+
+`webhookEventIds` is for a driver whose `parseWebhook` has to call the gateway (Mercado Pago, and
+Mollie's signed events, implement it). The mounted route asks it first; when every id it names is
+already in the ledger as `received` or `processed`, the delivery is answered `200` without calling
+`parseWebhook` at all. It must answer `undefined` whenever the ids cannot be both known and
+authenticated locally — no signing secret, an id that only the fetched resource reveals, a body that
+does not verify — and the route then parses the delivery in full, as it does for a driver without
+the method. See [Custom providers](/docs/payments/custom-providers#skipping-the-fetch-on-a-redelivery).
 
 `submitDisputeEvidence` is a **once** call at most gateways. The library never submits
 automatically: whether to fight a chargeback or refund it is a risk decision about your own
@@ -545,7 +559,7 @@ interface BillingStore {
   saveDispute(dispute): Promise<DisputeRow | null>             // null ⇒ no billing_disputes table
   findDisputeByGatewayId(gatewayId): Promise<DisputeRow | null>
   findOpenDisputeByPayment(paymentGatewayId): Promise<DisputeRow | null>
-  listDisputes(query): Promise<DisputeListItem[]>
+  listDisputes(query: DisputeListQuery): Promise<DisputeListItem[]>   // + paymentGatewayId
   countDisputes(query): Promise<number>
   listDisputesDueWithin(query: DisputeDeadlineQuery): Promise<DisputeListItem[]>
   countDisputesDueWithin(query): Promise<number>
@@ -581,10 +595,11 @@ above them: they take every dispute in `OPEN_DISPUTE_STATUSES` regardless of `ev
 order oldest first. On a gateway that publishes no deadline they are the only reads that can see a
 chargeback at all.
 
-`listWebhookEventsForPayment` is a `CAST(payload AS TEXT) LIKE` scan: unindexed, able to over-match,
-and blind to a delivery that never stored the id. It is bounded by `size`, newest first, and never
-returns the payload. The dashboard reports `events.matchedBy: 'payload-substring'` beside the
-result rather than presenting it as a history.
+`listWebhookEventsForPayment` matches the `payment_gateway_id` each ledger row records on the way in
+— the normalized `gatewayId` of a `payment.*` event — through an index. Rows recorded before that
+column existed are found by a `CAST(payload AS TEXT) LIKE` scan of their stored payload instead,
+which can over-match. It is bounded by `size`, newest first, and never returns the payload. The
+dashboard reports `events.matchedBy: 'payment-gateway-id'` beside the result.
 
 `recordAuditEvent` answers `null` on an install whose `billing_audit_events` table is not there yet
 — the audit row is additional to an action that already happened, so a missing table skips the note
@@ -615,9 +630,20 @@ answers exactly what `revenue` does, because no refund was ever recorded to subt
 `null` means in flight or already processed — a redelivery. An event whose previous attempt
 **failed** is claimed again and returned, which is what lets a retry actually re-run it. See
 [Idempotency](/docs/payments/concepts/idempotency).
+
+The claim has to be atomic, and a store of your own must keep it so: of several concurrent calls
+for one `gatewayEventId`, exactly one returns the row. The Lucid store makes the `INSERT` the claim —
+a unique-constraint violation on `gateway_event_id` (Postgres `23505`, MySQL `ER_DUP_ENTRY`, SQLite
+`SQLITE_CONSTRAINT_UNIQUE`) means another delivery won, and the existing row is read back — and
+re-claims a failed row with `UPDATE … WHERE id = ? AND status = 'failed'`, so only one of two
+concurrent retries gets it. The insert still goes through the model's `save()`, so a swapped-in
+`webhookEventModel` keeps its hooks; on Postgres each losing duplicate leaves a unique-violation
+line in the server log. `markWebhookProcessed` and `markWebhookFailed` are one `UPDATE` each, so a
+new `payment.succeeded` delivery costs four round trips: the claim, the payment lookup and write,
+and the mark.
 </Callout>
 
-The list reads take `BillingListQuery` — `{ status?, provider?, page?, size? }` — and three of
+The list reads take `BillingListQuery` — `{ status?, provider?, page?, size? }` — and most of
 them extend it. `page` is **1-based** (default `1`) and `size` is the page size: the same pagination
 shape `@adonis-agora/filter` takes, so every Agora library pages the same way. The 0-based SQL
 offset is computed inside the store and never appears in a query type:
@@ -628,6 +654,8 @@ interface PaymentListQuery extends BillingListQuery {
   gatewayId?: string           // the gateway's payment id
   customerId?: string          // the gateway's customer id
 }
+interface SubscriptionListQuery extends BillingListQuery { externalReference?, gatewayId?, customerId? }
+interface DisputeListQuery     extends BillingListQuery { paymentGatewayId?: string }  // every dispute on one payment
 interface WebhookEventListQuery extends BillingListQuery { type?: string }
 interface CustomerListQuery    extends BillingListQuery { ownerType?, ownerId?, gatewayId? }
 ```
@@ -809,6 +837,9 @@ emitInvoiceIfRequested(ctx, input, payment, driver): Promise<void>
 Webhook security helpers (from `@adonis-agora/payments/webhook_security`): `safeCompare`,
 `verifyHmacSignature`, `verifyHmacOverPayload`, `verifyRsaSha256Signature`,
 `verifyStandardWebhookSignature`, `verifyPagBankAuthenticityToken`, `requireMatchingCredential`.
+`verifyRsaSha256Signature` parses each public key string once and keeps the parsed key, for up to
+32 distinct keys (oldest dropped first); a key that fails to parse is not kept and throws on every
+call.
 
 See [Custom providers](/docs/payments/custom-providers).
 

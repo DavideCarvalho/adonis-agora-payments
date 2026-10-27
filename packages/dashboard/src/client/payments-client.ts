@@ -266,8 +266,9 @@ export interface PaymentDetail {
   disputes: DisputeRow[];
   events: {
     rows: WebhookEventRow[];
-    /** How the ledger rows were found. `payload-substring` means an unindexed substring scan
-     *  over the stored payload — it can miss, and it can over-match. Say so on screen. */
+    /** How the ledger rows were found. `payment-gateway-id` is the payment id each row records
+     *  on the way in; rows recorded before that column existed are matched by a substring scan
+     *  of their stored payload instead, which can over-match. Say so on screen. */
     matchedBy: string;
   };
   audit: AuditRow[];

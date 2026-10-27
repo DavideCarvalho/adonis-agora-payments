@@ -94,7 +94,7 @@ describe('createBillingTables', () => {
       ),
     );
     const index = db.sql.indexOf(
-      'CREATE INDEX IF NOT EXISTS billing_usage_scope_meter_idx ON billing_usage_events (scope_type, scope_id, meter)',
+      'CREATE INDEX IF NOT EXISTS billing_usage_scope_meter_recorded_idx ON billing_usage_events (scope_type, scope_id, meter, recorded_at)',
     );
 
     for (const alter of alters) expect(alter).toBeGreaterThanOrEqual(0);
@@ -155,6 +155,94 @@ describe('createBillingTables', () => {
     // Anything else is a real failure and has to surface: a permission error swallowed here
     // is a schema that silently never gets created.
     const denied = fakeDb('mysql', { on: /^CREATE INDEX/i, message: 'permission denied' });
+    await expect(createBillingTables(denied)).rejects.toThrow(/permission denied/);
+  });
+
+  // The ledger's payment link, the usage windows and the console poll, on every dialect.
+  const HOT_PATH_INDEXES = [
+    [
+      'billing_webhook_events_payment_idx',
+      'billing_webhook_events',
+      'payment_gateway_id, created_at',
+    ],
+    ['billing_webhook_events_status_created_idx', 'billing_webhook_events', 'status, created_at'],
+    ['billing_webhook_events_created_idx', 'billing_webhook_events', 'created_at'],
+    ['billing_payments_status_created_idx', 'billing_payments', 'status, created_at'],
+    ['billing_payments_created_idx', 'billing_payments', 'created_at'],
+    ['billing_payments_status_paid_idx', 'billing_payments', 'status, paid_at'],
+    ['billing_subscriptions_status_created_idx', 'billing_subscriptions', 'status, created_at'],
+    [
+      'billing_usage_subscription_meter_recorded_idx',
+      'billing_usage_events',
+      'subscription_id, meter, recorded_at',
+    ],
+    [
+      'billing_usage_customer_meter_recorded_idx',
+      'billing_usage_events',
+      'customer_id, meter, recorded_at',
+    ],
+    [
+      'billing_usage_scope_meter_recorded_idx',
+      'billing_usage_events',
+      'scope_type, scope_id, meter, recorded_at',
+    ],
+    ['billing_usage_recorded_meter_idx', 'billing_usage_events', 'recorded_at, meter'],
+  ] as const;
+  const SUPERSEDED_INDEXES = [
+    'billing_usage_subscription_meter_idx',
+    'billing_usage_customer_meter_idx',
+    'billing_usage_scope_meter_idx',
+  ];
+
+  it.each([
+    ['postgres', 'CREATE INDEX IF NOT EXISTS'],
+    ['mysql', 'CREATE INDEX'],
+    ['sqlite3', 'CREATE INDEX IF NOT EXISTS'],
+  ])('creates the hot-path indexes on %s', async (dialect, create) => {
+    const db = fakeDb(dialect);
+    await createBillingTables(db);
+
+    for (const [name, table, columns] of HOT_PATH_INDEXES) {
+      expect(db.sql).toContain(`${create} ${name} ON ${table} (${columns})`);
+    }
+    const alter = db.sql.findIndex((s) =>
+      /ALTER TABLE billing_webhook_events ADD COLUMN.* payment_gateway_id VARCHAR\(255\)/.test(s),
+    );
+    const index = db.sql.findIndex((s) => s.includes('billing_webhook_events_payment_idx'));
+    expect(alter, 'no ALTER for payment_gateway_id').toBeGreaterThanOrEqual(0);
+    expect(alter).toBeLessThan(index);
+  });
+
+  it.each([
+    ['postgres', (name: string) => `DROP INDEX IF EXISTS ${name}`],
+    ['mysql', (name: string) => `DROP INDEX ${name} ON billing_usage_events`],
+    ['sqlite3', (name: string) => `DROP INDEX IF EXISTS ${name}`],
+  ])(
+    'drops the usage indexes the recorded_at ones supersede on %s, after creating them',
+    async (dialect, drop) => {
+      const db = fakeDb(dialect);
+      await createBillingTables(db);
+
+      const lastCreate = Math.max(
+        ...HOT_PATH_INDEXES.filter(([, table]) => table === 'billing_usage_events').map(([name]) =>
+          db.sql.findIndex((s) => s.includes(` ${name} ON `)),
+        ),
+      );
+      for (const name of SUPERSEDED_INDEXES) {
+        expect(db.sql.indexOf(drop(name)), name).toBeGreaterThan(lastCreate);
+        expect(db.sql.some((s) => s.startsWith('CREATE') && s.includes(` ${name} `))).toBe(false);
+      }
+    },
+  );
+
+  it('treats an index MySQL reports as already gone as dropped', async () => {
+    const missing = fakeDb('mysql', {
+      on: /^DROP INDEX/i,
+      message: "Can't DROP 'billing_usage_scope_meter_idx'; check that column/key exists",
+    });
+    await expect(createBillingTables(missing)).resolves.toBeUndefined();
+
+    const denied = fakeDb('mysql', { on: /^DROP INDEX/i, message: 'permission denied' });
     await expect(createBillingTables(denied)).rejects.toThrow(/permission denied/);
   });
 

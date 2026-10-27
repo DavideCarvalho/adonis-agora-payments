@@ -132,6 +132,29 @@ async function createIndex(
 }
 
 /**
+ * Drop a secondary index, idempotently. Same split as {@link createIndex}: MySQL has no
+ * `DROP INDEX IF EXISTS`, so there the statement is attempted and a missing-index error is
+ * swallowed. Any other failure still throws.
+ */
+async function dropIndex(
+  db: LucidDatabase,
+  dialect: string | undefined,
+  name: string,
+  table: string,
+): Promise<void> {
+  if (!isMysql(dialect)) {
+    await db.rawQuery(`DROP INDEX IF EXISTS ${name}`);
+    return;
+  }
+  try {
+    await db.rawQuery(`DROP INDEX ${name} ON ${table}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/check that (column\/key|it) exists|can't drop/i.test(message)) throw error;
+  }
+}
+
+/**
  * Add a column that was introduced AFTER its table shipped, idempotently.
  *
  * `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists, so it cannot carry
@@ -243,6 +266,7 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
       status VARCHAR(255),
       payload ${t.json},
       normalized ${t.json},
+      payment_gateway_id VARCHAR(255),
       error TEXT,
       created_at ${t.timestamp} NOT NULL,
       updated_at ${t.timestamp} NOT NULL
@@ -377,6 +401,12 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   await addColumn(db, dialect, 'billing_usage_events', 'scope_type', 'VARCHAR(255)');
   await addColumn(db, dialect, 'billing_usage_events', 'scope_id', 'VARCHAR(255)');
 
+  // 0.21.0 — the payment a ledger row is about, copied from the normalized event's `gatewayId`
+  // when the row is recorded, so a payment's timeline is an indexed equality instead of a
+  // substring scan over every stored payload. `''` on a row about something else; `NULL` on rows
+  // recorded before the column existed, which the timeline still finds by substring.
+  await addColumn(db, dialect, 'billing_webhook_events', 'payment_gateway_id', 'VARCHAR(255)');
+
   // ── Indexes ───────────────────────────────────────────────────────────────────────────
   //
   // Last, and that is load-bearing twice over. Every table above has to exist, and so does
@@ -449,28 +479,90 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
     'billing_audit_events',
     'subject_type, subject_id',
   );
+  // The usage reads: "how much of this meter, in this window" per subscription, customer or
+  // scope. `recorded_at` closes each index so the window is a range scan rather than a read of
+  // every row the owner ever recorded — `usage().remaining()` runs this before each metered
+  // call. The scope index needs the 0.18.0 ALTERs above on an older install.
   await createIndex(
     db,
     dialect,
-    'billing_usage_subscription_meter_idx',
+    'billing_usage_subscription_meter_recorded_idx',
     'billing_usage_events',
-    'subscription_id, meter',
+    'subscription_id, meter, recorded_at',
   );
   await createIndex(
     db,
     dialect,
-    'billing_usage_customer_meter_idx',
+    'billing_usage_customer_meter_recorded_idx',
     'billing_usage_events',
-    'customer_id, meter',
+    'customer_id, meter, recorded_at',
   );
-  // The scoped read — "how much of this meter has THIS project used" — names exactly these
-  // three columns. Needs the 0.18.0 ALTERs above on an older install.
   await createIndex(
     db,
     dialect,
-    'billing_usage_scope_meter_idx',
+    'billing_usage_scope_meter_recorded_idx',
     'billing_usage_events',
-    'scope_type, scope_id, meter',
+    'scope_type, scope_id, meter, recorded_at',
+  );
+  // The overview's read: every meter, one window, no owner.
+  await createIndex(
+    db,
+    dialect,
+    'billing_usage_recorded_meter_idx',
+    'billing_usage_events',
+    'recorded_at, meter',
+  );
+  // Each of these is a leading prefix of an index above, so it only costs writes.
+  await dropIndex(db, dialect, 'billing_usage_subscription_meter_idx', 'billing_usage_events');
+  await dropIndex(db, dialect, 'billing_usage_customer_meter_idx', 'billing_usage_events');
+  await dropIndex(db, dialect, 'billing_usage_scope_meter_idx', 'billing_usage_events');
+
+  // A payment's timeline, newest first. Also serves the `IS NULL` read over rows recorded
+  // before the column existed.
+  await createIndex(
+    db,
+    dialect,
+    'billing_webhook_events_payment_idx',
+    'billing_webhook_events',
+    'payment_gateway_id, created_at',
+  );
+  // What the console polls: newest-first pages with and without a status filter, the status
+  // counts over a creation window, and revenue over a settlement window.
+  await createIndex(
+    db,
+    dialect,
+    'billing_payments_status_created_idx',
+    'billing_payments',
+    'status, created_at',
+  );
+  await createIndex(db, dialect, 'billing_payments_created_idx', 'billing_payments', 'created_at');
+  await createIndex(
+    db,
+    dialect,
+    'billing_payments_status_paid_idx',
+    'billing_payments',
+    'status, paid_at',
+  );
+  await createIndex(
+    db,
+    dialect,
+    'billing_webhook_events_status_created_idx',
+    'billing_webhook_events',
+    'status, created_at',
+  );
+  await createIndex(
+    db,
+    dialect,
+    'billing_webhook_events_created_idx',
+    'billing_webhook_events',
+    'created_at',
+  );
+  await createIndex(
+    db,
+    dialect,
+    'billing_subscriptions_status_created_idx',
+    'billing_subscriptions',
+    'status, created_at',
   );
   // The renewal runner's working set: every tick asks "which managed subscriptions are due".
   // Unindexed, that is a full scan of every subscription ever created, on a schedule.

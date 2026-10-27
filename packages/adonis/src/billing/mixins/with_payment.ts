@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { NormalizeConstructor } from '@adonisjs/core/types/helpers';
 import { BaseModel, beforeCreate, column } from '@adonisjs/lucid/orm';
 import type { DateTime } from 'luxon';
+import { jsonColumn } from './json_column.js';
 
 /**
  * The Lucid model backing the `billing_payments` table. Mirrors the gateway payment —
@@ -9,6 +10,12 @@ import type { DateTime } from 'luxon';
  * calling the gateway API.
  */
 export class BillingPayment extends BaseModel {
+  /**
+   * The hook below assigns the id, so Lucid must not overwrite it with what the INSERT reports.
+   * On SQLite that is the numeric rowid, and every later `where id = ?` would miss the row.
+   */
+  static override selfAssignPrimaryKey = true;
+
   /**
    * The `id` column is a `uuid` with no database-side default (see the published
    * migration), so nothing but this hook fills it. Generating it here rather than in the
@@ -81,7 +88,7 @@ export class BillingPayment extends BaseModel {
   @column({ consume: (value: unknown) => (value === null ? null : Number(value)) })
   declare refundedAmount: number | null;
 
-  @column({ serializeAs: null })
+  @column({ ...jsonColumn, serializeAs: null })
   declare payload: Record<string, unknown>;
 
   @column.dateTime({ autoCreate: true })
@@ -154,7 +161,7 @@ export function withPayment() {
       @column({ consume: (value: unknown) => (value === null ? null : Number(value)) })
       declare refundedAmount: number | null;
 
-      @column({ serializeAs: null })
+      @column({ ...jsonColumn, serializeAs: null })
       declare payload: Record<string, unknown>;
 
       @column.dateTime({ autoCreate: true })

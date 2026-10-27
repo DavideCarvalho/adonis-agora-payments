@@ -222,13 +222,34 @@ describe('paymentDetail', () => {
     expect(body.audit.map((a) => a.actor)).toEqual(['ana <7>']);
   });
 
-  it('says HOW the ledger rows were matched rather than implying a real link', async () => {
-    // A payload substring scan can over-match and can miss. Reading "3 events" as "exactly the
-    // three that touched this payment" is the mistake the disclosure exists to stop.
+  it('says HOW the ledger rows were matched', async () => {
     const res = await paymentDetail(deps(await withTimeline()), req({}, { gatewayId: 'pay_ana' }));
     expect((res.body as { events: { matchedBy: string } }).events.matchedBy).toBe(
-      'payload-substring',
+      'payment-gateway-id',
     );
+  });
+
+  it("lists a payment's disputes even when more than a page of newer ones exist elsewhere", async () => {
+    // The disputes strand used to be the newest page of ALL disputes, filtered here — so a
+    // payment whose dispute was older than that page showed none.
+    const store = await seed();
+    await store.saveDispute({
+      gatewayId: 'dp_ana',
+      paymentGatewayId: 'pay_ana',
+      provider: 'asaas',
+      status: 'open',
+    });
+    for (let i = 0; i < 60; i += 1) {
+      await store.saveDispute({
+        gatewayId: `dp_${i}`,
+        paymentGatewayId: 'pay_other',
+        provider: 'asaas',
+        status: 'open',
+      });
+    }
+    const res = await paymentDetail(deps(store), req({}, { gatewayId: 'pay_ana' }));
+    const body = res.body as { disputes: Array<{ gatewayId: string }> };
+    expect(body.disputes.map((d) => d.gatewayId)).toEqual(['dp_ana']);
   });
 
   it('404s a payment that is not recorded', async () => {

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { BaseModel, beforeCreate, column } from '@adonisjs/lucid/orm';
 import type { DateTime } from 'luxon';
+import { jsonColumn } from './json_column.js';
 
 /**
  * The Lucid model backing the `billing_audit_events` table — what HAPPENED to this install
@@ -21,6 +22,12 @@ import type { DateTime } from 'luxon';
  */
 export class BillingAuditEvent extends BaseModel {
   static override table = 'billing_audit_events';
+
+  /**
+   * The hook below assigns the id, so Lucid must not overwrite it with what the INSERT reports.
+   * On SQLite that is the numeric rowid, and every later `where id = ?` would miss the row.
+   */
+  static override selfAssignPrimaryKey = true;
 
   /**
    * Same reason as every other model here: the column is a `uuid` with no database-side default,
@@ -66,7 +73,7 @@ export class BillingAuditEvent extends BaseModel {
   @column()
   declare message: string | null;
 
-  @column()
+  @column({ ...jsonColumn })
   declare metadata: Record<string, unknown> | null;
 
   @column.dateTime({ autoCreate: true })

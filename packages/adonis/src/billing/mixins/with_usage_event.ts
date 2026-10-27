@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { BaseModel, beforeCreate, column } from '@adonisjs/lucid/orm';
 import type { DateTime } from 'luxon';
+import { jsonColumn } from './json_column.js';
 
 /**
  * The Lucid model backing the `billing_usage_events` table — a metered subscription's
@@ -8,6 +9,12 @@ import type { DateTime } from 'luxon';
  * the billing layer aggregates them per meter for a period to bill usage-based plans.
  */
 export class BillingUsageEvent extends BaseModel {
+  /**
+   * The hook below assigns the id, so Lucid must not overwrite it with what the INSERT reports.
+   * On SQLite that is the numeric rowid, and every later `where id = ?` would miss the row.
+   */
+  static override selfAssignPrimaryKey = true;
+
   /**
    * The `id` column is a `uuid` with no database-side default (see the published
    * migration), so nothing but this hook fills it. Generating it here rather than in the
@@ -50,7 +57,7 @@ export class BillingUsageEvent extends BaseModel {
   @column()
   declare quantity: number;
 
-  @column({ serializeAs: null })
+  @column({ ...jsonColumn, serializeAs: null })
   declare metadata: Record<string, unknown>;
 
   @column.dateTime({ autoCreate: true })

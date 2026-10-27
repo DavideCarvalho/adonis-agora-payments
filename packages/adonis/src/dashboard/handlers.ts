@@ -9,12 +9,7 @@ import {
   OPEN_DISPUTE_STATUSES,
   type PaymentListItem,
 } from '../billing/billing_store.js';
-import {
-  BILLING_LIST_DEFAULT_SIZE,
-  BILLING_LIST_MAX_SIZE,
-  clampPage,
-  clampSize,
-} from '../billing/list_query.js';
+import { BILLING_LIST_DEFAULT_SIZE, clampPage, clampSize } from '../billing/list_query.js';
 import type { RefundAction, ReplayAction } from './actions.js';
 import { resolvePeriod } from './period.js';
 
@@ -178,12 +173,8 @@ export const SUBSCRIPTION_DEFAULT_STATUS = 'past_due';
 const REFUNDABLE_STATUS = 'paid';
 
 /**
- * How many rows a provider-filtered page may scan before it gives up and says so.
- *
- * `BillingListQuery` filters on `status` only, so `?provider=` is applied here, over pages read
- * from the store. That is bounded work by construction — but it has to be bounded VISIBLY: a
- * silent "no Asaas payments" that really means "none in the last thousand rows" is the kind of
- * wrong answer an operator acts on. `page.truncated` says which one they are looking at.
+ * @deprecated Nothing reads this. Every list applies `?provider=` in the store, so no page
+ * scans beyond the rows it returns and `meta.truncated` is always `false`.
  */
 export const PROVIDER_SCAN_CAP = 1000;
 
@@ -238,7 +229,7 @@ function iso(value: Date | null): string | null {
   return value === null ? null : value.toISOString();
 }
 
-/** One page of rows plus the honesty flags a provider-filtered page needs. */
+/** One page of rows plus the honesty flags the list envelope carries. */
 interface FilteredPage<T> {
   rows: T[];
   scanned: number;
@@ -246,49 +237,15 @@ interface FilteredPage<T> {
 }
 
 /**
- * Read one page, optionally narrowed to a provider.
- *
- * With no `provider` this is a single store call and `truncated` is always `false`. With one, it
- * walks the store in store-sized chunks, keeping matches, until it has filled the requested page,
- * run out of rows, or hit {@link PROVIDER_SCAN_CAP}.
+ * Read one page. Every filter, `provider` included, is a column the store applies, so the page
+ * is complete by construction: `scanned` is the rows returned and `truncated` is always `false`.
  */
-async function pageBy<T extends { provider: string }>(
+async function pageBy<T>(
   fetch: (size: number, page: number) => Promise<T[]>,
   paging: Paging,
-  provider: string | undefined,
 ): Promise<FilteredPage<T>> {
-  if (provider === undefined) {
-    const rows = await fetch(paging.size, paging.page);
-    return { rows, scanned: rows.length, truncated: false };
-  }
-
-  // The scan walks the table in MAX-SIZE pages of its own — the requested page is a window over
-  // the matches, not over the rows, so the two page numbers are unrelated and the row offset of
-  // the window is computed here rather than asked of the store.
-  const skip = (paging.page - 1) * paging.size;
-  const wanted = skip + paging.size;
-  const matched: T[] = [];
-  let scanned = 0;
-  let scanPage = 1;
-  let exhausted = false;
-
-  while (matched.length < wanted && scanned < PROVIDER_SCAN_CAP && !exhausted) {
-    const rows = await fetch(BILLING_LIST_MAX_SIZE, scanPage);
-    scanned += rows.length;
-    scanPage += 1;
-    if (rows.length < BILLING_LIST_MAX_SIZE) exhausted = true;
-    for (const row of rows) {
-      if (row.provider === provider) matched.push(row);
-    }
-  }
-
-  return {
-    rows: matched.slice(skip, wanted),
-    scanned,
-    // Only a scan that stopped SHORT is truncated. Filling the page or reaching the end of the
-    // table are both complete answers.
-    truncated: !exhausted && matched.length < wanted,
-  };
+  const rows = await fetch(paging.size, paging.page);
+  return { rows, scanned: rows.length, truncated: false };
 }
 
 /** The `meta` envelope every list endpoint echoes back, in the same `{ page, size }` terms the
@@ -558,6 +515,7 @@ export async function payments(deps: Deps, req: ApiRequest): Promise<ApiResponse
     (size, page) =>
       deps.store.listPayments({
         ...(status !== undefined ? { status } : {}),
+        ...(provider !== undefined ? { provider } : {}),
         ...(reference !== undefined ? { externalReference: reference } : {}),
         ...(gatewayId !== undefined ? { gatewayId } : {}),
         ...(customerId !== undefined ? { customerId } : {}),
@@ -565,7 +523,6 @@ export async function payments(deps: Deps, req: ApiRequest): Promise<ApiResponse
         page,
       }),
     paging,
-    provider,
   );
   const owners = await ownersFor(deps.store, filtered.rows);
   return ok({
@@ -595,9 +552,9 @@ export async function payments(deps: Deps, req: ApiRequest): Promise<ApiResponse
  * - the row's CURRENT state, including `refundedAmount` and the app's own reference;
  * - the app-side OWNER, through `billing_customers`;
  * - every DISPUTE filed against it — that table does carry a real link (`payment_gateway_id`);
- * - the LEDGER rows whose stored delivery names it, newest first. That is a payload substring
- *   scan, with everything that implies: it is unindexed, and it can match a delivery that merely
- *   mentions the id. `events.matchedBy` says so on the wire rather than in a comment nobody sees.
+ * - the LEDGER rows recorded for it, newest first — matched on the payment id each row keeps.
+ *   Rows recorded before that column existed are matched by payload substring instead, which can
+ *   include a delivery that merely mentions the id. `events.matchedBy` names the method.
  * - the AUDIT rows naming it — who refunded it, from this console, and when.
  *
  * The stored payload is still never returned. The timeline says an event ARRIVED and what type it
@@ -619,7 +576,7 @@ export async function paymentDetail(deps: Deps, req: ApiRequest): Promise<ApiRes
 
   const [owners, disputeRows, eventRows, auditRows] = await Promise.all([
     ownersFor(deps.store, [row]),
-    deps.store.listDisputes({ size: PAYMENT_TIMELINE_LIMIT }),
+    deps.store.listDisputes({ paymentGatewayId: gatewayId, size: PAYMENT_TIMELINE_LIMIT }),
     deps.store.listWebhookEventsForPayment(gatewayId, { size: PAYMENT_TIMELINE_LIMIT }),
     deps.store.listAuditEvents({
       subjectType: 'payment',
@@ -634,14 +591,13 @@ export async function paymentDetail(deps: Deps, req: ApiRequest): Promise<ApiRes
       (row.customerId && owners.get(row.customerId)) || null,
       deps.capabilities,
     ),
-    // Filtered here rather than in the store: `listDisputes` has no payment filter, and adding
-    // one for a page that is already bounded would be a second read to maintain. A dispute list
-    // this long on one install is itself the emergency.
+    // Filtered again here for a custom store that predates the `paymentGatewayId` filter: it
+    // returns every payment's disputes, and only this one's belong on the page.
     disputes: disputeRows.filter((d) => d.paymentGatewayId === gatewayId).map(disputeJson),
     events: {
       rows: eventRows.map(webhookEventJson),
       /** How the rows were found — see the note on `listWebhookEventsForPayment`. */
-      matchedBy: 'payload-substring',
+      matchedBy: 'payment-gateway-id',
     },
     audit: auditRows.map(auditJson),
     currency: deps.currency,
@@ -668,9 +624,13 @@ export async function subscriptions(deps: Deps, req: ApiRequest): Promise<ApiRes
   const paging = pageOf(req);
   const filtered = await pageBy(
     (size, page) =>
-      deps.store.listSubscriptions({ ...(status !== undefined ? { status } : {}), size, page }),
+      deps.store.listSubscriptions({
+        ...(status !== undefined ? { status } : {}),
+        ...(provider !== undefined ? { provider } : {}),
+        size,
+        page,
+      }),
     paging,
-    provider,
   );
   // The one number that makes the filter tabs worth reading: how many are past due IN TOTAL, not
   // just on this page. Cheap — a single count — and it is the figure that decides the operator's
@@ -736,12 +696,12 @@ export async function webhookEvents(deps: Deps, req: ApiRequest): Promise<ApiRes
     (size, page) =>
       deps.store.listWebhookEvents({
         ...(status !== undefined ? { status } : {}),
+        ...(provider !== undefined ? { provider } : {}),
         ...(type !== undefined ? { type } : {}),
         size,
         page,
       }),
     paging,
-    provider,
   );
   return ok({
     events: filtered.rows.map(webhookEventJson),

@@ -130,10 +130,9 @@ What exists today and what does not:
   `rejected_deliveries` check is the only thing that counts them.
 - **No per-payment history.** `billing_payments` is a single mutable row upserted in place, so what
   it used to be is recorded nowhere. The console's per-payment view assembles what *is* knowable and
-  says so — its ledger strand is a `CAST(payload AS TEXT) LIKE` scan, reported as
-  `matchedBy: 'payload-substring'`, which is unindexed, can over-match and can miss. The honest fix
-  is a `payment_gateway_id` column the **processor** fills on the way in; no history table has been
-  invented in the meantime.
+  says so — its ledger strand matches the `payment_gateway_id` every ledger row records on the way
+  in (`matchedBy: 'payment-gateway-id'`), with a payload substring scan only for rows recorded
+  before that column existed. No history table has been invented.
 - **Splits are not attributed.** A split charge stores the full amount on one row; who received what
   is only in the gateway payload. Per-recipient reporting is on the app today — the manual pattern
   is in [Marketplace splits](/docs/payments/patterns/marketplace-splits).

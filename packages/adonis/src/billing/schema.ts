@@ -573,6 +573,17 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
     'billing_subscriptions',
     'managed, status, next_charge_at',
   );
+  // The app's own id for a subscription — what `listSubscriptions({ externalReference })` routes
+  // on, the same lookup `billing_payments_external_reference_idx` serves for payments. Unindexed
+  // it is a full scan of every subscription ever created, per lookup. The column comes from the
+  // ALTER block above, so an older install has it by the time this runs.
+  await createIndex(
+    db,
+    dialect,
+    'billing_subscriptions_external_reference_idx',
+    'billing_subscriptions',
+    'external_reference',
+  );
 }
 
 /**

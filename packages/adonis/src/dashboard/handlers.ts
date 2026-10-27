@@ -376,20 +376,24 @@ export async function disputes(deps: Deps, req: ApiRequest): Promise<ApiResponse
     }
     const withinHours = parsed;
     const now = deps.now?.();
-    const rows = await deps.store.listDisputesDueWithin({
-      withinHours,
-      ...(now !== undefined ? { now } : {}),
-      ...(provider !== undefined ? { provider } : {}),
-      page: paging.page,
-      size: paging.size,
-    });
-    // The full count, not `rows.length`: a page that fills says nothing about how many more
-    // windows are closing, and that number is the one an operator plans their day around.
-    const total = await deps.store.countDisputesDueWithin({
-      withinHours,
-      ...(now !== undefined ? { now } : {}),
-      ...(provider !== undefined ? { provider } : {}),
-    });
+    // The page and the total are independent reads, so they go out together rather than as two
+    // sequential round trips.
+    const [rows, total] = await Promise.all([
+      deps.store.listDisputesDueWithin({
+        withinHours,
+        ...(now !== undefined ? { now } : {}),
+        ...(provider !== undefined ? { provider } : {}),
+        page: paging.page,
+        size: paging.size,
+      }),
+      // The full count, not `rows.length`: a page that fills says nothing about how many more
+      // windows are closing, and that number is the one an operator plans their day around.
+      deps.store.countDisputesDueWithin({
+        withinHours,
+        ...(now !== undefined ? { now } : {}),
+        ...(provider !== undefined ? { provider } : {}),
+      }),
+    ]);
     return ok({
       disputes: rows.map(disputeJson),
       dueWithin: { hours: withinHours, total },
@@ -622,20 +626,31 @@ export async function subscriptions(deps: Deps, req: ApiRequest): Promise<ApiRes
   const status = filterQuery(req.query.status);
   const provider = filterQuery(req.query.provider);
   const paging = pageOf(req);
-  const filtered = await pageBy(
-    (size, page) =>
-      deps.store.listSubscriptions({
-        ...(status !== undefined ? { status } : {}),
-        ...(provider !== undefined ? { provider } : {}),
-        size,
-        page,
-      }),
-    paging,
-  );
-  // The one number that makes the filter tabs worth reading: how many are past due IN TOTAL, not
-  // just on this page. Cheap — a single count — and it is the figure that decides the operator's
-  // morning.
-  const pastDue = await deps.store.countSubscriptions({ status: SUBSCRIPTION_DEFAULT_STATUS });
+  // The page and both totals are independent reads, so they go out together instead of as three
+  // sequential round trips.
+  const [filtered, pastDue, failingRenewals] = await Promise.all([
+    pageBy(
+      (size, page) =>
+        deps.store.listSubscriptions({
+          ...(status !== undefined ? { status } : {}),
+          ...(provider !== undefined ? { provider } : {}),
+          size,
+          page,
+        }),
+      paging,
+    ),
+    // The one number that makes the filter tabs worth reading: how many are past due IN TOTAL,
+    // not just on this page. Cheap — a single count — and it is the figure that decides the
+    // operator's morning.
+    deps.store.countSubscriptions({ status: SUBSCRIPTION_DEFAULT_STATUS }),
+    // Quantas estão falhando a renovação AGORA, no total e não na página. O mesmo motivo do
+    // `past_due`: é o número que decide a manhã de quem opera.
+    deps.store.countSubscriptions({
+      status: 'active',
+      managed: true,
+      minRenewalFailures: 1,
+    }),
+  ]);
   return ok({
     subscriptions: filtered.rows.map((row) => ({
       id: row.id,
@@ -665,13 +680,7 @@ export async function subscriptions(deps: Deps, req: ApiRequest): Promise<ApiRes
     statuses: SUBSCRIPTION_STATUSES,
     counts: {
       past_due: pastDue,
-      // Quantas estão falhando a renovação AGORA, no total e não na página. O mesmo motivo do
-      // `past_due`: é o número que decide a manhã de quem opera.
-      failing_renewals: await deps.store.countSubscriptions({
-        status: 'active',
-        managed: true,
-        minRenewalFailures: 1,
-      }),
+      failing_renewals: failingRenewals,
     },
   });
 }

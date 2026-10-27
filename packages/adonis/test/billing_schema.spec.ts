@@ -82,6 +82,25 @@ describe('createBillingTables', () => {
     expect(alter, 'the column must be added before it is indexed').toBeLessThan(index);
   });
 
+  it('indexes the subscription external_reference after the ALTER that adds it', async () => {
+    // `listSubscriptions({ externalReference })` is how an app finds its subscription by its own
+    // id. The column arrives through the ALTER phase on an older install, so the index must
+    // come after it — the same ordering rule as the payments index above.
+    const db = fakeDb('postgres');
+    await createBillingTables(db);
+
+    const alter = db.sql.indexOf(
+      'ALTER TABLE billing_subscriptions ADD COLUMN IF NOT EXISTS external_reference VARCHAR(255)',
+    );
+    const index = db.sql.indexOf(
+      'CREATE INDEX IF NOT EXISTS billing_subscriptions_external_reference_idx ON billing_subscriptions (external_reference)',
+    );
+
+    expect(alter).toBeGreaterThanOrEqual(0);
+    expect(index).toBeGreaterThanOrEqual(0);
+    expect(alter).toBeLessThan(index);
+  });
+
   it('carries the usage scope columns to an existing install, then indexes them', async () => {
     // 0.18.0. `billing_usage_events` shipped without `scope_type`/`scope_id`, so an existing
     // install only gets them through the ALTER phase — and the scoped index must come after.

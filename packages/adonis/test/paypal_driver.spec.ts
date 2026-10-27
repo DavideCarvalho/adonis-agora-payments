@@ -198,6 +198,41 @@ describe('PayPalDriver', () => {
     expect(tokenCalls()).toBe(2);
   });
 
+  it('mints ONE token for concurrent calls on a cold cache, and retries after a failed mint', async () => {
+    let tokenCalls = 0;
+    let failNextToken = true;
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).endsWith('/v1/oauth2/token')) {
+        tokenCalls += 1;
+        // Yield so every concurrent caller reaches the token check before the mint settles.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        if (failNextToken) {
+          failNextToken = false;
+          return { ok: false, status: 503, text: async () => 'unavailable' };
+        }
+        return tokenResponse(3600);
+      }
+      return jsonResponse({ id: 'CAPTURE-1', status: 'COMPLETED' });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const driver = makeDriver();
+
+    // A failed mint rejects every caller that shared it, and is not cached.
+    const failed = await Promise.allSettled([
+      driver.findPayment('CAPTURE-1'),
+      driver.findPayment('CAPTURE-1'),
+    ]);
+    expect(failed.every((result) => result.status === 'rejected')).toBe(true);
+    expect(tokenCalls).toBe(1);
+
+    await Promise.all([
+      driver.findPayment('CAPTURE-1'),
+      driver.findPayment('CAPTURE-1'),
+      driver.findPayment('CAPTURE-1'),
+    ]);
+    expect(tokenCalls).toBe(2);
+  });
+
   it('verifies a webhook with PayPal and reads the externalReference back out', async () => {
     const fetchMock = vi
       .fn()

@@ -53,6 +53,29 @@ export function minorUnitsPer(currency: string): number {
 }
 
 /**
+ * Memoized `Intl` formatters.
+ *
+ * Building an `Intl.NumberFormat`/`Intl.DateTimeFormat` is far more expensive than calling
+ * `.format()` on one (it resolves locale data every time), and every table cell on every 10s
+ * refetch used to build a fresh one. The set of distinct keys is tiny — a locale, a currency, a
+ * style — and capped anyway so a pathological caller cannot grow it without bound. A constructor
+ * that THROWS (an unknown currency code) is never cached, so the fallback below still runs.
+ */
+const FORMATTER_CACHE_LIMIT = 64;
+const numberFormats = new Map<string, Intl.NumberFormat>();
+const dateFormats = new Map<string, Intl.DateTimeFormat>();
+
+function cached<F>(cache: Map<string, F>, key: string, build: () => F): F {
+  let formatter = cache.get(key);
+  if (formatter === undefined) {
+    formatter = build();
+    if (cache.size >= FORMATTER_CACHE_LIMIT) cache.clear();
+    cache.set(key, formatter);
+  }
+  return formatter;
+}
+
+/**
  * Render integer minor units as a localized currency string — `123456` + `'BRL'` becomes
  * `R$ 1.234,56`, `1990` + `'JPY'` becomes `¥ 1.990`, `1990` + `'KWD'` becomes `KD 1,990`.
  *
@@ -64,12 +87,17 @@ export function formatCents(cents: number, currency: string, locale = 'pt-BR'): 
   const exponent = currencyExponent(currency);
   const value = cents / 10 ** exponent;
   try {
-    return new Intl.NumberFormat(locale, {
-      style: 'currency',
-      currency,
-      minimumFractionDigits: exponent,
-      maximumFractionDigits: exponent,
-    }).format(value);
+    return cached(
+      numberFormats,
+      `currency|${locale}|${currency}|${exponent}`,
+      () =>
+        new Intl.NumberFormat(locale, {
+          style: 'currency',
+          currency,
+          minimumFractionDigits: exponent,
+          maximumFractionDigits: exponent,
+        }),
+    ).format(value);
   } catch {
     return `${currency.toUpperCase()} ${value.toFixed(exponent)}`;
   }
@@ -101,7 +129,9 @@ export function parseMajorToMinor(input: string, currency: string): number | nul
 
 /** Render a plain (non-money) integer with thousands separators — usage quantities, counts. */
 export function formatCount(value: number, locale = 'pt-BR'): string {
-  return new Intl.NumberFormat(locale).format(value);
+  return cached(numberFormats, `count|${locale}`, () => new Intl.NumberFormat(locale)).format(
+    value,
+  );
 }
 
 /** Short absolute timestamp for a table cell; `—` for a null/absent one. */
@@ -109,10 +139,11 @@ export function formatWhen(iso: string | null, locale = 'pt-BR'): string {
   if (iso === null) return '—';
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return '—';
-  return new Intl.DateTimeFormat(locale, {
-    dateStyle: 'short',
-    timeStyle: 'medium',
-  }).format(date);
+  return cached(
+    dateFormats,
+    `when|${locale}`,
+    () => new Intl.DateTimeFormat(locale, { dateStyle: 'short', timeStyle: 'medium' }),
+  ).format(date);
 }
 
 /**
@@ -126,7 +157,11 @@ export function formatDay(iso: string | null, locale = 'pt-BR'): string {
   if (iso === null) return '—';
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return '—';
-  return new Intl.DateTimeFormat(locale, { dateStyle: 'short' }).format(date);
+  return cached(
+    dateFormats,
+    `day|${locale}`,
+    () => new Intl.DateTimeFormat(locale, { dateStyle: 'short' }),
+  ).format(date);
 }
 
 /**

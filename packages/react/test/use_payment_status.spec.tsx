@@ -79,6 +79,32 @@ describe('usePaymentStatus', () => {
     expect(fetchImpl.spy).toHaveBeenCalledTimes(4);
   });
 
+  it('does not re-render when a poll returns what is already shown', async () => {
+    const fetchImpl = fakeFetch([pending]);
+    let renders = 0;
+    const { result } = renderHook(() => {
+      renders += 1;
+      return usePaymentStatus('pay_1', { fetchImpl: fetchImpl.impl });
+    });
+
+    await flush();
+    expect(result.current.status).toBe('pending');
+    const settledRenders = renders;
+    const first = result.current;
+
+    // Three more `pending` answers: identical data, so no new render and the same values.
+    await flush(2000);
+    await flush(3000);
+    await flush(4500);
+    expect(fetchImpl.spy).toHaveBeenCalledTimes(4);
+    // Before the bail-out every poll rendered (+3 here). React may still run the component once
+    // more before it decides the state is unchanged (its eager bail-out only applies to an empty
+    // update queue), so at most one extra render is allowed — never one per tick.
+    expect(renders).toBeLessThanOrEqual(settledRenders + 1);
+    expect(result.current.status).toBe(first.status);
+    expect(result.current.isPolling).toBe(true);
+  });
+
   it('caps the interval', async () => {
     const fetchImpl = fakeFetch([pending]);
     renderHook(() =>

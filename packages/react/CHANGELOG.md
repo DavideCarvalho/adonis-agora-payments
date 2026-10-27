@@ -1,5 +1,11 @@
 # @adonis-agora/payments-react
 
+## 0.2.1
+
+### Patch Changes
+
+- [#179](https://github.com/DavideCarvalho/adonis-agora-payments/pull/179) [`6968caf`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/6968cafa9897c05669886d0472f35ca82111c228) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - perf: `usePaymentStatus` no longer re-renders the consumer on every poll that returns the same snapshot (e.g. still `pending`); the previous state object is kept so React bails out.
+
 ## 0.2.0
 
 ### Minor Changes

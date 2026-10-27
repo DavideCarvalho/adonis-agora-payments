@@ -1,5 +1,11 @@
 # @adonis-agora/payments-dashboard
 
+## 0.5.2
+
+### Patch Changes
+
+- [#179](https://github.com/DavideCarvalho/adonis-agora-payments/pull/179) [`6968caf`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/6968cafa9897c05669886d0472f35ca82111c228) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - perf: memoize the `Intl.NumberFormat`/`Intl.DateTimeFormat` instances behind the money, count and date cell formatters instead of constructing a new one per cell on every refetch (~20-50x cheaper per formatted value).
+
 ## 0.5.1
 
 ### Patch Changes

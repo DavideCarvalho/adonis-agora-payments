@@ -281,14 +281,26 @@ export function usePaymentStatus(
       const settled = isTerminalPaymentStatus(snapshot.status);
       if (settled) finish();
       if (!disposed) {
-        setState({
-          status: snapshot.status,
-          amount: snapshot.amount,
-          currency: snapshot.currency,
-          paidAt: snapshot.paidAt,
-          error: null,
-          isPolling: !settled,
-        });
+        // A poll that comes back with exactly what is already shown (the common case: still
+        // `pending`, every few seconds, for minutes) keeps the previous state object, so React
+        // bails out instead of re-rendering the consumer on every tick.
+        setState((previous) =>
+          previous.status === snapshot.status &&
+          previous.amount === snapshot.amount &&
+          previous.currency === snapshot.currency &&
+          previous.paidAt === snapshot.paidAt &&
+          previous.error === null &&
+          previous.isPolling === !settled
+            ? previous
+            : {
+                status: snapshot.status,
+                amount: snapshot.amount,
+                currency: snapshot.currency,
+                paidAt: snapshot.paidAt,
+                error: null,
+                isPolling: !settled,
+              },
+        );
       }
       if (settled) {
         optionsRef.current.onSettled?.(snapshot);

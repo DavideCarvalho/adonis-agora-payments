@@ -206,6 +206,8 @@ export class PayPalDriver implements PaymentsDriver {
   #invoiceCtx: EmitInvoiceContext;
   /** Cached client-credentials token. `expiresAt` comes from PayPal's own `expires_in`. */
   #token: { value: string; expiresAt: number } | undefined;
+  /** In-flight token request, so concurrent calls on a cold/expired cache mint ONE token. */
+  #tokenInFlight: Promise<string> | undefined;
 
   constructor(ctx: EmitInvoiceContext, config: PayPalDriverConfig) {
     this.#invoiceCtx = ctx;
@@ -1153,6 +1155,18 @@ export class PayPalDriver implements PaymentsDriver {
   async #accessToken(): Promise<string> {
     const cached = this.#token;
     if (cached !== undefined && Date.now() < cached.expiresAt) return cached.value;
+    // Collapse concurrent misses onto one token request (same as the Efí driver): a burst of
+    // charges/webhook verifications landing on a cold or just-expired cache would otherwise each
+    // mint their own client-credentials token, one extra round trip to PayPal apiece.
+    if (this.#tokenInFlight !== undefined) return this.#tokenInFlight;
+    const request = this.#mintToken().finally(() => {
+      this.#tokenInFlight = undefined;
+    });
+    this.#tokenInFlight = request;
+    return request;
+  }
+
+  async #mintToken(): Promise<string> {
     const response = await fetch(`${this.#baseUrl}/v1/oauth2/token`, {
       method: 'POST',
       headers: {

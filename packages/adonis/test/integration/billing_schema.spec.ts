@@ -84,7 +84,10 @@ describe('createBillingTables (integration)', () => {
     // The renewal runner's working set. Unindexed, "which subscriptions are due" is a full
     // scan of every subscription ever created, on a schedule.
     expect(await indexesOf('billing_subscriptions')).toEqual(
-      expect.arrayContaining(['billing_subscriptions_due_idx']),
+      expect.arrayContaining([
+        'billing_subscriptions_due_idx',
+        'billing_subscriptions_external_reference_idx',
+      ]),
     );
   });
 

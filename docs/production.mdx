@@ -386,6 +386,7 @@ either statement, so there a duplicate or a missing index is tolerated instead).
 | `billing_webhook_events_payment_idx` — `payment_gateway_id, created_at` | a payment's ledger timeline |
 | `(status, created_at)` and `(created_at)` on payments and webhook events, `(status, created_at)` on subscriptions | the console's newest-first pages, status filters and status counts |
 | `billing_payments_status_paid_idx` — `status, paid_at` | `revenue()` / `netRevenue()` over a settlement window |
+| `billing_subscriptions_external_reference_idx` — `external_reference` | `listSubscriptions({ externalReference })`: finding a subscription by **your** id for it |
 
 The three older usage indexes — `billing_usage_subscription_meter_idx`,
 `billing_usage_customer_meter_idx` and `billing_usage_scope_meter_idx` — are leading prefixes of

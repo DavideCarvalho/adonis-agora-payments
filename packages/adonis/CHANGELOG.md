@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 0.22.0
+
+### Minor Changes
+
+- [#178](https://github.com/DavideCarvalho/adonis-agora-payments/pull/178) [`a19048d`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/a19048d5ed940da3524b9860f4c8ec02628b04fc) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Dashboard `authorize` now takes the shared Agora dashboard-gate contract: return `boolean | { allowed, reason?: 'unauthenticated' | 'forbidden' }`. `{ allowed: false }` denies (403), `reason: 'unauthenticated'` answers 401 (access-denied page with that reason, or `{ error: 'unauthorized' }` on the API), and a throwing hook is a 403 instead of an unhandled error. A hook that already wrote a redirect still wins. `AuthorizeDecision` and `AuthorizeResult` are exported from `@adonis-agora/payments/dashboard`. The client endpoint's `authorize` accepts the same shape (`{ allowed: false }` denies with 401; `reason: 'forbidden'` is 403), so `@adonis-agora/authz`'s `authorizeByRoles` stays safe once it returns decisions.
+
 ## 0.21.0
 
 ### Minor Changes

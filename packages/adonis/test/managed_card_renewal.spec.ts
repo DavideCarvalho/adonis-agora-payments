@@ -55,6 +55,17 @@ const store = () => new InMemoryBillingStore() as unknown as BillingStore;
 const DUE = new Date('2026-02-10T00:00:00Z');
 
 describe('managed card renewal', () => {
+  it('a card declined at signup leaves nothing to renew', async () => {
+    const driver = new RecordingDriver();
+    const billing = store();
+    driver.failures = 1;
+
+    await expect(subscribed(driver, billing)).rejects.toThrow('Transação não autorizada');
+
+    expect(await renewDueManagedSubscriptions(() => driver, billing, { now: DUE })).toEqual([]);
+    expect(driver.inputs).toHaveLength(1);
+  });
+
   it('charges the saved token on every renewal, without resending holder data', async () => {
     const driver = new RecordingDriver();
     const billing = store();

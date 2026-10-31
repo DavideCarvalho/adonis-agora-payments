@@ -137,16 +137,29 @@ export async function createManagedSubscription(
     payload: {},
   } satisfies ManagedSubscriptionInput);
 
-  const charge = await chargeCycle(driver, {
-    id: row.id,
-    amount,
-    customerId: input.customerId,
-    description: input.description ?? null,
-    externalReference: input.externalReference ?? null,
-    method: input.method ?? null,
-    periodStart,
-    card: input.card,
-  });
+  let charge: Awaited<ReturnType<PaymentsDriver['charge']>>;
+  try {
+    charge = await chargeCycle(driver, {
+      id: row.id,
+      amount,
+      customerId: input.customerId,
+      description: input.description ?? null,
+      externalReference: input.externalReference ?? null,
+      method: input.method ?? null,
+      periodStart,
+      card: input.card,
+    });
+  } catch (error) {
+    // A row left `active` here would debit, a period from now, a customer told their card was
+    // declined and who never subscribed. The row exists first because the idempotency key needs
+    // its id, so it has to be closed on the way out.
+    await store.updateManagedSubscription(row.id, {
+      status: 'canceled',
+      nextChargeAt: null,
+      endsAt: new Date(),
+    });
+    throw error;
+  }
 
   return {
     id: row.id,

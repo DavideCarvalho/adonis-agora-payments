@@ -88,6 +88,20 @@ describe('managed card renewal', () => {
     expect(driver.inputs[1]?.paymentMethodId).toBeUndefined();
   });
 
+  it('a first charge answered as failed also leaves nothing to renew', async () => {
+    class DecliningDriver extends RecordingDriver {
+      async charge(input: ChargeInput) {
+        return { ...(await super.charge(input)), status: 'failed' as const };
+      }
+    }
+    const driver = new DecliningDriver();
+    const billing = store();
+
+    await expect(subscribed(driver, billing)).rejects.toThrow('declined');
+
+    expect(await renewDueManagedSubscriptions(() => driver, billing, { now: DUE })).toEqual([]);
+  });
+
   it('backs off between failed attempts and reports the streak', async () => {
     const driver = new RecordingDriver();
     const billing = store();

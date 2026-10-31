@@ -149,6 +149,9 @@ export async function createManagedSubscription(
       periodStart,
       card: input.card,
     });
+    if (charge.status === 'failed') {
+      throw new Error('The gateway declined the charge.');
+    }
   } catch (error) {
     // A row left `active` here would debit, a period from now, a customer told their card was
     // declined and who never subscribed. The row exists first because the idempotency key needs

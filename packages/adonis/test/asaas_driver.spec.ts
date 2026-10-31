@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { WebhookProcessor } from '../src/billing/webhook_processor.js';
 import { AsaasDriver } from '../src/drivers/asaas.js';
+import { cycleReference } from '../src/drivers/shared.js';
 import { InMemoryBillingStore } from '../src/testing/in_memory_billing_store.js';
 
 function makeDriver(webhookToken?: string) {
@@ -131,7 +132,7 @@ describe('AsaasDriver', () => {
     }
   });
 
-  it('maps externalReference (preferred over idempotencyKey) to the Asaas externalReference field', async () => {
+  it('carries externalReference and idempotencyKey together in the Asaas externalReference field', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -160,7 +161,7 @@ describe('AsaasDriver', () => {
         (call) => (call[1] as RequestInit | undefined)?.method === 'POST',
       ) as [string, RequestInit] | undefined;
       expect(JSON.parse(String(post?.[1].body))).toMatchObject({
-        externalReference: 'pay_local_1',
+        externalReference: cycleReference('pay_local_1', 'idem_1'),
       });
     } finally {
       vi.unstubAllGlobals();

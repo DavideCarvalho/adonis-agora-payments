@@ -24,7 +24,8 @@ const DEFAULT_LIMIT = 100;
  * asks the gateway for the same charge instead of a second one.
  *
  * A charge that fails does not advance the period and does not stop the pass: that
- * subscription stays due and is retried next tick, while everyone else is still renewed. How
+ * subscription is retried after a growing delay (1h, 6h, 24h, then every 72h), while everyone
+ * else is still renewed. How
  * many failures should cancel someone is a dunning policy the application owns — this
  * command reports failures and cancels nobody.
  */

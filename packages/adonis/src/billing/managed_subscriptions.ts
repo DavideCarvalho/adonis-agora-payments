@@ -129,6 +129,11 @@ export async function createManagedSubscription(
     currentPeriodEnd: periodEnd,
     // The next cycle is due when this one ends.
     nextChargeAt: periodEnd,
+    // The token, not the card: what lets the NEXT cycle debit without the customer present.
+    // Holder data belongs to the sale the customer is sitting in front of, and the token stands
+    // in for it afterwards. Asaas still shows `remoteIp` on its token examples, and a renewal
+    // has no payer IP to send: unproven against the real gateway, so test it before relying on it.
+    paymentMethodId: input.card?.token ?? null,
     payload: {},
   } satisfies ManagedSubscriptionInput);
 
@@ -164,6 +169,7 @@ async function chargeCycle(
     method: string | null;
     periodStart: Date;
     card?: CreateSubscriptionInput['card'];
+    paymentMethodId?: string | null;
   },
 ): Promise<Awaited<ReturnType<PaymentsDriver['charge']>>> {
   return driver.charge({
@@ -177,7 +183,20 @@ async function chargeCycle(
     ...(cycle.description !== null ? { description: cycle.description } : {}),
     ...(cycle.method !== null ? { method: cycle.method } : {}),
     ...(cycle.card !== undefined ? { card: cycle.card } : {}),
+    ...(cycle.paymentMethodId ? { paymentMethodId: cycle.paymentMethodId } : {}),
   });
+}
+
+/**
+ * How long a failed renewal waits before the next attempt, by consecutive failures; the last
+ * entry repeats. Hourly crons are the norm here, and re-presenting a declined card every hour
+ * is how a merchant gets flagged by the acquirer's antifraud.
+ */
+export const DEFAULT_RENEWAL_RETRY_DELAYS_HOURS = [1, 6, 24, 72] as const;
+
+function nextRetryAt(now: Date, failureCount: number, delaysHours: readonly number[]): Date {
+  const index = Math.min(failureCount - 1, delaysHours.length - 1);
+  return new Date(now.getTime() + (delaysHours[index] ?? 1) * 60 * 60 * 1000);
 }
 
 /** What one renewal pass did. */
@@ -186,20 +205,24 @@ export interface RenewalOutcome {
   /** `charged` advanced the period; `ended` stopped a subscription asked to cancel. */
   result: 'charged' | 'ended' | 'failed';
   error?: string;
+  /** Consecutive failures so far, on a `failed` outcome: what a dunning policy decides on. */
+  failureCount?: number;
+  /** The app's own reference, so a dunning policy finds its row without another read. */
+  externalReference?: string | null;
 }
 
 /**
  * Charge every managed subscription whose cycle is due, and advance its period.
  *
  * A failed charge does NOT advance the period and does not stop the pass: the subscription
- * stays due and is retried next tick, and one gateway hiccup cannot skip a customer's month
+ * is retried after `retryDelaysHours`, and one gateway hiccup cannot skip a customer's month
  * or abort everyone else's renewal. Repeated failure is a dunning policy the application
  * owns — this reports, it does not cancel anyone.
  */
 export async function renewDueManagedSubscriptions(
   resolveDriver: (provider: string) => PaymentsDriver,
   store: BillingStore,
-  options: { now?: Date; limit?: number } = {},
+  options: { now?: Date; limit?: number; retryDelaysHours?: readonly number[] } = {},
 ): Promise<RenewalOutcome[]> {
   const now = options.now ?? new Date();
   const due = await store.listDueManagedSubscriptions(now, options.limit ?? 100);
@@ -222,7 +245,7 @@ export async function renewDueManagedSubscriptions(
     const periodEnd = advancePeriod(periodStart, row.cycle ?? 'MONTHLY');
 
     try {
-      await chargeCycle(resolveDriver(row.provider), {
+      const charge = await chargeCycle(resolveDriver(row.provider), {
         id: row.id,
         amount: row.amount ?? 0,
         customerId: row.customerId,
@@ -230,7 +253,13 @@ export async function renewDueManagedSubscriptions(
         externalReference: row.externalReference ?? null,
         method: row.method ?? null,
         periodStart,
+        paymentMethodId: row.paymentMethodId ?? null,
       });
+      // Some gateways answer a decline with a 200 and a failed payment. Advancing here would
+      // grant a month nobody paid for.
+      if (charge.status === 'failed') {
+        throw new Error('The gateway declined the charge.');
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // Period untouched on purpose: it stays due and is retried, rather than silently
@@ -240,12 +269,26 @@ export async function renewDueManagedSubscriptions(
       // "invisible": because nothing about the row changes on a failure, a subscription that
       // has been failing for a week looked exactly like one due for the first time. These
       // three fields are what the console reads to say which ones, and for how long.
+      const failureCount = (row.renewalFailureCount ?? 0) + 1;
       await store.updateManagedSubscription(row.id, {
         lastRenewalError: message.slice(0, RENEWAL_ERROR_MAX_LENGTH),
         lastRenewalAttemptAt: now,
-        renewalFailureCount: (row.renewalFailureCount ?? 0) + 1,
+        renewalFailureCount: failureCount,
+        // Only `nextChargeAt` moves. The period is what the charge is for, so the eventual
+        // success still pays this cycle, under this cycle's idempotency key.
+        nextChargeAt: nextRetryAt(
+          now,
+          failureCount,
+          options.retryDelaysHours ?? DEFAULT_RENEWAL_RETRY_DELAYS_HOURS,
+        ),
       });
-      outcomes.push({ subscriptionId: row.id, result: 'failed', error: message });
+      outcomes.push({
+        subscriptionId: row.id,
+        result: 'failed',
+        error: message,
+        failureCount,
+        externalReference: row.externalReference ?? null,
+      });
       continue;
     }
 
@@ -328,12 +371,41 @@ export async function updateManagedSubscription(
   await store.updateManagedSubscription(id, patch);
 }
 
+/**
+ * Replace the saved card of a managed subscription.
+ *
+ * A subscription in a failure streak becomes due now: the customer just fixed the problem, and
+ * making them wait out the backoff would keep them locked out for nothing. A healthy one keeps
+ * its date, because changing card mid-cycle must not bring a charge forward.
+ */
+export async function updateManagedPaymentMethod(
+  store: BillingStore,
+  id: string,
+  paymentMethodId: string,
+  options: { now?: Date } = {},
+): Promise<void> {
+  const row = (await store.findSubscriptionById(id)) as unknown as ManagedRow | null;
+  if (row === null) throw new Error(`[payments] No subscription ${id}.`);
+  if (row.status !== 'active') {
+    throw new Error(
+      `[payments] Subscription ${id} is "${row.status}", not active — it has no next charge to ` +
+        'put a new card on.',
+    );
+  }
+  await store.updateManagedSubscription(id, {
+    paymentMethodId,
+    ...((row.renewalFailureCount ?? 0) > 0 ? { nextChargeAt: options.now ?? new Date() } : {}),
+  });
+}
+
 /** `VARCHAR(500)`: a gateway error can be a paragraph, and the column is not a log. */
 const RENEWAL_ERROR_MAX_LENGTH = 500;
 
 /** The subset of a stored row this module reads, whatever the store implementation is. */
 interface ManagedRow {
   id: string;
+  status?: string;
+  paymentMethodId?: string | null;
   provider: string;
   customerId: string;
   amount?: number | null;

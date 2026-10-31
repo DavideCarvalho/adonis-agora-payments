@@ -450,3 +450,32 @@ describe('WooviDriver', () => {
     expect(payment?.pixCode).toBe('brcode-2');
   });
 });
+
+describe('WooviDriver: a reference shared by several charges', () => {
+  it('gives each cycle its own correlationID and hands the webhook the app reference', async () => {
+    const driver = new WooviDriver({ config: () => ({}) }, { appId: 'test' });
+    const sent: string[] = [];
+    createClientMock.charge.create.mockImplementation(async (body: { correlationID: string }) => {
+      sent.push(body.correlationID);
+      return { charge: { globalID: 'x', correlationID: body.correlationID, value: 4900 } };
+    });
+
+    for (const cycle of ['2026-01-10', '2026-02-10']) {
+      await driver.charge({
+        amount: 4900,
+        externalReference: 'sub:abc',
+        idempotencyKey: `sub:row:${cycle}`,
+      });
+    }
+
+    expect(new Set(sent).size).toBe(2);
+    const event = driver.parseWebhook(
+      JSON.stringify({
+        event: 'OPENPIX:CHARGE_COMPLETED',
+        charge: { globalID: 'x', correlationID: sent[1], value: 4900, status: 'COMPLETED' },
+      }),
+      {},
+    );
+    expect(event.data).toMatchObject({ externalReference: 'sub:abc' });
+  });
+});

@@ -5,6 +5,7 @@ import {
   type RenewalOutcome,
   renewDueManagedSubscriptions,
   resumeManagedSubscription,
+  updateManagedPaymentMethod,
   updateManagedSubscription,
 } from './billing/managed_subscriptions.js';
 import type { CreateSubscriptionInput, PaymentsDriver } from './driver.js';
@@ -202,6 +203,30 @@ export class SubscriptionsApi {
   }
 
   /**
+   * Put a new card on a managed subscription. `paymentMethodId` is the gateway token, from
+   * `tokenizeCard` or the gateway's browser SDK, for the customer on this subscription.
+   *
+   * Managed-mode only: a gateway-owned subscription keeps its card at the gateway, and there
+   * is no portable way to change it from here.
+   */
+  async updatePaymentMethod(
+    id: string,
+    paymentMethodId: string,
+    options: { via?: string; managed?: boolean; now?: Date } = {},
+  ): Promise<void> {
+    const driver = this.#deps.resolveDriver(options.via);
+    if (this.#deps.mode(driver.provider, options.managed) === 'gateway') {
+      throw new Error(
+        `[payments] Changing the saved card here is managed-mode only — "${driver.provider}" owns ` +
+          'this subscription and its card.',
+      );
+    }
+    await updateManagedPaymentMethod(this.#deps.store(), id, paymentMethodId, {
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
+  }
+
+  /**
    * Managed subscriptions due at or before `now`, WITHOUT charging anything.
    *
    * What `payments:renew --dry-run` reads. It runs the same store query the real pass does,
@@ -218,7 +243,9 @@ export class SubscriptionsApi {
    * Charge every managed subscription whose cycle is due. Drive it from `payments:renew`
    * (a cron, a durable schedule) — nothing renews on its own.
    */
-  async renewDue(options: { now?: Date; limit?: number } = {}): Promise<RenewalOutcome[]> {
+  async renewDue(
+    options: { now?: Date; limit?: number; retryDelaysHours?: readonly number[] } = {},
+  ): Promise<RenewalOutcome[]> {
     return renewDueManagedSubscriptions(
       (provider) => this.#deps.resolveDriver(provider),
       this.#deps.store(),

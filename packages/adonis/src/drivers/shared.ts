@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 /**
  * Validation shared by every driver, so fourteen gateways cannot drift into fourteen
  * slightly different messages for the same mistake.
@@ -47,4 +48,27 @@ export function requireCurrency(driver: string, currency: string | undefined): s
     );
   }
   return currency;
+}
+
+const CYCLE_REFERENCE_SEPARATOR = '|k:';
+
+/**
+ * The reference for a charge that has BOTH an app reference and its own idempotency key.
+ *
+ * Asaas and Woovi have one field for the two jobs. The app reference repeats on purpose (each
+ * cycle of `sub:<id>` routes to the same subscription), while a charge's identity must not:
+ * with the bare reference, Asaas' lookup found the first cycle's charge and every renewal
+ * returned it instead of charging. So the field carries both, and the driver gives the app its
+ * reference back through {@link routingReference}. The key is hashed to stay inside the
+ * gateways' length limits.
+ */
+export function cycleReference(reference: string, idempotencyKey: string): string {
+  const digest = createHash('sha256').update(idempotencyKey).digest('hex').slice(0, 16);
+  return `${reference}${CYCLE_REFERENCE_SEPARATOR}${digest}`;
+}
+
+/** The app's reference out of what the gateway echoes. A plain reference passes through. */
+export function routingReference(echoed: string): string {
+  const separator = echoed.lastIndexOf(CYCLE_REFERENCE_SEPARATOR);
+  return separator === -1 ? echoed : echoed.slice(0, separator);
 }

@@ -91,6 +91,8 @@ export interface ManagedSubscriptionInput {
   currentPeriodStart: Date;
   currentPeriodEnd: Date;
   nextChargeAt: Date | null;
+  /** The saved card's gateway token, charged on every renewal. */
+  paymentMethodId?: string | null;
   payload?: Record<string, unknown>;
 }
 
@@ -109,6 +111,7 @@ export interface ManagedSubscriptionPatch {
   nextChargeAt?: Date | null;
   cancelAtPeriodEnd?: boolean;
   endsAt?: Date | null;
+  paymentMethodId?: string | null;
 }
 
 /** One `billing_subscriptions` row, normalized for reading. See {@link PaymentListItem}. */

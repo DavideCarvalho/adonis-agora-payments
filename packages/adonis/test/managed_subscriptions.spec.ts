@@ -134,9 +134,9 @@ describe('managed subscriptions', () => {
     });
     expect(failed[0]).toMatchObject({ result: 'failed', error: 'gateway said no' });
 
-    // Still due, and succeeds on the next pass.
+    // Still owed, and succeeds once the retry delay has passed.
     const retried = await renewDueManagedSubscriptions(() => driver, billing, {
-      now: new Date('2026-02-10T00:00:00Z'),
+      now: new Date('2026-02-10T02:00:00Z'),
     });
     expect(retried[0]).toMatchObject({ result: 'charged' });
   });

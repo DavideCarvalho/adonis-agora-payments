@@ -89,7 +89,7 @@ describe('renovação: o que fica registrado', () => {
     expect(failed.renewalFailureCount).toBe(1);
 
     await renewDueManagedSubscriptions(() => driver, billing, {
-      now: new Date('2026-02-10T00:00:00Z'),
+      now: new Date('2026-02-10T02:00:00Z'),
     });
 
     // Mede uma SEQUÊNCIA, não um total histórico: quem falhou em março e paga desde então não

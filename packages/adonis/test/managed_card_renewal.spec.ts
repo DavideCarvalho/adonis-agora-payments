@@ -55,6 +55,17 @@ const store = () => new InMemoryBillingStore() as unknown as BillingStore;
 const DUE = new Date('2026-02-10T00:00:00Z');
 
 describe('managed card renewal', () => {
+  it('a card declined at signup leaves nothing to renew', async () => {
+    const driver = new RecordingDriver();
+    const billing = store();
+    driver.failures = 1;
+
+    await expect(subscribed(driver, billing)).rejects.toThrow('Transação não autorizada');
+
+    expect(await renewDueManagedSubscriptions(() => driver, billing, { now: DUE })).toEqual([]);
+    expect(driver.inputs).toHaveLength(1);
+  });
+
   it('charges the saved token on every renewal, without resending holder data', async () => {
     const driver = new RecordingDriver();
     const billing = store();
@@ -75,6 +86,20 @@ describe('managed card renewal', () => {
     await renewDueManagedSubscriptions(() => driver, billing, { now: DUE });
 
     expect(driver.inputs[1]?.paymentMethodId).toBeUndefined();
+  });
+
+  it('a first charge answered as failed also leaves nothing to renew', async () => {
+    class DecliningDriver extends RecordingDriver {
+      async charge(input: ChargeInput) {
+        return { ...(await super.charge(input)), status: 'failed' as const };
+      }
+    }
+    const driver = new DecliningDriver();
+    const billing = store();
+
+    await expect(subscribed(driver, billing)).rejects.toThrow('declined');
+
+    expect(await renewDueManagedSubscriptions(() => driver, billing, { now: DUE })).toEqual([]);
   });
 
   it('backs off between failed attempts and reports the streak', async () => {

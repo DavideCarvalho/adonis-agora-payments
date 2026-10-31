@@ -212,7 +212,7 @@ export class SubscriptionsApi {
   async updatePaymentMethod(
     id: string,
     paymentMethodId: string,
-    options: { via?: string; managed?: boolean } = {},
+    options: { via?: string; managed?: boolean; now?: Date } = {},
   ): Promise<void> {
     const driver = this.#deps.resolveDriver(options.via);
     if (this.#deps.mode(driver.provider, options.managed) === 'gateway') {
@@ -221,7 +221,9 @@ export class SubscriptionsApi {
           'this subscription and its card.',
       );
     }
-    await updateManagedPaymentMethod(this.#deps.store(), id, paymentMethodId);
+    await updateManagedPaymentMethod(this.#deps.store(), id, paymentMethodId, {
+      ...(options.now !== undefined ? { now: options.now } : {}),
+    });
   }
 
   /**

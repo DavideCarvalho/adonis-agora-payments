@@ -130,8 +130,9 @@ export async function createManagedSubscription(
     // The next cycle is due when this one ends.
     nextChargeAt: periodEnd,
     // The token, not the card: what lets the NEXT cycle debit without the customer present.
-    // Holder data and IP belong to the sale the customer is sitting in front of, and the
-    // token stands in for them afterwards.
+    // Holder data belongs to the sale the customer is sitting in front of, and the token stands
+    // in for it afterwards. Asaas still shows `remoteIp` on its token examples, and a renewal
+    // has no payer IP to send: unproven against the real gateway, so test it before relying on it.
     paymentMethodId: input.card?.token ?? null,
     payload: {},
   } satisfies ManagedSubscriptionInput);

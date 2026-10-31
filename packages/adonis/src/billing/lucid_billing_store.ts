@@ -568,6 +568,7 @@ export class LucidBillingStore
     row.currentPeriodEnd = DateTime.fromJSDate(sub.currentPeriodEnd);
     row.nextChargeAt = sub.nextChargeAt ? DateTime.fromJSDate(sub.nextChargeAt) : null;
     row.cancelAtPeriodEnd = false;
+    row.paymentMethodId = sub.paymentMethodId ?? null;
     row.payload = sub.payload ?? {};
     await row.save();
     return row;
@@ -604,6 +605,18 @@ export class LucidBillingStore
     if (patch.cancelAtPeriodEnd !== undefined) row.cancelAtPeriodEnd = patch.cancelAtPeriodEnd;
     if (patch.endsAt !== undefined) {
       row.endsAt = patch.endsAt ? DateTime.fromJSDate(patch.endsAt) : null;
+    }
+    if (patch.paymentMethodId !== undefined) row.paymentMethodId = patch.paymentMethodId;
+    // Without these three the failure streak never reached the database: the console's
+    // "failing renewals" list stayed empty and a retry delay would restart from the first step.
+    if (patch.lastRenewalError !== undefined) row.lastRenewalError = patch.lastRenewalError;
+    if (patch.lastRenewalAttemptAt !== undefined) {
+      row.lastRenewalAttemptAt = patch.lastRenewalAttemptAt
+        ? DateTime.fromJSDate(patch.lastRenewalAttemptAt)
+        : null;
+    }
+    if (patch.renewalFailureCount !== undefined) {
+      row.renewalFailureCount = patch.renewalFailureCount;
     }
     await row.save();
     return row;

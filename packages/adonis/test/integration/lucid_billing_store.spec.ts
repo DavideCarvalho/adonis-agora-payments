@@ -159,6 +159,29 @@ describe('LucidBillingStore (integration)', () => {
       expect(second.id).not.toBe(row.id);
     });
 
+    it('persists the saved card and the failure streak, and never serializes the token', async () => {
+      const row = await store.createManagedSubscription({
+        ...base,
+        currentPeriodStart: new Date('2026-02-01T00:00:00.000Z'),
+        currentPeriodEnd: new Date('2026-03-01T00:00:00.000Z'),
+        nextChargeAt: new Date('2026-03-01T00:00:00.000Z'),
+        paymentMethodId: 'tok_secret',
+      });
+
+      await store.updateManagedSubscription(row.id, {
+        lastRenewalError: 'recusado',
+        lastRenewalAttemptAt: new Date('2026-03-01T00:00:00.000Z'),
+        renewalFailureCount: 2,
+        paymentMethodId: 'tok_secret_2',
+      });
+
+      const read = await store.findSubscriptionById(row.id);
+      expect(read?.paymentMethodId).toBe('tok_secret_2');
+      expect(read?.renewalFailureCount).toBe(2);
+      expect(read?.lastRenewalError).toBe('recusado');
+      expect(JSON.stringify(read?.serialize())).not.toContain('tok_secret');
+    });
+
     it('returns only what is due, oldest first, and never a gateway-owned row', async () => {
       const due = await store.createManagedSubscription({
         ...base,

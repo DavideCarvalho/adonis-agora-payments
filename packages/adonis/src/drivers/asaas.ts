@@ -34,6 +34,7 @@ import type {
   WebhookEvent,
 } from '../types.js';
 import { requireMatchingCredential } from '../webhook_security.js';
+import { cycleReference, routingReference } from './shared.js';
 
 interface AsaasCustomerResponse {
   id: string;
@@ -364,7 +365,10 @@ export class AsaasDriver implements PaymentsDriver {
     // The value that will land in `externalReference` — and therefore the value the
     // idempotency lookup below has to search on. They must be the same string or the second
     // call looks for a key the first one never wrote.
-    const reference = input.externalReference ?? input.idempotencyKey;
+    const reference =
+      input.externalReference !== undefined && input.idempotencyKey !== undefined
+        ? cycleReference(input.externalReference, input.idempotencyKey)
+        : (input.externalReference ?? input.idempotencyKey);
     const body: Record<string, unknown> = {
       customer: input.customerId,
       value: toDecimal(input.amount),
@@ -968,7 +972,7 @@ export class AsaasDriver implements PaymentsDriver {
         ...(payment.customerId !== undefined ? { customerId: payment.customerId } : {}),
         ...(payment.subscriptionId !== undefined ? { subscriptionId: payment.subscriptionId } : {}),
         ...(payload.payment.externalReference !== undefined
-          ? { externalReference: payload.payment.externalReference }
+          ? { externalReference: routingReference(payload.payment.externalReference) }
           : {}),
         // The payment's CURRENT state, and the two figures that go with it. `payment.updated`
         // is the only event whose type does not state its own outcome — Asaas sends eight

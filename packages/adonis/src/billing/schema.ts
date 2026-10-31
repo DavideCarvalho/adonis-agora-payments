@@ -390,6 +390,10 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   await addColumn(db, dialect, 'billing_subscriptions', 'last_renewal_attempt_at', t.timestamp);
   await addColumn(db, dialect, 'billing_subscriptions', 'renewal_failure_count', 'INTEGER');
 
+  // 0.23.0 — the saved card of a managed subscription. The token is the only thing a renewal
+  // can debit with: the customer is not there and the holder data was for the first sale.
+  await addColumn(db, dialect, 'billing_subscriptions', 'payment_method_id', 'VARCHAR(255)');
+
   // 0.18.0 — usage metered against something that is neither the subscription nor the
   // customer: a project shared by several members, a workspace, an environment, a site. Before
   // this the only place to put it was `metadata`, and aggregating meant `metadata->>'projectId'`

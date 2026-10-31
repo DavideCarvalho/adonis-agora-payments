@@ -26,6 +26,7 @@ import type {
   WebhookEvent,
 } from '../types.js';
 import { verifyHmacSignature, verifyRsaSha256Signature } from '../webhook_security.js';
+import { cycleReference, routingReference } from './shared.js';
 
 /**
  * Woovi/OpenPix driver — Brazilian Pix gateway with Pix Automático (recurring Pix via
@@ -156,7 +157,13 @@ export class WooviDriver implements PaymentsDriver {
       // Woovi's `correlationID` is the app's own reference — the routing key webhook
       // handlers read. Prefer the explicit `externalReference`, fall back to the
       // idempotency key (legacy behavior).
-      correlationID: input.externalReference ?? input.idempotencyKey ?? `charge_${Date.now()}`,
+      //
+      // With both, it carries both: `correlationID` is unique per charge, and the same
+      // `sub:<id>` on every cycle of a managed subscription would collide from the second one.
+      correlationID:
+        input.externalReference !== undefined && input.idempotencyKey !== undefined
+          ? cycleReference(input.externalReference, input.idempotencyKey)
+          : (input.externalReference ?? input.idempotencyKey ?? `charge_${Date.now()}`),
       // Centavos, straight through. OpenPix documents `value` as "o valor em centavos da
       // cobrança Pix" — the same integer minor unit this package uses — so there is no
       // conversion to do. This driver used to send `toDecimal(amount)`, which turned a
@@ -561,7 +568,7 @@ export class WooviDriver implements PaymentsDriver {
         planId: subscription.planId,
         ...(subscription.customerId !== undefined ? { customerId: subscription.customerId } : {}),
         ...(typeof subject.correlationID === 'string'
-          ? { externalReference: subject.correlationID }
+          ? { externalReference: routingReference(subject.correlationID) }
           : {}),
       };
     }
@@ -579,7 +586,7 @@ export class WooviDriver implements PaymentsDriver {
       ...(payment.customerId !== undefined ? { customerId: payment.customerId } : {}),
       // `correlationID` is what an app sets as its own reference on a Woovi charge.
       ...(typeof subject.correlationID === 'string'
-        ? { externalReference: subject.correlationID }
+        ? { externalReference: routingReference(subject.correlationID) }
         : {}),
       ...(typeof endToEndId === 'string' ? { metadata: { endToEndId } } : {}),
     };
@@ -633,7 +640,9 @@ export class WooviDriver implements PaymentsDriver {
       // produce a broken <img> in every consumer that followed the docs, so it is left
       // unset: `pixCode` is the BR Code and a QR renders from it client-side.
       ...(paymentLinkUrl !== undefined ? { hostedUrl: paymentLinkUrl } : {}),
-      ...(typeof charge.correlationID === 'string' ? { customerId: charge.correlationID } : {}),
+      ...(typeof charge.correlationID === 'string'
+        ? { customerId: routingReference(charge.correlationID) }
+        : {}),
       payload: data,
       createdAt: typeof charge.createdAt === 'string' ? charge.createdAt : new Date().toISOString(),
     };

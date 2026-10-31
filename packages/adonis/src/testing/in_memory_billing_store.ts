@@ -140,6 +140,7 @@ export interface InMemorySubscriptionRow {
   lastRenewalError?: string | null;
   lastRenewalAttemptAt?: Date | null;
   renewalFailureCount?: number | null;
+  paymentMethodId?: string | null;
 }
 
 export interface InMemoryPaymentRow {
@@ -539,6 +540,7 @@ export class InMemoryBillingStore
       currentPeriodEnd: sub.currentPeriodEnd,
       nextChargeAt: sub.nextChargeAt,
       cancelAtPeriodEnd: false,
+      paymentMethodId: sub.paymentMethodId ?? null,
     };
     this.managedSubscriptions.set(row.id, row);
     return row;
@@ -570,6 +572,7 @@ export class InMemoryBillingStore
     if (patch.nextChargeAt !== undefined) row.nextChargeAt = patch.nextChargeAt;
     if (patch.cancelAtPeriodEnd !== undefined) row.cancelAtPeriodEnd = patch.cancelAtPeriodEnd;
     if (patch.endsAt !== undefined) row.endsAt = patch.endsAt;
+    if (patch.paymentMethodId !== undefined) row.paymentMethodId = patch.paymentMethodId;
     if (patch.lastRenewalError !== undefined) row.lastRenewalError = patch.lastRenewalError;
     if (patch.lastRenewalAttemptAt !== undefined) {
       row.lastRenewalAttemptAt = patch.lastRenewalAttemptAt;

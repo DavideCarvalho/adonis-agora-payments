@@ -141,6 +141,13 @@ export class BillingSubscription extends BaseModel {
   @column()
   declare renewalFailureCount: number | null;
 
+  /**
+   * The saved card's gateway token. Never serialized: it can move money with the account's API
+   * key, and nothing that renders a subscription has a reason to see it.
+   */
+  @column({ serializeAs: null })
+  declare paymentMethodId: string | null;
+
   @column.dateTime({ autoCreate: true })
   declare createdAt: DateTime;
 

@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 0.23.1
+
+### Patch Changes
+
+- [#186](https://github.com/DavideCarvalho/adonis-agora-payments/pull/186) [`039a326`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/039a326e4488b2a668dfff332faee4a091411810) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Fix: when the first charge of a managed subscription failed, its row stayed `active` and was charged again one period later, debiting a customer whose signup had failed. The row is now closed before the error propagates.
+
 ## 0.23.0
 
 ### Minor Changes

@@ -103,7 +103,14 @@ describe('managed subscriptions', () => {
       now: new Date('2026-02-10T00:00:00Z'),
     });
 
-    expect(outcomes).toEqual([{ subscriptionId: expect.any(String), result: 'charged' }]);
+    expect(outcomes).toEqual([
+      {
+        subscriptionId: expect.any(String),
+        result: 'charged',
+        charge: expect.objectContaining({ id: expect.anything() }),
+        externalReference: 'sub:local-1',
+      },
+    ]);
     expect(driver.chargeCalls).toHaveLength(2);
 
     // Not due again until the next cycle: renewing twice in one period is a double charge.

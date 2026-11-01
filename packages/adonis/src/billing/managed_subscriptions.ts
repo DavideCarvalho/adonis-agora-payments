@@ -225,6 +225,12 @@ export interface RenewalOutcome {
   failureCount?: number;
   /** The app's own reference, so a dunning policy finds its row without another read. */
   externalReference?: string | null;
+  /**
+   * The charge a `charged` outcome created. A Pix or boleto renewal is only paid if the customer
+   * sees it, and this pass runs in a cron nobody is watching: the code and the link have to reach
+   * the application, which is the side that knows how to notify its customers.
+   */
+  charge?: Awaited<ReturnType<PaymentsDriver['charge']>>;
 }
 
 /**
@@ -260,8 +266,9 @@ export async function renewDueManagedSubscriptions(
     const periodStart = toDate(row.currentPeriodEnd) ?? now;
     const periodEnd = advancePeriod(periodStart, row.cycle ?? 'MONTHLY');
 
+    let charge: Awaited<ReturnType<PaymentsDriver['charge']>>;
     try {
-      const charge = await chargeCycle(resolveDriver(row.provider), {
+      charge = await chargeCycle(resolveDriver(row.provider), {
         id: row.id,
         amount: row.amount ?? 0,
         customerId: row.customerId,
@@ -318,7 +325,12 @@ export async function renewDueManagedSubscriptions(
       lastRenewalAttemptAt: now,
       renewalFailureCount: 0,
     });
-    outcomes.push({ subscriptionId: row.id, result: 'charged' });
+    outcomes.push({
+      subscriptionId: row.id,
+      result: 'charged',
+      charge,
+      externalReference: row.externalReference ?? null,
+    });
   }
 
   return outcomes;

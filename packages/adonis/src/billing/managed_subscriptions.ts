@@ -385,6 +385,36 @@ export async function resumeManagedSubscription(store: BillingStore, id: string)
 }
 
 /**
+ * Move the end of the current period forward, and the next charge with it.
+ *
+ * What granting free time needs: the customer keeps what they have and nothing is charged until
+ * `until`. Forward only, because moving a paid period back would take away time already sold, and
+ * a charge brought forward is money nobody agreed to at that date.
+ */
+export async function extendManagedSubscription(
+  store: BillingStore,
+  id: string,
+  until: Date,
+): Promise<void> {
+  const row = (await store.findSubscriptionById(id)) as unknown as ManagedRow | null;
+  if (row === null) throw new Error(`[payments] No subscription ${id}.`);
+  if (row.status !== 'active') {
+    throw new Error(
+      `[payments] Subscription ${id} is "${row.status}", not active — it has no next charge to ` +
+        'move.',
+    );
+  }
+  const currentEnd = toDate(row.currentPeriodEnd);
+  if (currentEnd !== null && until <= currentEnd) {
+    throw new Error(
+      `[payments] Cannot extend subscription ${id} to ${until.toISOString()}: its period already ` +
+        `runs until ${currentEnd.toISOString()}.`,
+    );
+  }
+  await store.updateManagedSubscription(id, { currentPeriodEnd: until, nextChargeAt: until });
+}
+
+/**
  * Re-price or re-describe a managed subscription.
  *
  * Takes effect on the NEXT cycle — the current one is already paid, and silently re-charging

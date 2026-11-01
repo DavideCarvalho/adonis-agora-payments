@@ -2,6 +2,7 @@ import type { BillingStore } from './billing/billing_store.js';
 import {
   cancelManagedSubscription,
   createManagedSubscription,
+  extendManagedSubscription,
   type RenewalOutcome,
   renewDueManagedSubscriptions,
   resumeManagedSubscription,
@@ -179,6 +180,30 @@ export class SubscriptionsApi {
     }
 
     await resumeManagedSubscription(this.#deps.store(), id);
+  }
+
+  /**
+   * Push the end of the current period, and the next charge, forward to `until`.
+   *
+   * Managed mode only, like {@link resume}: a gateway-owned subscription bills on the gateway's
+   * schedule, and there is no portable way to move it.
+   */
+  async extend(
+    id: string,
+    until: Date,
+    options: { via?: string; managed?: boolean } = {},
+  ): Promise<void> {
+    const driver = this.#deps.resolveDriver(options.via);
+    const mode = this.#deps.mode(driver.provider, options.managed);
+
+    if (mode === 'gateway') {
+      throw new Error(
+        `[payments] Extending a subscription is managed-mode only — "${driver.provider}" owns this ` +
+          'one and bills on its own schedule.',
+      );
+    }
+
+    await extendManagedSubscription(this.#deps.store(), id, until);
   }
 
   /** Re-price or re-describe. In managed mode it takes effect on the next cycle. */

@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 0.24.0
+
+### Minor Changes
+
+- [#187](https://github.com/DavideCarvalho/adonis-agora-payments/pull/187) [`92f2fa5`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/92f2fa576abbe0390e1a5e445de48b68f8fb896c) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - `renewDue()` now returns the created charge and the `externalReference` on `charged` outcomes, so an application can deliver a Pix code or payment link to the customer.
+
 ## 0.23.1
 
 ### Patch Changes

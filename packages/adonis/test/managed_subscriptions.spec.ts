@@ -4,8 +4,8 @@ import {
   advancePeriod,
   cancelManagedSubscription,
   createManagedSubscription,
-  extendManagedSubscription,
   cycleIdempotencyKey,
+  extendManagedSubscription,
   renewDueManagedSubscriptions,
   resumeManagedSubscription,
 } from '../src/billing/managed_subscriptions.js';

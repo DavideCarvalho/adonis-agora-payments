@@ -2,9 +2,9 @@ import type { BillingStore } from './billing/billing_store.js';
 import {
   cancelManagedSubscription,
   createManagedSubscription,
+  extendManagedSubscription,
   type RenewalOutcome,
   renewDueManagedSubscriptions,
-  extendManagedSubscription,
   resumeManagedSubscription,
   updateManagedPaymentMethod,
   updateManagedSubscription,

@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 0.25.0
+
+### Minor Changes
+
+- [#189](https://github.com/DavideCarvalho/adonis-agora-payments/pull/189) [`46f9a4e`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/46f9a4e065063b959ff5eac69342e292eb0d8010) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - `subscriptions().extend(id, until)` moves the end of a managed subscription's period, and its next charge, forward. Useful for granting free time.
+
 ## 0.24.0
 
 ### Minor Changes

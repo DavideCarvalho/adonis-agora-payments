@@ -319,5 +319,10 @@ describe('gateway subscription lifecycle', () => {
     await expect(
       extendManagedSubscription(billing, id, new Date('2026-01-01T00:00:00Z')),
     ).rejects.toThrow(/already/);
+
+    await cancelManagedSubscription(billing, id);
+    await expect(
+      extendManagedSubscription(billing, id, new Date('2027-01-01T00:00:00Z')),
+    ).rejects.toThrow(/not active/);
   });
 });

@@ -4,6 +4,7 @@ import {
   advancePeriod,
   cancelManagedSubscription,
   createManagedSubscription,
+  extendManagedSubscription,
   cycleIdempotencyKey,
   renewDueManagedSubscriptions,
   resumeManagedSubscription,
@@ -291,5 +292,32 @@ describe('gateway subscription lifecycle', () => {
       update: false,
       cancel: false,
     });
+  });
+
+  it('extend moves the next charge forward, and refuses to move it back', async () => {
+    const driver = new ChargeOnlyDriver();
+    const billing = store();
+    const { id } = await createManagedSubscription(driver, billing, {
+      customerId: 'cus_1',
+      planId: 'p',
+      amount: 100,
+      cycle: 'MONTHLY',
+      startDate: '2026-01-10',
+    });
+
+    await extendManagedSubscription(billing, id, new Date('2026-04-10T00:00:00Z'));
+
+    const nothingDue = await renewDueManagedSubscriptions(() => driver, billing, {
+      now: new Date('2026-03-10T00:00:00Z'),
+    });
+    expect(nothingDue).toEqual([]);
+    const due = await renewDueManagedSubscriptions(() => driver, billing, {
+      now: new Date('2026-04-10T00:00:00Z'),
+    });
+    expect(due[0]).toMatchObject({ result: 'charged' });
+
+    await expect(
+      extendManagedSubscription(billing, id, new Date('2026-01-01T00:00:00Z')),
+    ).rejects.toThrow(/already/);
   });
 });

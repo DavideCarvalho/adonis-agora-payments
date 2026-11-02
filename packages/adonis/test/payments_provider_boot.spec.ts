@@ -1,3 +1,4 @@
+import { WorkflowEngine } from '@adonis-agora/durable';
 import type { ApplicationService } from '@adonisjs/core/types';
 import { afterEach, describe, expect, it } from 'vitest';
 import PaymentsProvider from '../providers/payments_provider.js';
@@ -18,8 +19,9 @@ afterEach(() => {
 });
 
 /** An `ApplicationService` stand-in exposing only what `register()`/`boot()` touch. */
-function fakeApp(config: PaymentsConfig): ApplicationService {
+function fakeApp(config: PaymentsConfig, engine?: unknown): ApplicationService {
   const bindings = new Map<unknown, () => Promise<unknown> | unknown>();
+  if (engine) bindings.set(WorkflowEngine, () => engine);
   const app = {
     config: { get: () => config },
     booted: async (callback: () => Promise<void>) => {
@@ -219,5 +221,37 @@ describe('PaymentsProvider boot — webhook verification', () => {
     provider.register();
     await provider.boot();
     expect(await app.container.make(PaymentsManager)).toBeInstanceOf(PaymentsManager);
+  });
+});
+
+describe('PaymentsProvider boot — webhook workflow on the durable engine', () => {
+  const durableConfig = (role?: 'api' | 'worker' | 'all'): PaymentsConfig => ({
+    ...base,
+    billing: { ...base.billing, durable: true, ...(role ? { role } : {}) },
+  });
+
+  async function bootWithEngine(config: PaymentsConfig) {
+    const registered: string[] = [];
+    const engine = { register: (name: string) => registered.push(name) };
+    const provider = new PaymentsProvider(fakeApp(config, engine));
+    provider.register();
+    await provider.boot();
+    return registered;
+  }
+
+  it('a worker that never received a webhook can run one', async () => {
+    expect(await bootWithEngine(durableConfig('worker'))).toEqual(['payments-webhook']);
+  });
+
+  it('a web process that just restarted can run one too', async () => {
+    expect(await bootWithEngine(durableConfig('all'))).toEqual(['payments-webhook']);
+  });
+
+  it('leaves the api half alone: it has no handlers to run an event with', async () => {
+    expect(await bootWithEngine(durableConfig('api'))).toEqual([]);
+  });
+
+  it('boot survives an engine that cannot be built', async () => {
+    await expect(boot(durableConfig('worker'))).resolves.toBeUndefined();
   });
 });

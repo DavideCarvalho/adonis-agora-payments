@@ -103,6 +103,8 @@ export default class PaymentsProvider {
       // factories), so the mounted route can emit `billing:*` and run app handlers.
       if (config.billing?.enabled !== false) {
         await this.#buildBillingLayer(config);
+        // The api half only enqueues, and has no handlers to run an event with.
+        if (resolveRole(config) !== 'api') await this.#webhook?.prepare();
       }
       // Resolve the manager here so `setPayments` runs and `getPayments()` works for
       // services that read it during boot — after every provider has registered.

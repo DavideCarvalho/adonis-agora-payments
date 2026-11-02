@@ -268,6 +268,26 @@ export class WebhookDispatcher {
   }
 
   /**
+   * Register the webhook workflow at boot, before any webhook reaches this process.
+   *
+   * Durable runs travel through a queue shared by every process, and pending runs are polled by
+   * the worker. Registering only on the first dispatch left every other process (the worker, or
+   * a web process that just restarted) unable to run what it picked up, so the event sat
+   * `pending` with the gateway already answered 200.
+   *
+   * A failure here is reported and left to the first dispatch: boot must not depend on it.
+   */
+  async prepare(): Promise<void> {
+    try {
+      if (await this.#useDurable()) this.#registerWorkflow(await this.#resolveEngine());
+    } catch (error) {
+      console.warn(
+        `[payments] could not register the webhook workflow at boot: ${asError(error).message}`,
+      );
+    }
+  }
+
+  /**
    * Register the webhook workflow on the engine. Idempotent, and it has to happen before
    * the first `start`: the engine resolves a run by looking its NAME up in the registry and
    * throws `workflow payments-webhook is not registered` otherwise.

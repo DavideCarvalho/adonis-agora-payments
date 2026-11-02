@@ -237,8 +237,8 @@ importers:
         specifier: 8.23.1
         version: 8.23.1
       stripe:
-        specifier: 23.0.1
-        version: 23.0.1(@types/node@26.6.5)
+        specifier: 23.1.0
+        version: 23.1.0(@types/node@26.6.5)
       typescript:
         specifier: 7.0.2
         version: 7.0.2
@@ -3715,8 +3715,8 @@ packages:
   strip-literal@3.1.0:
     resolution: {integrity: sha512-8r3mkIM/2+PpjHoOtiAW8Rg3jJLHaV7xPwG+YRGrv6FP0wwk/toTpATxWYOW0BKdWwl82VT2tFYi5DlROa0Mxg==}
 
-  stripe@23.0.1:
-    resolution: {integrity: sha512-VFLs9IAzSZ8GIm6/vqhjqOL0fbYrSNYCpgZ3LS3YkSi/i5RnyMpu/Hf9YxPTOCYwc3mZKU3IJvuvKffQH2NLMg==}
+  stripe@23.1.0:
+    resolution: {integrity: sha512-fVUfMSfTPoukfoV//MUKAx2+YxyKmYaYtnAL9VkfnHfaPNQylFdWZMD+zgUFerI8rjbaiER8Vzj2XEUQ2AhAsQ==}
     engines: {node: '>=20'}
     peerDependencies:
       '@types/node': '>=20'
@@ -7579,7 +7579,7 @@ snapshots:
     dependencies:
       js-tokens: 9.0.1
 
-  stripe@23.0.1(@types/node@26.6.5):
+  stripe@23.1.0(@types/node@26.6.5):
     optionalDependencies:
       '@types/node': 26.6.5
 

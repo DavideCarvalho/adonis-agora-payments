@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 0.25.1
+
+### Patch Changes
+
+- [#194](https://github.com/DavideCarvalho/adonis-agora-payments/pull/194) [`94fdcc4`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/94fdcc4baefc154c745c4529afbcc82c4685e941) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Register the webhook workflow at boot, not on the first dispatch. A worker, or a web process that had just restarted, could pick up a run it did not know how to execute and leave the event `pending` after the gateway had been answered 200.
+
 ## 0.25.0
 
 ### Minor Changes

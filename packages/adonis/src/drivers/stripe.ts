@@ -190,6 +190,16 @@ function methodRestrictionFor(apiVersion: string): (types: string[]) => MethodRe
  * `unknown` is Stripe's forward-compatible catch-all for a wallet this SDK predates — it is
  * a wallet, not an unrecognized card, so it still answers `wallet` with no brand attached.
  */
+/**
+ * The expansions that make a wallet visible on the response.
+ *
+ * Stripe reports the wallet on the CHARGE (`payment_method_details.card.wallet.type`), and
+ * `latest_charge` comes back as a bare `ch_…` id unless asked for. Without the expansion a
+ * Google Pay payment looks like a typed card — in production only, because the specs' mocks
+ * hand back the object already expanded.
+ */
+const WALLET_EXPANSIONS = ['latest_charge.payment_method_details'] as const;
+
 function walletOf(intent: Stripe.PaymentIntent): 'wallet' | undefined {
   const latest = intent.latest_charge;
   const charge = typeof latest === 'object' && latest !== null ? latest : undefined;
@@ -296,7 +306,16 @@ export class StripeDriver implements PaymentsDriver {
      * different request is exactly what the caller cannot see.
      */
     const instrument = input.card?.token ?? input.paymentMethodId;
-    const canConfirm = instrument !== undefined;
+    // A non-empty token, not merely a present one: `''` would send `confirm: true` with
+    // `payment_method: ''` and fail at the API with an error that says nothing useful.
+    const canConfirm = instrument !== undefined && instrument !== '';
+    if (input.offSession === true && !canConfirm) {
+      // Silently dropping the flag turns a renewal into an on-session intent that waits for
+      // a payer who is not there — it stalls, and nothing in the answer says why.
+      throw new Error(
+        '[payments] An off-session charge needs an instrument (`card.token` or `paymentMethodId`) to confirm.',
+      );
+    }
     const params: Stripe.PaymentIntentCreateParams & Partial<LegacyMethodRestriction> = {
       amount: input.amount,
       currency: input.currency ?? this.#currency,
@@ -321,6 +340,10 @@ export class StripeDriver implements PaymentsDriver {
       ...(input.setupFutureUsage !== undefined
         ? { setup_future_usage: input.setupFutureUsage }
         : {}),
+      // The wallet is a property of the CHARGE (`payment_method_details.card.wallet`), and
+      // Stripe hands `latest_charge` back as a bare id unless it is expanded — so a map that
+      // only reads the object would never see a wallet on a real response.
+      expand: [...WALLET_EXPANSIONS],
     };
     if (input.idempotencyKey !== undefined) {
       // Stripe never echoes the request header back on the object, so the metadata copy is
@@ -342,7 +365,9 @@ export class StripeDriver implements PaymentsDriver {
 
   async findPayment(gatewayId: string): Promise<Payment | null> {
     try {
-      const intent = await this.#stripe.paymentIntents.retrieve(gatewayId);
+      const intent = await this.#stripe.paymentIntents.retrieve(gatewayId, {
+        expand: [...WALLET_EXPANSIONS],
+      });
       return this.#mapPayment(intent);
     } catch (error) {
       if (this.#isNotFound(error)) return null;
@@ -693,12 +718,15 @@ export class StripeDriver implements PaymentsDriver {
       result.paidAt = new Date(intent.created * 1000).toISOString();
     }
     /**
-     * The browser needs this to finish what the server did not. Present on every intent
-     * that can still be confirmed client-side — which is the normal case for a wallet
-     * charge the payer has to authenticate, and the reason `confirm: false` is a useful
-     * answer instead of a failure.
+     * The browser needs this to finish what the server did not — and ONLY then. Stripe keeps
+     * `client_secret` on the intent after it settles, so copying it unconditionally left every
+     * paid payment carrying a credential the docs promise is never stored or logged.
      */
-    if (intent.client_secret !== null && intent.client_secret !== undefined) {
+    if (
+      result.status === 'pending' &&
+      intent.client_secret !== null &&
+      intent.client_secret !== undefined
+    ) {
       result.clientSecret = intent.client_secret;
     }
     // A Pix/boleto intent is useless to the caller without what the payer has to act on;

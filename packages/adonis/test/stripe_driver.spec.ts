@@ -325,6 +325,40 @@ describe('StripeDriver', () => {
       expect(payment.clientSecret).toBeUndefined();
       expect(payment.status).toBe('paid');
     });
+
+    it('drops the secret Stripe keeps on a settled payment', async () => {
+      // Stripe does not clear `client_secret` on success. Copying it anyway would leave every
+      // paid payment carrying a credential the docs promise is never stored or logged.
+      stripeMock.paymentIntents.create.mockResolvedValue(
+        intent({ status: 'succeeded', client_secret: 'pi_1_secret_abc' }),
+      );
+
+      const payment = await makeDriver().charge({
+        customerId: 'cus_1',
+        amount: 1990,
+        card: { token: 'pm_1' },
+        confirm: true,
+      });
+
+      expect(payment.status).toBe('paid');
+      expect(payment.clientSecret).toBeUndefined();
+    });
+
+    it('refuses to drop an off-session charge on the floor', async () => {
+      // With no instrument there is nothing to confirm, so the flag used to vanish — and the
+      // renewal it belonged to became an on-session intent waiting for a payer who is not there.
+      await expect(
+        makeDriver().charge({ customerId: 'cus_1', amount: 1990, offSession: true }),
+      ).rejects.toThrow(/off-session charge needs an instrument/);
+    });
+
+    it('does not treat an empty token as an instrument', async () => {
+      stripeMock.paymentIntents.create.mockResolvedValue(intent());
+
+      await makeDriver().charge({ customerId: 'cus_1', amount: 1990, card: { token: '' } });
+
+      expect(stripeMock.paymentIntents.create.mock.calls[0]![0]).not.toHaveProperty('confirm');
+    });
   });
 
   it('maps the Pix QR code and instructions page off next_action', async () => {

@@ -283,11 +283,48 @@ subscription exists, it will bill again, and it grants nothing today.
 
 ## Payment methods
 
-`supportedMethods` is unchanged (`pix`, `credit_card`, `boleto`, `undefined`): those are
-the methods `charge()` can actually pin onto the intent. Stripe has no single
-type for "a bank transfer" — it has iDEAL, Bancontact, EPS, P24, BLIK and a new one most
-quarters — so routing by the wider categories would promise an instrument this call cannot
-choose. Ask for one of those with `metadata` and Stripe's dashboard settings instead.
+`supportedMethods` is `pix`, `credit_card`, `wallet`, `boleto` and `undefined`. The first
+three are exactly what `charge()` can pin onto the intent.
+
+`wallet` is `card` at Stripe, and that is not a compromise — it is how the gateway works.
+The browser's Google Pay flow returns a PaymentMethod (`pm_…`), the server charges it as a
+card, and **what makes it a wallet is `payment_method_details.card.wallet.type` on the
+resulting charge**. Stripe has no `google_pay` type to pin, so a `charge()` routed as
+`wallet` restricts the intent to `card` (the only honest restriction) and reports the wallet
+back on `Payment.method`, read off the charge rather than the allowed-type list:
+
+```ts
+const payment = await payments.driver('wallet').charge({
+  customerId: stripeCustomerId,
+  amount: 19900,
+  method: 'wallet',
+  card: { token: paymentMethodFromTheBrowser }, // pm_…
+  confirm: true,                                // else the intent is only reserved
+  setupFutureUsage: 'off_session',              // vault it for the renewals
+  externalReference: buildReference('subscription', id),
+});
+```
+
+`payment.status` is `pending` when the wallet still has to authenticate (`clientSecret`
+carries what the browser needs) and `paid` when it settled — in both cases the outcome of
+record arrives by webhook, which is the only path a renewal pass reads.
+
+Two things `charge()` will not do silently, because both look like success from the caller's
+side:
+
+- **`confirm` is honoured only when the input names an instrument** (`card.token` /
+  `paymentMethodId`). Without one there is nothing to confirm, and Stripe would refuse the
+  call; the intent is created for the client to finish.
+- **`offSession` is only sent alongside `confirm`.** Stripe refuses an off-session
+  confirmation that needs authentication, and that refusal is the correct answer: a renewal
+  that needs the payer in front of the page is a renewal that cannot happen. A first cycle
+  (`managed` mode sends `setupFutureUsage: 'off_session'` and leaves `offSession` off) may
+  step up; every later cycle is off-session.
+
+Stripe has no single type for "a bank transfer" — it has iDEAL, Bancontact, EPS, P24, BLIK
+and a new one most quarters — so routing by the wider categories would promise an instrument
+this call cannot choose. Ask for one of those with `metadata` and Stripe's dashboard settings
+instead.
 
 What *did* widen is the method reported back on `Payment.method`, which is now a category
 rather than only `card`/`pix`/`boleto`/`unknown`:

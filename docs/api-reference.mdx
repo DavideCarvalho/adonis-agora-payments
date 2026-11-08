@@ -265,6 +265,9 @@ is read as `'unsupported'`**: a driver that never opted in cannot be assumed to 
   method?: string
   paymentMethodId?: string
   card?: CardInput
+  confirm?: boolean                   // charge now, instead of leaving an intent to confirm
+  offSession?: boolean                // no payer present (renewals); Stripe/Adyen read it
+  setupFutureUsage?: 'on_session' | 'off_session'  // vault the instrument for later cycles
   customer?: { name?: string; taxId?: string; email?: string }   // the payer's fiscal data
   idempotencyKey?: string             // guards the OUTBOUND call
   externalReference?: string          // routes the INBOUND webhook to your row
@@ -367,6 +370,7 @@ interface Payment {
   pixQrCode?: string                  // @deprecated alias of pixQrCodeImage
   pixCopiaECola?: string              // @deprecated alias of pixCode
   hostedUrl?: string
+  clientSecret?: string               // what the BROWSER needs to finish an unconfirmed charge
   subscriptionId?: string
   invoice?: Invoice
 }

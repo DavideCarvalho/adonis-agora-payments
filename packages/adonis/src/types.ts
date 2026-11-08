@@ -271,6 +271,19 @@ export interface Payment {
   pixCopiaECola?: string;
   /** URL to a hosted checkout/charge page when the gateway provides one. */
   hostedUrl?: string;
+  /**
+   * The secret the BROWSER needs to finish a payment the server did not confirm itself.
+   *
+   * Stripe's published key cannot charge anything on its own: it takes a
+   * `client_secret` to confirm a PaymentIntent, and every step-up (3DS, a wallet asking
+   * to authenticate) happens on that side. A charge that comes back `pending` with a
+   * `clientSecret` is waiting for the payer, not failing — the caller renders the element
+   * with it and the outcome arrives by webhook.
+   *
+   * Gateways that settle server-side never send one, and it must never be logged or put
+   * in a URL a third party can read.
+   */
+  clientSecret?: string;
   /** The subscription this payment belongs to, when recurring. */
   subscriptionId?: string;
   /** Invoice emitted for this payment, when `invoice` was requested. */

@@ -375,6 +375,38 @@ export interface ChargeInput {
    */
   card?: CardInput;
   /**
+   * Confirm the charge in this call, instead of handing the payer an intent to confirm
+   * themselves.
+   *
+   * Gateways split the two, and only some make the choice visible. Asaas, Woovi and the
+   * BR drivers charge synchronously and have nothing to confirm: for them this is a no-op.
+   * Stripe's `POST /payment_intents` is the counter-example — without `confirm` the intent
+   * comes back `requires_confirmation`, no money moves, and a caller that assumed the
+   * charge happened records a subscription nobody paid for. Naming it in the contract is
+   * better than each app rediscovering which gateways need it.
+   *
+   * A charge that still needs the payer after confirmation — 3DS step-up — reports
+   * `payment.clientSecret` so the caller can finish it in the browser.
+   */
+  confirm?: boolean;
+  /**
+   * The charge happens WITHOUT the payer present (a renewal against a stored instrument).
+   *
+   * Stores the intent under the network's merchant-initiated rules instead of the
+   * customer-initiated ones. Stripe and Adyen read it; gateways whose recurring charges are
+   * always server-side have no use for it. Only meaningful with {@link confirm}.
+   */
+  offSession?: boolean;
+  /**
+   * Vault the instrument for later charges, and say under which rules.
+   *
+   * `'off_session'` is what a subscription's FIRST charge sends: the payer is in front of
+   * the checkout now, and every later cycle happens without them. Without it the gateway
+   * keeps no reusable credential and the renewal has nothing to charge — the payment
+   * succeeds once and the subscription silently ends.
+   */
+  setupFutureUsage?: 'on_session' | 'off_session';
+  /**
    * The payer's fiscal data — the single source used when an invoice is emitted with
    * this charge. Falls back to `card.holder` (cpfCnpj/name/email) when absent, so a
    * card checkout that also wants a fiscal note doesn't restate the holder.

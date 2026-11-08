@@ -134,6 +134,8 @@ describe('StripeDriver', () => {
         ['pix', 'pix'],
         ['boleto', 'boleto'],
         ['credit_card', 'card'],
+        // A wallet is a card intent at Stripe — the wallet is on the resulting charge.
+        ['wallet', 'card'],
       ] as const) {
         stripeMock.paymentIntents.create.mockResolvedValue(
           intent({ payment_method_types: [type] }),
@@ -154,6 +156,174 @@ describe('StripeDriver', () => {
       const params = stripeMock.paymentIntents.create.mock.calls[0]![0];
       expect(params).not.toHaveProperty('payment_method_types');
       expect(params).not.toHaveProperty('allowed_payment_method_types');
+    });
+  });
+
+  /**
+   * A charge that is not confirmed only RESERVES the intent, and every caller that took the
+   * answer as money would record a subscription nobody paid for — so the difference between
+   * `requires_confirmation` and `succeeded` has to be askable, and asking has to reach Stripe.
+   */
+  describe('confirming the charge', () => {
+    it('confirms when the charge names an instrument', async () => {
+      stripeMock.paymentIntents.create.mockResolvedValue(intent({ status: 'succeeded' }));
+
+      await makeDriver().charge({
+        customerId: 'cus_1',
+        amount: 1990,
+        method: 'wallet',
+        card: { token: 'pm_google_pay' },
+        confirm: true,
+      });
+
+      expect(stripeMock.paymentIntents.create.mock.calls[0]![0].confirm).toBe(true);
+    });
+
+    it('does not confirm an intent with nothing to charge', async () => {
+      // The payer finishes it in the browser; a server-side confirm here would be refused
+      // with "no payment method", which reads as a failure of a request that was fine.
+      stripeMock.paymentIntents.create.mockResolvedValue(intent());
+
+      await makeDriver().charge({ customerId: 'cus_1', amount: 1990, confirm: true });
+
+      expect(stripeMock.paymentIntents.create.mock.calls[0]![0]).not.toHaveProperty('confirm');
+    });
+
+    it('leaves confirmation out unless it was asked for', async () => {
+      stripeMock.paymentIntents.create.mockResolvedValue(intent());
+
+      await makeDriver().charge({
+        customerId: 'cus_1',
+        amount: 1990,
+        card: { token: 'pm_1' },
+      });
+
+      expect(stripeMock.paymentIntents.create.mock.calls[0]![0]).not.toHaveProperty('confirm');
+    });
+
+    it('marks an off-session charge only when it is also confirmed', async () => {
+      // `off_session` on an unconfirmed intent is meaningless, and on a confirmed one it is
+      // what stops Stripe asking a payer who is not there to authenticate.
+      stripeMock.paymentIntents.create.mockResolvedValue(intent({ status: 'succeeded' }));
+
+      await makeDriver().charge({
+        customerId: 'cus_1',
+        amount: 1990,
+        card: { token: 'pm_1' },
+        confirm: true,
+        offSession: true,
+      });
+      expect(stripeMock.paymentIntents.create.mock.calls[0]![0].off_session).toBe(true);
+
+      stripeMock.paymentIntents.create.mockClear();
+      await makeDriver().charge({
+        customerId: 'cus_1',
+        amount: 1990,
+        card: { token: 'pm_1' },
+        offSession: true,
+      });
+      expect(stripeMock.paymentIntents.create.mock.calls[0]![0]).not.toHaveProperty('off_session');
+    });
+
+    it('vaults the instrument for later cycles when the charge says so', async () => {
+      stripeMock.paymentIntents.create.mockResolvedValue(intent({ status: 'succeeded' }));
+
+      await makeDriver().charge({
+        customerId: 'cus_1',
+        amount: 1990,
+        card: { token: 'pm_1' },
+        confirm: true,
+        setupFutureUsage: 'off_session',
+      });
+
+      expect(stripeMock.paymentIntents.create.mock.calls[0]![0].setup_future_usage).toBe(
+        'off_session',
+      );
+    });
+  });
+
+  /**
+   * Google Pay is a `card` intent whose charge says `wallet` — the only place Stripe records
+   * it. Without reading the charge, a wallet payment is indistinguishable from a typed card.
+   */
+  describe('calling a wallet a wallet', () => {
+    const asWallet = (type: string) => ({
+      latest_charge: {
+        payment_method_details: { card: { wallet: { type } } },
+      },
+    });
+
+    it('reports the wallet the charge actually used', async () => {
+      stripeMock.paymentIntents.create.mockResolvedValue(
+        intent({ payment_method_types: ['card'], ...asWallet('google_pay'), status: 'succeeded' }),
+      );
+
+      const payment = await makeDriver().charge({
+        customerId: 'cus_1',
+        amount: 1990,
+        method: 'wallet',
+        card: { token: 'pm_1' },
+        confirm: true,
+      });
+
+      expect(payment.method).toBe('wallet');
+    });
+
+    it('reads the wallet off an expanded payment_method too', async () => {
+      stripeMock.paymentIntents.create.mockResolvedValue(
+        intent({
+          payment_method_types: ['card'],
+          payment_method: { id: 'pm_1', card: { wallet: { type: 'apple_pay' } } },
+        }),
+      );
+
+      const payment = await makeDriver().charge({ customerId: 'cus_1', amount: 1990 });
+      expect(payment.method).toBe('wallet');
+    });
+
+    it('keeps a typed card a card', async () => {
+      stripeMock.paymentIntents.create.mockResolvedValue(
+        intent({ payment_method_types: ['card'], status: 'succeeded' }),
+      );
+
+      const payment = await makeDriver().charge({
+        customerId: 'cus_1',
+        amount: 1990,
+        card: { token: 'pm_1' },
+      });
+      expect(payment.method).toBe('card');
+    });
+
+    it('hands the browser the secret for a charge it still has to finish', async () => {
+      stripeMock.paymentIntents.create.mockResolvedValue(
+        intent({ status: 'requires_action', client_secret: 'pi_1_secret_abc' }),
+      );
+
+      const payment = await makeDriver().charge({
+        customerId: 'cus_1',
+        amount: 1990,
+        card: { token: 'pm_1' },
+        confirm: true,
+      });
+
+      expect(payment.clientSecret).toBe('pi_1_secret_abc');
+      expect(payment.status).toBe('pending');
+    });
+
+    it('sends no secret when Stripe has none', async () => {
+      stripeMock.paymentIntents.create.mockResolvedValue(
+        intent({ status: 'succeeded', client_secret: null }),
+      );
+
+      const payment = await makeDriver().charge({
+        customerId: 'cus_1',
+        amount: 1990,
+        card: { token: 'pm_1' },
+        confirm: true,
+      });
+
+      expect(payment.clientSecret).toBeUndefined();
+      expect(payment.status).toBe('paid');
     });
   });
 

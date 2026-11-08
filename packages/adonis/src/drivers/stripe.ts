@@ -175,9 +175,46 @@ function methodRestrictionFor(apiVersion: string): (types: string[]) => MethodRe
     : (types) => ({ payment_method_types: types });
 }
 
+/**
+ * Which wallet paid, readable off the intent's latest charge.
+ *
+ * Stripe reports Google Pay, Apple Pay and the rest as `card` — the wallet is a property of
+ * the CREDENTIAL (`card.wallet.type`), not of the payment method. Without reading it, a
+ * Google Pay payment is indistinguishable from a typed card, and the app cannot show the
+ * payer the instrument they actually used.
+ *
+ * Two shapes, because the field moved: `latest_charge.payment_method_details.card.wallet`
+ * where the charge is expanded, and `payment_method.card.wallet` when the intent carries it
+ * inline. Expanded charges are not the default on every API version, so both are read.
+ *
+ * `unknown` is Stripe's forward-compatible catch-all for a wallet this SDK predates — it is
+ * a wallet, not an unrecognized card, so it still answers `wallet` with no brand attached.
+ */
+function walletOf(intent: Stripe.PaymentIntent): 'wallet' | undefined {
+  const latest = intent.latest_charge;
+  const charge = typeof latest === 'object' && latest !== null ? latest : undefined;
+  const onCharge = charge?.payment_method_details?.card?.wallet?.type;
+  // `payment_method` is a bare id unless the caller expanded it.
+  const inline =
+    typeof intent.payment_method === 'object' && intent.payment_method !== null
+      ? intent.payment_method.card?.wallet?.type
+      : undefined;
+  const type = onCharge ?? inline;
+  return type !== undefined && type !== null ? 'wallet' : undefined;
+}
+
 export class StripeDriver implements PaymentsDriver {
   readonly provider = 'stripe';
-  readonly supportedMethods = ['pix', 'credit_card', 'boleto', 'undefined'] as const;
+  /**
+   * `wallet` is here because Google Pay and Apple Pay are, at Stripe, **cards**: the wallet
+   * is `payment_method_details.card.wallet` on a `card` PaymentIntent, not a method type of
+   * its own. Routing it under its own name is what lets an app say "the button the payer
+   * pressed was a wallet" and still be charged the way Stripe charges them — while a
+   * gateway that only takes cards (Asaas, Pagar.me) keeps refusing `wallet` instead of
+   * quietly turning a Google Pay payload into an invalid card charge.
+   */
+  readonly supportedMethods = ['pix', 'credit_card', 'wallet', 'boleto', 'undefined'] as const;
+
   readonly capabilities = { disputes: true, refunds: true, invoices: true, subscriptions: true };
 
   #stripe: Stripe;
@@ -251,6 +288,15 @@ export class StripeDriver implements PaymentsDriver {
     // Without a method restriction Stripe creates the intent with whatever the account's
     // dashboard defaults are, so a charge routed as Pix could come back a card.
     const methodType = this.#mapMethodToStripe(input.method);
+    /**
+     * A charge that names an instrument (a token from the browser) can be confirmed right
+     * here; one that names none is an intent the payer has to finish, and confirming it
+     * server-side would fail with "no payment method". So `confirm` is asked for, but only
+     * honoured when there is something to confirm — silently turning a request into a
+     * different request is exactly what the caller cannot see.
+     */
+    const instrument = input.card?.token ?? input.paymentMethodId;
+    const canConfirm = instrument !== undefined;
     const params: Stripe.PaymentIntentCreateParams & Partial<LegacyMethodRestriction> = {
       amount: input.amount,
       currency: input.currency ?? this.#currency,
@@ -261,6 +307,19 @@ export class StripeDriver implements PaymentsDriver {
       ...(methodType !== undefined ? this.#restrictMethods([methodType]) : {}),
       ...(input.metadata !== undefined
         ? { metadata: input.metadata as Record<string, string> }
+        : {}),
+      // Without `confirm` Stripe only RESERVES the intent: `requires_confirmation`, no
+      // money, no webhook. Every caller that expected a charge would record a paid
+      // subscription and be wrong, and the failure is silent until nobody converts.
+      ...(input.confirm === true && canConfirm ? { confirm: true } : {}),
+      // Merchant-initiated: the payer is not in front of the checkout. Stripe refuses an
+      // off-session confirmation that needs authentication, which is the honest answer —
+      // a renewal that needs the payer is a renewal that cannot happen.
+      ...(input.confirm === true && canConfirm && input.offSession === true
+        ? { off_session: true }
+        : {}),
+      ...(input.setupFutureUsage !== undefined
+        ? { setup_future_usage: input.setupFutureUsage }
         : {}),
     };
     if (input.idempotencyKey !== undefined) {
@@ -621,8 +680,26 @@ export class StripeDriver implements PaymentsDriver {
     };
     if (typeof intent.customer === 'string') result.customerId = intent.customer;
     if (method !== undefined && method !== 'unknown') result.method = method;
+    /**
+     * The wallet the payer actually used, read off the charge rather than the allowed
+     * method list. `payment_method_types` says `card` for a Google Pay payment — Stripe
+     * has no `google_pay` type to report — so an app asking "did they tap or type?" has
+     * no answer anywhere else. Only present once the charge exists, which is also the
+     * only moment it can be known.
+     */
+    const wallet = walletOf(intent);
+    if (wallet !== undefined) result.method = 'wallet';
     if (intent.status === 'succeeded') {
       result.paidAt = new Date(intent.created * 1000).toISOString();
+    }
+    /**
+     * The browser needs this to finish what the server did not. Present on every intent
+     * that can still be confirmed client-side — which is the normal case for a wallet
+     * charge the payer has to authenticate, and the reason `confirm: false` is a useful
+     * answer instead of a failure.
+     */
+    if (intent.client_secret !== null && intent.client_secret !== undefined) {
+      result.clientSecret = intent.client_secret;
     }
     // A Pix/boleto intent is useless to the caller without what the payer has to act on;
     // Stripe puts it under `next_action`. `image_url_png` is a URL, not the base64 PNG
@@ -1349,6 +1426,12 @@ export class StripeDriver implements PaymentsDriver {
       case 'boleto':
         return 'boleto';
       case 'credit_card':
+        return 'card';
+      // A device wallet is a `card` PaymentIntent at Stripe: the Google Pay credential the
+      // browser returns is a PaymentMethod (`pm_…`), and what makes it a wallet is
+      // `card.wallet` on the resulting charge. Routing it to its own Stripe type would
+      // restrict the intent to a method type Stripe does not have.
+      case 'wallet':
         return 'card';
       default:
         return undefined;

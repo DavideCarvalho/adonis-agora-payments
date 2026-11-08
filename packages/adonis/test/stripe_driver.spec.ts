@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const stripeMock = vi.hoisted(() => ({
   paymentIntents: { create: vi.fn(), retrieve: vi.fn() },
   refunds: { create: vi.fn() },
-  customers: { create: vi.fn(), retrieve: vi.fn(), update: vi.fn() },
+  customers: { create: vi.fn(), retrieve: vi.fn(), update: vi.fn(), createTaxId: vi.fn() },
   subscriptions: { create: vi.fn(), update: vi.fn(), cancel: vi.fn(), retrieve: vi.fn() },
   checkout: { sessions: { create: vi.fn() } },
   invoices: { list: vi.fn() },
@@ -68,6 +68,48 @@ describe('StripeDriver', () => {
     await driver.charge({ customerId: 'cus_1', amount: 1990 });
 
     expect(stripeMock.paymentIntents.create.mock.calls[0]![0].currency).toBe('eur');
+  });
+
+  /**
+   * Stripe has no `tax_id` string on a customer — the identifier is a TaxID object with a
+   * TYPE. The old field sent the raw number, so the request failed and the customer was
+   * created without the CPF, which only bites when the fiscal side of the checkout runs.
+   */
+  describe('the customer tax id', () => {
+    it('sends an 11-digit tax id as a CPF', async () => {
+      stripeMock.customers.create.mockResolvedValue({ id: 'cus_1', email: null, name: null });
+
+      await makeDriver().createCustomer({ email: 'a@b.c', taxId: '24971563792' });
+
+      expect(stripeMock.customers.create.mock.calls[0]![0].tax_id_data).toEqual([
+        { type: 'br_cpf', value: '24971563792' },
+      ]);
+    });
+
+    it('sends a 14-digit tax id as a CNPJ, digits only', async () => {
+      stripeMock.customers.create.mockResolvedValue({ id: 'cus_1', email: null, name: null });
+
+      await makeDriver().createCustomer({ taxId: '11.222.333/0001-81' });
+
+      expect(stripeMock.customers.create.mock.calls[0]![0].tax_id_data).toEqual([
+        { type: 'br_cnpj', value: '11222333000181' },
+      ]);
+    });
+
+    it('adds the tax id on update through its own resource, because create-only fields are ignored', async () => {
+      // `tax_id_data` on an update is silently dropped by Stripe, so a CPF typed after the
+      // customer exists never reached the gateway.
+      stripeMock.customers.update.mockResolvedValue({ id: 'cus_1', email: null, name: null });
+
+      await makeDriver().updateCustomer('cus_1', { taxId: '24971563792' });
+
+      expect(stripeMock.customers.createTaxId.mock.calls[0]![0]).toBe('cus_1');
+      expect(stripeMock.customers.createTaxId.mock.calls[0]![1]).toEqual({
+        type: 'br_cpf',
+        value: '24971563792',
+      });
+      expect(stripeMock.customers.update.mock.calls[0]![1]).not.toHaveProperty('tax_id_data');
+    });
   });
 
   it('sends the idempotency key as the request option, not only as metadata', async () => {

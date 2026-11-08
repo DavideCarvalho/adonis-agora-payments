@@ -200,6 +200,23 @@ function methodRestrictionFor(apiVersion: string): (types: string[]) => MethodRe
  */
 const WALLET_EXPANSIONS = ['latest_charge.payment_method_details'] as const;
 
+/**
+ * A CPF/CNPJ as Stripe's TaxID resource wants it.
+ *
+ * Stripe has no `tax_id` field on a customer: the identifier is a list of TaxID objects,
+ * each with a TYPE. Sending the raw string under `tax_id` (the field this driver used
+ * before) fails the request — a customer created without the CPF, which only shows up
+ * when the fiscal side of the checkout runs.
+ *
+ * Brazil has two types and the digit count decides: 11 is a CPF, 14 a CNPJ. Anything else
+ * is passed as `br_cpf` and left for Stripe to refuse loudly, rather than being guessed
+ * into a type that would validate a wrong number.
+ */
+function taxIdData(taxId: string): Array<{ type: 'br_cpf' | 'br_cnpj'; value: string }> {
+  const value = taxId.replace(/\D/g, '');
+  return [{ type: value.length === 14 ? 'br_cnpj' : 'br_cpf', value }];
+}
+
 function walletOf(intent: Stripe.PaymentIntent): 'wallet' | undefined {
   const latest = intent.latest_charge;
   const charge = typeof latest === 'object' && latest !== null ? latest : undefined;
@@ -259,7 +276,7 @@ export class StripeDriver implements PaymentsDriver {
       {
         ...(input.email !== undefined ? { email: input.email } : {}),
         ...(input.name !== undefined ? { name: input.name } : {}),
-        ...(input.taxId !== undefined ? { tax_id: input.taxId } : {}),
+        ...(input.taxId !== undefined ? { tax_id_data: taxIdData(input.taxId) } : {}),
         ...(input.metadata !== undefined
           ? { metadata: input.metadata as Record<string, string> }
           : {}),
@@ -281,10 +298,15 @@ export class StripeDriver implements PaymentsDriver {
   }
 
   async updateCustomer(customerId: string, input: UpdateCustomerInput): Promise<Customer> {
+    // `tax_id_data` is a CREATE-only field at Stripe: an update carrying it is silently
+    // ignored, so a CPF typed after the customer exists never reaches the gateway. The
+    // separate TaxID resource is the only way to add one later.
+    if (input.taxId !== undefined) {
+      await this.#stripe.customers.createTaxId(customerId, taxIdData(input.taxId)[0]!);
+    }
     const customer = await this.#stripe.customers.update(customerId, {
       ...(input.email !== undefined ? { email: input.email } : {}),
       ...(input.name !== undefined ? { name: input.name } : {}),
-      ...(input.taxId !== undefined ? { tax_id: input.taxId } : {}),
       ...(input.metadata !== undefined
         ? { metadata: input.metadata as Record<string, string> }
         : {}),

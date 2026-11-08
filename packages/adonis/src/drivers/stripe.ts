@@ -298,11 +298,13 @@ export class StripeDriver implements PaymentsDriver {
   }
 
   async updateCustomer(customerId: string, input: UpdateCustomerInput): Promise<Customer> {
-    // `tax_id_data` is a CREATE-only field at Stripe: an update carrying it is silently
-    // ignored, so a CPF typed after the customer exists never reaches the gateway. The
-    // separate TaxID resource is the only way to add one later.
+    // `tax_id_data` is a CREATE-only field at Stripe: an update carrying it is rejected as an
+    // unknown parameter, so a CPF typed after the customer exists never reaches the gateway
+    // through it. The separate TaxID resource is the only way to add one later — and it does
+    // not deduplicate, so writing it unconditionally fails on the second save with the same
+    // CPF and leaves a stale id behind when the number changes.
     if (input.taxId !== undefined) {
-      await this.#stripe.customers.createTaxId(customerId, taxIdData(input.taxId)[0]!);
+      await this.#syncTaxId(customerId, input.taxId);
     }
     const customer = await this.#stripe.customers.update(customerId, {
       ...(input.email !== undefined ? { email: input.email } : {}),
@@ -312,6 +314,28 @@ export class StripeDriver implements PaymentsDriver {
         : {}),
     });
     return this.#mapCustomer(customer);
+  }
+
+  /**
+   * Leaves the customer carrying exactly the given tax id, and no other.
+   *
+   * Stripe's TaxID resource is a LIST, not a field: creating the same CPF twice is refused,
+   * and adding a changed CPF without deleting the old one leaves the customer with two
+   * contradictory identifiers. So this reads the list, deletes what no longer matches, and
+   * creates only what is missing.
+   */
+  async #syncTaxId(customerId: string, taxId: string): Promise<void> {
+    const wanted = taxIdData(taxId)[0]!;
+    const existing = await this.#stripe.customers.listTaxIds(customerId);
+    let kept = false;
+    for (const item of existing.data) {
+      if (!kept && item.value === wanted.value && item.type === wanted.type) {
+        kept = true;
+        continue;
+      }
+      await this.#stripe.customers.deleteTaxId(customerId, item.id);
+    }
+    if (!kept) await this.#stripe.customers.createTaxId(customerId, wanted);
   }
 
   // ── Payments ─────────────────────────────────────────────────────────────────────────

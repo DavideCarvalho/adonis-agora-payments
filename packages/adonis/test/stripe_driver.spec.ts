@@ -3,7 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const stripeMock = vi.hoisted(() => ({
   paymentIntents: { create: vi.fn(), retrieve: vi.fn() },
   refunds: { create: vi.fn() },
-  customers: { create: vi.fn(), retrieve: vi.fn(), update: vi.fn(), createTaxId: vi.fn() },
+  customers: {
+    create: vi.fn(),
+    retrieve: vi.fn(),
+    update: vi.fn(),
+    createTaxId: vi.fn(),
+    listTaxIds: vi.fn(),
+    deleteTaxId: vi.fn(),
+  },
   subscriptions: { create: vi.fn(), update: vi.fn(), cancel: vi.fn(), retrieve: vi.fn() },
   checkout: { sessions: { create: vi.fn() } },
   invoices: { list: vi.fn() },
@@ -96,19 +103,61 @@ describe('StripeDriver', () => {
       ]);
     });
 
-    it('adds the tax id on update through its own resource, because create-only fields are ignored', async () => {
-      // `tax_id_data` on an update is silently dropped by Stripe, so a CPF typed after the
-      // customer exists never reached the gateway.
+    it('reconciles the tax id on update instead of appending one per save', async () => {
+      // `tax_id_data` on an update is rejected as an unknown parameter, so the CPF goes through
+      // the TaxID resource — which is a LIST and does not deduplicate. Writing it
+      // unconditionally fails on the second save with the same CPF, and a changed CPF added
+      // alongside the old one leaves the customer with two contradictory identifiers.
       stripeMock.customers.update.mockResolvedValue({ id: 'cus_1', email: null, name: null });
+      stripeMock.customers.listTaxIds.mockResolvedValue({
+        data: [{ id: 'txi_1', type: 'br_cpf', value: '24971563792' }],
+      });
+      stripeMock.customers.createTaxId.mockResolvedValue({ id: 'txi_2' });
 
       await makeDriver().updateCustomer('cus_1', { taxId: '24971563792' });
 
-      expect(stripeMock.customers.createTaxId.mock.calls[0]![0]).toBe('cus_1');
+      expect(stripeMock.customers.createTaxId).not.toHaveBeenCalled();
+      expect(stripeMock.customers.deleteTaxId).not.toHaveBeenCalled();
+      expect(stripeMock.customers.update.mock.calls[0]![1]).not.toHaveProperty('tax_id_data');
+    });
+
+    it('replaces a tax id that changed, leaving only the new one', async () => {
+      stripeMock.customers.update.mockResolvedValue({ id: 'cus_1', email: null, name: null });
+      stripeMock.customers.listTaxIds.mockResolvedValue({
+        data: [
+          { id: 'txi_old', type: 'br_cpf', value: '11111111111' },
+          { id: 'txi_dup', type: 'br_cpf', value: '24971563792' },
+        ],
+      });
+      stripeMock.customers.createTaxId.mockResolvedValue({ id: 'txi_new' });
+
+      await makeDriver().updateCustomer('cus_1', { taxId: '24971563792' });
+
+      // The stale number is gone, the one that already matched stays, nothing is re-created.
+      expect(stripeMock.customers.deleteTaxId.mock.calls.map((call) => call[1])).toEqual([
+        'txi_old',
+      ]);
+      expect(stripeMock.customers.createTaxId).not.toHaveBeenCalled();
+
+      // Two identical ids (two saves before the reconcile existed) collapse to one.
+      stripeMock.customers.listTaxIds.mockResolvedValue({
+        data: [
+          { id: 'txi_dup1', type: 'br_cpf', value: '24971563792' },
+          { id: 'txi_dup2', type: 'br_cpf', value: '24971563792' },
+        ],
+      });
+      stripeMock.customers.deleteTaxId.mockClear();
+      await makeDriver().updateCustomer('cus_1', { taxId: '24971563792' });
+      expect(stripeMock.customers.deleteTaxId.mock.calls.map((call) => call[1])).toEqual([
+        'txi_dup2',
+      ]);
+
+      stripeMock.customers.listTaxIds.mockResolvedValue({ data: [] });
+      await makeDriver().updateCustomer('cus_1', { taxId: '24971563792' });
       expect(stripeMock.customers.createTaxId.mock.calls[0]![1]).toEqual({
         type: 'br_cpf',
         value: '24971563792',
       });
-      expect(stripeMock.customers.update.mock.calls[0]![1]).not.toHaveProperty('tax_id_data');
     });
   });
 

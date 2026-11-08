@@ -1,5 +1,17 @@
 # @adonis-agora/payments
 
+## 0.26.1
+
+### Patch Changes
+
+- [#213](https://github.com/DavideCarvalho/adonis-agora-payments/pull/213) [`12f6af7`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/12f6af72d2e64457e358b171e03b3b10324f817f) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - The Stripe driver sends a customer's CPF/CNPJ as a TaxID object instead of a plain `tax_id` string.
+  
+  `tax_id` is not a field Stripe accepts on a customer — the request failed, and the customer
+  was created without the tax id, which only shows up when the fiscal side of the checkout runs.
+  A new customer now carries `tax_id_data` with `br_cpf` (11 digits) or `br_cnpj` (14), and an
+  update adds the id through the TaxID resource, because `tax_id_data` is create-only there and
+  Stripe silently ignores it on an update.
+
 ## 0.26.0
 
 ### Minor Changes

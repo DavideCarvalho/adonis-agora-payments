@@ -78,6 +78,28 @@ describe('managed card renewal', () => {
     expect(driver.inputs[1]?.card).toBeUndefined();
   });
 
+  /**
+   * A managed cycle is charged BY THE LIBRARY, in a cron with nobody present. At Stripe an
+   * unconfirmed intent only reserves the money and an on-session one asks the payer to
+   * authenticate — so neither `confirm` nor `offSession` is a stylistic choice: without them
+   * the renewal is a 200 that charges nothing, and the subscription stays "active" for free.
+   */
+  it('confirms every cycle, and marks the ones nobody is watching as off-session', async () => {
+    const driver = new RecordingDriver();
+    const billing = store();
+    await subscribed(driver, billing);
+
+    // The first cycle runs inside the subscribe call: the payer is still on the page and
+    // may legitimately be asked to authenticate (3DS), so it is confirmed but not off-session.
+    expect(driver.inputs[0]).toMatchObject({ confirm: true, setupFutureUsage: 'off_session' });
+    expect(driver.inputs[0]?.offSession).toBeUndefined();
+
+    await renewDueManagedSubscriptions(() => driver, billing, { now: DUE });
+
+    expect(driver.inputs[1]).toMatchObject({ confirm: true, offSession: true });
+    expect(driver.inputs[1]?.setupFutureUsage).toBeUndefined();
+  });
+
   it('sends no payment method for a subscription that never had a card', async () => {
     const driver = new RecordingDriver();
     const billing = store();

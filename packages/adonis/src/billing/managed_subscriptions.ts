@@ -148,6 +148,7 @@ export async function createManagedSubscription(
       method: input.method ?? null,
       periodStart,
       card: input.card,
+      foreground: true,
     });
     if (charge.status === 'failed') {
       throw new Error('The gateway declined the charge.');
@@ -186,6 +187,11 @@ async function chargeCycle(
     periodStart: Date;
     card?: CreateSubscriptionInput['card'];
     paymentMethodId?: string | null;
+    /**
+     * This cycle runs while the payer is still on the page (the subscribe call), so it may
+     * ask them to authenticate. A renewal in a cron never may.
+     */
+    foreground?: boolean;
   },
 ): Promise<Awaited<ReturnType<PaymentsDriver['charge']>>> {
   return driver.charge({
@@ -200,6 +206,15 @@ async function chargeCycle(
     ...(cycle.method !== null ? { method: cycle.method } : {}),
     ...(cycle.card !== undefined ? { card: cycle.card } : {}),
     ...(cycle.paymentMethodId ? { paymentMethodId: cycle.paymentMethodId } : {}),
+    // A managed cycle is charged BY THE LIBRARY, never by the payer finishing a page: the
+    // first one runs inside the subscribe call, while the payer is still on the checkout, so
+    // it may step up (3DS) and report a `clientSecret`; every later one runs in a cron with
+    // nobody present and MUST NOT ask for authentication. Left out, Stripe reserves the
+    // intent without charging anything, and the subscription is born unpaid.
+    confirm: true,
+    ...(cycle.foreground === true
+      ? { setupFutureUsage: 'off_session' as const }
+      : { offSession: true }),
   });
 }
 

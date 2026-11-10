@@ -149,28 +149,23 @@ export interface ResolvedPaymentsClientConfig {
 }
 
 /**
- * The minimum of `ctx.auth` this package reads.
- *
- * Structural on purpose, copied from `@adonis-agora/authz`'s `authorizeByRoles`: it fits
- * `@adonis-agora/authkit-client`'s `Authenticator` (`getUser()`) and any `@adonisjs/auth`
- * guard (`.user`) without importing either, so this package depends on neither.
+ * The minimum of `ctx.auth` this package reads: `ctx.auth.user`, as every `@adonisjs/auth`
+ * guard (and authkit) exposes it. Structural, so this package imports no auth library.
  */
 interface AuthLike {
-  getUser?: () => Promise<unknown>;
   user?: unknown;
 }
 
 /**
- * The user behind a request, or `null`.
+ * The user behind a request (`ctx.auth.user`), or `null`.
  *
- * A throwing `getUser()` (some guards throw rather than return `null` for an anonymous
- * request) is a denial, not a `500`.
+ * A guard whose `user` getter throws for an anonymous request is a denial, not a `500`.
  */
 export async function resolveRequestUser(ctx: unknown): Promise<unknown> {
   const auth = (ctx as { auth?: AuthLike } | null | undefined)?.auth;
   if (!auth) return null;
   try {
-    return (await auth.getUser?.()) ?? auth.user ?? null;
+    return auth.user ?? null;
   } catch {
     return null;
   }

@@ -327,8 +327,8 @@ resolves.
 
 ### With authkit, authz, or a plain guard
 
-The default `authorize` and `owner` read the user **structurally**: `ctx.auth.getUser()` if it is
-there, otherwise `ctx.auth.user`. That is the same technique
+The default `authorize` and `owner` read the user **structurally** from `ctx.auth.user`. That is
+the same technique
 [`@adonis-agora/authz`](/docs/authz) uses in `authorizeByRoles`, and it means this package imports
 neither authkit nor authz nor `@adonisjs/auth`. It works with all three, and with a guard you wrote
 yourself, because it depends on none of them.

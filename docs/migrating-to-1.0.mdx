@@ -101,6 +101,33 @@ export default defineConfig({
 })
 ```
 
+## Client endpoint: the user comes from `ctx.auth.user`
+
+The default `authorize` and `owner` of the payments client endpoint read `ctx.auth.user` and nothing
+else. They no longer call `ctx.auth.getUser()`, which only the old authkit-client `ctx.auth` had. Any
+`@adonisjs/auth` guard, and authkit 1.0, already set `ctx.auth.user`. If your `ctx.auth` exposes the
+user some other way, pass your own `authorize` and `owner`.
+
+Before:
+
+```ts title="config/payments_client.ts"
+// Worked because the default probed ctx.auth.getUser()
+export default defineConfig({ enabled: true })
+```
+
+After:
+
+```ts title="config/payments_client.ts"
+export default defineConfig({
+  enabled: true,
+  authorize: async (ctx) => (await myUser(ctx)) !== null,
+  owner: async (ctx) => {
+    const user = await myUser(ctx)
+    return user ? { type: 'User', id: String(user.id) } : null
+  },
+})
+```
+
 ## Dashboard: `PROVIDER_SCAN_CAP` is gone
 
 `@adonis-agora/payments/dashboard` no longer exports `PROVIDER_SCAN_CAP`. Nothing in the console read

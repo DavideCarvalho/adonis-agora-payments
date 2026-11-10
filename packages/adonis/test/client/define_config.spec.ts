@@ -24,20 +24,28 @@ describe('payments client config', () => {
     expect(resolveConfig({ path: '/' }).path).toBe('');
   });
 
-  it('resolves the user structurally, from authkit or from an AdonisJS guard', async () => {
-    // `getUser()` — @adonis-agora/authkit-client's Authenticator.
-    expect(await resolveRequestUser(ctx({ getUser: async () => ({ id: 7 }) }))).toEqual({ id: 7 });
-    // `.user` — any @adonisjs/auth guard.
+  it('resolves the user from ctx.auth.user', async () => {
     expect(await resolveRequestUser(ctx({ user: { id: 9 } }))).toEqual({ id: 9 });
-    // Neither. Nothing is imported from either package to tell them apart.
     expect(await resolveRequestUser(ctx({}))).toBeNull();
     expect(await resolveRequestUser(ctx(undefined))).toBeNull();
     expect(await resolveRequestUser(undefined)).toBeNull();
   });
 
-  it('treats a throwing getUser as anonymous, not as a 500', async () => {
-    const throwing = ctx({
+  it('no longer probes the removed authkit-client getUser()', async () => {
+    let called = false;
+    const auth = {
       getUser: async () => {
+        called = true;
+        return { id: 7 };
+      },
+    };
+    expect(await resolveRequestUser(ctx(auth))).toBeNull();
+    expect(called).toBe(false);
+  });
+
+  it('treats a throwing user getter as anonymous, not as a 500', async () => {
+    const throwing = ctx({
+      get user() {
         throw new Error('unauthenticated');
       },
     });
@@ -52,10 +60,7 @@ describe('payments client config', () => {
 
   it('default owner derives { type: User, id } from that same user', async () => {
     expect(await defaultOwner(ctx({ user: { id: 42 } }))).toEqual({ type: 'User', id: '42' });
-    expect(await defaultOwner(ctx({ getUser: async () => ({ id: 'u_1' }) }))).toEqual({
-      type: 'User',
-      id: 'u_1',
-    });
+    expect(await defaultOwner(ctx({ user: { id: 'u_1' } }))).toEqual({ type: 'User', id: 'u_1' });
     // No user, or a user with no id, is nobody — and nobody owns nothing.
     expect(await defaultOwner(ctx({}))).toBeNull();
     expect(await defaultOwner(ctx({ user: {} }))).toBeNull();

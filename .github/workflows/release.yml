@@ -47,7 +47,7 @@ jobs:
         with:
           node-version: 24.22.2
           cache: pnpm
-          registry-url: 'https://registry.npmjs.org'
+          registry-url: "https://registry.npmjs.org"
 
       # Trusted publishing needs npm CLI >= 11.5.1; Node 22 still bundles npm 10.x.
       #
@@ -224,7 +224,7 @@ jobs:
         with:
           node-version: 24.22.2
           cache: pnpm
-          registry-url: 'https://registry.npmjs.org'
+          registry-url: "https://registry.npmjs.org"
 
       # Trusted publishing needs npm CLI >= 11.5.1; Node 22 still bundles npm 10.x.
       #

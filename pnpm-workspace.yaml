@@ -1,8 +1,8 @@
 packages:
   - "packages/*"
 allowBuilds:
-  '@biomejs/biome': true
-  '@swc/core': true
+  "@biomejs/biome": true
+  "@swc/core": true
   # testcontainers' transitive deps (dockerode -> ssh2). None of their build scripts are
   # needed: cpu-features is optional native acceleration for ssh2, and protobufjs' postinstall
   # only regenerates code that ships prebuilt.

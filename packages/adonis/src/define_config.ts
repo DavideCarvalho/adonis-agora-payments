@@ -290,7 +290,7 @@ export interface WooviDriverConfig {
  *   },
  *   billing: {
  *     enabled: true,
- *     durable: 'auto',
+ *     dispatcher: 'auto',
  *   },
  * })
  * ```
@@ -400,12 +400,6 @@ export interface PaymentsConfig {
      * it calls the SAME `createBillingTables` function, so the two paths cannot drift.
      */
     autoCreateSchema?: boolean;
-    /**
-     * Legacy alias for {@link dispatcher}: `'auto'` (default) or a boolean (`true` =
-     * `'durable'`, `false` = `'in-process'`). Prefer `dispatcher` for the full set of
-     * backends.
-     */
-    durable?: 'auto' | boolean;
     /**
      * How webhook events are processed:
      *

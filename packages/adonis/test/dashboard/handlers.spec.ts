@@ -11,7 +11,6 @@ import {
   disputes,
   health,
   overview,
-  PROVIDER_SCAN_CAP,
   payments,
   providers,
   refundPayment,
@@ -566,7 +565,7 @@ describe('provider filter', () => {
       amount: 1,
       currency: 'BRL',
     });
-    for (let i = 0; i < PROVIDER_SCAN_CAP + 5; i += 1) {
+    for (let i = 0; i < 1005; i += 1) {
       await store.savePayment({
         gatewayId: `pi_${i}`,
         provider: 'stripe',

@@ -317,8 +317,6 @@ export default class PaymentsProvider {
     return (await this.app.container.make(WorkflowEngine)) as unknown as DurableEngineLike;
   }
 
-  /** Map `billing.durable` (`'auto' | boolean`) onto the dispatcher's mode. */
-
   #registerWebhookRoute(router: HttpRouterService) {
     router
       .post('/payments/webhook/:provider', async (ctx: HttpContext) => {

@@ -5,11 +5,7 @@ import type { WebhookDispatchMode } from './webhook_dispatcher.js';
 export type BillingRole = 'all' | 'api' | 'worker';
 
 /**
- * The dispatch backend for a config: `billing.dispatcher` when set, else the
- * legacy `billing.durable` alias, else `'auto'`.
- *
- * `dispatcher` is read FIRST because it is the only option able to name every backend; the
- * boolean alias can only say durable or not.
+ * The dispatch backend for a config: `billing.dispatcher` when set, else `'auto'`.
  */
 export function resolveDispatchMode(config: PaymentsConfig): WebhookDispatchMode {
   const dispatcher = config.billing?.dispatcher;
@@ -23,12 +19,14 @@ export function resolveDispatchMode(config: PaymentsConfig): WebhookDispatchMode
       '[payments] `billing.dispatcher: "queue"` is not implemented — it never was, and it silently ran the in-process or durable backend instead. Use "durable" (a real channel, and the only mode that can split billing.role) or "in-process". Track the queue backend in the roadmap.',
     );
   }
-  if (dispatcher !== undefined) return dispatcher;
-
-  const legacy = config.billing?.durable ?? 'auto';
-  if (legacy === true) return 'durable';
-  if (legacy === false) return 'in-process';
-  return 'auto';
+  // `billing.durable` was removed in 1.0. Without this check a leftover `durable: false` would
+  // quietly become `'auto'` and start running webhooks on durable.
+  if ((config.billing as { durable?: unknown } | undefined)?.durable !== undefined) {
+    throw new Error(
+      '[payments] `billing.durable` was removed in 1.0. Use `billing.dispatcher`: "auto", "durable" (was `durable: true`) or "in-process" (was `durable: false`).',
+    );
+  }
+  return dispatcher ?? 'auto';
 }
 
 /** Which half this process is. Defaults to running both. */

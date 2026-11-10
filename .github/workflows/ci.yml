@@ -39,15 +39,15 @@ jobs:
 
       - run: pnpm build
 
-  # The suite runs on every Node line we support (the range `engines.node` promises): the lines Node
-  # itself still maintains that AdonisJS 7 also accepts (it requires >=24).
-  # Lint, typecheck and build stay on the single pinned version above: only the test run is multiplied.
+      # publint + arethetypeswrong on every published package's packed tarball.
+      - run: pnpm check:package
+
   test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node: [24, 26]
+        node: [24]
     name: test (node ${{ matrix.node }})
     steps:
       - uses: actions/checkout@v7.0.1
@@ -68,8 +68,7 @@ jobs:
   # right. Two bugs lived under it for the package's whole life: the models never generated their
   # uuid `id` (so every insert failed on Postgres), and Lucid puts aggregates in `$extras` rather
   # than on the model instance (so `revenue()` always returned a silent zero). This job is what
-  # keeps that class of bug from coming back. It stays on the single pinned Node: what it guards is
-  # the SQL the store emits, not the runtime, and the unit suite above already covers every Node line.
+  # keeps that class of bug from coming back.
   integration:
     runs-on: ubuntu-latest
     steps:

@@ -93,10 +93,10 @@ export default defineConfig({
     enabled: true,
     /**
      * 'auto' uses @adonis-agora/durable to process webhooks when it is installed in the
-     * app, falling back to an in-process dispatcher otherwise. Set `false` to always use
-     * the in-process dispatcher, or `true` to require durable.
+     * app, falling back to an in-process dispatcher otherwise. Set 'in-process' to always
+     * use the in-process dispatcher, or 'durable' to require durable.
      */
-    durable: 'auto',
+    dispatcher: 'auto',
     /**
      * Business webhook handlers run inside the lib-mounted route (errors mark the event
      * failed + retry). Accepts a DI service class (the lib calls its `.handle`) or a

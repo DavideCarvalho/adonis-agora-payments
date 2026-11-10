@@ -781,7 +781,6 @@ export class StripeDriver implements PaymentsDriver {
     const pix = intent.next_action?.pix_display_qr_code;
     if (pix?.data !== undefined) {
       result.pixCode = pix.data;
-      result.pixCopiaECola = pix.data;
     }
     const hostedUrl =
       pix?.hosted_instructions_url ??

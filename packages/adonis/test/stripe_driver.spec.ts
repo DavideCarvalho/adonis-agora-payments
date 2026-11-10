@@ -471,7 +471,7 @@ describe('StripeDriver', () => {
 
     expect(payment.method).toBe('pix');
     expect(payment.pixCode).toBe('00020126BR.GOV.BCB.PIX');
-    expect(payment.pixCopiaECola).toBe('00020126BR.GOV.BCB.PIX');
+    expect(payment).not.toHaveProperty('pixCopiaECola');
     expect(payment.hostedUrl).toBe('https://payments.stripe.com/pix/1');
     // `image_url_png` is a URL; `pixQrCodeImage` promises a base64 PNG.
     expect(payment.pixQrCodeImage).toBeUndefined();

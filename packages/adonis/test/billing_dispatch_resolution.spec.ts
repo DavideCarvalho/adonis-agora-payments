@@ -5,11 +5,6 @@ import {
   resolveRole,
 } from '../src/billing/resolve_dispatch.js';
 
-/**
- * `billing.dispatcher` is the only option able to name every backend — the
- * boolean `durable` alias can only say durable or not. Reading the alias first would make an
- * explicit `dispatcher` a silent no-op.
- */
 describe('resolveDispatchMode', () => {
   it('defaults to auto', () => {
     expect(resolveDispatchMode({})).toBe('auto');
@@ -31,16 +26,13 @@ describe('resolveDispatchMode', () => {
     expect(resolveDispatchMode({ billing: { dispatcher: 'in-process' } })).toBe('in-process');
   });
 
-  it('prefers dispatcher over the legacy alias when both are set', () => {
-    expect(resolveDispatchMode({ billing: { dispatcher: 'in-process', durable: true } })).toBe(
-      'in-process',
+  it('refuses the removed billing.durable option and names the replacement', () => {
+    expect(() => resolveDispatchMode({ billing: { durable: false } } as never)).toThrow(
+      /billing\.dispatcher/,
     );
-  });
-
-  it('still honours the legacy durable alias on its own', () => {
-    expect(resolveDispatchMode({ billing: { durable: true } })).toBe('durable');
-    expect(resolveDispatchMode({ billing: { durable: false } })).toBe('in-process');
-    expect(resolveDispatchMode({ billing: { durable: 'auto' } })).toBe('auto');
+    expect(() =>
+      resolveDispatchMode({ billing: { dispatcher: 'durable', durable: true } } as never),
+    ).toThrow(/removed in 1\.0/);
   });
 });
 

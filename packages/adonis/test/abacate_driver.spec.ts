@@ -49,9 +49,9 @@ describe('AbacateDriver', () => {
     expect(payment.gatewayId).toBe('tr_1');
     expect(payment.pixQrCodeImage).toBe('iVBORw0KGgo=');
     expect(payment.pixCode).toContain('00020126580014');
-    // Deprecated aliases stay populated with the same values for existing consumers.
-    expect(payment.pixQrCode).toBe(payment.pixQrCodeImage);
-    expect(payment.pixCopiaECola).toBe(payment.pixCode);
+    // The 0.x aliases are gone in 1.0: no duplicate keys on the normalized payment.
+    expect(payment).not.toHaveProperty('pixQrCode');
+    expect(payment).not.toHaveProperty('pixCopiaECola');
     expect(payment.hostedUrl).toBe('https://pay.abacatepay.com/tr_1');
     expect(payment.status).toBe('pending');
   });

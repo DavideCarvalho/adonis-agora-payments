@@ -172,12 +172,6 @@ export const SUBSCRIPTION_DEFAULT_STATUS = 'past_due';
  *  yet, and a `refunded`/`canceled` one has none left to take. */
 const REFUNDABLE_STATUS = 'paid';
 
-/**
- * @deprecated Nothing reads this. Every list applies `?provider=` in the store, so no page
- * scans beyond the rows it returns and `meta.truncated` is always `false`.
- */
-export const PROVIDER_SCAN_CAP = 1000;
-
 /** How far back `GET /providers` looks to learn which gateways this install actually uses. */
 const PROVIDER_DISCOVERY_SCAN = 600;
 

@@ -46,7 +46,6 @@ describe('RazorpayDriver boot', () => {
   it('fails at boot without a key id', () => {
     const keyId = process.env.RAZORPAY_KEY_ID;
     process.env.RAZORPAY_KEY_ID = undefined;
-    // biome-ignore lint/performance/noDelete: an empty string would satisfy `??` but not the check.
     delete process.env.RAZORPAY_KEY_ID;
     try {
       expect(() => makeDriver({ keyId: undefined })).toThrow(/requires keyId/);
@@ -57,7 +56,6 @@ describe('RazorpayDriver boot', () => {
 
   it('fails at boot without a key secret', () => {
     const keySecret = process.env.RAZORPAY_KEY_SECRET;
-    // biome-ignore lint/performance/noDelete: same reason.
     delete process.env.RAZORPAY_KEY_SECRET;
     try {
       expect(() => makeDriver({ keySecret: undefined })).toThrow(/requires keySecret/);
@@ -335,7 +333,6 @@ describe('RazorpayDriver webhooks', () => {
 
   it('skips verification when no webhook secret is configured, so local dev works', () => {
     const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
-    // biome-ignore lint/performance/noDelete: the fallback must be genuinely absent.
     delete process.env.RAZORPAY_WEBHOOK_SECRET;
     try {
       const driver = makeDriver({ webhookSecret: undefined });

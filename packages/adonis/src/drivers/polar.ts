@@ -1,8 +1,4 @@
-import {
-  publishPaymentDiagnostics,
-  publishRefundDiagnostics,
-  publishSubscriptionDiagnostics,
-} from '../diagnostics.js';
+import { publishRefundDiagnostics, publishSubscriptionDiagnostics } from '../diagnostics.js';
 import type {
   ChargeInput,
   CheckoutInput,
@@ -191,10 +187,8 @@ export class PolarDriver implements PaymentsDriver {
   #bearerToken: string;
   #currency: string;
   #webhookSecret: string | undefined;
-  #invoiceCtx: EmitInvoiceContext;
 
-  constructor(ctx: EmitInvoiceContext, config: PolarDriverConfig) {
-    this.#invoiceCtx = ctx;
+  constructor(_ctx: EmitInvoiceContext, config: PolarDriverConfig) {
     this.#bearerToken = requireCredential({
       driver: 'polar',
       option: 'accessToken',

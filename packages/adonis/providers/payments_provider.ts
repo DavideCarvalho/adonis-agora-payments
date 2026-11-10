@@ -10,7 +10,7 @@ import {
   resolveRole,
 } from '../src/billing/resolve_dispatch.js';
 import { isInjectableAsLucid, resolveBillingStore } from '../src/billing/resolve_store.js';
-import type { DurableEngineLike, WebhookDispatchMode } from '../src/billing/webhook_dispatcher.js';
+import type { DurableEngineLike } from '../src/billing/webhook_dispatcher.js';
 import { WebhookDispatcher } from '../src/billing/webhook_dispatcher.js';
 import type { WebhookHandler } from '../src/billing/webhook_processor.js';
 import { WebhookProcessor } from '../src/billing/webhook_processor.js';

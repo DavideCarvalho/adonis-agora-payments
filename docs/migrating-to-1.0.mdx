@@ -11,8 +11,8 @@ to look for in your app and what to write instead. No database migration is need
 
 ## Node 24 or newer
 
-Every package now declares `"engines": { "node": ">=24" }`. AdonisJS 7 already requires it, so an
-app that boots today is unaffected.
+Every package now declares `"engines": { "node": ">=24" }` and is tested on Node 24 and 26. AdonisJS 7
+already requires Node 24, so an app that boots today is unaffected.
 
 ## Pix: `pixQrCode` is now only `pixQrCodeImage`
 
@@ -116,5 +116,5 @@ After: no import. There is no replacement.
 
 ## Peer range for `@adonis-agora/durable`
 
-The optional `@adonis-agora/durable` peer now accepts `>=0.1.0 <2.0.0`, so durable 1.x installs
-without a peer warning. Nothing to change in your app.
+The optional `@adonis-agora/durable` peer now accepts `>=0.1.0 <2.0.0 || >=1.0.0-rc.0 <2.0.0`, so
+durable 1.x and its release candidates install without a peer warning. Nothing to change in your app.

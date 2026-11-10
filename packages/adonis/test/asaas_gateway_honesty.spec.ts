@@ -12,9 +12,7 @@ import type { WebhookEvent } from '../src/types.js';
  */
 
 function driver() {
-  // biome-ignore lint/performance/noDelete: env var must be absent, not "undefined".
   delete process.env.ASAAS_WEBHOOK_TOKEN;
-  // biome-ignore lint/performance/noDelete: env var must be absent, not "undefined".
   delete process.env.ASAAS_WEBHOOK_ACCESS_TOKEN;
   return new AsaasDriver({ config: () => ({}) }, { apiKey: 'test', sandbox: true });
 }

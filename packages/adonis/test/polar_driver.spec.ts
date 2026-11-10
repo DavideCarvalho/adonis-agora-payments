@@ -68,9 +68,7 @@ describe('PolarDriver', () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     process.env.POLAR_ACCESS_TOKEN = undefined;
-    // biome-ignore lint/performance/noDelete: the driver reads the env, so it must be absent.
     delete process.env.POLAR_ACCESS_TOKEN;
-    // biome-ignore lint/performance/noDelete: same.
     delete process.env.POLAR_WEBHOOK_SECRET;
   });
 
@@ -401,9 +399,7 @@ describe('PolarDriver', () => {
 describe('PolarDriver — the widened contract', () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
-    // biome-ignore lint/performance/noDelete: the driver reads the env, so it must be absent.
     delete process.env.POLAR_ACCESS_TOKEN;
-    // biome-ignore lint/performance/noDelete: same.
     delete process.env.POLAR_WEBHOOK_SECRET;
   });
 

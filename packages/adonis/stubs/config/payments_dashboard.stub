@@ -21,7 +21,7 @@ import { defineConfig } from '@adonis-agora/payments/dashboard'
  */
 export default defineConfig({
   // enabled: true,
-  // path: '/payments-dashboard',
+  // path: '/payments',
   // currency: 'BRL',
   // authorize: (ctx) => ctx.auth.user?.isAdmin === true,
   // dashboardAuth: {

@@ -252,7 +252,7 @@ export class WooviDriver implements PaymentsDriver {
       url: asString(charge.paymentLinkUrl) ?? '',
       status: 'open',
       amount: { amount: input.amount, currency: 'brl' },
-      ...(brCode !== '' ? { pixCode: brCode, pixCopiaECola: brCode } : {}),
+      ...(brCode !== '' ? { pixCode: brCode } : {}),
     };
   }
 
@@ -634,7 +634,7 @@ export class WooviDriver implements PaymentsDriver {
           : status === 'EXPIRED' || status === 'CANCELED' || status === 'REJECTED'
             ? 'canceled'
             : 'pending',
-      ...(brCode !== undefined ? { pixCode: brCode, pixCopiaECola: brCode } : {}),
+      ...(brCode !== undefined ? { pixCode: brCode } : {}),
       // Woovi's `qrCodeImage` is a URL, and `pixQrCodeImage` is documented as base64 PNG
       // ("render it directly as `data:image/png;base64,...`"). Putting a URL there would
       // produce a broken <img> in every consumer that followed the docs, so it is left

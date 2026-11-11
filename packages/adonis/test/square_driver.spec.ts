@@ -65,7 +65,6 @@ afterEach(() => {
 describe('SquareDriver boot', () => {
   it('fails at boot without an access token', () => {
     const token = process.env.SQUARE_ACCESS_TOKEN;
-    // biome-ignore lint/performance/noDelete: the env fallback must be genuinely absent.
     delete process.env.SQUARE_ACCESS_TOKEN;
     try {
       expect(() => makeDriver({ accessToken: undefined })).toThrow(/requires accessToken/);
@@ -76,7 +75,6 @@ describe('SquareDriver boot', () => {
 
   it('fails at boot without a location id — most calls are location-scoped', () => {
     const location = process.env.SQUARE_LOCATION_ID;
-    // biome-ignore lint/performance/noDelete: same reason.
     delete process.env.SQUARE_LOCATION_ID;
     try {
       expect(() => makeDriver({ locationId: undefined })).toThrow(/requires locationId/);
@@ -91,7 +89,6 @@ describe('SquareDriver boot', () => {
 
   it('fails at boot when a signature key is set without the notification URL it is signed with', () => {
     const url = process.env.SQUARE_WEBHOOK_NOTIFICATION_URL;
-    // biome-ignore lint/performance/noDelete: same reason.
     delete process.env.SQUARE_WEBHOOK_NOTIFICATION_URL;
     try {
       expect(() => makeDriver({ notificationUrl: undefined })).toThrow(/no notificationUrl/);
@@ -565,7 +562,6 @@ describe('SquareDriver webhooks', () => {
 
   it('skips verification when no signature key is configured, so local dev works', () => {
     const key = process.env.SQUARE_WEBHOOK_SIGNATURE_KEY;
-    // biome-ignore lint/performance/noDelete: the env fallback must be genuinely absent.
     delete process.env.SQUARE_WEBHOOK_SIGNATURE_KEY;
     try {
       const driver = makeDriver({ webhookSignatureKey: undefined, notificationUrl: undefined });

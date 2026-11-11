@@ -1,0 +1,175 @@
+---
+title: Migrating to 1.0
+description: The breaking changes in @adonis-agora/payments 1.0 and payments-dashboard / payments-react 1.0 — the renamed Pix fields, the billing dispatcher option and the Node 24 floor — each with a before and after.
+icon: Milestone
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+1.0 removes the old names that 0.x kept next to the new ones. Each section below is one change: what
+to look for in your app and what to write instead. No database migration is needed.
+
+## Node 24 or newer
+
+Every package now declares `"engines": { "node": ">=24" }` and is tested on Node 24 and 26. AdonisJS 7
+already requires Node 24, so an app that boots today is unaffected.
+
+## Pix: `pixQrCode` is now only `pixQrCodeImage`
+
+`Payment.pixQrCode` held the base64 PNG of the QR code, not a code. It is no longer set; read
+`pixQrCodeImage`.
+
+Before:
+
+```ts title="app/controllers/checkout_controller.ts"
+export default class CheckoutController {
+  async pix({ inertia }: HttpContext) {
+    const payment = await getPayments().driver('pix').charge(input)
+    return inertia.render('checkout/pix', { qrImage: payment.pixQrCode })
+  }
+}
+```
+
+After:
+
+```ts title="app/controllers/checkout_controller.ts"
+export default class CheckoutController {
+  async pix({ inertia }: HttpContext) {
+    const payment = await getPayments().driver('pix').charge(input)
+    return inertia.render('checkout/pix', { qrImage: payment.pixQrCodeImage })
+  }
+}
+```
+
+## Pix: `pixCopiaECola` is now only `pixCode`
+
+The BR Code the customer copies is `pixCode`, on both `Payment` and `CheckoutSession`.
+`pixCopiaECola` is no longer set on either.
+
+Before:
+
+```ts title="app/controllers/checkout_controller.ts"
+const payment = await getPayments().driver('pix').charge(input)
+return inertia.render('checkout/pix', { copyPaste: payment.pixCopiaECola })
+
+const session = await getPayments().driver('pix').createCheckout(checkout)
+const brCode = session.pixCopiaECola
+```
+
+After:
+
+```ts title="app/controllers/checkout_controller.ts"
+const payment = await getPayments().driver('pix').charge(input)
+return inertia.render('checkout/pix', { copyPaste: payment.pixCode })
+
+const session = await getPayments().driver('pix').createCheckout(checkout)
+const brCode = session.pixCode
+```
+
+<Callout type="warn" title="Fallbacks hide the break">
+A line like `payment.pixCode ?? payment.pixCopiaECola` still compiles if you typed the right-hand
+side yourself, and simply stops ever using it. Search the app for `pixCopiaECola` and `pixQrCode`
+(the exact name, not `pixQrCodeImage`) and replace every read.
+</Callout>
+
+## `billing.durable` is now `billing.dispatcher`
+
+The boolean `durable` option is gone. `billing.dispatcher` names the backend. Leaving `durable` in
+the config is a boot error that names the replacement.
+
+Before:
+
+```ts title="config/payments.ts"
+export default defineConfig({
+  // ...
+  billing: {
+    enabled: true,
+    durable: 'auto', // or true / false
+  },
+})
+```
+
+After:
+
+```ts title="config/payments.ts"
+export default defineConfig({
+  // ...
+  billing: {
+    enabled: true,
+    dispatcher: 'auto', // `true` → 'durable', `false` → 'in-process'
+  },
+})
+```
+
+## Client endpoint: the user comes from `ctx.auth.user`
+
+The default `authorize` and `owner` of the payments client endpoint read `ctx.auth.user` and nothing
+else. They no longer call `ctx.auth.getUser()`, which only the old authkit-client `ctx.auth` had. Any
+`@adonisjs/auth` guard, and authkit 1.0, already set `ctx.auth.user`. If your `ctx.auth` exposes the
+user some other way, pass your own `authorize` and `owner`.
+
+Before:
+
+```ts title="config/payments_client.ts"
+// Worked because the default probed ctx.auth.getUser()
+export default defineConfig({ enabled: true })
+```
+
+After:
+
+```ts title="config/payments_client.ts"
+export default defineConfig({
+  enabled: true,
+  authorize: async (ctx) => (await myUser(ctx)) !== null,
+  owner: async (ctx) => {
+    const user = await myUser(ctx)
+    return user ? { type: 'User', id: String(user.id) } : null
+  },
+})
+```
+
+## Dashboard: `PROVIDER_SCAN_CAP` is gone
+
+`@adonis-agora/payments/dashboard` no longer exports `PROVIDER_SCAN_CAP`. Nothing in the console read
+it: every list filters by provider in the store. Delete the import.
+
+Before:
+
+```ts
+import { PROVIDER_SCAN_CAP } from '@adonis-agora/payments/dashboard'
+```
+
+After: no import. There is no replacement.
+
+## Dashboard SPA: config comes only from the data block
+
+The prebuilt console no longer reads the `window.__PAYMENTS_BASE__`, `__PAYMENTS_API__`,
+`__PAYMENTS_CURRENCY__` and `__PAYMENTS_AUTH__` globals. The provider has passed this config as a
+`<script type="application/json">` block since 0.4.1, so an app that mounts the console with the
+dashboard provider changes nothing. A page that embeds the bundle by hand must render that block
+instead of setting the globals:
+
+Before:
+
+```html
+<script>window.__PAYMENTS_BASE__ = '/ops/billing'</script>
+```
+
+After:
+
+```html
+<script type="application/json" id="payments-dashboard-config">
+  {"base":"/ops/billing","api":"/ops/billing/api","currency":"BRL","auth":null}
+</script>
+```
+
+With no block at all, the console assumes the server's default mount, `/payments` (it used to
+assume `/payments-dashboard`).
+
+`@adonis-agora/payments-dashboard` also stops declaring `react` and `react-dom` as peers. The
+console ships prebuilt with React inside it, so your app does not need to install React for it.
+
+## Peer range for `@adonis-agora/durable`
+
+The optional `@adonis-agora/durable` peer now accepts `>=0.1.0 <2.0.0 || >=1.0.0-rc.0 <2.0.0`, so
+durable 1.x and its release candidates install without a peer warning. Nothing to change in your app.

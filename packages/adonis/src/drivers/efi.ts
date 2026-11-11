@@ -322,9 +322,7 @@ export class EfiDriver implements PaymentsDriver {
       url: '',
       status: cob.status === 'CONCLUIDA' ? 'complete' : 'open',
       amount: { amount: input.amount, currency: 'brl' },
-      ...(cob.pixCopiaECola !== undefined
-        ? { pixCode: cob.pixCopiaECola, pixCopiaECola: cob.pixCopiaECola }
-        : {}),
+      ...(cob.pixCopiaECola !== undefined ? { pixCode: cob.pixCopiaECola } : {}),
     };
   }
 
@@ -562,7 +560,6 @@ export class EfiDriver implements PaymentsDriver {
     };
     if (cob.pixCopiaECola !== undefined) {
       result.pixCode = cob.pixCopiaECola;
-      result.pixCopiaECola = cob.pixCopiaECola;
     }
     if (settled?.horario !== undefined) result.paidAt = settled.horario;
     return result;
@@ -570,7 +567,7 @@ export class EfiDriver implements PaymentsDriver {
 
   /**
    * Fetch the rendered QR image for a charge. Best-effort: the charge already exists and
-   * `pixCopiaECola` is what the payer actually needs, so a failure here is not a failure.
+   * `pixCode` is what the payer actually needs, so a failure here is not a failure.
    */
   async #attachQrCode(payment: Payment, cob: EfiCob): Promise<void> {
     const locId = cob.loc?.id;
@@ -579,13 +576,11 @@ export class EfiDriver implements PaymentsDriver {
       const qr = await this.#request<EfiLocQrCode>(`/v2/loc/${locId}/qrcode`);
       if (qr.qrcode !== undefined && payment.pixCode === undefined) {
         payment.pixCode = qr.qrcode;
-        payment.pixCopiaECola = qr.qrcode;
       }
       if (qr.imagemQrcode !== undefined) {
         // Efí returns a full data URI; this field is documented as bare base64.
         const base64 = qr.imagemQrcode.replace(/^data:image\/\w+;base64,/, '');
         payment.pixQrCodeImage = base64;
-        payment.pixQrCode = base64;
       }
     } catch {
       // The charge is created and payable — the image is a convenience.

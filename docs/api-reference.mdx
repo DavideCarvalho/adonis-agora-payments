@@ -29,7 +29,6 @@ defineConfig({
     dispatcher?: 'auto' | 'durable' | 'in-process'
     role?: 'all' | 'api' | 'worker'
     store?: BillingStoreFactory
-    durable?: 'auto' | boolean       // legacy alias for dispatcher
     handlers?: Record<string, WebhookHandler | WebhookHandlerService>
     passthroughEvents?: string[]
   }
@@ -367,8 +366,6 @@ interface Payment {
   paidAt?: string
   pixQrCodeImage?: string             // base64 PNG of the Pix QR code
   pixCode?: string                    // the BR Code (EMV payload) the customer copies
-  pixQrCode?: string                  // @deprecated alias of pixQrCodeImage
-  pixCopiaECola?: string              // @deprecated alias of pixCode
   hostedUrl?: string
   clientSecret?: string               // what the BROWSER needs to finish an unconfirmed charge
   subscriptionId?: string
@@ -404,7 +401,7 @@ interface WebhookEvent<T = unknown> {
 
 interface Customer { id: string; email?: string; name?: string; taxId?: string; metadata?: Record<string, unknown> }
 interface Refund { id: string; gatewayId: string; provider: string; amount: MoneyAmount; status: 'succeeded' | 'pending' | 'failed'; createdAt: string }
-interface CheckoutSession { id: string; gatewayId: string; provider: string; url: string; status: 'open' | 'complete' | 'expired'; amount?: MoneyAmount; subscriptionId?: string; customerId?: string; pixCode?: string; pixCopiaECola?: string }
+interface CheckoutSession { id: string; gatewayId: string; provider: string; url: string; status: 'open' | 'complete' | 'expired'; amount?: MoneyAmount; subscriptionId?: string; customerId?: string; pixCode?: string }
 ```
 
 ### Disputes

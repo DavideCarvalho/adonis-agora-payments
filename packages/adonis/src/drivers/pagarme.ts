@@ -704,11 +704,9 @@ export class PagarmeDriver implements PaymentsDriver {
     if (method !== 'unknown') payment.method = method;
     if (transaction?.qr_code !== undefined) {
       payment.pixCode = transaction.qr_code;
-      payment.pixCopiaECola = transaction.qr_code;
     }
     if (transaction?.qr_code_url !== undefined) {
       payment.pixQrCodeImage = transaction.qr_code_url;
-      payment.pixQrCode = transaction.qr_code_url;
     }
     // Boleto: `url` is the hosted slip, `pdf` the printable one.
     const hosted = transaction?.url ?? transaction?.pdf;

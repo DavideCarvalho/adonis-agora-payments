@@ -157,7 +157,7 @@
     "test:integration": "vitest run -c vitest.integration.config.ts"
   },
   "peerDependencies": {
-    "@adonis-agora/durable": ">=0.1.0 <1.0.0",
+    "@adonis-agora/durable": ">=0.1.0 <2.0.0 || >=1.0.0-rc.0 <2.0.0",
     "@adonisjs/core": "^7.3.0",
     "@adonisjs/lucid": "^22.4.0",
     "@woovi/node-sdk": "^1.0.0",

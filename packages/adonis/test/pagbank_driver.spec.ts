@@ -384,7 +384,6 @@ describe('PagBankDriver capabilities', () => {
   it('boots only with a token', () => {
     const saved = process.env.PAGBANK_TOKEN;
     process.env.PAGBANK_TOKEN = undefined;
-    // biome-ignore lint/performance/noDelete: env var must be absent, not "undefined".
     delete process.env.PAGBANK_TOKEN;
     try {
       expect(() => new PagBankDriver({ config: () => ({}) }, {})).toThrow(

@@ -227,7 +227,7 @@ describe('PaymentsProvider boot — webhook verification', () => {
 describe('PaymentsProvider boot — webhook workflow on the durable engine', () => {
   const durableConfig = (role?: 'api' | 'worker' | 'all'): PaymentsConfig => ({
     ...base,
-    billing: { ...base.billing, durable: true, ...(role ? { role } : {}) },
+    billing: { ...base.billing, dispatcher: 'durable', ...(role ? { role } : {}) },
   });
 
   async function bootWithEngine(config: PaymentsConfig) {

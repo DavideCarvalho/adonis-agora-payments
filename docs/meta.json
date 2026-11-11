@@ -24,6 +24,7 @@
     "cli",
     "---Reference---",
     "api-reference",
+    "migrating-to-1.0",
     "roadmap"
   ],
   "root": true,

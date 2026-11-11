@@ -259,16 +259,6 @@ export interface Payment {
    * one the customer copies and pastes into their bank app ("Pix copia e cola").
    */
   pixCode?: string;
-  /**
-   * @deprecated Misleading name — it holds the QR **image**, not a code. Use {@link Payment.pixQrCodeImage}.
-   * Still populated with the same value for backward compatibility.
-   */
-  pixQrCode?: string;
-  /**
-   * @deprecated Portuguese name for the BR Code payload. Use {@link Payment.pixCode}.
-   * Still populated with the same value for backward compatibility.
-   */
-  pixCopiaECola?: string;
   /** URL to a hosted checkout/charge page when the gateway provides one. */
   hostedUrl?: string;
   /**
@@ -327,8 +317,6 @@ export interface CheckoutSession {
    * string the payer copies. Same field as {@link Payment.pixCode}.
    */
   pixCode?: string;
-  /** @deprecated Renamed to {@link CheckoutSession.pixCode}. Still populated. */
-  pixCopiaECola?: string;
   status: 'open' | 'complete' | 'expired';
   amount?: MoneyAmount;
   /** The subscription created by this checkout, when it was a subscription checkout. */

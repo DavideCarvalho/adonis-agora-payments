@@ -464,9 +464,6 @@ falls back to in-process and nothing says so. Setting `dispatcher: 'durable'` tu
 error, which is where you want to find out. See [Production](/docs/payments/production).
 </Callout>
 
-`billing.durable` is the legacy alias — `true` maps to `'durable'`, `false` to `'in-process'`.
-Prefer `dispatcher`, which names the backend instead of encoding it as a boolean.
-
 ## Usage-based billing — metered subscriptions
 
 Plans that bill by consumption (API calls, stored GB, minutes) are metered through the

@@ -82,11 +82,8 @@ const SUBSCRIPTION = {
 describe('DodoDriver', () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
-    // biome-ignore lint/performance/noDelete: the driver reads the env, so it must be absent.
     delete process.env.DODO_PAYMENTS_API_KEY;
-    // biome-ignore lint/performance/noDelete: same.
     delete process.env.DODO_PAYMENTS_WEBHOOK_KEY;
-    // biome-ignore lint/performance/noDelete: same.
     delete process.env.DODO_PAYMENTS_BILLING_COUNTRY;
   });
 
@@ -470,11 +467,8 @@ describe('DodoDriver', () => {
 describe('DodoDriver — the widened contract', () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
-    // biome-ignore lint/performance/noDelete: the driver reads the env, so it must be absent.
     delete process.env.DODO_PAYMENTS_API_KEY;
-    // biome-ignore lint/performance/noDelete: same.
     delete process.env.DODO_PAYMENTS_WEBHOOK_KEY;
-    // biome-ignore lint/performance/noDelete: same.
     delete process.env.DODO_PAYMENTS_BILLING_COUNTRY;
   });
 

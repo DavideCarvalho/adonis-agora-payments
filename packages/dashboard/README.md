@@ -39,7 +39,7 @@ import { defineConfig } from '@adonis-agora/payments/dashboard'
 
 export default defineConfig({
   enabled: true,               // false => no routes are registered at all
-  path: '/payments-dashboard', // the SPA mounts here; the JSON API at <path>/api
+  path: '/payments',           // the SPA mounts here; the JSON API at <path>/api
   currency: 'BRL',             // how the edge formats the integer cents it receives
 })
 ```
@@ -65,8 +65,7 @@ wider than the viewport.
 
 The provider hands the SPA its config as a `<script type="application/json">` data block, never an
 executable inline script, so `script-src 'self'` (with or without a nonce) is all the console needs.
-The `window.__PAYMENTS_*__` globals `src/client/payments-client.ts` also reads are a test/embedding
-escape hatch, consulted only when the block is absent.
+That block is the only way the SPA learns its mount, API base, currency and auth surface.
 
 ## Money
 

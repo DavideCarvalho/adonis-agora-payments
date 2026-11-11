@@ -470,11 +470,6 @@ stylesheet are served from `<path>/assets/`, the API is `<path>/api`, and the de
 including [`@adonisjs/shield`](https://docs.adonisjs.com/guides/security/securing-ssr-applications)'s
 `scriptSrc: ["'self'", '@nonce']`, the recommended setup.
 
-Before `0.4.1` the config was injected as an inline `<script>` assigning `window.__PAYMENTS_*__`
-globals. Under a nonce-only `script-src` the browser drops that script without a word, the SPA falls
-back to its default mount and **every request 404s** from a console that rendered perfectly well. If
-you saw that, this is why; upgrading fixes it with no change on your side.
-
 Two things stay optional. The page links the JetBrains Mono / Space Grotesk web fonts from Google;
 a `style-src`/`font-src` that does not allow `fonts.googleapis.com` / `fonts.gstatic.com` just
 falls back to the system monospace and sans — nothing breaks. And `img-src` is never needed: the

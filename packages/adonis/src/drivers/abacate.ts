@@ -213,11 +213,9 @@ export class AbacateDriver implements PaymentsDriver {
     };
     if (data.brCodeBase64) {
       result.pixQrCodeImage = data.brCodeBase64;
-      result.pixQrCode = data.brCodeBase64;
     }
     if (data.brCode) {
       result.pixCode = data.brCode;
-      result.pixCopiaECola = data.brCode;
     }
     if (data.url) result.hostedUrl = data.url;
     return result;
@@ -294,9 +292,7 @@ export class AbacateDriver implements PaymentsDriver {
         currency: data.currency ?? 'brl',
       },
       customerId: input.customerId,
-      ...(data.pix?.copiaECola !== undefined
-        ? { pixCode: data.pix.copiaECola, pixCopiaECola: data.pix.copiaECola }
-        : {}),
+      ...(data.pix?.copiaECola !== undefined ? { pixCode: data.pix.copiaECola } : {}),
     };
   }
 
@@ -490,11 +486,9 @@ export class AbacateDriver implements PaymentsDriver {
     if (customerId !== undefined) result.customerId = customerId;
     if (data.pix?.qrCode !== undefined) {
       result.pixQrCodeImage = data.pix.qrCode;
-      result.pixQrCode = data.pix.qrCode;
     }
     if (data.pix?.copiaECola !== undefined) {
       result.pixCode = data.pix.copiaECola;
-      result.pixCopiaECola = data.pix.copiaECola;
     }
     if (data.url !== undefined) result.hostedUrl = data.url;
     if (data.paidAt !== undefined) result.paidAt = data.paidAt;

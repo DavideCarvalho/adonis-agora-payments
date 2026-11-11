@@ -69,7 +69,6 @@ export {
   ok,
   overview,
   PAYMENT_STATUSES,
-  PROVIDER_SCAN_CAP,
   paymentDetail,
   payments,
   providers,

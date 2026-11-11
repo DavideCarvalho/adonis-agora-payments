@@ -247,12 +247,6 @@ then a missing dependency is a boot error rather than a surprise. See
 The in-process fallback retries 5 times with exponential backoff (500 ms base, capped at 30 s),
 which covers a transient failure but does **not** survive a process restart. Durable does.
 
-<Callout title="`durable` is the legacy alias">
-`durable: 'auto' | true | false` still works and maps onto `dispatcher` — `true` is `'durable'`,
-`false` is `'in-process'`. New config should use `dispatcher`, which names the backend directly
-instead of encoding it as a boolean.
-</Callout>
-
 ### `handlers` — where your business logic runs
 
 The route validates the signature, syncs the billing tables, then runs **your** logic. Two

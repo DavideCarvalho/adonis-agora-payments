@@ -1,9 +1,9 @@
 /**
  * API client for the `@adonis-agora/payments` dashboard SPA. Talks JSON over `fetch` to the routes
- * mounted by `packages/adonis/providers/dashboard_provider.ts` (default base `/payments-dashboard`,
+ * mounted by `packages/adonis/providers/dashboard_provider.ts` (default base `/payments`,
  * JSON API at `<base>/api`).
  *
- * Mirrors `@adonis-agora/durable-dashboard`'s `durable-client.ts`: the same injected-globals base
+ * Mirrors `@adonis-agora/durable-dashboard`'s `durable-client.ts`: the same injected-config base
  * resolution, the same `http()` helper and the same 401 → auth-surface redirect.
  *
  * Reads are `GET`; the two things that CHANGE something — refunding a payment and retrying a failed
@@ -369,19 +369,6 @@ export interface RetryResult {
   status: 'processed';
 }
 
-declare global {
-  interface Window {
-    /** UI mount base (e.g. `/payments-dashboard`). Test/escape-hatch override; see {@link readConfig}. */
-    __PAYMENTS_BASE__?: string;
-    /** JSON API base (e.g. `/payments-dashboard/api`). */
-    __PAYMENTS_API__?: string;
-    /** ISO 4217 display currency (`config.currency`). */
-    __PAYMENTS_CURRENCY__?: string;
-    /** The `dashboardAuth` surface(s), or `null` when the deployment has none. */
-    __PAYMENTS_AUTH__?: { modes: string[] } | null;
-  }
-}
-
 /** `id` of the JSON data block the provider injects into `index.html` (`spa.ts`'s `CONFIG_ELEMENT_ID`). */
 export const CONFIG_ELEMENT_ID = 'payments-dashboard-config';
 
@@ -401,9 +388,7 @@ interface InjectedConfig {
  * word, so the globals were never set, every URL below fell back to the default mount, and a
  * console that had rendered perfectly answered 404 to all of its own requests. A data block is
  * never executed, so no policy can refuse it.
- *
- * The `window.__PAYMENTS_*__` globals are still honoured, AFTER the block, so a test or a host
- * embedding the bundle by hand can set them — but they are no longer how the provider speaks.
+
  */
 function readConfig(): InjectedConfig {
   if (typeof document === 'undefined') return {};
@@ -423,18 +408,13 @@ export function uiBase(): string {
   // silently fall through to the default instead of honoring it.
   const injected = readConfig().base;
   if (typeof injected === 'string') return injected;
-  if (typeof window !== 'undefined' && typeof window.__PAYMENTS_BASE__ === 'string') {
-    return window.__PAYMENTS_BASE__;
-  }
-  return '/payments-dashboard';
+  // The server's default mount (`resolveConfig`'s `path`), for a page served without the block.
+  return '/payments';
 }
 
 export function apiBase(): string {
   const injected = readConfig().api;
   if (typeof injected === 'string') return injected;
-  if (typeof window !== 'undefined' && typeof window.__PAYMENTS_API__ === 'string') {
-    return window.__PAYMENTS_API__;
-  }
   return `${uiBase()}/api`;
 }
 
@@ -442,9 +422,6 @@ export function apiBase(): string {
 export function displayCurrency(): string {
   const injected = readConfig().currency;
   if (typeof injected === 'string') return injected;
-  if (typeof window !== 'undefined' && typeof window.__PAYMENTS_CURRENCY__ === 'string') {
-    return window.__PAYMENTS_CURRENCY__;
-  }
   return 'BRL';
 }
 
@@ -457,12 +434,7 @@ export function displayCurrency(): string {
  */
 export function authSurface(): { modes: string[] } | null {
   const config = readConfig();
-  const candidate =
-    'auth' in config
-      ? config.auth
-      : typeof window !== 'undefined'
-        ? window.__PAYMENTS_AUTH__
-        : undefined;
+  const candidate = config.auth;
   if (typeof candidate !== 'object' || candidate === null) return null;
   const modes = (candidate as { modes?: unknown }).modes;
   if (!Array.isArray(modes)) return null;

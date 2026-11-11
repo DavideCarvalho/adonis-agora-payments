@@ -883,11 +883,9 @@ export class MercadoPagoDriver implements PaymentsDriver {
     const pix = data.point_of_interaction?.transaction_data;
     if (pix?.qr_code !== undefined) {
       result.pixCode = pix.qr_code;
-      result.pixCopiaECola = pix.qr_code;
     }
     if (pix?.qr_code_base64 !== undefined) {
       result.pixQrCodeImage = pix.qr_code_base64;
-      result.pixQrCode = pix.qr_code_base64;
     }
     const hostedUrl = pix?.ticket_url ?? data.transaction_details?.external_resource_url;
     if (hostedUrl !== undefined) result.hostedUrl = hostedUrl;

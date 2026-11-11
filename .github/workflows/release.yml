@@ -239,8 +239,12 @@ jobs:
 
       # Stamp every pending-changeset package (and any out-of-range dependent) to
       # `0.0.0-beta-<datetime>` in the runner only, never committed.
+      # Changesets refuses `--snapshot` in pre mode. The snapshot never commits, so dropping the
+      # pre-mode marker in the runner is safe and leaves the real rc/stable release untouched.
       - name: Version as beta snapshot
-        run: pnpm changeset version --snapshot beta
+        run: |
+          rm -f .changeset/pre.json
+          pnpm changeset version --snapshot beta
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # changelog-github, as in the release job
 

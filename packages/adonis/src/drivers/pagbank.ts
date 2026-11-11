@@ -274,7 +274,7 @@ export class PagBankDriver implements PaymentsDriver {
       url: '',
       status: 'open',
       amount: { amount: input.amount, currency: 'brl' },
-      ...(brCode !== undefined ? { pixCode: brCode, pixCopiaECola: brCode } : {}),
+      ...(brCode !== undefined ? { pixCode: brCode } : {}),
     };
   }
 
@@ -429,7 +429,6 @@ export class PagBankDriver implements PaymentsDriver {
     const brCode = charge?.qr_code?.text ?? qr?.text;
     if (brCode !== undefined) {
       result.pixCode = brCode;
-      result.pixCopiaECola = brCode;
     }
     // No `pixQrCodeImage`: PagBank returns *links* to the rendered PNG/base64, not the
     // image itself, and this field is documented as base64 content. The links stay in

@@ -10,7 +10,7 @@ import {
   resolveRole,
 } from '../src/billing/resolve_dispatch.js';
 import { isInjectableAsLucid, resolveBillingStore } from '../src/billing/resolve_store.js';
-import type { DurableEngineLike, WebhookDispatchMode } from '../src/billing/webhook_dispatcher.js';
+import type { DurableEngineLike } from '../src/billing/webhook_dispatcher.js';
 import { WebhookDispatcher } from '../src/billing/webhook_dispatcher.js';
 import type { WebhookHandler } from '../src/billing/webhook_processor.js';
 import { WebhookProcessor } from '../src/billing/webhook_processor.js';
@@ -316,8 +316,6 @@ export default class PaymentsProvider {
     const { WorkflowEngine } = await import('@adonis-agora/durable');
     return (await this.app.container.make(WorkflowEngine)) as unknown as DurableEngineLike;
   }
-
-  /** Map `billing.durable` (`'auto' | boolean`) onto the dispatcher's mode. */
 
   #registerWebhookRoute(router: HttpRouterService) {
     router

@@ -4,7 +4,7 @@
  * JSON API at `<base>/api`).
  *
  * Mirrors `@adonis-agora/durable-dashboard`'s `durable-client.ts`: the same injected-config base
- * resolution, the same `http()` helper and the same 401 → auth-surface redirect.
+ * resolution, the same `http()` helper and the same 401 handling (follow `redirectTo`, else reload).
  *
  * Reads are `GET`; the two things that CHANGE something — refunding a payment and retrying a failed
  * webhook event — are `POST`, and are the only calls in this file that are not idempotent.
@@ -376,7 +376,6 @@ interface InjectedConfig {
   base?: unknown;
   api?: unknown;
   currency?: unknown;
-  auth?: unknown;
 }
 
 /**
@@ -425,54 +424,30 @@ export function displayCurrency(): string {
   return 'BRL';
 }
 
-/**
- * The auth surface the page was served with — `null` when this deployment configures no
- * `dashboardAuth`. Only a deployment with one has a session to end: the provider registers
- * `GET <path>/logout` ONLY alongside `dashboardAuth`, so a Sign out link on any other deployment
- * points at a 404. A page with no config at all reads as "none" too, which errs towards hiding a
- * link rather than showing a broken one.
- */
-export function authSurface(): { modes: string[] } | null {
-  const config = readConfig();
-  const candidate = config.auth;
-  if (typeof candidate !== 'object' || candidate === null) return null;
-  const modes = (candidate as { modes?: unknown }).modes;
-  if (!Array.isArray(modes)) return null;
-  return { modes: modes.filter((m): m is string => typeof m === 'string') };
-}
-
-/** Best-effort read of an `{ error: 'unauthorized', auth: { modes } }` 401 body. */
-async function readAuthModes(res: Response): Promise<string[] | undefined> {
+/** The `redirectTo` a `401` body carries when the console's `authorize` asked for a redirect. */
+async function readRedirectTo(res: Response): Promise<string | undefined> {
   try {
     const body: unknown = await res.json();
-    if (typeof body !== 'object' || body === null || !('auth' in body)) return undefined;
-    const auth = (body as { auth?: unknown }).auth;
-    if (typeof auth !== 'object' || auth === null || !('modes' in auth)) return undefined;
-    const modes = (auth as { modes?: unknown }).modes;
-    return Array.isArray(modes)
-      ? modes.filter((m): m is string => typeof m === 'string')
-      : undefined;
+    if (typeof body !== 'object' || body === null) return undefined;
+    const target = (body as { redirectTo?: unknown }).redirectTo;
+    return typeof target === 'string' && target !== '' ? target : undefined;
   } catch {
     return undefined;
   }
 }
 
-function redirectToAuthSurface(modes: readonly string[] | undefined): void {
+/** On a `401`, go where `authorize` asked (`redirectTo`), else reload the console page so the
+ *  server answers the navigation itself (its access-denied page, or its own redirect). */
+function redirectToAuthSurface(redirectTo: string | undefined): void {
   if (typeof window === 'undefined') return;
-  const base = uiBase();
-  if (modes?.includes('login')) {
-    const returnTo = encodeURIComponent(window.location.pathname + window.location.search);
-    window.location.href = `${base}/login?returnTo=${returnTo}`;
-    return;
-  }
-  window.location.href = base;
+  window.location.href = redirectTo ?? (uiBase() || '/');
 }
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(apiBase() + path, init);
   if (res.status === 401) {
-    redirectToAuthSurface(await readAuthModes(res));
-    throw new Error('Session expired; redirecting to sign-in.');
+    redirectToAuthSurface(await readRedirectTo(res));
+    throw new Error('Not signed in; redirecting.');
   }
   if (res.status === 503) {
     // The billing layer (or the payments manager) is off in this deployment. A generic "500" would

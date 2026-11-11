@@ -50,9 +50,9 @@ function, an authorizer class (built through the container, so `@inject()` works
 `() => import('#policies/console_access')`. It answers `true`/`false`,
 `{ allowed, reason?: 'unauthenticated' | 'forbidden' }` (`401` for `unauthenticated`, `403` for any
 other denial or a throw) or `{ redirectTo }`. For machine access use
-`authorizeByToken({ token: env.get('CONSOLE_TOKEN') })` (bearer header only). You can also add the optional
-`dashboardAuth` session gate (a built-in login page and/or an "open the console from your app"
-endpoint) on top of it.
+`authorizeByToken({ token: env.get('CONSOLE_TOKEN') })` (bearer header only). Sign-in is your app's
+own: return `{ redirectTo: '/login' }` for a signed-out visitor. When an API call answers `401`, the
+console follows its `redirectTo`, or reloads so the server answers the navigation.
 
 ## URLs
 
@@ -67,7 +67,7 @@ wider than the viewport.
 
 The provider hands the SPA its config as a `<script type="application/json">` data block, never an
 executable inline script, so `script-src 'self'` (with or without a nonce) is all the console needs.
-That block is the only way the SPA learns its mount, API base, currency and auth surface.
+That block is the only way the SPA learns its mount, API base and currency.
 
 ## Money
 

@@ -3,11 +3,6 @@ import type {
   AccessDeniedOption as GenericAccessDeniedOption,
   AccessDeniedRenderer as GenericAccessDeniedRenderer,
 } from './access_denied_page.js';
-import {
-  type DashboardAuthOptions,
-  type ResolvedDashboardAuth,
-  resolveDashboardAuth,
-} from './auth.js';
 import type { ConsoleAuthorize, ConsoleAuthorizeResult } from './console_authorize.js';
 
 export type { AuthorizeDecision, AuthorizeResult } from './authorize_decision.js';
@@ -62,7 +57,7 @@ export interface PaymentsDashboardConfig {
    * It shares that prefix with the machine endpoints — `POST /payments/webhook/:provider`
    * and `GET /payments/client/status` — and does so safely, because every route this
    * provider registers is an EXACT path (`/payments`, `/payments/assets/:file`,
-   * `/payments/api/…`, login/session/logout). There is no SPA catch-all, so the dashboard's
+   * `/payments/api/…`). There is no SPA catch-all, so the dashboard's
    * `enforce` guard cannot reach a delivery it was never routed. If you ever add one, the
    * webhook route is what it would swallow, and a 403'd webhook looks exactly like a gateway
    * outage from the outside.
@@ -83,27 +78,13 @@ export interface PaymentsDashboardConfig {
    */
   authorize?: ConsoleAuthorize;
   /**
-   * Optional built-in login screen. When set, the provider mounts a
-   * server-rendered `GET <path>/login` page plus `POST <path>/login` /
-   * `GET <path>/logout`, and stamps a session guard on the dashboard: an
-   * unauthenticated page navigation is redirected (`302`) to the login page and
-   * an unauthenticated API request gets `401`. The signed session cookie is
-   * minted only by the host's {@link DashboardAuthOptions.login} hook.
-   *
-   * This is ADDITIVE and composes WITH {@link authorize} (both must pass) — it
-   * does not replace it. Omit it entirely for no login/logout routes and no
-   * session guard. Missing `secret`/`login` fails closed at boot.
-   */
-  dashboardAuth?: DashboardAuthOptions;
-  /**
-   * What a BROWSER sees when the guard refuses a page navigation (the SPA shell, its assets, or —
-   * Mode A only — a session-less visit). API requests are unaffected: they keep getting the JSON
-   * the SPA relies on (`403 { error: 'forbidden' }` / `401 { error: 'unauthenticated' }`, or
-   * `401 { error: 'unauthorized', auth }` from the `dashboardAuth` session guard).
+   * What a BROWSER sees when the guard refuses a page navigation (the SPA shell or its assets).
+   * API requests are unaffected: they keep getting the JSON the SPA relies on
+   * (`403 { error: 'forbidden' }` / `401 { error: 'unauthenticated' }`).
    *
    * Omit it for the built-in page — a dark card in the console's own visual language, with the
-   * status, a sentence explaining the refusal, a "Back to app" link and, when `dashboardAuth.login`
-   * exists, a "Sign in" button. Pass an object to tweak that page (`brand`, `title`, `message`,
+   * status, a sentence explaining the refusal and a "Back to app" link (plus a "Sign in" button when
+   * you set `loginHref`). Pass an object to tweak that page (`brand`, `title`, `message`,
    * `homeHref`, `loginHref`, `accent`, …), or a function to render/answer it yourself — see
    * {@link AccessDeniedRenderer}. Either way, an `authorize` hook that already wrote a redirect
    * still wins: the provider never overwrites a `location` header.
@@ -118,8 +99,6 @@ export interface ResolvedPaymentsDashboardConfig {
   currency: string;
   /** The configured `authorize` as given, or `null` when omitted (open outside production, `403` in it). */
   authorize: ConsoleAuthorize | null;
-  /** Resolved built-in login config, or `null` when `dashboardAuth` is unconfigured. */
-  dashboardAuth: ResolvedDashboardAuth | null;
   /** The host's `accessDenied` option as given, or `null` for the built-in page with defaults. */
   accessDenied: AccessDeniedOption | null;
 }
@@ -136,9 +115,6 @@ export function resolveConfig(
     path: trimmed === '/' ? '' : trimmed,
     currency: config.currency ?? 'BRL',
     authorize: config.authorize ?? null,
-    // Validate + resolve now so a misconfigured secret/login fails closed at boot,
-    // not on the first login attempt. `null` when `dashboardAuth` is omitted.
-    dashboardAuth: resolveDashboardAuth(config.dashboardAuth),
     accessDenied: config.accessDenied ?? null,
   };
 }

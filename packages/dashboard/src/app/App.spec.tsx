@@ -5,13 +5,11 @@ import { clearConfig, injectConfig } from '../client/test-config.test-helper';
 import { App } from './App';
 
 /**
- * The shell, rendered: the URL hash picks the screen, the tabs write it, and Sign out exists only
- * where a logout route does.
+ * The shell, rendered: the URL hash picks the screen and the tabs write it. Sign-in and sign-out
+ * belong to the host app, so the console shows no session control.
  *
- * Everything asserted here was a thing the console got wrong on a real deployment. Every screen
- * used to live in React state alone, so a reload always landed on the overview and the back
- * button left the console; and the Sign out link was unconditional, so on a deployment without
- * `dashboardAuth` — which registers no `/logout` route — it was a 404 one click away.
+ * Every screen used to live in React state alone, so a reload always landed on the overview and
+ * the back button left the console.
  */
 
 const originalFetch = globalThis.fetch;
@@ -140,22 +138,10 @@ describe('the hash route', () => {
   });
 });
 
-describe('Sign out', () => {
-  it('is absent when the deployment has no dashboardAuth — there is no /logout to point at', () => {
-    injectConfig({ auth: null });
-    renderApp();
-    expect(screen.queryByRole('link', { name: 'Sign out' })).toBeNull();
-  });
-
-  it('is absent when the page carries no auth surface, erring towards no broken link', () => {
-    renderApp();
-    expect(screen.queryByRole('link', { name: 'Sign out' })).toBeNull();
-  });
-
-  it('is offered when a session mode is configured', () => {
-    injectConfig({ auth: { modes: ['login'] } });
+describe('session control', () => {
+  it('is not offered: sign-out belongs to the host app', () => {
     injectConfig({ base: '/pd' });
     renderApp();
-    expect(screen.getByRole('link', { name: 'Sign out' }).getAttribute('href')).toBe('/pd/logout');
+    expect(screen.queryByRole('link', { name: 'Sign out' })).toBeNull();
   });
 });

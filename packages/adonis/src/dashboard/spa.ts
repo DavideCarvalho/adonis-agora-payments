@@ -31,14 +31,6 @@ export function contentTypeFor(file: string): string {
   return CONTENT_TYPES[ext] ?? 'application/octet-stream';
 }
 
-/**
- * Which `dashboardAuth` surface(s) this deployment has — `null` when it has none. Carried to the
- * SPA so it can tell "there is a session to end" from "there is no `/logout` route at all": on a
- * deployment without `dashboardAuth` the provider registers no auth routes, and a Sign out link
- * there was a 404 waiting to be clicked.
- */
-export type InjectedAuth = { modes: readonly string[] } | null;
-
 /** `id` of the JSON data block `renderIndexHtml` injects; `src/client/payments-client.ts` reads it. */
 export const CONFIG_ELEMENT_ID = 'payments-dashboard-config';
 
@@ -50,14 +42,12 @@ export interface InjectedConfig {
   api: string;
   /** ISO 4217 display currency. */
   currency: string;
-  auth: InjectedAuth;
 }
 
 /**
  * Rewrite the built `index.html` for serving: point Vite's placeholder base at the configured mount
  * path, and hand the SPA its deployment config — the mount base and API base
- * `src/client/payments-client.ts` builds URLs from, the display currency it formats cents with, and
- * the auth surface (see {@link InjectedAuth}).
+ * `src/client/payments-client.ts` builds URLs from, and the display currency it formats cents with.
  *
  * The config goes in as a JSON DATA BLOCK (`<script type="application/json">`), not as an inline
  * script assigning `window.__PAYMENTS_*__` globals. A data block is never executed, so no
@@ -77,14 +67,12 @@ export function renderIndexHtml(
   basePath: string,
   apiBasePath: string,
   currency: string,
-  auth: InjectedAuth = null,
 ): string {
   const based = html.split(BASE_PLACEHOLDER).join(`${basePath}/`);
   const config: InjectedConfig = {
     base: basePath,
     api: apiBasePath,
     currency,
-    auth: auth === null ? null : { modes: [...auth.modes] },
   };
   // `<` escaped as `\u003c` inside the JSON: a data block ends at the first `</script`, and a
   // config value must not be able to close it early. Valid JSON either way.

@@ -390,10 +390,10 @@ export interface AuditEventListItem {
   /** One of {@link AUDIT_ACTIONS}' values. A free string in the column: an app may add its own. */
   action: string;
   /**
-   * WHO did it — the dashboard session's user, as `enforce()` knew them.
+   * WHO did it — the app's signed-in user, as the console's `enforce()` knew them.
    *
    * `null` when nothing authorised it in a human sense: a rejected delivery has no actor, and a
-   * console with no `dashboardAuth` configured cannot name one. `null` therefore means
+   * request with no identifiable user cannot name one. `null` therefore means
    * "unattributed", never "the system".
    */
   actor: string | null;

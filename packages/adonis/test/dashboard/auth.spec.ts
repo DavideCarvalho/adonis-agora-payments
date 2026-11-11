@@ -8,7 +8,6 @@ describe('resolveConfig', () => {
     expect(config.path).toBe('/payments');
     expect(config.currency).toBe('BRL');
     expect(config.authorize).toBeNull();
-    expect(config.dashboardAuth).toBeNull();
   });
 
   it('normalizes the mount path', () => {
@@ -31,12 +30,7 @@ describe('resolveConfig', () => {
     expect(resolveConfig({ authorize }).authorize).toBe(authorize);
   });
 
-  it('resolves dashboardAuth at boot so a bad config fails closed immediately', () => {
-    expect(() => resolveConfig({ dashboardAuth: { secret: '', login: () => null } })).toThrow(
-      /secret is required/,
-    );
-    expect(() => resolveConfig({ dashboardAuth: { secret: 's' } })).toThrow(/login/);
-    const resolved = resolveConfig({ dashboardAuth: { secret: 's', login: () => null } });
-    expect(resolved.dashboardAuth?.modes).toEqual(['login']);
+  it("has no dashboardAuth any more: sign-in is the app's own", () => {
+    expect('dashboardAuth' in resolveConfig()).toBe(false);
   });
 });

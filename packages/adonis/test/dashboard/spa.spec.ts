@@ -41,7 +41,6 @@ describe('renderIndexHtml', () => {
       base: '/pd',
       api: '/pd/api',
       currency: 'USD',
-      auth: null,
     });
   });
 
@@ -56,20 +55,6 @@ describe('renderIndexHtml', () => {
     expect(injected).toHaveLength(1);
     expect(injected[0]).toContain('type="application/json"');
     expect(html).not.toContain('window.__PAYMENTS_');
-  });
-
-  it('carries a null auth surface when dashboardAuth is unconfigured', () => {
-    // `null`, explicitly — the SPA hides "Sign out" on it, because there is no `/logout` route
-    // to point at.
-    const html = renderIndexHtml(BUILT_HTML, '/pd', '/pd/api', 'BRL');
-    expect(injectedConfig(html).auth).toBeNull();
-  });
-
-  it('carries the configured auth modes so the SPA can offer Sign out', () => {
-    const html = renderIndexHtml(BUILT_HTML, '/pd', '/pd/api', 'BRL', {
-      modes: ['session', 'login'],
-    });
-    expect(injectedConfig(html).auth).toEqual({ modes: ['session', 'login'] });
   });
 
   it('injects an EMPTY base for a root mount rather than omitting it', () => {

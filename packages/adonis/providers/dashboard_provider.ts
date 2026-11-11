@@ -19,8 +19,13 @@ import {
   SESSION_COOKIE_NAME,
   sanitizeReturnTo,
 } from '../src/dashboard/auth.js';
-import { runAuthorize } from '../src/dashboard/authorize_decision.js';
 import {
+  type ConsoleAuthorizeDecision,
+  resolveConsoleAuthorize,
+} from '../src/dashboard/console_authorize.js';
+import {
+  defaultAuthorize,
+  isProduction,
   type PaymentsDashboardConfig,
   type ResolvedPaymentsDashboardConfig,
   resolveConfig,
@@ -118,12 +123,20 @@ export default class PaymentsDashboardProvider {
   /** Warn once so a throwing `login`/`session` hook doesn't spam the logs on every failed attempt. */
   private warnedOnHookThrow = false;
   private warnedOnAuthorizeThrow = false;
+  /** The `authorize` option turned into one guard (a lazy import is memoized inside it). */
+  private authorizeGuard: (ctx: HttpContext) => Promise<ConsoleAuthorizeDecision> = async () => ({
+    allowed: false,
+    status: 403,
+    reason: 'forbidden',
+  });
 
   async boot() {
     const config = resolveConfig(
       this.app.config.get<PaymentsDashboardConfig>('payments_dashboard', {}),
     );
     if (!config.enabled) return;
+    this.authorizeGuard = resolveConsoleAuthorize(config.authorize);
+    await this.warnIfClosedByDefault(config);
 
     // Route registration can't happen synchronously in `boot()`: the router singleton isn't
     // committed until the app's "booted" hooks run, which fire strictly AFTER every provider's
@@ -500,6 +513,23 @@ export default class PaymentsDashboardProvider {
       .as('payments_dashboard.logout');
   }
 
+  /**
+   * One boot-time warning when production runs the default guard with no token to accept: every
+   * request is then denied, and the host should configure `authorize`.
+   */
+  private async warnIfClosedByDefault(config: ResolvedPaymentsDashboardConfig): Promise<void> {
+    if (config.authorize !== defaultAuthorize) return;
+    if (!isProduction() || process.env.PAYMENTS_DASHBOARD_TOKEN) return;
+    try {
+      const logger = await this.app.container.make('logger');
+      logger.warn(
+        `payments dashboard: no \`authorize\` is configured and PAYMENTS_DASHBOARD_TOKEN is unset, so every request to ${config.path || '/'} is denied (403) in production. Set \`authorize\` in config/payments_dashboard.ts.`,
+      );
+    } catch {
+      // Logging is best-effort: a missing logger must not stop the app from booting.
+    }
+  }
+
   private async warnAuthorizeThrow(hookError: unknown): Promise<void> {
     if (this.warnedOnAuthorizeThrow) return;
     this.warnedOnAuthorizeThrow = true;
@@ -524,7 +554,8 @@ export default class PaymentsDashboardProvider {
    * Run the guards for a dashboard resource. Composes the `authorize` hook (bearer token/custom)
    * with the optional `dashboardAuth` session guard — BOTH must pass:
    *
-   * 1. `authorize` denies -> `401` when it answered `{ allowed: false, reason: 'unauthenticated' }`,
+   * 1. `authorize` answered `{ redirectTo }` -> `302` there for a `page` request, `401` JSON for an
+   *    `api` request. `authorize` denies -> `401` when it answered `{ allowed: false, reason: 'unauthenticated' }`,
    *    `403` otherwise (`false`, `{ allowed: false }`, `reason: 'forbidden'`, or a thrown hook):
    *    the built-in (or host-customised) access-denied PAGE for a `page` request,
    *    `{ error: 'unauthorized' | 'forbidden' }` JSON for an `api` request. A hook that already
@@ -545,10 +576,18 @@ export default class PaymentsDashboardProvider {
     ctx: HttpContext,
     mode: 'page' | 'api',
   ): Promise<{ allowed: boolean; actor?: string }> {
-    // Never `if (!(await config.authorize(ctx)))`: a `{ allowed: false }` decision is truthy.
-    const decision = await runAuthorize(config.authorize, ctx);
+    // Never `if (!(await authorize(ctx)))`: a `{ allowed: false }` decision is truthy.
+    const decision = await this.authorizeGuard(ctx);
     if (!decision.allowed) {
-      if (decision.hookError !== undefined) await this.warnAuthorizeThrow(decision.hookError);
+      if (decision.status === 403 && decision.error !== undefined) {
+        await this.warnAuthorizeThrow(decision.error);
+      }
+      if (decision.status === 302) {
+        if (responseAnswered(ctx)) return { allowed: false };
+        if (mode === 'page') ctx.response.redirect(decision.redirectTo);
+        else ctx.response.status(401).json({ error: 'unauthorized' });
+        return { allowed: false };
+      }
       if (mode === 'page') {
         await this.denyPage(ctx, config, { status: decision.status, reason: decision.reason });
       } else if (!responseAnswered(ctx)) {

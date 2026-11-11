@@ -321,46 +321,85 @@ export default defineConfig({
 | `enabled` | `true` | When `false`, no routes are registered at all. |
 | `path` | `'/payments'` | Route prefix. The HTML serves at the root; the JSON API at `<path>/api`. |
 | `currency` | `'BRL'` | ISO 4217 code the money columns render in. Does not change what is stored. |
-| `authorize` | see below | Per-request guard: `(ctx: HttpContext) => AuthorizeResult \| Promise<AuthorizeResult>` — a boolean or `{ allowed, reason? }`. |
+| `authorize` | see below | Who may open the console: an inline function, an authorizer class, or a lazy import of one. See [Authorization](#authorization). |
 | `dashboardAuth` | absent | Opt-in session layer on top of `authorize`. The console's **Sign out** link exists only when this is set — it is the only configuration that registers a `<path>/logout` route. |
 
 ### Authorization
 
-The default `authorize` is **open outside production**. In production it requires a bearer token
-equal to `PAYMENTS_DASHBOARD_TOKEN`, compared in constant time, and **denies when the variable is
-unset** — it fails closed. The token is read from an `Authorization: Bearer <token>` header, an
-`x-payments-token` header, or a `?token=` query param.
+When `authorize` is omitted, the console is **open outside production**. In production it requires a
+bearer token equal to `PAYMENTS_DASHBOARD_TOKEN`, compared in constant time. The token is read from an
+`Authorization: Bearer <token>` header, an `x-payments-token` header, or a `?token=` query param.
+With the variable unset, every request is denied with `403` and the app logs a warning at boot telling
+you to set `authorize`.
 
-Replace it with your own guard. It answers with a boolean or an `AuthorizeDecision` — the same
-contract every Agora console takes:
+`authorize` takes the same three forms as every Agora console. An inline function:
 
-```ts
-interface AuthorizeDecision {
-  allowed: boolean
-  reason?: 'unauthenticated' | 'forbidden'
-}
-type AuthorizeResult = boolean | AuthorizeDecision
-```
-
-| The hook answers | Status |
-| --- | --- |
-| `true` or `{ allowed: true }` | let through |
-| `{ allowed: false, reason: 'unauthenticated' }` | `401` |
-| `{ allowed: false, reason: 'forbidden' }`, `{ allowed: false }` or `false` | `403` |
-| it throws | `403` |
-| it already answered (wrote a redirect) | that answer, untouched |
-
-A denial is JSON for an API call (`{ "error": "unauthorized" }` / `{ "error": "forbidden" }`), the
-[access-denied page](#the-access-denied-page) with the matching status for a browser:
-
-```ts
+```ts title="config/payments_dashboard.ts"
 export default defineConfig({
   authorize: async (ctx) => {
-    if (!(await ctx.auth.check())) return { allowed: false, reason: 'unauthenticated' }
+    if (!(await ctx.auth.check())) return { redirectTo: '/login' }
     return ctx.auth.user?.isAdmin === true
   },
 })
 ```
+
+A class, for an authorizer in its own file. It is built through the container, so `@inject()` works:
+
+```ts title="app/policies/console_access.ts"
+import { inject } from '@adonisjs/core'
+import type { HttpContext } from '@adonisjs/core/http'
+import type { ConsoleAuthorizer } from '@adonis-agora/payments/dashboard'
+import AuditService from '#services/audit_service'
+
+@inject()
+export default class ConsoleAccess implements ConsoleAuthorizer {
+  constructor(private audit: AuditService) {}
+
+  async authorize(ctx: HttpContext) {
+    const allowed = ctx.auth.user?.isAdmin === true
+    await this.audit.record('payments-console', ctx.auth.user, allowed)
+    return allowed
+  }
+}
+```
+
+```ts title="config/payments_dashboard.ts"
+import ConsoleAccess from '#policies/console_access'
+
+export default defineConfig({
+  authorize: ConsoleAccess,
+})
+```
+
+Or a lazy import of that class, so the config file does not load it at boot:
+
+```ts title="config/payments_dashboard.ts"
+export default defineConfig({
+  authorize: () => import('#policies/console_access'),
+})
+```
+
+Whatever the form, the answer is one of:
+
+```ts
+type ConsoleAuthorizeResult =
+  | boolean
+  | { allowed: true }
+  | { allowed: false; reason?: 'unauthenticated' | 'forbidden' }
+  | { redirectTo: string }
+```
+
+| The authorizer answers | Page | API |
+| --- | --- | --- |
+| `true` or `{ allowed: true }` | let through | let through |
+| `{ allowed: false, reason: 'unauthenticated' }` | `401` page | `401` |
+| `{ allowed: false, reason: 'forbidden' }`, `{ allowed: false }` or `false` | `403` page | `403` |
+| `{ redirectTo: '/login' }` | `302` to that path | `401` |
+| it throws | `403` page | `403` |
+| it already answered (wrote a redirect) | that answer, untouched | that answer, untouched |
+
+A denial is JSON for an API call (`{ "error": "unauthorized" }` / `{ "error": "forbidden" }`), the
+[access-denied page](#the-access-denied-page) with the matching status for a browser.
 
 With [`@adonis-agora/authz`](/docs/authz) the shared helper reads your user and roles for you — the
 same one every Agora console takes, so one RBAC gate reads identically across durable, telescope,
@@ -376,8 +415,8 @@ export default defineConfig({
 
 <Callout type="warn" title="This console shows revenue — and can move it">
 Payment amounts and customer ids are reachable through it, and the refund action moves money at your
-gateway. The default token gate is a floor for staging, not an answer for production — put a real
-guard in front of it.
+gateway. The default token gate is a floor for staging, not an answer for production. Set `authorize`
+to a real guard.
 </Callout>
 
 ### The access-denied page

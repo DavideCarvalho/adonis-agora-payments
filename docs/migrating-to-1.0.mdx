@@ -128,6 +128,36 @@ export default defineConfig({
 })
 ```
 
+## Dashboard: `authorize` takes a class or a lazy import
+
+The console's `authorize` option now takes the same three forms as every Agora console: an inline
+function, an authorizer class, or a lazy import of one. An authorizer may also answer
+`{ redirectTo: '/login' }`. Existing functions keep working unchanged.
+
+When `authorize` is omitted, the console stays open outside production and token-gated in production.
+In production without `PAYMENTS_DASHBOARD_TOKEN`, every request is denied (`403`) as before, and the
+app now logs a warning at boot. Set `authorize` to silence it.
+
+Before:
+
+```ts title="config/payments_dashboard.ts"
+// No authorize: production relies on PAYMENTS_DASHBOARD_TOKEN, or denies everything
+export default defineConfig({})
+```
+
+After:
+
+```ts title="config/payments_dashboard.ts"
+export default defineConfig({
+  authorize: () => import('#policies/console_access'),
+})
+```
+
+The type of the option is now `ConsoleAuthorize`, exported from `@adonis-agora/payments/dashboard`
+along with `ConsoleAuthorizer` and `ConsoleAuthorizeResult`. Code that read
+`ResolvedPaymentsDashboardConfig['authorize']` as a plain function must accept the class and
+lazy-import forms too.
+
 ## Dashboard: `PROVIDER_SCAN_CAP` is gone
 
 `@adonis-agora/payments/dashboard` no longer exports `PROVIDER_SCAN_CAP`. Nothing in the console read

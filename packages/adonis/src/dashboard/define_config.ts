@@ -9,9 +9,15 @@ import {
   type ResolvedDashboardAuth,
   resolveDashboardAuth,
 } from './auth.js';
-import type { AuthorizeResult } from './authorize_decision.js';
+import type { ConsoleAuthorize, ConsoleAuthorizeResult } from './console_authorize.js';
 
 export type { AuthorizeDecision, AuthorizeResult } from './authorize_decision.js';
+export type {
+  ConsoleAuthorize,
+  ConsoleAuthorizeResult,
+  ConsoleAuthorizer,
+  ConsoleAuthorizerClass,
+} from './console_authorize.js';
 
 /**
  * The function form of {@link PaymentsDashboardConfig.accessDenied}: render (or answer) a refused
@@ -26,23 +32,21 @@ export type AccessDeniedRenderer = GenericAccessDeniedRenderer<HttpContext>;
 export type AccessDeniedOption = GenericAccessDeniedOption<HttpContext>;
 
 /**
- * Authorization guard for the dashboard. Runs before every dashboard route
- * (API + HTML). May be async (e.g. an auth lookup). Answer with:
+ * The inline-function form of the dashboard's `authorize` option. Runs before every dashboard
+ * route (API + HTML) and may be async. Answer with:
  *
  * - `true` / `{ allowed: true }` — let the request through;
  * - `{ allowed: false, reason: 'unauthenticated' }` — nobody is signed in: `401`;
- * - `{ allowed: false, reason: 'forbidden' }`, `{ allowed: false }` or `false` — `403`.
+ * - `{ allowed: false, reason: 'forbidden' }`, `{ allowed: false }` or `false` — `403`;
+ * - `{ redirectTo: '/login' }` — a page navigation is redirected (`302`), an API call gets `401`.
  *
- * A hook that throws is a `403`. A hook that already answered the request (wrote a
- * redirect — e.g. to your login page) keeps that answer; the provider writes nothing.
- * Page requests get the access-denied HTML page with the matching status; API requests
- * get `{ error: 'unauthorized' | 'forbidden' }`.
- *
- * It receives the AdonisJS {@link HttpContext}, so it can read the session,
- * a bearer token, an IP allow-list, etc. `@adonis-agora/authz`'s `authorizeByRoles`
- * fits here as-is.
+ * A hook that throws is a `403`. A hook that already answered the request (wrote a redirect)
+ * keeps that answer. `@adonis-agora/authz`'s `authorizeByRoles` fits here as-is. The option also
+ * takes an authorizer class or a lazy import of one: see {@link ConsoleAuthorize}.
  */
-export type AuthorizeHook = (ctx: HttpContext) => AuthorizeResult | Promise<AuthorizeResult>;
+export type AuthorizeHook = (
+  ctx: HttpContext,
+) => ConsoleAuthorizeResult | Promise<ConsoleAuthorizeResult>;
 
 /** Shape of `config/payments_dashboard.ts`. */
 export interface PaymentsDashboardConfig {
@@ -70,11 +74,13 @@ export interface PaymentsDashboardConfig {
    */
   currency?: string;
   /**
-   * Per-request authorization guard. Defaults to {@link defaultAuthorize}:
-   * allow everything OUTSIDE production, and in production require a bearer
-   * token matching the `PAYMENTS_DASHBOARD_TOKEN` env var (deny if it is unset).
+   * Who may open the console: an inline function, an authorizer class (built through the
+   * container, so `@inject()` works), or a lazy import of one (`() => import('#policies/…')`).
+   * Defaults to {@link defaultAuthorize}: allow everything OUTSIDE production; in production
+   * require a bearer token matching the `PAYMENTS_DASHBOARD_TOKEN` env var, and deny (`403`) when
+   * it is unset — the provider then logs a one-time warning at boot.
    */
-  authorize?: AuthorizeHook;
+  authorize?: ConsoleAuthorize;
   /**
    * Optional built-in login screen. When set, the provider mounts a
    * server-rendered `GET <path>/login` page plus `POST <path>/login` /
@@ -108,7 +114,8 @@ export interface ResolvedPaymentsDashboardConfig {
   enabled: boolean;
   path: string;
   currency: string;
-  authorize: AuthorizeHook;
+  /** The configured `authorize` as given, or {@link defaultAuthorize}. */
+  authorize: ConsoleAuthorize;
   /** Resolved built-in login config, or `null` when `dashboardAuth` is unconfigured. */
   dashboardAuth: ResolvedDashboardAuth | null;
   /** The host's `accessDenied` option as given, or `null` for the built-in page with defaults. */
@@ -119,7 +126,7 @@ export interface ResolvedPaymentsDashboardConfig {
  * Whether the process is running in production. Mirrors how AdonisJS reads the
  * environment without taking a hard dependency on its env service.
  */
-function isProduction(): boolean {
+export function isProduction(): boolean {
   return (process.env.NODE_ENV ?? '').toLowerCase() === 'production';
 }
 

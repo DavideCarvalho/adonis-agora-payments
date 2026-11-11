@@ -48,6 +48,18 @@ export type {
   ResolvedAuthorizeResult,
 } from './authorize_decision.js';
 export { resolveAuthorizeResult, runAuthorize } from './authorize_decision.js';
+// The console access contract (function, class or lazy import) shared by every Agora console.
+export type {
+  ConsoleAuthorize,
+  ConsoleAuthorizeDecision,
+  ConsoleAuthorizeResult,
+  ConsoleAuthorizer,
+  ConsoleAuthorizerClass,
+} from './console_authorize.js';
+export {
+  normalizeConsoleAuthorizeResult,
+  resolveConsoleAuthorize,
+} from './console_authorize.js';
 export type {
   AccessDeniedOption,
   AccessDeniedRenderer,

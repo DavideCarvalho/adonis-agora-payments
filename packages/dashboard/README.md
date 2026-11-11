@@ -46,9 +46,11 @@ export default defineConfig({
 
 **Auth defaults to the same posture as `@adonis-agora/durable`'s console**: open outside production;
 in production it requires a bearer token equal to `PAYMENTS_DASHBOARD_TOKEN`, and denies everything
-when that variable is unset. Replace `authorize` with your own guard — it returns `true`/`false` or
+(with a warning at boot) when that variable is unset. Set `authorize` to your own guard: an inline
+function, an authorizer class (built through the container, so `@inject()` works), or a lazy import
+`() => import('#policies/console_access')`. It answers `true`/`false`,
 `{ allowed, reason?: 'unauthenticated' | 'forbidden' }` (`401` for `unauthenticated`, `403` for any
-other denial or a throw) — and/or add the optional
+other denial or a throw) or `{ redirectTo }`. You can also add the optional
 `dashboardAuth` session gate (a built-in login page and/or an "open the console from your app"
 endpoint) on top of it.
 

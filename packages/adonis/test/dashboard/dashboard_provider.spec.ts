@@ -1,5 +1,5 @@
 import type { ApplicationService } from '@adonisjs/core/types';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import DashboardProvider from '../../providers/dashboard_provider.js';
 import type { PaymentsDashboardConfig } from '../../src/dashboard/define_config.js';
 
@@ -593,6 +593,75 @@ describe('page routes are refused with the access-denied page', () => {
       }
     });
 
+    it('takes an authorizer class, built through the request container', async () => {
+      class Access {
+        constructor(private allow: boolean) {}
+        authorize() {
+          return this.allow
+            ? true
+            : { allowed: false as const, reason: 'unauthenticated' as const };
+        }
+      }
+      for (const [allow, status] of [
+        [false, 401],
+        [true, undefined],
+      ] as const) {
+        const recorded: Recorded = { headers: {} };
+        const ctx = {
+          ...fakeCtx(recorded),
+          containerResolver: { make: async (C: typeof Access) => new C(allow) },
+        };
+        await (await pageHandler({ authorize: Access }, API))(ctx);
+        if (status) expect(recorded.status).toBe(status);
+        else expect([401, 403]).not.toContain(recorded.status);
+      }
+    });
+
+    it('takes a lazy import and runs the import once', async () => {
+      class Access {
+        authorize() {
+          return false;
+        }
+      }
+      let imports = 0;
+      const handler = await pageHandler(
+        {
+          authorize: async () => {
+            imports += 1;
+            return { default: Access };
+          },
+        },
+        API,
+      );
+      for (let i = 0; i < 2; i += 1) {
+        const recorded: Recorded = { headers: {} };
+        await handler(fakeCtx(recorded));
+        expect(recorded.status).toBe(403);
+        expect(recorded.body).toEqual({ error: 'forbidden' });
+      }
+      expect(imports).toBe(1);
+    });
+
+    it('redirects a page navigation on { redirectTo } and answers 401 JSON on the API', async () => {
+      const page: Recorded = { headers: {} };
+      const redirect = (url: string) => {
+        page.headers.location = url;
+      };
+      await (await pageHandler({ authorize: () => ({ redirectTo: '/auth/login' }) }))(
+        fakeCtx(page, { redirect }),
+      );
+      expect(page.headers.location).toBe('/auth/login');
+      expect(page.body).toBeUndefined();
+
+      const api: Recorded = { headers: {} };
+      await (await pageHandler({ authorize: () => ({ redirectTo: '/auth/login' }) }, API))(
+        fakeCtx(api),
+      );
+      expect(api.status).toBe(401);
+      expect(api.body).toEqual({ error: 'unauthorized' });
+      expect(api.headers.location).toBeUndefined();
+    });
+
     it('still runs the session step after a passing decision', async () => {
       const recorded: Recorded = { headers: {} };
       await (
@@ -772,5 +841,101 @@ describe('login routes: JSON for the script, redirects for a plain form', () => 
       path: '/payments/login',
       qs: { error: '1', returnTo: '/payments' },
     });
+  });
+});
+
+/**
+ * The default when `authorize` is omitted: open outside production; in production a bearer token
+ * equal to `PAYMENTS_DASHBOARD_TOKEN`, and with that unset every request is a 403 plus ONE boot
+ * warning telling the host to configure `authorize`.
+ */
+describe('the default guard in production', () => {
+  const API = '/payments/api/health';
+  const saved = { env: process.env.NODE_ENV, token: process.env.PAYMENTS_DASHBOARD_TOKEN };
+
+  afterEach(() => {
+    process.env.NODE_ENV = saved.env;
+    if (saved.token === undefined) delete process.env.PAYMENTS_DASHBOARD_TOKEN;
+    else process.env.PAYMENTS_DASHBOARD_TOKEN = saved.token;
+  });
+
+  async function boot(config: PaymentsDashboardConfig) {
+    const { routes, router } = fakeRouter();
+    const warnings: string[] = [];
+    const logger = { warn: (message: string) => warnings.push(message) };
+    const app = {
+      config: { get: () => config },
+      booted: async (callback: () => Promise<void>) => {
+        await callback();
+      },
+      container: { make: async (name: string) => (name === 'logger' ? logger : router) },
+    } as unknown as ApplicationService;
+    await new DashboardProvider(app).boot();
+    const route = routes.find((r) => r.pattern === API);
+    return { warnings, handler: route?.handler as (ctx: unknown) => Promise<unknown> };
+  }
+
+  function apiCtx(recorded: { status?: number; body?: unknown }, headers = {}) {
+    return {
+      params: {},
+      request: {
+        header: (name: string) => (headers as Record<string, string>)[name],
+        qs: () => ({}),
+        body: () => ({}),
+        plainCookie: () => undefined,
+      },
+      response: {
+        getHeader: () => undefined,
+        status(code: number) {
+          recorded.status = code;
+          return this;
+        },
+        json(body: unknown) {
+          recorded.body = body;
+          return this;
+        },
+      },
+    };
+  }
+
+  it('denies with 403 and warns once at boot when no authorize and no token', async () => {
+    process.env.NODE_ENV = 'production';
+    delete process.env.PAYMENTS_DASHBOARD_TOKEN;
+    const { warnings, handler } = await boot({});
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('authorize');
+    for (let i = 0; i < 2; i += 1) {
+      const recorded: { status?: number; body?: unknown } = {};
+      await handler(apiCtx(recorded));
+      expect(recorded).toEqual({ status: 403, body: { error: 'forbidden' } });
+    }
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('accepts the token and does not warn when PAYMENTS_DASHBOARD_TOKEN is set', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.PAYMENTS_DASHBOARD_TOKEN = 'secret';
+    const { warnings, handler } = await boot({});
+    expect(warnings).toEqual([]);
+    const recorded: { status?: number; body?: unknown } = {};
+    await handler(apiCtx(recorded, { authorization: 'Bearer secret' }));
+    expect([401, 403]).not.toContain(recorded.status);
+  });
+
+  it('does not warn when authorize is configured', async () => {
+    process.env.NODE_ENV = 'production';
+    delete process.env.PAYMENTS_DASHBOARD_TOKEN;
+    const { warnings } = await boot({ authorize: () => true });
+    expect(warnings).toEqual([]);
+  });
+
+  it('is open outside production, without a warning', async () => {
+    process.env.NODE_ENV = 'development';
+    delete process.env.PAYMENTS_DASHBOARD_TOKEN;
+    const { warnings, handler } = await boot({});
+    expect(warnings).toEqual([]);
+    const recorded: { status?: number; body?: unknown } = {};
+    await handler(apiCtx(recorded));
+    expect([401, 403]).not.toContain(recorded.status);
   });
 });

@@ -50,6 +50,7 @@ export type {
 export { resolveAuthorizeResult, runAuthorize } from './authorize_decision.js';
 // The console access contract (function, class or lazy import) shared by every Agora console.
 export type {
+  AuthorizeByTokenOptions,
   ConsoleAuthorize,
   ConsoleAuthorizeDecision,
   ConsoleAuthorizeResult,
@@ -57,6 +58,7 @@ export type {
   ConsoleAuthorizerClass,
 } from './console_authorize.js';
 export {
+  authorizeByToken,
   normalizeConsoleAuthorizeResult,
   resolveConsoleAuthorize,
 } from './console_authorize.js';
@@ -67,7 +69,7 @@ export type {
   PaymentsDashboardConfig,
   ResolvedPaymentsDashboardConfig,
 } from './define_config.js';
-export { defaultAuthorize, defineConfig, resolveConfig } from './define_config.js';
+export { defineConfig, resolveConfig } from './define_config.js';
 export type { ApiRequest, ApiResponse, DashboardActions, Deps } from './handlers.js';
 export {
   AUDIT_ACTION_FILTERS,

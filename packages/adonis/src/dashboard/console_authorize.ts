@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { HttpContext } from '@adonisjs/core/http';
 
 /**
@@ -116,5 +117,42 @@ export function resolveConsoleAuthorize(
     } catch (error) {
       return { ...FORBIDDEN, error };
     }
+  };
+}
+
+/** Options for {@link authorizeByToken}. */
+export interface AuthorizeByTokenOptions {
+  /** The shared secret callers send as `Authorization: Bearer <token>`. */
+  token: string | undefined;
+}
+
+function digest(value: string): Buffer {
+  return createHash('sha256').update(value).digest();
+}
+
+/**
+ * An `authorize` check for machine access: allows a request whose `Authorization` header is
+ * `Bearer <token>` (compared in constant time), and answers
+ * `{ allowed: false, reason: 'unauthenticated' }` (`401`) otherwise. Only the header is read.
+ *
+ * ```ts
+ * authorize: authorizeByToken({ token: env.get('CONSOLE_TOKEN') }),
+ * ```
+ *
+ * Throws at config time when `token` is empty or undefined.
+ */
+export function authorizeByToken(options: AuthorizeByTokenOptions): ConsoleAuthorize {
+  const token = options?.token;
+  if (typeof token !== 'string' || token === '') {
+    throw new Error(
+      '[@adonis-agora/payments] authorizeByToken: `token` must be a non-empty string',
+    );
+  }
+  const expected = digest(token);
+  return (ctx: HttpContext): ConsoleAuthorizeResult => {
+    const header = ctx.request.header('authorization');
+    const match = typeof header === 'string' ? /^Bearer\s+(.+)$/i.exec(header.trim()) : null;
+    if (match?.[1] && timingSafeEqual(digest(match[1]), expected)) return { allowed: true };
+    return { allowed: false, reason: 'unauthenticated' };
   };
 }

@@ -45,7 +45,6 @@ export async function configure(command: Configure) {
       ASAAS_API_KEY: 'Env.schema.string.optional()',
       WOOVI_APP_ID: 'Env.schema.string.optional()',
       FOCUS_NFE_TOKEN: 'Env.schema.string.optional()',
-      PAYMENTS_DASHBOARD_TOKEN: 'Env.schema.string.optional()',
     },
   });
 }

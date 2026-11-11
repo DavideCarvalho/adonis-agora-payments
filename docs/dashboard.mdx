@@ -321,16 +321,17 @@ export default defineConfig({
 | `enabled` | `true` | When `false`, no routes are registered at all. |
 | `path` | `'/payments'` | Route prefix. The HTML serves at the root; the JSON API at `<path>/api`. |
 | `currency` | `'BRL'` | ISO 4217 code the money columns render in. Does not change what is stored. |
-| `authorize` | see below | Who may open the console: an inline function, an authorizer class, or a lazy import of one. See [Authorization](#authorization). |
+| `authorize` | open outside production, `403` in production | Who may open the console: an inline function, an authorizer class, or a lazy import of one. See [Authorization](#authorization). |
 | `dashboardAuth` | absent | Opt-in session layer on top of `authorize`. The console's **Sign out** link exists only when this is set — it is the only configuration that registers a `<path>/logout` route. |
 
 ### Authorization
 
-When `authorize` is omitted, the console is **open outside production**. In production it requires a
-bearer token equal to `PAYMENTS_DASHBOARD_TOKEN`, compared in constant time. The token is read from an
-`Authorization: Bearer <token>` header, an `x-payments-token` header, or a `?token=` query param.
-With the variable unset, every request is denied with `403` and the app logs a warning at boot telling
-you to set `authorize`.
+When `authorize` is omitted, the console is **open outside production** and **denies every request
+in production** (`403`, pages and API alike). The app logs one warning at boot:
+
+```txt
+[@adonis-agora/payments] console has no `authorize` configured: it is open outside production and denies every request in production. Set `authorize` in config/payments_dashboard.ts.
+```
 
 `authorize` takes the same three forms as every Agora console. An inline function:
 
@@ -394,12 +395,27 @@ type ConsoleAuthorizeResult =
 | `true` or `{ allowed: true }` | let through | let through |
 | `{ allowed: false, reason: 'unauthenticated' }` | `401` page | `401` |
 | `{ allowed: false, reason: 'forbidden' }`, `{ allowed: false }` or `false` | `403` page | `403` |
-| `{ redirectTo: '/login' }` | `302` to that path | `401` |
+| `{ redirectTo: '/login' }` | `302` to that path | `401` with `redirectTo` |
 | it throws | `403` page | `403` |
 | it already answered (wrote a redirect) | that answer, untouched | that answer, untouched |
 
-A denial is JSON for an API call (`{ "error": "unauthorized" }` / `{ "error": "forbidden" }`), the
-[access-denied page](#the-access-denied-page) with the matching status for a browser.
+A denial is JSON for an API call (`{ "error": "forbidden" }` for a `403`,
+`{ "error": "unauthenticated" }` for a `401`, plus `"redirectTo"` when the authorizer answered one),
+the [access-denied page](#the-access-denied-page) with the matching status for a browser.
+
+For machine access (a script, a health probe), `authorizeByToken` allows a request whose
+`Authorization: Bearer <token>` header matches, compared in constant time, and answers `401`
+otherwise. It reads the header only. An empty or missing token throws when the config loads:
+
+```ts title="config/payments_dashboard.ts"
+import env from '#start/env'
+import { authorizeByToken, defineConfig } from '@adonis-agora/payments/dashboard'
+
+export default defineConfig({
+  authorize: authorizeByToken({ token: env.get('CONSOLE_TOKEN') }),
+})
+```
+
 
 With [`@adonis-agora/authz`](/docs/authz) the shared helper reads your user and roles for you — the
 same one every Agora console takes, so one RBAC gate reads identically across durable, telescope,
@@ -415,13 +431,12 @@ export default defineConfig({
 
 <Callout type="warn" title="This console shows revenue — and can move it">
 Payment amounts and customer ids are reachable through it, and the refund action moves money at your
-gateway. The default token gate is a floor for staging, not an answer for production. Set `authorize`
-to a real guard.
+gateway. Set `authorize` to a real guard before you deploy.
 </Callout>
 
 ### The access-denied page
 
-A refused **API** request gets JSON (`403 { "error": "forbidden" }`, `401 { "error": "unauthorized" }`
+A refused **API** request gets JSON (`403 { "error": "forbidden" }`, `401 { "error": "unauthenticated" }`
 when `authorize` said `reason: 'unauthenticated'`, or
 `401 { "error": "unauthorized", "auth": { "modes": [...] } }` without a session) — that is what
 the console's own `fetch` calls expect. A refused **page** navigation — the console shell, its
@@ -468,10 +483,11 @@ export default defineConfig({
 An `authorize` hook that already wrote a redirect still wins — the provider never overwrites a
 `location` header, with or without `accessDenied`.
 
-### A session instead of a token
+### A login session
 
 `dashboardAuth` adds a signed session cookie on top of `authorize` (**both** must pass). It is
-opt-in: omit it and there are no auth routes and no cookie. Two hooks, either or both:
+opt-in: omit it and there are no auth routes and no cookie. In production `authorize` still has to
+be set: use `authorize: () => true` when the session alone decides. Two hooks, either or both:
 
 - **`login`** — the console serves its own sign-in page at `<path>/login` and calls your hook to
   verify the credentials. The right shape when the console stands alone.

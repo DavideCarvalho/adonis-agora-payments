@@ -24,8 +24,6 @@ import {
   resolveConsoleAuthorize,
 } from '../src/dashboard/console_authorize.js';
 import {
-  defaultAuthorize,
-  isProduction,
   type PaymentsDashboardConfig,
   type ResolvedPaymentsDashboardConfig,
   resolveConfig,
@@ -79,6 +77,10 @@ function spaDirectory(): string {
   spaDir ??= fileURLToPath(new URL('../assets/spa/', import.meta.url));
   return spaDir;
 }
+
+/** Logged once at boot when `authorize` is omitted. Same wording in every Agora console. */
+export const NO_AUTHORIZE_WARNING =
+  '[@adonis-agora/payments] console has no `authorize` configured: it is open outside production and denies every request in production. Set `authorize` in config/payments_dashboard.ts.';
 
 /**
  * Mounts the payments dashboard into an AdonisJS app: the `@adonis-agora/payments-dashboard` React
@@ -135,8 +137,7 @@ export default class PaymentsDashboardProvider {
       this.app.config.get<PaymentsDashboardConfig>('payments_dashboard', {}),
     );
     if (!config.enabled) return;
-    this.authorizeGuard = resolveConsoleAuthorize(config.authorize);
-    await this.warnIfClosedByDefault(config);
+    this.authorizeGuard = await this.resolveGuard(config);
 
     // Route registration can't happen synchronously in `boot()`: the router singleton isn't
     // committed until the app's "booted" hooks run, which fire strictly AFTER every provider's
@@ -514,20 +515,21 @@ export default class PaymentsDashboardProvider {
   }
 
   /**
-   * One boot-time warning when production runs the default guard with no token to accept: every
-   * request is then denied, and the host should configure `authorize`.
+   * The `authorize` option turned into one guard. Omitted: open outside production, every request
+   * refused (`403`) in production; either way it says so once at boot (the provider boots once).
    */
-  private async warnIfClosedByDefault(config: ResolvedPaymentsDashboardConfig): Promise<void> {
-    if (config.authorize !== defaultAuthorize) return;
-    if (!isProduction() || process.env.PAYMENTS_DASHBOARD_TOKEN) return;
+  private async resolveGuard(
+    config: ResolvedPaymentsDashboardConfig,
+  ): Promise<(ctx: HttpContext) => Promise<ConsoleAuthorizeDecision>> {
+    if (config.authorize) return resolveConsoleAuthorize(config.authorize);
     try {
       const logger = await this.app.container.make('logger');
-      logger.warn(
-        `payments dashboard: no \`authorize\` is configured and PAYMENTS_DASHBOARD_TOKEN is unset, so every request to ${config.path || '/'} is denied (403) in production. Set \`authorize\` in config/payments_dashboard.ts.`,
-      );
+      logger.warn(NO_AUTHORIZE_WARNING);
     } catch {
       // Logging is best-effort: a missing logger must not stop the app from booting.
     }
+    if (this.app.inProduction !== true) return async () => ({ allowed: true });
+    return async () => ({ allowed: false, status: 403, reason: 'forbidden' });
   }
 
   private async warnAuthorizeThrow(hookError: unknown): Promise<void> {
@@ -551,14 +553,15 @@ export default class PaymentsDashboardProvider {
   }
 
   /**
-   * Run the guards for a dashboard resource. Composes the `authorize` hook (bearer token/custom)
+   * Run the guards for a dashboard resource. Composes the `authorize` check
    * with the optional `dashboardAuth` session guard — BOTH must pass:
    *
    * 1. `authorize` answered `{ redirectTo }` -> `302` there for a `page` request, `401` JSON for an
    *    `api` request. `authorize` denies -> `401` when it answered `{ allowed: false, reason: 'unauthenticated' }`,
    *    `403` otherwise (`false`, `{ allowed: false }`, `reason: 'forbidden'`, or a thrown hook):
    *    the built-in (or host-customised) access-denied PAGE for a `page` request,
-   *    `{ error: 'unauthorized' | 'forbidden' }` JSON for an `api` request. A hook that already
+   *    `{ error: 'unauthenticated' | 'forbidden' }` JSON for an `api` request (a redirect answers
+   *    `401 { error: 'unauthenticated', redirectTo }`). A hook that already
    *    answered (a redirect, a queued body) keeps its answer.
    * 2. `dashboardAuth` configured AND no valid session -> for a `page` request, redirect `302` to
    *    the login page (Mode B) carrying a sanitized `returnTo`, or the `401` "open this console
@@ -585,7 +588,11 @@ export default class PaymentsDashboardProvider {
       if (decision.status === 302) {
         if (responseAnswered(ctx)) return { allowed: false };
         if (mode === 'page') ctx.response.redirect(decision.redirectTo);
-        else ctx.response.status(401).json({ error: 'unauthorized' });
+        else {
+          ctx.response
+            .status(401)
+            .json({ error: 'unauthenticated', redirectTo: decision.redirectTo });
+        }
         return { allowed: false };
       }
       if (mode === 'page') {
@@ -593,7 +600,7 @@ export default class PaymentsDashboardProvider {
       } else if (!responseAnswered(ctx)) {
         ctx.response
           .status(decision.status)
-          .json({ error: decision.status === 401 ? 'unauthorized' : 'forbidden' });
+          .json({ error: decision.status === 401 ? 'unauthenticated' : 'forbidden' });
       }
       return { allowed: false };
     }

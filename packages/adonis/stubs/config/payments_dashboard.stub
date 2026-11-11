@@ -6,13 +6,14 @@ import { defineConfig } from '@adonis-agora/payments/dashboard'
 /**
  * Configuration for the @adonis-agora/payments dashboard.
  *
- * By default the dashboard is open OUTSIDE production, and in production it
- * requires a bearer token equal to \`PAYMENTS_DASHBOARD_TOKEN\` (deny if unset,
- * with a warning at boot). Set \`authorize\` to your own guard: an inline function,
+ * Without \`authorize\` the dashboard is open OUTSIDE production and answers
+ * every request with 403 in production (a warning is logged at boot). Set
+ * \`authorize\` to choose who may open it: an inline function,
  * an authorizer class (\`@inject()\` works), or a lazy import of one
  * (\`() => import('#policies/console_access')\`). It answers \`true\`/\`false\`,
  * \`{ allowed, reason?: 'unauthenticated' | 'forbidden' }\` or \`{ redirectTo }\`:
- * \`unauthenticated\` is a 401, any other denial (or a throw) a 403.
+ * \`unauthenticated\` is a 401, any other denial (or a throw) a 403. For machine
+ * access use \`authorizeByToken({ token: env.get('CONSOLE_TOKEN') })\`.
  *
  * Set \`enabled: false\` to remove it entirely — no routes are registered at all.
  *

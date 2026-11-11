@@ -134,14 +134,39 @@ The console's `authorize` option now takes the same three forms as every Agora c
 function, an authorizer class, or a lazy import of one. An authorizer may also answer
 `{ redirectTo: '/login' }`. Existing functions keep working unchanged.
 
-When `authorize` is omitted, the console stays open outside production and token-gated in production.
-In production without `PAYMENTS_DASHBOARD_TOKEN`, every request is denied (`403`) as before, and the
-app now logs a warning at boot. Set `authorize` to silence it.
+Before:
+
+```ts title="config/payments_dashboard.ts"
+export default defineConfig({
+  authorize: (ctx) => ctx.auth.user?.isAdmin === true,
+})
+```
+
+After (any of these):
+
+```ts title="config/payments_dashboard.ts"
+export default defineConfig({
+  authorize: (ctx) => ctx.auth.user?.isAdmin === true,
+  // authorize: ConsoleAccess,
+  // authorize: () => import('#policies/console_access'),
+})
+```
+
+The type of the option is now `ConsoleAuthorize`, exported from `@adonis-agora/payments/dashboard`
+along with `ConsoleAuthorizer` and `ConsoleAuthorizeResult`. Code that read
+`ResolvedPaymentsDashboardConfig['authorize']` as a plain function must accept the class and
+lazy-import forms too, and `null` when the option is omitted.
+
+## Dashboard: no `authorize` means `403` in production
+
+Without `authorize`, the console is open outside production and answers every request with `403` in
+production. The app logs one warning at boot saying so. There is no environment variable or token
+that opens it: set `authorize`.
 
 Before:
 
 ```ts title="config/payments_dashboard.ts"
-// No authorize: production relies on PAYMENTS_DASHBOARD_TOKEN, or denies everything
+// No authorize: open in development, PAYMENTS_DASHBOARD_TOKEN in production
 export default defineConfig({})
 ```
 
@@ -149,14 +174,57 @@ After:
 
 ```ts title="config/payments_dashboard.ts"
 export default defineConfig({
-  authorize: () => import('#policies/console_access'),
+  authorize: (ctx) => ctx.auth.user?.isAdmin === true,
 })
 ```
 
-The type of the option is now `ConsoleAuthorize`, exported from `@adonis-agora/payments/dashboard`
-along with `ConsoleAuthorizer` and `ConsoleAuthorizeResult`. Code that read
-`ResolvedPaymentsDashboardConfig['authorize']` as a plain function must accept the class and
-lazy-import forms too.
+If you use `dashboardAuth` and relied on it alone, add `authorize: () => true` so production does not
+deny before the session check.
+
+## Dashboard: `PAYMENTS_DASHBOARD_TOKEN` is gone
+
+The console no longer reads `PAYMENTS_DASHBOARD_TOKEN`, the `x-payments-token` header or the
+`?token=` query param, and `defaultAuthorize` is no longer exported from
+`@adonis-agora/payments/dashboard`. For token access, use `authorizeByToken`. It reads only the
+`Authorization: Bearer <token>` header and answers `401` on a mismatch. Remove
+`PAYMENTS_DASHBOARD_TOKEN` from `start/env.ts` and your environment.
+
+Before:
+
+```ts title="start/env.ts"
+PAYMENTS_DASHBOARD_TOKEN: Env.schema.string.optional(),
+```
+
+```sh
+curl -H "x-payments-token: $TOKEN" https://app.example.com/payments/api/health
+curl "https://app.example.com/payments/api/health?token=$TOKEN"
+```
+
+After:
+
+```ts title="start/env.ts"
+CONSOLE_TOKEN: Env.schema.string(),
+```
+
+```ts title="config/payments_dashboard.ts"
+import env from '#start/env'
+import { authorizeByToken, defineConfig } from '@adonis-agora/payments/dashboard'
+
+export default defineConfig({
+  authorize: authorizeByToken({ token: env.get('CONSOLE_TOKEN') }),
+})
+```
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" https://app.example.com/payments/api/health
+```
+
+## Dashboard: API denials say `unauthenticated`
+
+A `401` from `authorize` now answers `{ "error": "unauthenticated" }` (it was `"unauthorized"`), and a
+`{ redirectTo }` answer on an API call carries it: `{ "error": "unauthenticated", "redirectTo": "/login" }`.
+The `401` from the `dashboardAuth` session check is unchanged (`{ "error": "unauthorized", "auth": { ... } }`).
+Update any script that matched on the old body.
 
 ## Dashboard: `PROVIDER_SCAN_CAP` is gone
 

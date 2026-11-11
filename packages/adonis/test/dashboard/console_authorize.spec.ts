@@ -1,6 +1,7 @@
 import type { HttpContext } from '@adonisjs/core/http';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  authorizeByToken,
   type ConsoleAuthorizer,
   normalizeConsoleAuthorizeResult,
   resolveConsoleAuthorize,
@@ -147,5 +148,49 @@ describe('resolveConsoleAuthorize', () => {
       },
     } as unknown as HttpContext;
     expect(await resolveConsoleAuthorize(Access)(ctx)).toMatchObject({ status: 403 });
+  });
+});
+
+describe('authorizeByToken', () => {
+  const ctxWith = (headers: Record<string, string>) =>
+    ({
+      request: { header: (name: string) => headers[name.toLowerCase()] },
+    }) as unknown as HttpContext;
+
+  it('allows a matching Authorization: Bearer header', async () => {
+    const authorize = authorizeByToken({ token: 'secret' }) as (ctx: HttpContext) => unknown;
+    expect(await authorize(ctxWith({ authorization: 'Bearer secret' }))).toEqual({ allowed: true });
+    expect(await authorize(ctxWith({ authorization: 'bearer secret' }))).toEqual({ allowed: true });
+  });
+
+  it('answers unauthenticated for a wrong, shorter or missing token', async () => {
+    const authorize = authorizeByToken({ token: 'secret' }) as (ctx: HttpContext) => unknown;
+    const denied = { allowed: false, reason: 'unauthenticated' };
+    expect(await authorize(ctxWith({ authorization: 'Bearer nope' }))).toEqual(denied);
+    expect(await authorize(ctxWith({ authorization: 'Bearer s' }))).toEqual(denied);
+    expect(await authorize(ctxWith({ authorization: 'Basic secret' }))).toEqual(denied);
+    expect(await authorize(ctxWith({}))).toEqual(denied);
+  });
+
+  it('reads the header only: no query string, no custom header', async () => {
+    const authorize = authorizeByToken({ token: 'secret' }) as (ctx: HttpContext) => unknown;
+    const ctx = {
+      request: {
+        header: (name: string) => (name === 'x-payments-token' ? 'secret' : undefined),
+        qs: () => ({ token: 'secret' }),
+      },
+    } as unknown as HttpContext;
+    expect(await authorize(ctx)).toEqual({ allowed: false, reason: 'unauthenticated' });
+  });
+
+  it('throws at config time for an empty or undefined token', () => {
+    expect(() => authorizeByToken({ token: undefined })).toThrow(/non-empty/);
+    expect(() => authorizeByToken({ token: '' })).toThrow(/non-empty/);
+  });
+
+  it('normalizes to a 401 through the resolver', async () => {
+    const guard = resolveConsoleAuthorize(authorizeByToken({ token: 'secret' }));
+    expect(await guard(ctxWith({}))).toMatchObject({ allowed: false, status: 401 });
+    expect(await guard(ctxWith({ authorization: 'Bearer secret' }))).toEqual({ allowed: true });
   });
 });

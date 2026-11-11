@@ -8,6 +8,7 @@ import {
   paymentsClient,
   uiBase,
 } from './payments-client';
+import { clearConfig, injectConfig } from './test-config.test-helper';
 
 const originalFetch = globalThis.fetch;
 
@@ -34,26 +35,10 @@ function stubFetch(response: Partial<Response> & { json?: () => Promise<unknown>
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  Reflect.deleteProperty(window, '__PAYMENTS_BASE__');
-  Reflect.deleteProperty(window, '__PAYMENTS_API__');
-  Reflect.deleteProperty(window, '__PAYMENTS_CURRENCY__');
+  clearConfig();
 });
 
-/** Put the provider's config block on the page, the way `renderIndexHtml` does. */
-function injectConfig(config: Record<string, unknown>): void {
-  const el = document.createElement('script');
-  el.type = 'application/json';
-  el.id = CONFIG_ELEMENT_ID;
-  el.textContent = JSON.stringify(config);
-  document.head.appendChild(el);
-}
-
 describe('the injected config block', () => {
-  afterEach(() => {
-    document.getElementById(CONFIG_ELEMENT_ID)?.remove();
-    Reflect.deleteProperty(window, '__PAYMENTS_AUTH__');
-  });
-
   it('is where the base, api, currency and auth surface come from', () => {
     // The provider speaks through a JSON data block, because a host CSP with `script-src 'self'
     // 'nonce-…'` refuses an inline script and the console then 404s on every request.
@@ -69,23 +54,27 @@ describe('the injected config block', () => {
     expect(authSurface()).toEqual({ modes: ['login'] });
   });
 
-  it('wins over the window globals', () => {
-    injectConfig({ base: '', api: '/api', currency: 'BRL', auth: null });
-    window.__PAYMENTS_BASE__ = '/stale';
-    window.__PAYMENTS_API__ = '/stale/api';
-    window.__PAYMENTS_AUTH__ = { modes: ['login'] };
-    expect(uiBase()).toBe('');
-    expect(apiBase()).toBe('/api');
-    expect(authSurface()).toBeNull();
-  });
-
-  it('falls through to the globals, then the defaults, when there is no block', () => {
-    window.__PAYMENTS_API__ = '/g/api';
-    expect(apiBase()).toBe('/g/api');
-    Reflect.deleteProperty(window, '__PAYMENTS_API__');
-    Reflect.deleteProperty(window, '__PAYMENTS_BASE__');
-    expect(apiBase()).toBe('/payments-dashboard/api');
-    expect(authSurface()).toBeNull();
+  it('ignores window globals, which no provider sets any more', () => {
+    const w = window as unknown as Record<string, unknown>;
+    w.__PAYMENTS_BASE__ = '/stale';
+    w.__PAYMENTS_API__ = '/stale/api';
+    w.__PAYMENTS_CURRENCY__ = 'USD';
+    w.__PAYMENTS_AUTH__ = { modes: ['login'] };
+    try {
+      expect(uiBase()).toBe('/payments');
+      expect(apiBase()).toBe('/payments/api');
+      expect(displayCurrency()).toBe('BRL');
+      expect(authSurface()).toBeNull();
+    } finally {
+      for (const key of [
+        '__PAYMENTS_BASE__',
+        '__PAYMENTS_API__',
+        '__PAYMENTS_CURRENCY__',
+        '__PAYMENTS_AUTH__',
+      ]) {
+        Reflect.deleteProperty(window, key);
+      }
+    }
   });
 
   it('ignores a block that is not JSON rather than crashing the console', () => {
@@ -94,29 +83,20 @@ describe('the injected config block', () => {
     el.id = CONFIG_ELEMENT_ID;
     el.textContent = '{not json';
     document.head.appendChild(el);
-    expect(apiBase()).toBe('/payments-dashboard/api');
+    expect(apiBase()).toBe('/payments/api');
   });
 });
 
 describe('base resolution', () => {
   it('falls back to the default mount when the provider injected nothing', () => {
-    expect(uiBase()).toBe('/payments-dashboard');
-    expect(apiBase()).toBe('/payments-dashboard/api');
+    expect(uiBase()).toBe('/payments');
+    expect(apiBase()).toBe('/payments/api');
     expect(displayCurrency()).toBe('BRL');
-  });
-
-  it('honors the injected globals', () => {
-    window.__PAYMENTS_BASE__ = '/ops/billing';
-    window.__PAYMENTS_API__ = '/ops/billing/api';
-    window.__PAYMENTS_CURRENCY__ = 'USD';
-    expect(uiBase()).toBe('/ops/billing');
-    expect(apiBase()).toBe('/ops/billing/api');
-    expect(displayCurrency()).toBe('USD');
   });
 
   it('honors an EMPTY injected base (a root-mounted dashboard) instead of defaulting', () => {
     // The trap a truthy check falls into: `''` is a deliberate, valid base.
-    window.__PAYMENTS_BASE__ = '';
+    injectConfig({ base: '' });
     expect(uiBase()).toBe('');
     expect(apiBase()).toBe('/api');
   });
@@ -136,7 +116,7 @@ describe('buildQuery', () => {
 
 describe('paymentsClient request shapes', () => {
   beforeEach(() => {
-    window.__PAYMENTS_API__ = '/pd/api';
+    injectConfig({ api: '/pd/api' });
   });
 
   it('requests the overview with the selected period', async () => {
@@ -219,7 +199,7 @@ describe('paymentsClient request shapes', () => {
  */
 describe('actions are POSTs', () => {
   beforeEach(() => {
-    window.__PAYMENTS_API__ = '/pd/api';
+    injectConfig({ api: '/pd/api' });
   });
 
   it('posts a full refund with an empty body', async () => {
@@ -290,7 +270,7 @@ describe('actions are POSTs', () => {
 
 describe('error handling', () => {
   beforeEach(() => {
-    window.__PAYMENTS_API__ = '/pd/api';
+    injectConfig({ api: '/pd/api' });
   });
 
   it("surfaces the server's own message for a 503 (billing layer off)", async () => {
@@ -337,14 +317,14 @@ describe('disputes carry a record, never a decision', () => {
     const disputeCalls = Object.keys(paymentsClient).filter((key) => /dispute/i.test(key));
     expect(disputeCalls).toEqual(['disputes', 'resolveDispute']);
 
-    window.__PAYMENTS_API__ = '/pd/api';
+    injectConfig({ api: '/pd/api' });
     const { inits } = stubFetch({ json: async () => ({ disputes: [] }) });
     await paymentsClient.disputes({ dueWithin: 72 });
     expect(inits[0]?.method).toBeUndefined();
   });
 
   it('sends the outcome record as a POST to that dispute’s resolve route', async () => {
-    window.__PAYMENTS_API__ = '/pd/api';
+    injectConfig({ api: '/pd/api' });
     const { calls, inits } = stubFetch({ json: async () => ({ dispute: {}, audit: null }) });
     await paymentsClient.resolveDispute('dp 1/2', { status: 'lost', note: 'bank ruled' });
     // Encoded: a dispute id with a slash in it must not be able to select a different route.

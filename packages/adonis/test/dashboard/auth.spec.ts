@@ -80,10 +80,9 @@ describe('defaultAuthorize', () => {
 });
 
 describe('resolveConfig', () => {
-  it('defaults to enabled, the /payments-dashboard mount, BRL and defaultAuthorize', () => {
+  it('defaults to enabled, the /payments mount, BRL and defaultAuthorize', () => {
     const config = resolveConfig();
     expect(config.enabled).toBe(true);
-    // NOT `/payments` — that prefix already carries the gateway webhook route.
     expect(config.path).toBe('/payments');
     expect(config.currency).toBe('BRL');
     expect(config.authorize).toBe(defaultAuthorize);

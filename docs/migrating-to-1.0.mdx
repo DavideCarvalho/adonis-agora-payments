@@ -141,6 +141,34 @@ import { PROVIDER_SCAN_CAP } from '@adonis-agora/payments/dashboard'
 
 After: no import. There is no replacement.
 
+## Dashboard SPA: config comes only from the data block
+
+The prebuilt console no longer reads the `window.__PAYMENTS_BASE__`, `__PAYMENTS_API__`,
+`__PAYMENTS_CURRENCY__` and `__PAYMENTS_AUTH__` globals. The provider has passed this config as a
+`<script type="application/json">` block since 0.4.1, so an app that mounts the console with the
+dashboard provider changes nothing. A page that embeds the bundle by hand must render that block
+instead of setting the globals:
+
+Before:
+
+```html
+<script>window.__PAYMENTS_BASE__ = '/ops/billing'</script>
+```
+
+After:
+
+```html
+<script type="application/json" id="payments-dashboard-config">
+  {"base":"/ops/billing","api":"/ops/billing/api","currency":"BRL","auth":null}
+</script>
+```
+
+With no block at all, the console assumes the server's default mount, `/payments` (it used to
+assume `/payments-dashboard`).
+
+`@adonis-agora/payments-dashboard` also stops declaring `react` and `react-dom` as peers. The
+console ships prebuilt with React inside it, so your app does not need to install React for it.
+
 ## Peer range for `@adonis-agora/durable`
 
 The optional `@adonis-agora/durable` peer now accepts `>=0.1.0 <2.0.0 || >=1.0.0-rc.0 <2.0.0`, so

@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearConfig, injectConfig } from '../client/test-config.test-helper';
 import { App } from './App';
 
 /**
@@ -83,14 +84,13 @@ function setHash(hash: string) {
 }
 
 beforeEach(() => {
-  window.__PAYMENTS_API__ = '/pd/api';
+  injectConfig({ api: '/pd/api' });
   stubApi();
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  Reflect.deleteProperty(window, '__PAYMENTS_API__');
-  Reflect.deleteProperty(window, '__PAYMENTS_AUTH__');
+  clearConfig();
   window.location.hash = '';
 });
 
@@ -142,21 +142,20 @@ describe('the hash route', () => {
 
 describe('Sign out', () => {
   it('is absent when the deployment has no dashboardAuth — there is no /logout to point at', () => {
-    window.__PAYMENTS_AUTH__ = null;
+    injectConfig({ auth: null });
     renderApp();
     expect(screen.queryByRole('link', { name: 'Sign out' })).toBeNull();
   });
 
-  it('is absent when the provider predates the global, erring towards no broken link', () => {
+  it('is absent when the page carries no auth surface, erring towards no broken link', () => {
     renderApp();
     expect(screen.queryByRole('link', { name: 'Sign out' })).toBeNull();
   });
 
   it('is offered when a session mode is configured', () => {
-    window.__PAYMENTS_AUTH__ = { modes: ['login'] };
-    window.__PAYMENTS_BASE__ = '/pd';
+    injectConfig({ auth: { modes: ['login'] } });
+    injectConfig({ base: '/pd' });
     renderApp();
     expect(screen.getByRole('link', { name: 'Sign out' }).getAttribute('href')).toBe('/pd/logout');
-    Reflect.deleteProperty(window, '__PAYMENTS_BASE__');
   });
 });

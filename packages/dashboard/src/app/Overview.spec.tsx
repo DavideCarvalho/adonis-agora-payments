@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OverviewMetric } from '../client/payments-client';
+import { clearConfig, injectConfig } from '../client/test-config.test-helper';
 import { Overview } from './Overview';
 
 /**
@@ -61,12 +62,12 @@ const REVENUE_METRICS = [
 ];
 
 beforeEach(() => {
-  window.__PAYMENTS_API__ = '/pd/api';
+  injectConfig({ api: '/pd/api' });
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  Reflect.deleteProperty(window, '__PAYMENTS_API__');
+  clearConfig();
 });
 
 describe('the revenue tiles', () => {

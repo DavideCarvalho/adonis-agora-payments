@@ -64,7 +64,7 @@ export interface InjectedConfig {
  * Content-Security-Policy can refuse it; an inline script IS, and a host with
  * `script-src 'self' 'nonce-…'` — `@adonisjs/shield`'s `@nonce`, which is the recommended setup —
  * silently dropped ours. The globals were then undefined, the SPA fell back to its default mount
- * (`/payments-dashboard/api`), and EVERY request from a console that had rendered perfectly well
+ * (`/payments/api`), and EVERY request from a console that had rendered perfectly well
  * answered 404. The module script Vite emits is a same-origin file, which is why the page itself
  * kept loading and made the failure look like a routing bug rather than a policy one.
  *

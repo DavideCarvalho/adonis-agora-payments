@@ -128,6 +128,158 @@ export default defineConfig({
 })
 ```
 
+## Dashboard: `authorize` takes a class or a lazy import
+
+The console's `authorize` option now takes the same three forms as every Agora console: an inline
+function, an authorizer class, or a lazy import of one. An authorizer may also answer
+`{ redirectTo: '/login' }`. Existing functions keep working unchanged.
+
+Before:
+
+```ts title="config/payments_dashboard.ts"
+export default defineConfig({
+  authorize: (ctx) => ctx.auth.user?.isAdmin === true,
+})
+```
+
+After (any of these):
+
+```ts title="config/payments_dashboard.ts"
+export default defineConfig({
+  authorize: (ctx) => ctx.auth.user?.isAdmin === true,
+  // authorize: ConsoleAccess,
+  // authorize: () => import('#policies/console_access'),
+})
+```
+
+The type of the option is now `ConsoleAuthorize`, exported from `@adonis-agora/payments/dashboard`
+along with `ConsoleAuthorizer` and `ConsoleAuthorizeResult`. Code that read
+`ResolvedPaymentsDashboardConfig['authorize']` as a plain function must accept the class and
+lazy-import forms too, and `null` when the option is omitted.
+
+## Dashboard: no `authorize` means `403` in production
+
+Without `authorize`, the console is open outside production and answers every request with `403` in
+production. The app logs one warning at boot saying so. There is no environment variable or token
+that opens it: set `authorize`.
+
+Before:
+
+```ts title="config/payments_dashboard.ts"
+// No authorize: open in development, PAYMENTS_DASHBOARD_TOKEN in production
+export default defineConfig({})
+```
+
+After:
+
+```ts title="config/payments_dashboard.ts"
+export default defineConfig({
+  authorize: (ctx) => ctx.auth.user?.isAdmin === true,
+})
+```
+
+## Dashboard: `PAYMENTS_DASHBOARD_TOKEN` is gone
+
+The console no longer reads `PAYMENTS_DASHBOARD_TOKEN`, the `x-payments-token` header or the
+`?token=` query param, and `defaultAuthorize` is no longer exported from
+`@adonis-agora/payments/dashboard`. For token access, use `authorizeByToken`. It reads only the
+`Authorization: Bearer <token>` header and answers `401` on a mismatch. Remove
+`PAYMENTS_DASHBOARD_TOKEN` from `start/env.ts` and your environment.
+
+Before:
+
+```ts title="start/env.ts"
+PAYMENTS_DASHBOARD_TOKEN: Env.schema.string.optional(),
+```
+
+```sh
+curl -H "x-payments-token: $TOKEN" https://app.example.com/payments/api/health
+curl "https://app.example.com/payments/api/health?token=$TOKEN"
+```
+
+After:
+
+```ts title="start/env.ts"
+CONSOLE_TOKEN: Env.schema.string(),
+```
+
+```ts title="config/payments_dashboard.ts"
+import env from '#start/env'
+import { authorizeByToken, defineConfig } from '@adonis-agora/payments/dashboard'
+
+export default defineConfig({
+  authorize: authorizeByToken({ token: env.get('CONSOLE_TOKEN') }),
+})
+```
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" https://app.example.com/payments/api/health
+```
+
+## Dashboard: API denials say `unauthenticated`
+
+A `401` from `authorize` now answers `{ "error": "unauthenticated" }` (it was `"unauthorized"`), and a
+`{ redirectTo }` answer on an API call carries it: `{ "error": "unauthenticated", "redirectTo": "/login" }`.
+Update any script that matched on the old body.
+
+## Dashboard: `dashboardAuth` is gone
+
+The console no longer has a login of its own. `dashboardAuth` is removed, with no alias, and with it:
+
+- the built-in login page and the `GET|POST <path>/login`, `POST <path>/session` and
+  `GET <path>/logout` routes;
+- the signed session cookie, its `login` and `session` hooks, and the `secret`/`ttl` options;
+- the console's **Sign out** link;
+- the exports `resolveDashboardAuth`, `performLogin`, `performSession`, `readSession`,
+  `sanitizeReturnTo`, `SESSION_COOKIE_NAME`, `signSessionCookie`, `verifySessionCookie`,
+  `renderLoginPage`, and the types `DashboardAuthOptions`, `ResolvedDashboardAuth`, `AuthMode`,
+  `LoginHook`, `LoginOutcome`, `SessionHook`, `SessionOutcome`, `DashboardSession`,
+  `DashboardSessionUser`, `SignOptions`, `VerifyOptions` and `InjectedAuth`;
+- the access-denied page's `'session-required'` reason.
+
+Operators sign in through your app. Gate the console in `authorize`, and return
+`{ redirectTo: '/login' }` for a signed-out visitor: a page navigation is redirected there, and the
+console UI follows the same `redirectTo` when one of its API calls answers `401`. Remove the
+secret and password variables you added for `dashboardAuth` from `start/env.ts`.
+
+Before:
+
+```ts title="config/payments_dashboard.ts"
+import env from '#start/env'
+import User from '#models/user'
+import { defineConfig } from '@adonis-agora/payments/dashboard'
+
+export default defineConfig({
+  authorize: () => true,
+  dashboardAuth: {
+    secret: env.get('PAYMENTS_DASHBOARD_SECRET'),
+    ttl: '8h',
+    login: async (username, password) => {
+      const user = await User.verifyCredentials(username, password).catch(() => null)
+      if (!user?.isAdmin) return null
+      return { id: String(user.id), name: user.fullName }
+    },
+  },
+})
+```
+
+After:
+
+```ts title="config/payments_dashboard.ts"
+import { defineConfig } from '@adonis-agora/payments/dashboard'
+
+export default defineConfig({
+  authorize: async (ctx) => {
+    if (!(await ctx.auth.check())) return { redirectTo: '/login' }
+    return ctx.auth.user!.isAdmin === true
+  },
+})
+```
+
+The refund and dispute-resolution audit rows used to name the session user. They now name your
+app's signed-in user (`ctx.auth.user`'s `email`, `name` or `id`), `bearer` for a token caller, or
+`null` (unattributed).
+
 ## Dashboard: `PROVIDER_SCAN_CAP` is gone
 
 `@adonis-agora/payments/dashboard` no longer exports `PROVIDER_SCAN_CAP`. Nothing in the console read
@@ -144,7 +296,7 @@ After: no import. There is no replacement.
 ## Dashboard SPA: config comes only from the data block
 
 The prebuilt console no longer reads the `window.__PAYMENTS_BASE__`, `__PAYMENTS_API__`,
-`__PAYMENTS_CURRENCY__` and `__PAYMENTS_AUTH__` globals. The provider has passed this config as a
+`__PAYMENTS_CURRENCY__` and `__PAYMENTS_AUTH__` globals, and the block no longer carries `auth`. The provider has passed this config as a
 `<script type="application/json">` block since 0.4.1, so an app that mounts the console with the
 dashboard provider changes nothing. A page that embeds the bundle by hand must render that block
 instead of setting the globals:
@@ -159,7 +311,7 @@ After:
 
 ```html
 <script type="application/json" id="payments-dashboard-config">
-  {"base":"/ops/billing","api":"/ops/billing/api","currency":"BRL","auth":null}
+  {"base":"/ops/billing","api":"/ops/billing/api","currency":"BRL"}
 </script>
 ```
 

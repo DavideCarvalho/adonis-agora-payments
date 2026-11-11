@@ -116,8 +116,8 @@ export function Activity({ initialAction }: { initialAction?: string | undefined
 /**
  * WHO — and `null` renders as "unattributed", never as "system".
  *
- * The distinction is the whole reason the column exists: a console with no `dashboardAuth`
- * configured genuinely cannot name anybody, and writing "system" there would invent an actor for
+ * The distinction is the whole reason the column exists: a request with no signed-in user
+ * genuinely cannot name anybody, and writing "system" there would invent an actor for
  * an action a person took.
  */
 function actorLabel(row: AuditRow): string {

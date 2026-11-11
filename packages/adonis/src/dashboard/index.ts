@@ -23,24 +23,6 @@ export type {
 } from './actions.js';
 // The two WRITE actions (refund + webhook retry), as framework-light ports.
 export { createRefundAction, createReplayAction } from './actions.js';
-export type {
-  AuthMode,
-  DashboardAuthOptions,
-  LoginHook,
-  LoginOutcome,
-  ResolvedDashboardAuth,
-  SessionHook,
-  SessionOutcome,
-} from './auth.js';
-// Built-in `dashboardAuth` login screen (optional; opt-in via `config/payments_dashboard.ts`).
-export {
-  performLogin,
-  performSession,
-  readSession,
-  resolveDashboardAuth,
-  SESSION_COOKIE_NAME,
-  sanitizeReturnTo,
-} from './auth.js';
 // The dashboard-gate contract shared (by copy) with every @adonis-agora console.
 export type {
   AuthorizeDecision,
@@ -48,6 +30,20 @@ export type {
   ResolvedAuthorizeResult,
 } from './authorize_decision.js';
 export { resolveAuthorizeResult, runAuthorize } from './authorize_decision.js';
+// The console access contract (function, class or lazy import) shared by every Agora console.
+export type {
+  AuthorizeByTokenOptions,
+  ConsoleAuthorize,
+  ConsoleAuthorizeDecision,
+  ConsoleAuthorizeResult,
+  ConsoleAuthorizer,
+  ConsoleAuthorizerClass,
+} from './console_authorize.js';
+export {
+  authorizeByToken,
+  normalizeConsoleAuthorizeResult,
+  resolveConsoleAuthorize,
+} from './console_authorize.js';
 export type {
   AccessDeniedOption,
   AccessDeniedRenderer,
@@ -55,7 +51,7 @@ export type {
   PaymentsDashboardConfig,
   ResolvedPaymentsDashboardConfig,
 } from './define_config.js';
-export { defaultAuthorize, defineConfig, resolveConfig } from './define_config.js';
+export { defineConfig, resolveConfig } from './define_config.js';
 export type { ApiRequest, ApiResponse, DashboardActions, Deps } from './handlers.js';
 export {
   AUDIT_ACTION_FILTERS,
@@ -81,17 +77,9 @@ export {
   WEBHOOK_EVENT_STATUSES,
   webhookEvents,
 } from './handlers.js';
-export { renderLoginPage } from './login_page.js';
 export type { Period, PeriodPreset } from './period.js';
 export { DEFAULT_PERIOD, PERIOD_PRESETS, resolvePeriod } from './period.js';
-export type {
-  DashboardSession,
-  DashboardSessionUser,
-  SignOptions,
-  VerifyOptions,
-} from './session_cookie.js';
-export { signSessionCookie, verifySessionCookie } from './session_cookie.js';
-export type { InjectedAuth, InjectedConfig } from './spa.js';
+export type { InjectedConfig } from './spa.js';
 export {
   BASE_PLACEHOLDER,
   CONFIG_ELEMENT_ID,

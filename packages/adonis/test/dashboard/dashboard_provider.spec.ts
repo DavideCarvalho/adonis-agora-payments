@@ -1,6 +1,10 @@
 import type { ApplicationService } from '@adonisjs/core/types';
 import { describe, expect, it } from 'vitest';
-import DashboardProvider from '../../providers/dashboard_provider.js';
+import DashboardProvider, {
+  auditActor,
+  NO_AUTHORIZE_WARNING,
+} from '../../providers/dashboard_provider.js';
+import { authorizeByToken } from '../../src/dashboard/console_authorize.js';
 import type { PaymentsDashboardConfig } from '../../src/dashboard/define_config.js';
 
 /**
@@ -177,41 +181,9 @@ describe('PaymentsDashboardProvider route registration', () => {
     expect(await bootWith({ enabled: false })).toEqual([]);
   });
 
-  it('adds no auth routes when dashboardAuth is unconfigured', async () => {
-    const routes = await bootWith({});
-    expect(routes.some((r) => r.pattern.includes('login'))).toBe(false);
-    expect(routes.some((r) => r.pattern.includes('logout'))).toBe(false);
-  });
-
-  it('adds the login page + submit + logout for Mode B', async () => {
-    const routes = await bootWith({
-      dashboardAuth: { secret: 's'.repeat(32), login: () => null },
-    });
-    const named = routes.map((r) => `${r.method.toUpperCase()} ${r.pattern}`);
-    expect(named).toContain('GET /payments/login');
-    expect(named).toContain('POST /payments/login');
-    expect(named).toContain('GET /payments/logout');
-    // Mode B alone must not mount the host-session mint endpoint.
-    expect(named).not.toContain('POST /payments/session');
-  });
-
-  it('adds the session mint (and no login page) for Mode A alone', async () => {
-    const routes = await bootWith({
-      dashboardAuth: { secret: 's'.repeat(32), session: () => null },
-    });
-    const named = routes.map((r) => `${r.method.toUpperCase()} ${r.pattern}`);
-    expect(named).toContain('POST /payments/session');
-    expect(named).toContain('GET /payments/logout');
-    expect(named).not.toContain('GET /payments/login');
-  });
-
-  it('registers no auth routes at all when disabled, even with dashboardAuth set', async () => {
-    expect(
-      await bootWith({
-        enabled: false,
-        dashboardAuth: { secret: 's'.repeat(32), login: () => null },
-      }),
-    ).toEqual([]);
+  it("registers no login, session or logout route: sign-in is the app's own", async () => {
+    const patterns = (await bootWith({})).map((r) => r.pattern);
+    expect(patterns.some((p) => /\/(login|logout|session)$/.test(p))).toBe(false);
   });
 
   it('names every route so an app can reference them by name', async () => {
@@ -234,7 +206,7 @@ describe('action routes are guarded', () => {
   }
 
   /** A minimal `HttpContext` stand-in: enough for `enforce` plus the JSON reply. */
-  function fakeCtx(recorded: Recorded, cookie?: string) {
+  function fakeCtx(recorded: Recorded) {
     const response = {
       getHeader: () => undefined,
       status(code: number) {
@@ -258,8 +230,7 @@ describe('action routes are guarded', () => {
         qs: () => ({}),
         body: () => ({}),
         url: () => '/payments',
-        plainCookie: () => cookie,
-        secure: () => false,
+        header: () => undefined,
         headers: () => ({}),
       },
     };
@@ -287,15 +258,15 @@ describe('action routes are guarded', () => {
       expect(recorded.body).toEqual({ error: 'forbidden' });
     });
 
-    it(`401s the ${name} action when dashboardAuth is on and there is no session`, async () => {
+    it(`401s the ${name} action when authorize says nobody is signed in`, async () => {
       const recorded: Recorded = {};
       const handler = await routeHandler(
-        { dashboardAuth: { secret: 's'.repeat(32), login: () => null } },
+        { authorize: () => ({ allowed: false, reason: 'unauthenticated' }) },
         pattern,
       );
       await handler(fakeCtx(recorded));
       expect(recorded.status).toBe(401);
-      expect(recorded.body).toMatchObject({ error: 'unauthorized' });
+      expect(recorded.body).toEqual({ error: 'unauthenticated' });
     });
 
     it(`lets the ${name} action past the guard only to hit the missing billing store`, async () => {
@@ -348,8 +319,7 @@ describe('page routes are refused with the access-denied page', () => {
         qs: () => ({}),
         body: () => ({}),
         url: () => '/payments',
-        plainCookie: () => undefined,
-        secure: () => false,
+        header: () => undefined,
         headers: () => ({}),
       },
     };
@@ -391,16 +361,6 @@ describe('page routes are refused with the access-denied page', () => {
     expect(recorded.body).toEqual({ error: 'forbidden' });
   });
 
-  it('serves the "open from your app" page (401) when only a session hook is configured', async () => {
-    const recorded: Recorded = { headers: {} };
-    await (await pageHandler({ dashboardAuth: { secret: 's'.repeat(32), session: () => null } }))(
-      fakeCtx(recorded),
-    );
-    expect(recorded.status).toBe(401);
-    expect(recorded.body).toContain('<h1>Open this console from your app</h1>');
-    expect(recorded.body).not.toContain('/payments/login');
-  });
-
   it('applies the accessDenied object options', async () => {
     const recorded: Recorded = { headers: {} };
     await (
@@ -421,7 +381,6 @@ describe('page routes are refused with the access-denied page', () => {
     await (
       await pageHandler({
         authorize: () => false,
-        dashboardAuth: { secret: 's'.repeat(32), login: () => null },
         accessDenied: (info, c) => {
           seen = [info, c];
           return '<p>custom</p>';
@@ -434,7 +393,6 @@ describe('page routes are refused with the access-denied page', () => {
       status: 403,
       reason: 'forbidden',
       basePath: '/payments',
-      loginHref: '/payments/login',
     });
     expect(seen[1]).toBe(ctx);
   });
@@ -482,7 +440,7 @@ describe('page routes are refused with the access-denied page', () => {
       name: string;
       authorize: NonNullable<PaymentsDashboardConfig['authorize']>;
       status: 401 | 403;
-      error: 'unauthorized' | 'forbidden';
+      error: 'unauthenticated' | 'forbidden';
       heading: string;
     }> = [
       {
@@ -503,7 +461,7 @@ describe('page routes are refused with the access-denied page', () => {
         name: "reason 'unauthenticated'",
         authorize: () => ({ allowed: false, reason: 'unauthenticated' }),
         status: 401,
-        error: 'unauthorized',
+        error: 'unauthenticated',
         heading: '<h1>',
       },
       {
@@ -593,19 +551,73 @@ describe('page routes are refused with the access-denied page', () => {
       }
     });
 
-    it('still runs the session step after a passing decision', async () => {
-      const recorded: Recorded = { headers: {} };
-      await (
-        await pageHandler(
-          {
-            authorize: () => ({ allowed: true }),
-            dashboardAuth: { secret: 's'.repeat(32), login: () => null },
+    it('takes an authorizer class, built through the request container', async () => {
+      class Access {
+        constructor(private allow: boolean) {}
+        authorize() {
+          return this.allow
+            ? true
+            : { allowed: false as const, reason: 'unauthenticated' as const };
+        }
+      }
+      for (const [allow, status] of [
+        [false, 401],
+        [true, undefined],
+      ] as const) {
+        const recorded: Recorded = { headers: {} };
+        const ctx = {
+          ...fakeCtx(recorded),
+          containerResolver: { make: async (C: typeof Access) => new C(allow) },
+        };
+        await (await pageHandler({ authorize: Access }, API))(ctx);
+        if (status) expect(recorded.status).toBe(status);
+        else expect([401, 403]).not.toContain(recorded.status);
+      }
+    });
+
+    it('takes a lazy import and runs the import once', async () => {
+      class Access {
+        authorize() {
+          return false;
+        }
+      }
+      let imports = 0;
+      const handler = await pageHandler(
+        {
+          authorize: async () => {
+            imports += 1;
+            return { default: Access };
           },
-          API,
-        )
-      )(fakeCtx(recorded));
-      expect(recorded.status).toBe(401);
-      expect(recorded.body).toMatchObject({ error: 'unauthorized', auth: { modes: ['login'] } });
+        },
+        API,
+      );
+      for (let i = 0; i < 2; i += 1) {
+        const recorded: Recorded = { headers: {} };
+        await handler(fakeCtx(recorded));
+        expect(recorded.status).toBe(403);
+        expect(recorded.body).toEqual({ error: 'forbidden' });
+      }
+      expect(imports).toBe(1);
+    });
+
+    it('redirects a page navigation on { redirectTo } and answers 401 JSON on the API', async () => {
+      const page: Recorded = { headers: {} };
+      const redirect = (url: string) => {
+        page.headers.location = url;
+      };
+      await (await pageHandler({ authorize: () => ({ redirectTo: '/auth/login' }) }))(
+        fakeCtx(page, { redirect }),
+      );
+      expect(page.headers.location).toBe('/auth/login');
+      expect(page.body).toBeUndefined();
+
+      const api: Recorded = { headers: {} };
+      await (await pageHandler({ authorize: () => ({ redirectTo: '/auth/login' }) }, API))(
+        fakeCtx(api),
+      );
+      expect(api.status).toBe(401);
+      expect(api.body).toEqual({ error: 'unauthenticated', redirectTo: '/auth/login' });
+      expect(api.headers.location).toBeUndefined();
     });
   });
 
@@ -616,161 +628,147 @@ describe('page routes are refused with the access-denied page', () => {
   });
 });
 
-/**
- * The built-in login page must work with its script dropped by a CSP (or JavaScript off): the
- * same `POST` answers JSON to the page's `fetch` and a redirect to a classic form submit.
- */
-describe('login routes: JSON for the script, redirects for a plain form', () => {
-  interface Recorded {
-    status?: number;
-    body?: unknown;
-    headers: Record<string, string>;
-    redirect?: { path: string; qs?: Record<string, string> };
-    cookie?: string;
+/** Who a refund or a dispute resolution is recorded against. */
+describe('auditActor', () => {
+  function ctx(user: Record<string, unknown> | null, authorization?: string) {
+    return {
+      ...(user !== undefined ? { auth: { user } } : {}),
+      request: {
+        header: (name: string) => (name === 'authorization' ? authorization : undefined),
+      },
+    } as never;
   }
 
-  function fakeCtx(
-    recorded: Recorded,
-    request: { body?: unknown; contentType?: string; qs?: Record<string, unknown>; nonce?: string },
+  it("names the app's signed-in user by email, then name, then id", () => {
+    expect(auditActor(ctx({ email: 'ana@x.dev', name: 'Ana', id: 7 }))).toBe('ana@x.dev');
+    expect(auditActor(ctx({ name: 'Ana', id: 7 }))).toBe('Ana');
+    expect(auditActor(ctx({ id: 7 }))).toBe('7');
+  });
+
+  it('says bearer for a token caller and leaves everyone else unattributed', () => {
+    expect(auditActor(ctx(null, 'Bearer t0ken'))).toBe('bearer');
+    expect(auditActor(ctx(null))).toBeUndefined();
+  });
+});
+
+/**
+ * The default when `authorize` is omitted: open outside production, every request a 403 in
+ * production, and ONE boot warning (in either environment) telling the host to set `authorize`.
+ */
+describe('the default when authorize is omitted', () => {
+  const API = '/payments/api/health';
+  const PAGE = '/payments';
+
+  async function boot(config: PaymentsDashboardConfig, inProduction: boolean) {
+    const { routes, router } = fakeRouter();
+    const warnings: string[] = [];
+    const logger = { warn: (message: string) => warnings.push(message) };
+    const app = {
+      inProduction,
+      config: { get: () => config },
+      booted: async (callback: () => Promise<void>) => {
+        await callback();
+      },
+      container: { make: async (name: string) => (name === 'logger' ? logger : router) },
+    } as unknown as ApplicationService;
+    await new DashboardProvider(app).boot();
+    const handler = (pattern: string) =>
+      routes.find((r) => r.pattern === pattern)?.handler as (ctx: unknown) => Promise<unknown>;
+    return { warnings, handler };
+  }
+
+  function ctx(
+    recorded: { status?: number; body?: unknown; headers?: Record<string, string> },
+    headers: Record<string, string> = {},
   ) {
-    const response = {
-      getHeader: (name: string) => recorded.headers[name.toLowerCase()],
-      status(code: number) {
-        recorded.status = code;
-        return this;
-      },
-      json(body: unknown) {
-        recorded.body = body;
-        return this;
-      },
-      header(name: string, value: string) {
-        recorded.headers[name.toLowerCase()] = value;
-        return this;
-      },
-      send(body: unknown) {
-        recorded.body = body;
-      },
-      redirect: () => {
-        let qs: Record<string, string> | undefined;
-        const chain = {
-          withQs(value: Record<string, string>) {
-            qs = value;
-            return chain;
-          },
-          toPath(path: string) {
-            recorded.redirect = qs ? { path, qs } : { path };
-          },
-        };
-        return chain;
-      },
-      plainCookie: (_name: string, value: string) => {
-        recorded.cookie = value;
-      },
-      ...(request.nonce !== undefined ? { nonce: request.nonce } : {}),
-    };
+    recorded.headers ??= {};
+    const sent = recorded.headers;
     return {
-      response,
       params: {},
       request: {
-        qs: () => request.qs ?? {},
-        body: () => request.body ?? {},
-        header: (name: string) =>
-          name.toLowerCase() === 'content-type' ? request.contentType : undefined,
-        url: () => '/payments',
-        plainCookie: () => undefined,
-        secure: () => false,
-        headers: () => ({}),
+        header: (name: string) => headers[name.toLowerCase()],
+        qs: () => ({ token: 'secret' }),
+        body: () => ({}),
+      },
+      response: {
+        getHeader: (name: string) => sent[name.toLowerCase()],
+        status(code: number) {
+          recorded.status = code;
+          return this;
+        },
+        json(body: unknown) {
+          recorded.body = body;
+          return this;
+        },
+        header(name: string, value: string) {
+          sent[name.toLowerCase()] = value;
+          return this;
+        },
+        send(body: unknown) {
+          recorded.body = body;
+        },
       },
     };
   }
 
-  const config: PaymentsDashboardConfig = {
-    dashboardAuth: {
-      secret: 's'.repeat(32),
-      login: (username, password) =>
-        username === 'ana' && password === 'pw' ? { id: 'u1', name: 'Ana' } : null,
-    },
-  };
-
-  async function handler(method: 'get' | 'post') {
-    const routes = await bootWith(config);
-    const route = routes.find((r) => r.pattern === '/payments/login' && r.method === method);
-    expect(route?.handler).toBeTypeOf('function');
-    return route?.handler as (ctx: unknown) => Promise<unknown>;
-  }
-
-  it('GET renders the page with the sanitized returnTo, the error flag and the CSP nonce', async () => {
-    const recorded: Recorded = { headers: {} };
-    await (await handler('get'))(
-      fakeCtx(recorded, { qs: { returnTo: '/payments/p/1', error: '1' }, nonce: 'n0nce' }),
-    );
-    expect(recorded.headers['content-type']).toBe('text/html; charset=utf-8');
-    expect(recorded.body).toContain('name="returnTo" value="/payments/p/1"');
-    expect(recorded.body).toContain('role="alert" style="display:block"');
-    expect(recorded.body).toContain('<script nonce="n0nce">');
-
-    const open: Recorded = { headers: {} };
-    await (await handler('get'))(fakeCtx(open, { qs: { returnTo: '//evil.com' } }));
-    expect(open.body).toContain('name="returnTo" value="/payments"');
-    expect(open.body).not.toContain('style="display:block"');
+  it('denies the API and the page with 403 in production, warning exactly once at boot', async () => {
+    const { warnings, handler } = await boot({}, true);
+    expect(warnings).toEqual([NO_AUTHORIZE_WARNING]);
+    for (let i = 0; i < 2; i += 1) {
+      const recorded: { status?: number; body?: unknown } = {};
+      await handler(API)(ctx(recorded));
+      expect(recorded.status).toBe(403);
+      expect(recorded.body).toEqual({ error: 'forbidden' });
+    }
+    const page: { status?: number; body?: unknown } = {};
+    await handler(PAGE)(ctx(page));
+    expect(page.status).toBe(403);
+    expect(page.body).toContain('<h1>Access denied</h1>');
+    expect(warnings).toHaveLength(1);
   });
 
-  it('POST as JSON keeps answering JSON', async () => {
-    const ok: Recorded = { headers: {} };
-    await (await handler('post'))(
-      fakeCtx(ok, {
-        contentType: 'application/json',
-        body: { username: 'ana', password: 'pw', returnTo: '/payments/p/1' },
-      }),
+  it('uses the shared wording', () => {
+    expect(NO_AUTHORIZE_WARNING).toBe(
+      '[@adonis-agora/payments] console has no `authorize` configured: it is open outside production and denies every request in production. Set `authorize` in config/payments_dashboard.ts.',
     );
-    expect(ok.status).toBe(200);
-    expect(ok.body).toEqual({ redirectTo: '/payments/p/1' });
-    expect(ok.cookie).toBeTypeOf('string');
-    expect(ok.redirect).toBeUndefined();
-
-    const bad: Recorded = { headers: {} };
-    await (await handler('post'))(
-      fakeCtx(bad, { contentType: 'application/json', body: { username: 'ana', password: 'x' } }),
-    );
-    expect(bad.status).toBe(401);
-    expect(bad.body).toEqual({ error: 'Invalid username or password.' });
   });
 
-  it('POST as a form redirects: to returnTo on success, back to the login page on failure', async () => {
-    const ok: Recorded = { headers: {} };
-    await (await handler('post'))(
-      fakeCtx(ok, {
-        contentType: 'application/x-www-form-urlencoded',
-        body: { username: 'ana', password: 'pw', returnTo: '/payments/p/1' },
-      }),
-    );
-    expect(ok.cookie).toBeTypeOf('string');
-    expect(ok.redirect).toEqual({ path: '/payments/p/1' });
-    expect(ok.body).toBeUndefined();
+  it('no longer accepts PAYMENTS_DASHBOARD_TOKEN or any token in production', async () => {
+    const saved = process.env.PAYMENTS_DASHBOARD_TOKEN;
+    process.env.PAYMENTS_DASHBOARD_TOKEN = 'secret';
+    try {
+      const { handler } = await boot({}, true);
+      const recorded: { status?: number; body?: unknown } = {};
+      await handler(API)(
+        ctx(recorded, { authorization: 'Bearer secret', 'x-payments-token': 'secret' }),
+      );
+      expect(recorded.status).toBe(403);
+    } finally {
+      if (saved === undefined) delete process.env.PAYMENTS_DASHBOARD_TOKEN;
+      else process.env.PAYMENTS_DASHBOARD_TOKEN = saved;
+    }
+  });
 
-    const bad: Recorded = { headers: {} };
-    await (await handler('post'))(
-      fakeCtx(bad, {
-        contentType: 'application/x-www-form-urlencoded; charset=UTF-8',
-        body: { username: 'ana', password: 'x', returnTo: '/payments/p/1' },
-      }),
-    );
-    expect(bad.cookie).toBeUndefined();
-    expect(bad.redirect).toEqual({
-      path: '/payments/login',
-      qs: { error: '1', returnTo: '/payments/p/1' },
-    });
+  it('is open outside production, and still warns once', async () => {
+    const { warnings, handler } = await boot({}, false);
+    expect(warnings).toEqual([NO_AUTHORIZE_WARNING]);
+    const recorded: { status?: number; body?: unknown } = {};
+    await handler(API)(ctx(recorded));
+    expect([401, 403]).not.toContain(recorded.status);
+  });
 
-    const malformed: Recorded = { headers: {} };
-    await (await handler('post'))(
-      fakeCtx(malformed, {
-        contentType: 'application/x-www-form-urlencoded',
-        body: { returnTo: 'https://evil.com' },
-      }),
-    );
-    expect(malformed.redirect).toEqual({
-      path: '/payments/login',
-      qs: { error: '1', returnTo: '/payments' },
-    });
+  it('does not warn when authorize is configured', async () => {
+    const { warnings } = await boot({ authorize: () => true }, true);
+    expect(warnings).toEqual([]);
+  });
+
+  it('gates machine access with authorizeByToken: 401 without the bearer, through with it', async () => {
+    const { handler } = await boot({ authorize: authorizeByToken({ token: 'secret' }) }, true);
+    const denied: { status?: number; body?: unknown } = {};
+    await handler(API)(ctx(denied));
+    expect(denied).toMatchObject({ status: 401, body: { error: 'unauthenticated' } });
+    const allowed: { status?: number; body?: unknown } = {};
+    await handler(API)(ctx(allowed, { authorization: 'Bearer secret' }));
+    expect([401, 403]).not.toContain(allowed.status);
   });
 });

@@ -28,8 +28,7 @@ and no extra package to install.
 <Callout title="It mounts at /payments, next to the machine endpoints">
 The dashboard shares its prefix with `POST /payments/webhook/:provider` and
 `GET /payments/client/status`, and that is safe for exactly one reason: **every route the provider
-registers is an exact path** — `/payments`, `/payments/assets/:file`, `/payments/api/…`, and the
-login routes. There is no SPA catch-all, so the dashboard's authorization guard can never end up in
+registers is an exact path** — `/payments`, `/payments/assets/:file` and `/payments/api/…`. There is no SPA catch-all, so the dashboard's authorization guard can never end up in
 front of a gateway's delivery endpoint.
 
 If you fork this and add a wildcard for client-side routing, the webhook route is what it swallows.
@@ -216,8 +215,8 @@ outcome that already happened at the bank. See below.
 ## Actions
 
 Three things can be changed from the console. All are `POST` (a refund reachable by URL is a refund
-a crawler can trigger) and all run through the same [`authorize`](#authorization) guard — and the
-`dashboardAuth` session, when configured — as every read.
+a crawler can trigger) and all run through the same [`authorize`](#authorization) guard as every
+read.
 
 They also carry a CSRF token. `@adonisjs/shield` guards every state-changing route of the host app,
 and the SPA sent none — so both POSTs were refused before they ever reached the console's own guard,
@@ -243,10 +242,10 @@ The local row is not rewritten. The gateway confirms a refund with a `payment.re
 that is what moves the row to `refunded` — writing it optimistically would show a refund that may
 never have settled.
 
-A successful refund writes an **audit row** naming the person who authorised it, the amount asked
-for and whether it was partial. `enforce()` had already verified exactly who was asking; until now
-that was thrown away and the only record was a diagnostic carrying a gateway id and an amount. A
-console with no `dashboardAuth` records `actor: null` — "unattributed", never an invented "system".
+A successful refund writes an **audit row** naming the person who made it, the amount asked for and
+whether it was partial. The actor is your app's signed-in user (`ctx.auth.user`'s `email`, `name` or
+`id`), `bearer` for a caller using a token, and `null` — "unattributed", never an invented "system" —
+when the request carries neither.
 A refund the gateway **refused** writes nothing: an audit of refunds that never happened is an audit
 nobody can trust.
 
@@ -321,46 +320,106 @@ export default defineConfig({
 | `enabled` | `true` | When `false`, no routes are registered at all. |
 | `path` | `'/payments'` | Route prefix. The HTML serves at the root; the JSON API at `<path>/api`. |
 | `currency` | `'BRL'` | ISO 4217 code the money columns render in. Does not change what is stored. |
-| `authorize` | see below | Per-request guard: `(ctx: HttpContext) => AuthorizeResult \| Promise<AuthorizeResult>` — a boolean or `{ allowed, reason? }`. |
-| `dashboardAuth` | absent | Opt-in session layer on top of `authorize`. The console's **Sign out** link exists only when this is set — it is the only configuration that registers a `<path>/logout` route. |
+| `authorize` | open outside production, `403` in production | Who may open the console: an inline function, an authorizer class, or a lazy import of one. See [Authorization](#authorization). |
+| `accessDenied` | the built-in page | What a browser sees when `authorize` refuses a page navigation. See [The access-denied page](#the-access-denied-page). |
 
 ### Authorization
 
-The default `authorize` is **open outside production**. In production it requires a bearer token
-equal to `PAYMENTS_DASHBOARD_TOKEN`, compared in constant time, and **denies when the variable is
-unset** — it fails closed. The token is read from an `Authorization: Bearer <token>` header, an
-`x-payments-token` header, or a `?token=` query param.
+The console has no login of its own. Operators sign in through your app, and `authorize` decides
+who may open the console, returning `{ redirectTo: '/login' }` to send a signed-out visitor to your
+sign-in page. When an API call answers `401`, the console UI follows its `redirectTo`, or reloads the
+page so the server answers the navigation.
 
-Replace it with your own guard. It answers with a boolean or an `AuthorizeDecision` — the same
-contract every Agora console takes:
+When `authorize` is omitted, the console is **open outside production** and **denies every request
+in production** (`403`, pages and API alike). The app logs one warning at boot:
 
-```ts
-interface AuthorizeDecision {
-  allowed: boolean
-  reason?: 'unauthenticated' | 'forbidden'
-}
-type AuthorizeResult = boolean | AuthorizeDecision
+```txt
+[@adonis-agora/payments] console has no `authorize` configured: it is open outside production and denies every request in production. Set `authorize` in config/payments_dashboard.ts.
 ```
 
-| The hook answers | Status |
-| --- | --- |
-| `true` or `{ allowed: true }` | let through |
-| `{ allowed: false, reason: 'unauthenticated' }` | `401` |
-| `{ allowed: false, reason: 'forbidden' }`, `{ allowed: false }` or `false` | `403` |
-| it throws | `403` |
-| it already answered (wrote a redirect) | that answer, untouched |
+`authorize` takes the same three forms as every Agora console. An inline function:
 
-A denial is JSON for an API call (`{ "error": "unauthorized" }` / `{ "error": "forbidden" }`), the
-[access-denied page](#the-access-denied-page) with the matching status for a browser:
-
-```ts
+```ts title="config/payments_dashboard.ts"
 export default defineConfig({
   authorize: async (ctx) => {
-    if (!(await ctx.auth.check())) return { allowed: false, reason: 'unauthenticated' }
+    if (!(await ctx.auth.check())) return { redirectTo: '/login' }
     return ctx.auth.user?.isAdmin === true
   },
 })
 ```
+
+A class, for an authorizer in its own file. It is built through the container, so `@inject()` works:
+
+```ts title="app/policies/console_access.ts"
+import { inject } from '@adonisjs/core'
+import type { HttpContext } from '@adonisjs/core/http'
+import type { ConsoleAuthorizer } from '@adonis-agora/payments/dashboard'
+import AuditService from '#services/audit_service'
+
+@inject()
+export default class ConsoleAccess implements ConsoleAuthorizer {
+  constructor(private audit: AuditService) {}
+
+  async authorize(ctx: HttpContext) {
+    const allowed = ctx.auth.user?.isAdmin === true
+    await this.audit.record('payments-console', ctx.auth.user, allowed)
+    return allowed
+  }
+}
+```
+
+```ts title="config/payments_dashboard.ts"
+import ConsoleAccess from '#policies/console_access'
+
+export default defineConfig({
+  authorize: ConsoleAccess,
+})
+```
+
+Or a lazy import of that class, so the config file does not load it at boot:
+
+```ts title="config/payments_dashboard.ts"
+export default defineConfig({
+  authorize: () => import('#policies/console_access'),
+})
+```
+
+Whatever the form, the answer is one of:
+
+```ts
+type ConsoleAuthorizeResult =
+  | boolean
+  | { allowed: true }
+  | { allowed: false; reason?: 'unauthenticated' | 'forbidden' }
+  | { redirectTo: string }
+```
+
+| The authorizer answers | Page | API |
+| --- | --- | --- |
+| `true` or `{ allowed: true }` | let through | let through |
+| `{ allowed: false, reason: 'unauthenticated' }` | `401` page | `401` |
+| `{ allowed: false, reason: 'forbidden' }`, `{ allowed: false }` or `false` | `403` page | `403` |
+| `{ redirectTo: '/login' }` | `302` to that path | `401` with `redirectTo` |
+| it throws | `403` page | `403` |
+| it already answered (wrote a redirect) | that answer, untouched | that answer, untouched |
+
+A denial is JSON for an API call (`{ "error": "forbidden" }` for a `403`,
+`{ "error": "unauthenticated" }` for a `401`, plus `"redirectTo"` when the authorizer answered one),
+the [access-denied page](#the-access-denied-page) with the matching status for a browser.
+
+For machine access (a script, a health probe), `authorizeByToken` allows a request whose
+`Authorization: Bearer <token>` header matches, compared in constant time, and answers `401`
+otherwise. It reads the header only. An empty or missing token throws when the config loads:
+
+```ts title="config/payments_dashboard.ts"
+import env from '#start/env'
+import { authorizeByToken, defineConfig } from '@adonis-agora/payments/dashboard'
+
+export default defineConfig({
+  authorize: authorizeByToken({ token: env.get('CONSOLE_TOKEN') }),
+})
+```
+
 
 With [`@adonis-agora/authz`](/docs/authz) the shared helper reads your user and roles for you — the
 same one every Agora console takes, so one RBAC gate reads identically across durable, telescope,
@@ -376,19 +435,16 @@ export default defineConfig({
 
 <Callout type="warn" title="This console shows revenue — and can move it">
 Payment amounts and customer ids are reachable through it, and the refund action moves money at your
-gateway. The default token gate is a floor for staging, not an answer for production — put a real
-guard in front of it.
+gateway. Set `authorize` to a real guard before you deploy.
 </Callout>
 
 ### The access-denied page
 
-A refused **API** request gets JSON (`403 { "error": "forbidden" }`, `401 { "error": "unauthorized" }`
-when `authorize` said `reason: 'unauthenticated'`, or
-`401 { "error": "unauthorized", "auth": { "modes": [...] } }` without a session) — that is what
-the console's own `fetch` calls expect. A refused **page** navigation — the console shell, its
-assets, or the Mode-A-only "open this from your app" case — gets a real page instead: a dark card
-in the console's visual language showing the status, a sentence explaining the refusal, a
-"Back to app" link and, when `dashboardAuth.login` is configured, a "Sign in" button. It carries
+A refused **API** request gets JSON (`403 { "error": "forbidden" }`, `401 { "error": "unauthenticated" }`
+when `authorize` said `reason: 'unauthenticated'`) — that is what the console's own `fetch` calls
+expect. A refused **page** navigation — the console shell or its assets — gets a real page instead:
+a dark card in the console's visual language showing the status, a sentence explaining the refusal,
+a "Back to app" link and, when you set `loginHref`, a "Sign in" button. It carries
 no inline script, so a nonce'd `script-src` CSP cannot break it (its one inline `<style>` picks up
 `@adonisjs/shield`'s request nonce).
 
@@ -402,7 +458,7 @@ export default defineConfig({
     message: 'Peça ao admin para liberar o console de pagamentos.',
     homeHref: '/admin',              // "Back to app"; default "/", `false` hides it
     homeLabel: 'Voltar',
-    loginHref: '/entrar',            // default: the built-in login page when one exists
+    loginHref: '/entrar',            // your app's sign-in; default: no "Sign in" button
     loginLabel: 'Entrar',
     accent: '#f59e0b',               // any CSS colour; default: the console's cyan
   },
@@ -410,7 +466,7 @@ export default defineConfig({
 ```
 
 Or replace it. Pass a function and it receives the refusal (`status`, `reason` —
-`'forbidden'`, `'unauthenticated'` or `'session-required'` — `basePath`, `loginHref`, and the CSP
+`'forbidden'` or `'unauthenticated'` — `basePath`, `loginHref`, and the CSP
 `nonce` when there is one) plus the `HttpContext`. Return an HTML string to have it served with the
 right status; answer the request yourself and return nothing to make the provider stand down:
 
@@ -428,38 +484,6 @@ export default defineConfig({
 
 An `authorize` hook that already wrote a redirect still wins — the provider never overwrites a
 `location` header, with or without `accessDenied`.
-
-### A session instead of a token
-
-`dashboardAuth` adds a signed session cookie on top of `authorize` (**both** must pass). It is
-opt-in: omit it and there are no auth routes and no cookie. Two hooks, either or both:
-
-- **`login`** — the console serves its own sign-in page at `<path>/login` and calls your hook to
-  verify the credentials. The right shape when the console stands alone.
-- **`session`** — your already-authenticated app calls the console's session endpoint, and your hook
-  reads whatever you already trust to identify the operator. No second login.
-
-```ts title="config/payments_dashboard.ts"
-export default defineConfig({
-  dashboardAuth: {
-    secret: env.get('PAYMENTS_DASHBOARD_SECRET'), // HMAC-SHA256 key, 32+ bytes
-    ttl: '8h',
-    login: async (username, password) => {
-      const user = await User.verifyCredentials(username, password).catch(() => null)
-      if (!user?.isAdmin) return null // null denies
-      return { id: String(user.id), name: user.fullName }
-    },
-  },
-})
-```
-
-With a session configured, an unauthenticated page navigation is redirected (`302`) to the login
-page and an unauthenticated API call gets `401`. The login page is a plain HTML form that works
-without JavaScript (a form submit is answered with a redirect — to the page the operator came
-from, or back to the form with the error shown) and whose inline script and style carry
-`@adonisjs/shield`'s request nonce, so a `script-src 'self' @nonce` policy keeps it working. `secret` is always required, plus at least one of
-`login`/`session` — a `dashboardAuth` missing either fails at boot rather than serving an ungated
-console.
 
 ### Content Security Policy
 
@@ -536,7 +560,7 @@ somebody asks:
 | `dispute.resolved` | someone closed a dispute the gateway will never close itself |
 
 `actor` is `null` when nothing authorised it in a human sense — a rejected delivery has none, and a
-console with no `dashboardAuth` cannot name one. `null` means **unattributed**, never "the system".
+request with no signed-in user or token cannot name one. `null` means **unattributed**, never "the system".
 
 `action` is a free string in the column, so an app recording its own actions with
 `store.recordAuditEvent(...)` sees them here too; the filter list is a UI convenience, not a

@@ -1,17 +1,18 @@
-import { timingSafeEqual } from 'node:crypto';
 import type { HttpContext } from '@adonisjs/core/http';
 import type {
   AccessDeniedOption as GenericAccessDeniedOption,
   AccessDeniedRenderer as GenericAccessDeniedRenderer,
 } from './access_denied_page.js';
-import {
-  type DashboardAuthOptions,
-  type ResolvedDashboardAuth,
-  resolveDashboardAuth,
-} from './auth.js';
-import type { AuthorizeResult } from './authorize_decision.js';
+import type { ConsoleAuthorize, ConsoleAuthorizeResult } from './console_authorize.js';
 
 export type { AuthorizeDecision, AuthorizeResult } from './authorize_decision.js';
+export type {
+  AuthorizeByTokenOptions,
+  ConsoleAuthorize,
+  ConsoleAuthorizeResult,
+  ConsoleAuthorizer,
+  ConsoleAuthorizerClass,
+} from './console_authorize.js';
 
 /**
  * The function form of {@link PaymentsDashboardConfig.accessDenied}: render (or answer) a refused
@@ -26,23 +27,21 @@ export type AccessDeniedRenderer = GenericAccessDeniedRenderer<HttpContext>;
 export type AccessDeniedOption = GenericAccessDeniedOption<HttpContext>;
 
 /**
- * Authorization guard for the dashboard. Runs before every dashboard route
- * (API + HTML). May be async (e.g. an auth lookup). Answer with:
+ * The inline-function form of the dashboard's `authorize` option. Runs before every dashboard
+ * route (API + HTML) and may be async. Answer with:
  *
  * - `true` / `{ allowed: true }` — let the request through;
  * - `{ allowed: false, reason: 'unauthenticated' }` — nobody is signed in: `401`;
- * - `{ allowed: false, reason: 'forbidden' }`, `{ allowed: false }` or `false` — `403`.
+ * - `{ allowed: false, reason: 'forbidden' }`, `{ allowed: false }` or `false` — `403`;
+ * - `{ redirectTo: '/login' }` — a page navigation is redirected (`302`), an API call gets `401`.
  *
- * A hook that throws is a `403`. A hook that already answered the request (wrote a
- * redirect — e.g. to your login page) keeps that answer; the provider writes nothing.
- * Page requests get the access-denied HTML page with the matching status; API requests
- * get `{ error: 'unauthorized' | 'forbidden' }`.
- *
- * It receives the AdonisJS {@link HttpContext}, so it can read the session,
- * a bearer token, an IP allow-list, etc. `@adonis-agora/authz`'s `authorizeByRoles`
- * fits here as-is.
+ * A hook that throws is a `403`. A hook that already answered the request (wrote a redirect)
+ * keeps that answer. `@adonis-agora/authz`'s `authorizeByRoles` fits here as-is. The option also
+ * takes an authorizer class or a lazy import of one: see {@link ConsoleAuthorize}.
  */
-export type AuthorizeHook = (ctx: HttpContext) => AuthorizeResult | Promise<AuthorizeResult>;
+export type AuthorizeHook = (
+  ctx: HttpContext,
+) => ConsoleAuthorizeResult | Promise<ConsoleAuthorizeResult>;
 
 /** Shape of `config/payments_dashboard.ts`. */
 export interface PaymentsDashboardConfig {
@@ -58,7 +57,7 @@ export interface PaymentsDashboardConfig {
    * It shares that prefix with the machine endpoints — `POST /payments/webhook/:provider`
    * and `GET /payments/client/status` — and does so safely, because every route this
    * provider registers is an EXACT path (`/payments`, `/payments/assets/:file`,
-   * `/payments/api/…`, login/session/logout). There is no SPA catch-all, so the dashboard's
+   * `/payments/api/…`). There is no SPA catch-all, so the dashboard's
    * `enforce` guard cannot reach a delivery it was never routed. If you ever add one, the
    * webhook route is what it would swallow, and a 403'd webhook looks exactly like a gateway
    * outage from the outside.
@@ -70,32 +69,22 @@ export interface PaymentsDashboardConfig {
    */
   currency?: string;
   /**
-   * Per-request authorization guard. Defaults to {@link defaultAuthorize}:
-   * allow everything OUTSIDE production, and in production require a bearer
-   * token matching the `PAYMENTS_DASHBOARD_TOKEN` env var (deny if it is unset).
-   */
-  authorize?: AuthorizeHook;
-  /**
-   * Optional built-in login screen. When set, the provider mounts a
-   * server-rendered `GET <path>/login` page plus `POST <path>/login` /
-   * `GET <path>/logout`, and stamps a session guard on the dashboard: an
-   * unauthenticated page navigation is redirected (`302`) to the login page and
-   * an unauthenticated API request gets `401`. The signed session cookie is
-   * minted only by the host's {@link DashboardAuthOptions.login} hook.
+   * Who may open the console: an inline function, an authorizer class (built through the
+   * container, so `@inject()` works), or a lazy import of one (`() => import('#policies/…')`).
+   * For machine access, use `authorizeByToken({ token })`.
    *
-   * This is ADDITIVE and composes WITH {@link authorize} (both must pass) — it
-   * does not replace it. Omit it entirely for no login/logout routes and no
-   * session guard. Missing `secret`/`login` fails closed at boot.
+   * Omitted: the console is open outside production and answers every request with `403` in
+   * production; the provider logs a one-time warning at boot saying so.
    */
-  dashboardAuth?: DashboardAuthOptions;
+  authorize?: ConsoleAuthorize;
   /**
-   * What a BROWSER sees when the guard refuses a page navigation (the SPA shell, its assets, or —
-   * Mode A only — a session-less visit). API requests are unaffected: they keep getting the JSON
-   * the SPA relies on (`403 { error: 'forbidden' }` / `401 { error: 'unauthorized', auth }`).
+   * What a BROWSER sees when the guard refuses a page navigation (the SPA shell or its assets).
+   * API requests are unaffected: they keep getting the JSON the SPA relies on
+   * (`403 { error: 'forbidden' }` / `401 { error: 'unauthenticated' }`).
    *
    * Omit it for the built-in page — a dark card in the console's own visual language, with the
-   * status, a sentence explaining the refusal, a "Back to app" link and, when `dashboardAuth.login`
-   * exists, a "Sign in" button. Pass an object to tweak that page (`brand`, `title`, `message`,
+   * status, a sentence explaining the refusal and a "Back to app" link (plus a "Sign in" button when
+   * you set `loginHref`). Pass an object to tweak that page (`brand`, `title`, `message`,
    * `homeHref`, `loginHref`, `accent`, …), or a function to render/answer it yourself — see
    * {@link AccessDeniedRenderer}. Either way, an `authorize` hook that already wrote a redirect
    * still wins: the provider never overwrites a `location` header.
@@ -108,69 +97,10 @@ export interface ResolvedPaymentsDashboardConfig {
   enabled: boolean;
   path: string;
   currency: string;
-  authorize: AuthorizeHook;
-  /** Resolved built-in login config, or `null` when `dashboardAuth` is unconfigured. */
-  dashboardAuth: ResolvedDashboardAuth | null;
+  /** The configured `authorize` as given, or `null` when omitted (open outside production, `403` in it). */
+  authorize: ConsoleAuthorize | null;
   /** The host's `accessDenied` option as given, or `null` for the built-in page with defaults. */
   accessDenied: AccessDeniedOption | null;
-}
-
-/**
- * Whether the process is running in production. Mirrors how AdonisJS reads the
- * environment without taking a hard dependency on its env service.
- */
-function isProduction(): boolean {
-  return (process.env.NODE_ENV ?? '').toLowerCase() === 'production';
-}
-
-/**
- * Extract a bearer token from an `Authorization: Bearer <token>` header, a
- * `token` query-string param, or an `x-payments-token` header — whichever is
- * present. Returns `undefined` when none is supplied.
- */
-function readToken(ctx: HttpContext): string | undefined {
-  const header = ctx.request.header('authorization');
-  if (header) {
-    const match = /^Bearer\s+(.+)$/i.exec(header);
-    if (match?.[1]) return match[1].trim();
-  }
-  const xHeader = ctx.request.header('x-payments-token');
-  if (xHeader) return xHeader.trim();
-  const qs = ctx.request.qs().token;
-  if (typeof qs === 'string' && qs.length > 0) return qs;
-  return undefined;
-}
-
-/**
- * Compare two secrets in constant time (guarding for equal byte-length first,
- * since {@link timingSafeEqual} throws on a length mismatch). Returns `false`
- * for any length difference, otherwise the timing-safe equality — so the token
- * check leaks neither a match nor the token's length via response time.
- */
-function secretsMatch(a: string, b: string): boolean {
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  if (bufA.length !== bufB.length) return false;
-  return timingSafeEqual(bufA, bufB);
-}
-
-/**
- * The default guard: open outside production; in production it requires a
- * bearer token equal to `PAYMENTS_DASHBOARD_TOKEN`. If that env var is unset in
- * production the dashboard is denied entirely (fail-closed) — you must opt in
- * by setting a token or supplying your own {@link AuthorizeHook}.
- *
- * Identical posture to `@adonis-agora/durable`'s `defaultAuthorize`, down to the
- * constant-time compare; only the env var name differs.
- */
-export function defaultAuthorize(ctx: HttpContext): boolean {
-  if (!isProduction()) return true;
-  const expected = process.env.PAYMENTS_DASHBOARD_TOKEN;
-  if (!expected) return false;
-  const provided = readToken(ctx);
-  if (provided === undefined) return false;
-  // Constant-time compare to remove the timing side-channel from the token check.
-  return secretsMatch(provided, expected);
 }
 
 /** Apply defaults to a partial config, producing a fully-resolved one. */
@@ -184,10 +114,7 @@ export function resolveConfig(
     enabled: config.enabled ?? true,
     path: trimmed === '/' ? '' : trimmed,
     currency: config.currency ?? 'BRL',
-    authorize: config.authorize ?? defaultAuthorize,
-    // Validate + resolve now so a misconfigured secret/login fails closed at boot,
-    // not on the first login attempt. `null` when `dashboardAuth` is omitted.
-    dashboardAuth: resolveDashboardAuth(config.dashboardAuth),
+    authorize: config.authorize ?? null,
     accessDenied: config.accessDenied ?? null,
   };
 }

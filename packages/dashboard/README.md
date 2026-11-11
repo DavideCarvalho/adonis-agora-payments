@@ -44,13 +44,15 @@ export default defineConfig({
 })
 ```
 
-**Auth defaults to the same posture as `@adonis-agora/durable`'s console**: open outside production;
-in production it requires a bearer token equal to `PAYMENTS_DASHBOARD_TOKEN`, and denies everything
-when that variable is unset. Replace `authorize` with your own guard — it returns `true`/`false` or
+**Without `authorize` the console is open outside production and answers `403` to every request in
+production** (with a warning at boot). Set `authorize` to your own guard: an inline
+function, an authorizer class (built through the container, so `@inject()` works), or a lazy import
+`() => import('#policies/console_access')`. It answers `true`/`false`,
 `{ allowed, reason?: 'unauthenticated' | 'forbidden' }` (`401` for `unauthenticated`, `403` for any
-other denial or a throw) — and/or add the optional
-`dashboardAuth` session gate (a built-in login page and/or an "open the console from your app"
-endpoint) on top of it.
+other denial or a throw) or `{ redirectTo }`. For machine access use
+`authorizeByToken({ token: env.get('CONSOLE_TOKEN') })` (bearer header only). Sign-in is your app's
+own: return `{ redirectTo: '/login' }` for a signed-out visitor. When an API call answers `401`, the
+console follows its `redirectTo`, or reloads so the server answers the navigation.
 
 ## URLs
 
@@ -65,7 +67,7 @@ wider than the viewport.
 
 The provider hands the SPA its config as a `<script type="application/json">` data block, never an
 executable inline script, so `script-src 'self'` (with or without a nonce) is all the console needs.
-That block is the only way the SPA learns its mount, API base, currency and auth surface.
+That block is the only way the SPA learns its mount, API base and currency.
 
 ## Money
 

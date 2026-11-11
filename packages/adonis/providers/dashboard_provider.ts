@@ -12,14 +12,9 @@ import {
 } from '../src/dashboard/access_denied_page.js';
 import { createRefundAction, createReplayAction } from '../src/dashboard/actions.js';
 import {
-  performLogin,
-  performSession,
-  type ResolvedDashboardAuth,
-  readSession,
-  SESSION_COOKIE_NAME,
-  sanitizeReturnTo,
-} from '../src/dashboard/auth.js';
-import { runAuthorize } from '../src/dashboard/authorize_decision.js';
+  type ConsoleAuthorizeDecision,
+  resolveConsoleAuthorize,
+} from '../src/dashboard/console_authorize.js';
 import {
   type PaymentsDashboardConfig,
   type ResolvedPaymentsDashboardConfig,
@@ -45,7 +40,6 @@ import {
   subscriptions,
   webhookEvents,
 } from '../src/dashboard/handlers.js';
-import { renderLoginPage } from '../src/dashboard/login_page.js';
 import { contentTypeFor, renderIndexHtml } from '../src/dashboard/spa.js';
 import type { BillingHandlers, PaymentsConfig } from '../src/define_config.js';
 import { PaymentsManager } from '../src/payments_manager.js';
@@ -74,6 +68,10 @@ function spaDirectory(): string {
   spaDir ??= fileURLToPath(new URL('../assets/spa/', import.meta.url));
   return spaDir;
 }
+
+/** Logged once at boot when `authorize` is omitted. Same wording in every Agora console. */
+export const NO_AUTHORIZE_WARNING =
+  '[@adonis-agora/payments] console has no `authorize` configured: it is open outside production and denies every request in production. Set `authorize` in config/payments_dashboard.ts.';
 
 /**
  * Mounts the payments dashboard into an AdonisJS app: the `@adonis-agora/payments-dashboard` React
@@ -106,24 +104,29 @@ function spaDirectory(): string {
  * - `POST /api/disputes/:gatewayId/resolve`          -> record how a dispute ended, and who said so
  * - `POST /api/webhook-events/:gatewayEventId/retry` -> re-run a failed event's handlers
  *
- * Plus, when `dashboardAuth` is configured, `GET|POST <path>/login`, `POST <path>/session` and
- * `GET <path>/logout`.
+ * Sign-in is the app's own: the console has no login page. `authorize` may answer
+ * `{ redirectTo: '/login' }` to send a page navigation to the app's sign-in.
  *
- * With `enabled: false` this provider registers NOTHING — not the SPA, not the API, not the auth
- * routes. The dashboard is then completely absent from the app's route table.
+ * With `enabled: false` this provider registers NOTHING — not the SPA, not the API. The dashboard is then completely absent from the app's route table.
  */
 export default class PaymentsDashboardProvider {
   constructor(protected app: ApplicationService) {}
 
-  /** Warn once so a throwing `login`/`session` hook doesn't spam the logs on every failed attempt. */
-  private warnedOnHookThrow = false;
+  /** Warn once so a throwing `authorize` hook doesn't spam the logs on every request. */
   private warnedOnAuthorizeThrow = false;
+  /** The `authorize` option turned into one guard (a lazy import is memoized inside it). */
+  private authorizeGuard: (ctx: HttpContext) => Promise<ConsoleAuthorizeDecision> = async () => ({
+    allowed: false,
+    status: 403,
+    reason: 'forbidden',
+  });
 
   async boot() {
     const config = resolveConfig(
       this.app.config.get<PaymentsDashboardConfig>('payments_dashboard', {}),
     );
     if (!config.enabled) return;
+    this.authorizeGuard = await this.resolveGuard(config);
 
     // Route registration can't happen synchronously in `boot()`: the router singleton isn't
     // committed until the app's "booted" hooks run, which fire strictly AFTER every provider's
@@ -136,13 +139,6 @@ export default class PaymentsDashboardProvider {
 
   private registerRoutes(router: HttpRouterService, config: ResolvedPaymentsDashboardConfig): void {
     const apiBase = `${config.path}/api`;
-
-    // Built-in `dashboardAuth` (Mode A `session` and/or Mode B `login`, opt-in). Registered ONLY
-    // when configured. These endpoints are public (behind NEITHER guard): they MINT the session
-    // the guard checks for.
-    if (config.dashboardAuth) {
-      this.registerAuthRoutes(router, config, config.dashboardAuth);
-    }
 
     this.registerSpaRoutes(router, config, apiBase);
 
@@ -168,10 +164,10 @@ export default class PaymentsDashboardProvider {
           const deps: Deps = {
             store,
             currency: config.currency,
-            // WHO is asking. The guard has already verified a signed session carrying a user;
-            // passing it through is what lets a refund and a dispute resolution be recorded
-            // against a person instead of against nobody. Absent when this deployment
-            // configures no `dashboardAuth` — recorded as "unattributed", never invented.
+            // WHO is asking: the app's signed-in user (`ctx.auth.user`), or `bearer` for a
+            // token caller. It lets a refund and a dispute resolution be recorded against a
+            // person. Absent when nobody is identifiable — recorded as "unattributed", never
+            // invented.
             ...(guard.actor !== undefined ? { actor: guard.actor } : {}),
             // Resolved lazily and only for the routes that need it: a console whose payments
             // manager is unreachable must still serve every read.
@@ -372,15 +368,7 @@ export default class PaymentsDashboardProvider {
         return ctx.response
           .header('content-type', 'text/html; charset=utf-8')
           .header('cache-control', 'no-store, must-revalidate')
-          .send(
-            renderIndexHtml(
-              html,
-              config.path,
-              apiBase,
-              config.currency,
-              config.dashboardAuth ? { modes: config.dashboardAuth.modes } : null,
-            ),
-          );
+          .send(renderIndexHtml(html, config.path, apiBase, config.currency));
       })
       .as('payments_dashboard.index');
 
@@ -406,98 +394,21 @@ export default class PaymentsDashboardProvider {
   }
 
   /**
-   * Mount the built-in `dashboardAuth` endpoints under `basePath`. All are public (no guard): they
-   * create/destroy the session the {@link enforce} guard checks for.
-   *
-   * - `GET  <base>/login`   -> the server-rendered login page (Mode B only).
-   * - `POST <base>/login`   -> verifies credentials via the host `login` hook and mints the cookie.
-   * - `POST <base>/session` -> Mode A: verifies the HOST APP's own auth (off the raw request) via
-   *    the `session` hook and mints the cookie. `204` on success, uniform `401` on denial.
-   * - `GET  <base>/logout`  -> clears the cookie and redirects to the login page (Mode B) or the
-   *    dashboard root (Mode A only).
+   * The `authorize` option turned into one guard. Omitted: open outside production, every request
+   * refused (`403`) in production; either way it says so once at boot (the provider boots once).
    */
-  private registerAuthRoutes(
-    router: HttpRouterService,
+  private async resolveGuard(
     config: ResolvedPaymentsDashboardConfig,
-    auth: ResolvedDashboardAuth,
-  ): void {
-    const loginPath = `${config.path}/login`;
-    const sessionPath = `${config.path}/session`;
-    const logoutPath = `${config.path}/logout`;
-
-    if (auth.login) {
-      router
-        .get(loginPath, async (ctx) => {
-          ctx.response.header('content-type', 'text/html; charset=utf-8');
-          ctx.response.header('cache-control', 'no-store, must-revalidate');
-          const qs = ctx.request.qs();
-          const nonce = cspNonce(ctx);
-          return ctx.response.send(
-            renderLoginPage(config.path, {
-              ...(nonce !== undefined ? { nonce } : {}),
-              error: qs.error !== undefined,
-              returnTo: qs.returnTo,
-            }),
-          );
-        })
-        .as('payments_dashboard.login.page');
-
-      // Two callers: the page's own `fetch` (JSON in, JSON out — `{ redirectTo }` / `{ error }`)
-      // and, with JavaScript off or its inline script dropped by a CSP, the same page as a classic
-      // form post (form-encoded in, a redirect out: to `returnTo` on success, back to the login
-      // page with `?error` on failure). Same hook, same cookie, same uniform failure either way.
-      router
-        .post(loginPath, async (ctx) => {
-          const body = ctx.request.body();
-          const outcome = await performLogin(auth, body, config.path);
-          const form = isFormPost(ctx);
-          const backToLogin = () =>
-            ctx.response
-              .redirect()
-              .withQs({
-                error: '1',
-                returnTo: sanitizeReturnTo(
-                  (body as { returnTo?: unknown } | null)?.returnTo,
-                  config.path || '/',
-                ),
-              })
-              .toPath(loginPath);
-          if (outcome.kind === 'bad-request') {
-            if (form) return backToLogin();
-            return ctx.response.status(400).json({ error: outcome.message });
-          }
-          if (outcome.kind === 'unauthorized') {
-            await this.warnHookThrow(outcome.hookError);
-            if (form) return backToLogin();
-            return ctx.response.status(401).json({ error: outcome.message });
-          }
-          this.writeSessionCookie(ctx, auth, outcome.cookieValue);
-          if (form) return ctx.response.redirect().toPath(outcome.redirectTo);
-          return ctx.response.status(200).json({ redirectTo: outcome.redirectTo });
-        })
-        .as('payments_dashboard.login.submit');
+  ): Promise<(ctx: HttpContext) => Promise<ConsoleAuthorizeDecision>> {
+    if (config.authorize) return resolveConsoleAuthorize(config.authorize);
+    try {
+      const logger = await this.app.container.make('logger');
+      logger.warn(NO_AUTHORIZE_WARNING);
+    } catch {
+      // Logging is best-effort: a missing logger must not stop the app from booting.
     }
-
-    if (auth.session) {
-      router
-        .post(sessionPath, async (ctx) => {
-          const outcome = await performSession(auth, ctx.request.request);
-          if (outcome.kind === 'unauthorized') {
-            await this.warnHookThrow(outcome.hookError);
-            return ctx.response.status(401).json({ error: 'unauthorized' });
-          }
-          this.writeSessionCookie(ctx, auth, outcome.cookieValue);
-          return ctx.response.status(204).send('');
-        })
-        .as('payments_dashboard.session.mint');
-    }
-
-    router
-      .get(logoutPath, async (ctx) => {
-        ctx.response.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
-        return ctx.response.redirect().toPath(auth.login ? loginPath : config.path || '/');
-      })
-      .as('payments_dashboard.logout');
+    if (this.app.inProduction !== true) return async () => ({ allowed: true });
+    return async () => ({ allowed: false, status: 403, reason: 'forbidden' });
   }
 
   private async warnAuthorizeThrow(hookError: unknown): Promise<void> {
@@ -512,79 +423,54 @@ export default class PaymentsDashboardProvider {
     }
   }
 
-  private async warnHookThrow(hookError: unknown): Promise<void> {
-    if (hookError === undefined || this.warnedOnHookThrow) return;
-    this.warnedOnHookThrow = true;
-    const message = hookError instanceof Error ? hookError.message : String(hookError);
-    const logger = await this.app.container.make('logger');
-    logger.warn(`dashboardAuth login/session hook threw; treating as denial. ${message}`);
-  }
-
   /**
-   * Run the guards for a dashboard resource. Composes the `authorize` hook (bearer token/custom)
-   * with the optional `dashboardAuth` session guard — BOTH must pass:
+   * Run the `authorize` gate for a dashboard resource:
    *
-   * 1. `authorize` denies -> `401` when it answered `{ allowed: false, reason: 'unauthenticated' }`,
+   * - `authorize` answered `{ redirectTo }` -> `302` there for a `page` request, `401` JSON for an
+   *    `api` request. `authorize` denies -> `401` when it answered `{ allowed: false, reason: 'unauthenticated' }`,
    *    `403` otherwise (`false`, `{ allowed: false }`, `reason: 'forbidden'`, or a thrown hook):
    *    the built-in (or host-customised) access-denied PAGE for a `page` request,
-   *    `{ error: 'unauthorized' | 'forbidden' }` JSON for an `api` request. A hook that already
+   *    `{ error: 'unauthenticated' | 'forbidden' }` JSON for an `api` request (a redirect answers
+   *    `401 { error: 'unauthenticated', redirectTo }`). A hook that already
    *    answered (a redirect, a queued body) keeps its answer.
-   * 2. `dashboardAuth` configured AND no valid session -> for a `page` request, redirect `302` to
-   *    the login page (Mode B) carrying a sanitized `returnTo`, or the `401` "open this console
-   *    from your app" page (Mode A only); for an `api` request,
-   *    `401 { error: 'unauthorized', auth: { modes } }`.
    *
    * Returns `allowed: false` (and has already written the response) when the request must
-   * short-circuit. On success it also carries WHO passed the gate: the session's user, which
-   * the write handlers record against a refund or a dispute resolution. `undefined` when this
-   * deployment configures no `dashboardAuth` — there is genuinely nobody to name, and inventing
-   * one would be worse than an honest "unattributed".
+   * short-circuit. On success it also carries WHO passed the gate ({@link auditActor}), which the
+   * write handlers record against a refund or a dispute resolution.
    */
   private async enforce(
     config: ResolvedPaymentsDashboardConfig,
     ctx: HttpContext,
     mode: 'page' | 'api',
   ): Promise<{ allowed: boolean; actor?: string }> {
-    // Never `if (!(await config.authorize(ctx)))`: a `{ allowed: false }` decision is truthy.
-    const decision = await runAuthorize(config.authorize, ctx);
+    // Never `if (!(await authorize(ctx)))`: a `{ allowed: false }` decision is truthy.
+    const decision = await this.authorizeGuard(ctx);
     if (!decision.allowed) {
-      if (decision.hookError !== undefined) await this.warnAuthorizeThrow(decision.hookError);
+      if (decision.status === 403 && decision.error !== undefined) {
+        await this.warnAuthorizeThrow(decision.error);
+      }
+      if (decision.status === 302) {
+        if (responseAnswered(ctx)) return { allowed: false };
+        if (mode === 'page') ctx.response.redirect(decision.redirectTo);
+        else {
+          ctx.response
+            .status(401)
+            .json({ error: 'unauthenticated', redirectTo: decision.redirectTo });
+        }
+        return { allowed: false };
+      }
       if (mode === 'page') {
         await this.denyPage(ctx, config, { status: decision.status, reason: decision.reason });
       } else if (!responseAnswered(ctx)) {
         ctx.response
           .status(decision.status)
-          .json({ error: decision.status === 401 ? 'unauthorized' : 'forbidden' });
+          .json({ error: decision.status === 401 ? 'unauthenticated' : 'forbidden' });
       }
       return { allowed: false };
     }
 
-    const auth = config.dashboardAuth;
-    if (!auth) return { allowed: true };
-
-    const session = readSession(auth, this.readSessionCookie(ctx));
-    // The display name when the host supplied one, the stable id otherwise. `sub` alone is
-    // unambiguous but often unreadable; a name alone is readable and not unique.
-    if (session) {
-      return {
-        allowed: true,
-        actor: session.name !== undefined ? `${session.name} <${session.sub}>` : session.sub,
-      };
-    }
-
-    if (mode === 'page') {
-      if (auth.login) {
-        const returnTo = ctx.request.url(true);
-        ctx.response.redirect().withQs('returnTo', returnTo).toPath(`${config.path}/login`);
-        return { allowed: false };
-      }
-      // Mode A only: there's no login page to send the browser to — this deployment expects the
-      // host app to mint a session via `POST <path>/session` before ever navigating here.
-      await this.denyPage(ctx, config, { status: 401, reason: 'session-required' });
-      return { allowed: false };
-    }
-    ctx.response.status(401).json({ error: 'unauthorized', auth: { modes: auth.modes } });
-    return { allowed: false };
+    const actor = auditActor(ctx);
+    return actor !== undefined ? { allowed: true, actor } : { allowed: true };
   }
 
   /**
@@ -604,7 +490,6 @@ export default class PaymentsDashboardProvider {
     const info: AccessDeniedInfo = {
       ...denial,
       basePath: config.path,
-      ...(config.dashboardAuth?.login ? { loginHref: `${config.path}/login` } : {}),
       ...(nonce !== undefined ? { nonce } : {}),
     };
     const html = await resolveAccessDeniedPage(info, config.accessDenied, ctx, answered);
@@ -614,22 +499,6 @@ export default class PaymentsDashboardProvider {
       .header('content-type', 'text/html; charset=utf-8')
       .header('cache-control', 'no-store, must-revalidate')
       .send(html);
-  }
-
-  private readSessionCookie(ctx: HttpContext): string | undefined {
-    const value = ctx.request.plainCookie(SESSION_COOKIE_NAME, undefined, false);
-    return typeof value === 'string' && value !== '' ? value : undefined;
-  }
-
-  private writeSessionCookie(ctx: HttpContext, auth: ResolvedDashboardAuth, value: string): void {
-    ctx.response.plainCookie(SESSION_COOKIE_NAME, value, {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: ctx.request.secure(),
-      path: '/',
-      maxAge: Math.floor(auth.ttlMs / 1000),
-      encode: false,
-    });
   }
 }
 
@@ -656,13 +525,20 @@ function cspNonce(ctx: HttpContext): string | undefined {
 }
 
 /**
- * Whether a login `POST` came from a classic HTML form submit (form-encoded — JavaScript off, or
- * the page's inline script dropped by a CSP) rather than the page's own JSON `fetch`. Decides
- * whether the reply is a redirect (a browser navigating) or JSON (a script awaiting it).
+ * Who a console action is attributed to: the app's signed-in user (`ctx.auth.user`'s `email`,
+ * `name` or `id`, read structurally — this package does not depend on `@adonisjs/auth`), `'bearer'`
+ * for a caller with an `Authorization` header and no user, else `undefined` ("unattributed").
  */
-function isFormPost(ctx: HttpContext): boolean {
-  const type = ctx.request.header('content-type') ?? '';
-  return type.includes('application/x-www-form-urlencoded') || type.includes('multipart/form-data');
+export function auditActor(ctx: HttpContext): string | undefined {
+  const user = (ctx as unknown as { auth?: { user?: Record<string, unknown> | null } }).auth?.user;
+  if (user) {
+    for (const key of ['email', 'name', 'id'] as const) {
+      const value = user[key];
+      if (typeof value === 'string' && value !== '') return value;
+      if (typeof value === 'number') return String(value);
+    }
+  }
+  return ctx.request.header('authorization') !== undefined ? 'bearer' : undefined;
 }
 
 /** Adapt an AdonisJS `HttpContext` to the framework-light {@link ApiRequest}. */

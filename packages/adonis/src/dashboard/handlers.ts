@@ -53,11 +53,9 @@ export interface Deps {
   /**
    * WHO is making this request, as the provider's `enforce()` guard already knew them.
    *
-   * Per-request, unlike everything else on `Deps`. The guard has verified a signed session
-   * carrying a user before any handler runs, and until now it threw that away — so the only
-   * record of a refund issued from this console was a diagnostic naming a gateway id, an amount
-   * and no person at all. `undefined` on a console with no `dashboardAuth` configured, which is
-   * recorded honestly as "unattributed" rather than invented.
+   * Per-request, unlike everything else on `Deps`: the app's signed-in user (`ctx.auth.user`), or
+   * `bearer` for a token caller. `undefined` when nobody is identifiable, which is recorded
+   * honestly as "unattributed" rather than invented.
    */
   actor?: string;
   /**
@@ -743,7 +741,7 @@ function auditJson(row: AuditEventListItem) {
   return {
     id: row.id,
     action: row.action,
-    /** `null` is "unattributed" — a console with no `dashboardAuth` cannot name anybody. */
+    /** `null` is "unattributed" — the request carried no identifiable user. */
     actor: row.actor,
     provider: row.provider,
     subjectType: row.subjectType,
@@ -1078,7 +1076,7 @@ export async function refundPayment(deps: Deps, req: ApiRequest): Promise<ApiRes
     case 'ok': {
       // WHO refunded WHAT. The only record of a console refund used to be a diagnostic carrying
       // a gateway id, a provider and an amount — and no actor at all, even though `enforce()`
-      // had already verified exactly who authorised the request. The payment row will not carry
+      // already knew who made the request. The payment row will not carry
       // it either: the gateway's webhook moves that row and it names no person. Partial refunds
       // make it sharper still, now that several of them can land on one payment.
       const audit = await deps.store.recordAuditEvent({

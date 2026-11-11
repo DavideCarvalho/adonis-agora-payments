@@ -678,8 +678,7 @@ describe('payments dashboard API (integration)', () => {
           qs: () => ({}),
           body: () => ({}),
           url: () => '/payments',
-          plainCookie: () => undefined,
-          secure: () => false,
+          header: () => undefined,
           headers: () => ({}),
         },
       };

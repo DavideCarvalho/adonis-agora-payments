@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from 'react';
-import { authSurface, uiBase } from '../client/payments-client';
 import { Activity } from './Activity';
 import { Customers } from './Customers';
 import { Disputes } from './Disputes';
@@ -50,9 +49,6 @@ function useHashRoute(): [Route, (next: Route) => void] {
 export function App() {
   const [route, navigate] = useHashRoute();
   const key = screenKey(route);
-  // Only a deployment with `dashboardAuth` has a session to end — and a logout route at all. On
-  // one without, the link was a 404 waiting to be clicked.
-  const auth = authSurface();
 
   /** Switching tabs by hand: no seed — each screen opens on its own sensible default. */
   const openScreen = (screen: Route['screen']) => navigate({ screen });
@@ -90,14 +86,6 @@ export function App() {
               this app.
             </p>
           </div>
-          {auth !== null && (
-            <a
-              href={`${uiBase()}/logout`}
-              className="rounded-sm border border-line px-2 py-1 text-xs text-zinc-400 hover:bg-panel-2 hover:text-zinc-200"
-            >
-              Sign out
-            </a>
-          )}
         </header>
 
         <Segmented

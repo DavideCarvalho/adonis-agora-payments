@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   apiBase,
-  authSurface,
   buildQuery,
   CONFIG_ELEMENT_ID,
   displayCurrency,
@@ -39,19 +38,17 @@ afterEach(() => {
 });
 
 describe('the injected config block', () => {
-  it('is where the base, api, currency and auth surface come from', () => {
+  it('is where the base, api and currency come from', () => {
     // The provider speaks through a JSON data block, because a host CSP with `script-src 'self'
     // 'nonce-…'` refuses an inline script and the console then 404s on every request.
     injectConfig({
       base: '/ops/billing',
       api: '/ops/billing/api',
       currency: 'USD',
-      auth: { modes: ['login'] },
     });
     expect(uiBase()).toBe('/ops/billing');
     expect(apiBase()).toBe('/ops/billing/api');
     expect(displayCurrency()).toBe('USD');
-    expect(authSurface()).toEqual({ modes: ['login'] });
   });
 
   it('ignores window globals, which no provider sets any more', () => {
@@ -59,19 +56,12 @@ describe('the injected config block', () => {
     w.__PAYMENTS_BASE__ = '/stale';
     w.__PAYMENTS_API__ = '/stale/api';
     w.__PAYMENTS_CURRENCY__ = 'USD';
-    w.__PAYMENTS_AUTH__ = { modes: ['login'] };
     try {
       expect(uiBase()).toBe('/payments');
       expect(apiBase()).toBe('/payments/api');
       expect(displayCurrency()).toBe('BRL');
-      expect(authSurface()).toBeNull();
     } finally {
-      for (const key of [
-        '__PAYMENTS_BASE__',
-        '__PAYMENTS_API__',
-        '__PAYMENTS_CURRENCY__',
-        '__PAYMENTS_AUTH__',
-      ]) {
+      for (const key of ['__PAYMENTS_BASE__', '__PAYMENTS_API__', '__PAYMENTS_CURRENCY__']) {
         Reflect.deleteProperty(window, key);
       }
     }
@@ -99,6 +89,38 @@ describe('base resolution', () => {
     injectConfig({ base: '' });
     expect(uiBase()).toBe('');
     expect(apiBase()).toBe('/api');
+  });
+});
+
+describe('a 401 from the console', () => {
+  /** A stand-in `window` whose `location.href` the client can assign without jsdom navigating. */
+  function fakeWindow(): { location: { href: string } } {
+    const win = { location: { href: 'http://localhost/payments' } };
+    vi.stubGlobal('window', win);
+    return win;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('goes where authorize asked when the 401 carries a redirectTo', async () => {
+    stubFetch({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: 'unauthenticated', redirectTo: '/auth/login' }),
+    });
+    const win = fakeWindow();
+    await expect(paymentsClient.health()).rejects.toThrow('Not signed in');
+    expect(win.location.href).toBe('/auth/login');
+  });
+
+  it('reloads the console page on a bare 401, so the server answers the navigation', async () => {
+    stubFetch({ ok: false, status: 401, json: async () => ({ error: 'unauthenticated' }) });
+    injectConfig({ base: '/ops/billing' });
+    const win = fakeWindow();
+    await expect(paymentsClient.health()).rejects.toThrow('Not signed in');
+    expect(win.location.href).toBe('/ops/billing');
   });
 });
 

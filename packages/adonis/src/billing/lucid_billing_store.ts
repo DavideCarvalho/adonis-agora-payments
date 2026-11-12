@@ -173,6 +173,32 @@ function affectedRows(result: unknown): number {
   return Number(first ?? 0);
 }
 
+/**
+ * Whether a driver error says the table or column does not exist — on any dialect this store
+ * runs on — rather than some other failure.
+ */
+function isMissingRelationError(error: unknown): boolean {
+  const e = error as { code?: unknown; errno?: unknown; message?: unknown } | null;
+  if (e === null || typeof e !== 'object') return false;
+  // Postgres `undefined_table`, `undefined_column`, `invalid_schema_name`.
+  if (e.code === '42P01' || e.code === '42703' || e.code === '3F000') return true;
+  // MySQL `ER_NO_SUCH_TABLE`, `ER_BAD_FIELD_ERROR`, `ER_BAD_DB_ERROR`.
+  if (e.errno === 1146 || e.errno === 1054 || e.errno === 1049) return true;
+  // SQLite reports both as a message under the generic `SQLITE_ERROR`.
+  return typeof e.message === 'string' && /no such (table|column)/i.test(e.message);
+}
+
+/** The part of a billing model the capability probe uses. */
+interface ProbedModel {
+  table: string;
+  connection?: string;
+  query(): {
+    pojo(): {
+      whereRaw(sql: string): PromiseLike<unknown> & { select(column: string): unknown };
+    };
+  };
+}
+
 type CustomerInstance = InstanceType<typeof DefaultCustomer>;
 type SubscriptionInstance = InstanceType<typeof DefaultSubscription>;
 type PaymentInstance = InstanceType<typeof DefaultPayment>;
@@ -280,11 +306,10 @@ export class LucidBillingStore
    * everywhere this package is installed. An app that upgrades the package before running it
    * must keep taking webhooks — a payment that records no reference, and a ledger row the
    * dashboard cannot replay, are both survivable; a `column ... does not exist` on every
-   * gateway delivery is not. So the write asks once, per column, and skips what is not there.
+   * gateway delivery is not. So the write asks once, per column, and skips what is not there —
+   * out loud. See {@link LucidBillingStore.#probe}.
    *
-   * Keyed by `table.column`. One `information_schema` read per column per process, then
-   * nothing. A probe that itself fails answers "present": dropping data quietly is the worse
-   * of the two failures, and the real INSERT will then say exactly what is wrong.
+   * Keyed by connection, table and column. One probe per column per process, then nothing.
    */
   #columnCache: Map<string, Promise<boolean>> = new Map();
 
@@ -381,21 +406,11 @@ export class LucidBillingStore
     return this.#schemaReady;
   }
 
-  async #hasColumn(
-    model: typeof DefaultPayment | typeof DefaultWebhookEvent | typeof DefaultDispute,
-    column: string,
-  ) {
-    const key = `${model.table}.${column}`;
-    let answer = this.#columnCache.get(key);
-    if (answer === undefined) {
-      answer = model
-        .query()
-        .client.columnsInfo(model.table)
-        .then((columns) => Object.hasOwn(columns as Record<string, unknown>, column))
-        .catch(() => true);
-      this.#columnCache.set(key, answer);
-    }
-    return answer;
+  /**
+   * Does the table this model reads have `column`? See {@link LucidBillingStore.#probe}.
+   */
+  async #hasColumn(model: ProbedModel, column: string): Promise<boolean> {
+    return this.#probe(model, column);
   }
 
   /**
@@ -405,16 +420,12 @@ export class LucidBillingStore
    * reason: `billing_disputes` arrives in a THIRD migration (an earlier schema), so an
    * app that upgrades the package before running it has a processor that wants to write
    * disputes and no table to write them to. The dispute row is ADDITIONAL — the payment row
-   * still moves, the diagnostics still publish — so a missing table skips the write and
-   * every dispute read answers empty, rather than failing every gateway delivery with
-   * `relation "billing_disputes" does not exist` until someone notices.
-   *
-   * Reuses the column cache and the column probe: `columnsInfo` on a table that does not
-   * exist yields no columns at all. A probe that itself fails answers "present", so the real
-   * query then says exactly what is wrong.
+   * still moves, the diagnostics still publish — so with `autoCreateSchema: false` a missing
+   * table skips the write (with a warning) and every dispute read answers empty, rather than
+   * failing every gateway delivery with `relation "billing_disputes" does not exist`.
    */
   async #hasDisputesTable(): Promise<boolean> {
-    return this.#hasTable(this.#disputeModel);
+    return this.#probe(this.#disputeModel, undefined);
   }
 
   /**
@@ -426,29 +437,68 @@ export class LucidBillingStore
    * filing no note.
    */
   async #hasAuditTable(): Promise<boolean> {
-    return this.#hasTable(this.#auditEventModel);
+    return this.#probe(this.#auditEventModel, undefined);
   }
 
   /**
-   * "Does this table exist?", cached beside the column answers and resolved the same way:
-   * `columnsInfo` on a missing table yields no columns at all. A probe that itself fails
-   * answers "present", so the real query then says exactly what is wrong.
+   * "Can this model read `column` (or, without one, its table at all)?", answered once per
+   * process and cached.
+   *
+   * The probe is a query THROUGH THE MODEL — `SELECT <column> FROM <model table> WHERE 1 = 0` —
+   * not a catalog lookup. A catalog lookup (`columnsInfo`) filters by the connection's current
+   * schema and takes the table name verbatim, so a model whose `static table` is qualified
+   * (`billing.billing_disputes`) or that lives in another schema came back with no columns,
+   * read as "not installed", and every dispute and audit write was skipped without a word. The
+   * model query resolves the table exactly the way the real INSERT will, whatever the schema,
+   * search path or connection.
+   *
+   * Only a "no such table/column" error counts as missing. Any other failure answers "present",
+   * so the real query then says exactly what is wrong.
+   *
+   * A missing answer is never silent:
+   * - `autoCreateSchema` on: the store just ran the DDL, so the model reading a table that is not
+   *   there means it points somewhere the DDL did not create (another connection, schema or
+   *   table name). That is a configuration error, and the caller gets it as one.
+   * - `autoCreateSchema` off: the app owns the DDL and has not run it yet — the documented
+   *   upgrade window. The write is skipped, as before, and a warning names what is missing and
+   *   how to add it, once per process.
    */
-  async #hasTable(model: {
-    table: string;
-    query(): { client: { columnsInfo(table: string): Promise<unknown> } };
-  }): Promise<boolean> {
-    const key = `${model.table}.*`;
+  #probe(model: ProbedModel, column: string | undefined): Promise<boolean> {
+    const key = `${model.connection ?? ''}|${model.table}|${column ?? '*'}`;
     let answer = this.#columnCache.get(key);
     if (answer === undefined) {
-      answer = model
-        .query()
-        .client.columnsInfo(model.table)
-        .then((columns) => Object.keys(columns as Record<string, unknown>).length > 0)
-        .catch(() => true);
+      const builder = model.query().pojo().whereRaw('1 = 0');
+      if (column !== undefined) builder.select(column);
+      answer = Promise.resolve(builder).then(
+        () => true,
+        (error: unknown) => {
+          if (!isMissingRelationError(error)) return true;
+          return this.#missing(model, column, error);
+        },
+      );
       this.#columnCache.set(key, answer);
     }
     return answer;
+  }
+
+  /** What to do with a probe that found nothing. See {@link LucidBillingStore.#probe}. */
+  #missing(model: ProbedModel, column: string | undefined, error: unknown): false {
+    const what =
+      column === undefined ? `table "${model.table}"` : `column "${model.table}.${column}"`;
+    const where = model.connection === undefined ? '' : ` on connection "${model.connection}"`;
+    const cause = error instanceof Error ? error.message : String(error);
+    if (this.#autoCreateSchema) {
+      throw new Error(
+        `[@adonis-agora/payments] The ${what}${where} does not exist, although autoCreateSchema created the billing tables. ` +
+          `The model reads a table the DDL did not create — check its connection and \`static table\`. (${cause})`,
+        { cause: error },
+      );
+    }
+    console.warn(
+      `[@adonis-agora/payments] The ${what}${where} does not exist and autoCreateSchema is off, so the billing data that goes there is NOT being stored. ` +
+        'Run a migration that calls `createBillingTables` (see the troubleshooting docs), then restart.',
+    );
+    return false;
   }
 
   /** `gateway_id`s of the customers owned by one of the scope's tenants. */

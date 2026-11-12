@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.6
+
+### Minor Changes
+
+- [#228](https://github.com/DavideCarvalho/adonis-agora-payments/pull/228) [`7f8a8a2`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/7f8a8a2d3560d5aca56dfc7fb20e59f7277021c4) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - The payments console joins the Agora console switcher. It registers itself in the app's `'agora.consoles'` registry (created by whichever console boots first), and its heading becomes a menu to the other Agora consoles the viewer may open, each checked with that console's own `authorize` (300 ms each, in parallel; `ctx.agoraProbe` is `true` while they run). Ctrl/Cmd-K searches every console the viewer may open; payments answers payments (gateway id or reference), customers (gateway id or owner id) and subscriptions (gateway id or reference, opening that subscription), only within the organizations the viewer may see. New routes: `GET <path>/api/consoles` and `GET <path>/api/consoles/search?q=`, behind the console's `authorize`. `registerAgoraConsole` is exported from `@adonis-agora/payments/dashboard` for consoles an app mounts itself. Nothing changes for an app with a single console.
+
 ## 1.0.0-rc.5
 
 ### Minor Changes

@@ -1,7 +1,9 @@
 import { BaseCommand, flags } from '@adonisjs/core/ace';
 import type { CommandOptions } from '@adonisjs/core/types/ace';
+import { resolvePaymentsTenancy, tenancySlot, tenantOwnerTypes } from '../src/agora/tenancy.js';
 import type { BillingStore } from '../src/billing/billing_store.js';
 import { resolveBillingStore } from '../src/billing/resolve_store.js';
+import { scopedBillingStore } from '../src/billing/scoped_store.js';
 import type { PaymentsConfig } from '../src/define_config.js';
 import type { PaymentsDriver } from '../src/driver.js';
 import { PaymentsManager } from '../src/payments_manager.js';
@@ -163,6 +165,81 @@ export async function reconcileSubscriptions(
   return { updated, unchanged, skipped, missing };
 }
 
+/** What {@link backfillCustomerOwners} reports. */
+export interface OwnerBackfillResult {
+  updated: number;
+  /** Customers that already had an owner (left alone). */
+  owned: number;
+  /** Customers with no owner the source could name. */
+  unresolved: number;
+}
+
+/**
+ * Give customers recorded with no owner one, so tenancy can scope them: one customer
+ * (`customer` + `ownerId`), or every ownerless customer whose stored `metadata[ownerKey]` names
+ * its owner. A customer that already has an owner is never changed.
+ */
+export async function backfillCustomerOwners(
+  store: BillingStore,
+  options: {
+    ownerType: string;
+    customer?: string | undefined;
+    ownerId?: string | undefined;
+    ownerKey?: string | undefined;
+    provider?: string | undefined;
+    log: SyncLogger;
+  },
+): Promise<OwnerBackfillResult> {
+  const result: OwnerBackfillResult = { updated: 0, owned: 0, unresolved: 0 };
+  const assign = async (gatewayId: string, provider: string, ownerId: string | undefined) => {
+    if (ownerId === undefined || ownerId === '') {
+      result.unresolved += 1;
+      return;
+    }
+    await store.saveCustomer({ gatewayId, provider, ownerType: options.ownerType, ownerId });
+    result.updated += 1;
+  };
+  if (options.customer !== undefined) {
+    const row = (await store.listCustomers({ gatewayId: options.customer, size: 1 }))[0];
+    if (row === undefined) {
+      options.log.warning(`${options.customer}: no such customer recorded`);
+      result.unresolved += 1;
+    } else if (row.ownerId !== null) {
+      result.owned += 1;
+    } else {
+      await assign(row.gatewayId, row.provider, options.ownerId);
+    }
+  } else {
+    for (let pageNumber = 1; ; pageNumber += 1) {
+      const page = await store.listCustomers({
+        size: PAGE_SIZE,
+        page: pageNumber,
+        ...(options.provider !== undefined ? { provider: options.provider } : {}),
+      });
+      for (const row of page) {
+        if (row.ownerId !== null) {
+          result.owned += 1;
+          continue;
+        }
+        const full = (await store.findCustomerByGatewayId(row.gatewayId)) as {
+          metadata?: Record<string, unknown> | null;
+        } | null;
+        const value = options.ownerKey ? full?.metadata?.[options.ownerKey] : undefined;
+        await assign(
+          row.gatewayId,
+          row.provider,
+          typeof value === 'string' || typeof value === 'number' ? String(value) : undefined,
+        );
+      }
+      if (page.length < PAGE_SIZE) break;
+    }
+  }
+  options.log.info(
+    `owners: ${result.updated} assigned, ${result.owned} already owned, ${result.unresolved} unresolved`,
+  );
+  return result;
+}
+
 export default class PaymentsSync extends BaseCommand {
   static override commandName = 'payments:sync';
   static override description = 'Reconcile local billing records with a payment provider';
@@ -184,7 +261,59 @@ export default class PaymentsSync extends BaseCommand {
   })
   declare subscriptions?: boolean;
 
+  @flags.string({
+    description: 'Only this organization (tenant) id: its customers and subscriptions',
+  })
+  declare tenant?: string;
+
+  @flags.string({
+    description: 'Kind of the --tenant (default: organization)',
+    flagName: 'tenant-kind',
+  })
+  declare tenantKind?: string;
+
+  @flags.string({
+    description:
+      'Give ownerless customers this owner type (with --customer + --owner-id, or --all + --owner-key)',
+    flagName: 'backfill-owner',
+  })
+  declare backfillOwner?: string;
+
+  @flags.string({ description: 'Owner id for --backfill-owner --customer', flagName: 'owner-id' })
+  declare ownerId?: string;
+
+  @flags.string({
+    description: 'Customer metadata key holding the owner id, for --backfill-owner --all',
+    flagName: 'owner-key',
+  })
+  declare ownerKey?: string;
+
   override async run(): Promise<void> {
+    const slot = tenancySlot();
+    if (this.tenant !== undefined && slot?.withTenant !== undefined) {
+      // Work started from here (handlers, jobs) is stamped with that organization.
+      await slot.withTenant({ id: this.tenant, kind: this.tenantKind ?? 'organization' }, () =>
+        this.#run(),
+      );
+      return;
+    }
+    await this.#run();
+  }
+
+  /** The configured store, confined to `--tenant` when one is given. */
+  async #store(config: PaymentsConfig): Promise<BillingStore> {
+    const store = await resolveBillingStore(config);
+    if (this.tenant === undefined) return store;
+    const tenancy = resolvePaymentsTenancy(config.tenancy === false ? undefined : config.tenancy);
+    const types = tenancy.enabled ? tenantOwnerTypes(tenancy) : [this.tenantKind ?? 'organization'];
+    return scopedBillingStore(store, {
+      tenantOwnerTypes: types,
+      tenantIds: [this.tenant],
+      includeNull: false,
+    });
+  }
+
+  async #run(): Promise<void> {
     const config = this.app.config.get<PaymentsConfig>('payments', {});
     if (config.billing?.enabled === false) {
       this.logger.error(
@@ -192,12 +321,30 @@ export default class PaymentsSync extends BaseCommand {
       );
       return;
     }
+    if (this.backfillOwner !== undefined) {
+      if (!(this.customer && this.ownerId) && !(this.all && this.ownerKey)) {
+        this.logger.error(
+          'Pass --backfill-owner=<OwnerType> with --customer=<id> --owner-id=<id>, or with --all --owner-key=<metadata key>.',
+        );
+        return;
+      }
+      await backfillCustomerOwners(await resolveBillingStore(config), {
+        ownerType: this.backfillOwner,
+        customer: this.customer,
+        ownerId: this.ownerId,
+        ownerKey: this.ownerKey,
+        provider: this.provider,
+        log: this.logger,
+      });
+      return;
+    }
+
     const manager = await this.app.container.make(PaymentsManager);
 
     // Assinaturas ANTES do guard de customer: este modo não itera customers, e exigir
     // `--all`/`--customer` para rodá-lo seria pedir um argumento que ele ignora.
     if (this.subscriptions) {
-      await reconcileSubscriptions(manager, await resolveBillingStore(config), {
+      await reconcileSubscriptions(manager, await this.#store(config), {
         provider: this.provider,
         log: this.logger,
       });
@@ -218,7 +365,14 @@ export default class PaymentsSync extends BaseCommand {
     // The CONFIGURED store, not a fresh Lucid one: an app that pointed `billing.store`
     // somewhere else would otherwise have its reconcile write to a database the rest of
     // the billing layer never reads.
-    const store = await resolveBillingStore(config);
+    const store = await this.#store(config);
+    if (this.tenant !== undefined && this.customer !== undefined) {
+      const [own] = await store.listCustomers({ gatewayId: this.customer, size: 1 });
+      if (own === undefined) {
+        this.logger.error(`${this.customer} is not a customer of organization ${this.tenant}.`);
+        return;
+      }
+    }
 
     const customers = this.customer
       ? [this.customer]

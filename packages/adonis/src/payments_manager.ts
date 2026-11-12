@@ -1,6 +1,20 @@
+import {
+  currentTenantFilter,
+  type PaymentsTenancyOption,
+  type ResolvedPaymentsTenancy,
+  resolvePaymentsTenancy,
+  type TenantOwner,
+} from './agora/tenancy.js';
 import { type Arrears, type ArrearsQuery, arrears } from './billing/arrears.js';
-import type { BillingStore } from './billing/billing_store.js';
-import { createUsageApi, type UsageApi } from './billing/usage.js';
+import type { BillingStore, CustomerListItem } from './billing/billing_store.js';
+import { ownerScopeOfFilter } from './billing/owner_scope.js';
+import { scopedBillingStore } from './billing/scoped_store.js';
+import { createUsageApi, type UsageApi, type UsageStore } from './billing/usage.js';
+import {
+  type CurrentCustomerOptions,
+  findOwnedCustomer,
+  resolveCurrentOwner,
+} from './current_customer.js';
 import type { PaymentsConfig } from './define_config.js';
 import type { PaymentsDriver } from './driver.js';
 import type { InvoiceManager } from './invoice/invoice_manager.js';
@@ -28,6 +42,10 @@ export interface PaymentsManagerOptions {
   store?: () => BillingStore;
   /** Explicit default provider name (`config.default`). */
   defaultName?: string;
+  /** `config.tenancy`: organizations as tenants. Default `'inherit'`. */
+  tenancy?: PaymentsTenancyOption;
+  /** `config.userOwnerType`: the owner type of a user's customer. Default `'User'`. */
+  userOwnerType?: string;
 }
 
 export class PaymentsManager {
@@ -45,8 +63,12 @@ export class PaymentsManager {
   #subscriptionsConfig: SubscriptionsConfig | undefined;
   #store: (() => BillingStore) | undefined;
   #subscriptionsApi: SubscriptionsApi | undefined;
+  #tenancyOption: PaymentsTenancyOption | undefined;
+  #userOwnerType: string;
 
   constructor(options: PaymentsManagerOptions) {
+    this.#tenancyOption = options.tenancy;
+    this.#userOwnerType = options.userOwnerType ?? 'User';
     this.#drivers = options.drivers;
     this.#invoices = options.invoices;
     this.#methods = options.methods ?? {};
@@ -117,6 +139,75 @@ export class PaymentsManager {
   }
 
   /**
+   * The `tenancy` option resolved against `config/context.ts`, read on every call (cheap), so it
+   * follows the context the app booted with.
+   */
+  tenancy(): ResolvedPaymentsTenancy {
+    return resolvePaymentsTenancy(this.#tenancyOption);
+  }
+
+  /**
+   * Who is paying right now: the active organization when tenancy is on and there is one, else
+   * the signed-in user (`{ type: 'User', id }`, see `userOwnerType`), else `null`.
+   *
+   * ```ts
+   * const owner = payments.currentOwner({ ctx })
+   * await ensureCustomer(driver, null, { name, email }, { store, owner })
+   * ```
+   */
+  currentOwner(options: Pick<CurrentCustomerOptions, 'ctx'> = {}): TenantOwner | null {
+    return resolveCurrentOwner({
+      tenancy: this.tenancy(),
+      userOwnerType: this.#userOwnerType,
+      ...(options.ctx !== undefined ? { ctx: options.ctx } : {}),
+    });
+  }
+
+  /**
+   * The billing customer of {@link currentOwner}: the active organization's customer, else the
+   * signed-in user's, else `null` (nobody, or they never became a customer).
+   *
+   * ```ts
+   * const customer = await payments.currentCustomer({ ctx })
+   * if (!customer) return response.redirect('/billing/setup')
+   * ```
+   */
+  async currentCustomer(options: CurrentCustomerOptions = {}): Promise<CustomerListItem | null> {
+    const owner = this.currentOwner(options);
+    if (owner === null) return null;
+    const providers =
+      options.provider !== undefined
+        ? [options.provider]
+        : [this.#defaultName, ...this.#drivers.keys()].filter(
+            (name, index, all) => name !== '' && all.indexOf(name) === index,
+          );
+    return findOwnedCustomer(this.#requireStore('Reading the current customer'), owner, providers);
+  }
+
+  /**
+   * The billing store as the current request may see it: with tenancy on, only the active
+   * organization's customers, payments, subscriptions, usage and disputes (or only rows with no
+   * organization, for a request without one); a row outside it reads as not found. Tenancy off,
+   * or inside `Context.allTenants()`, it is the store itself.
+   */
+  scopedStore(): BillingStore {
+    const store = this.#requireStore('Reading billing data');
+    const tenancy = this.tenancy();
+    return scopedBillingStore(store, ownerScopeOfFilter(tenancy, currentTenantFilter(tenancy)));
+  }
+
+  #requireStore(what: string): BillingStore {
+    const store = this.#store?.();
+    if (store === undefined) {
+      throw new Error(
+        `[payments] ${what} needs the billing store, and none is configured. ` +
+          'Enable `billing` in config/payments.ts.',
+      );
+    }
+    return store;
+  }
+
+  /**
    * Record metered usage and read it back against a quota, per subscription, per customer or
    * per application resource (`scope`), over a subscription's billing cycle:
    *
@@ -134,15 +225,14 @@ export class PaymentsManager {
    * The store is resolved on each call, not here, so asking for the API never fails on its own.
    */
   usage(): UsageApi {
-    return createUsageApi(() => {
-      const store = this.#store?.();
-      if (store === undefined) {
-        throw new Error(
-          '[payments] Metered usage needs the billing store, and none is configured. ' +
-            'Enable `billing` in config/payments.ts.',
-        );
-      }
-      return store;
+    const store = (): UsageStore => this.#requireStore('Metered usage');
+    return createUsageApi(store, {
+      // With tenancy on, usage with no `customerId` is the current customer's. Off: unchanged.
+      currentCustomerId: async () => {
+        if (!this.tenancy().enabled) return undefined;
+        const customer = await this.currentCustomer();
+        return customer === null ? null : customer.gatewayId;
+      },
     });
   }
 

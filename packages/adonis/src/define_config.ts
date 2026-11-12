@@ -1,3 +1,4 @@
+import type { PaymentsTenancyOption } from './agora/tenancy.js';
 import type { BillingStore } from './billing/billing_store.js';
 import type { BillingModels } from './billing/lucid_billing_store.js';
 import type { WebhookHandler } from './billing/webhook_processor.js';
@@ -351,6 +352,19 @@ export interface PaymentsConfig {
    * `true` opts every provider out at once, which is almost never what you want.
    */
   allowUnverifiedWebhooks?: boolean | string[];
+  /**
+   * Organizations (tenants). `'inherit'` (default) follows `tenancy.enabled` in
+   * `config/context.ts`; `false` keeps payments out of it. When on, a customer created with no
+   * explicit `owner` belongs to the active organization, `payments.currentCustomer()` answers the
+   * organization's customer, app webhook handlers run inside the customer's organization, and the
+   * console shows each viewer their own organizations. See the Tenancy docs.
+   */
+  tenancy?: PaymentsTenancyOption;
+  /**
+   * The `billing_customers.owner_type` a signed-in USER's customer is recorded under, for
+   * `payments.currentCustomer()` outside an organization. Default `'User'`.
+   */
+  userOwnerType?: string;
   /** Invoice emission settings. */
   invoice?: InvoiceSectionConfig;
   /**

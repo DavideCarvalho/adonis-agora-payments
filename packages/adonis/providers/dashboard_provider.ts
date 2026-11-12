@@ -3,7 +3,15 @@ import { basename, resolve as resolvePath } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { HttpContext } from '@adonisjs/core/http';
 import type { ApplicationService, HttpRouterService } from '@adonisjs/core/types';
-import type { BillingStore } from '../src/billing/billing_store.js';
+import {
+  currentTenantFilter,
+  type ResolvedPaymentsTenancy,
+  resolvePaymentsTenancy,
+  tenantLabels,
+  tenantOwnerTypes,
+} from '../src/agora/tenancy.js';
+import { AUDIT_ACTIONS, type BillingStore } from '../src/billing/billing_store.js';
+import { OwnerScopingUnsupportedError, scopedBillingStore } from '../src/billing/scoped_store.js';
 import type { WebhookHandler } from '../src/billing/webhook_processor.js';
 import { WebhookProcessor } from '../src/billing/webhook_processor.js';
 import {
@@ -41,6 +49,11 @@ import {
   webhookEvents,
 } from '../src/dashboard/handlers.js';
 import { contentTypeFor, renderIndexHtml } from '../src/dashboard/spa.js';
+import {
+  type ConsoleTenantScope,
+  ownerScopeOfConsole,
+  resolveConsoleTenantScope,
+} from '../src/dashboard/tenant_scope.js';
 import type { BillingHandlers, PaymentsConfig } from '../src/define_config.js';
 import { PaymentsManager } from '../src/payments_manager.js';
 import { getBillingStore } from '../src/services/main.js';
@@ -121,6 +134,11 @@ export default class PaymentsDashboardProvider {
     reason: 'forbidden',
   });
 
+  /** Each request's `authorize` verdict, read again for the console's organization scope. */
+  private readonly decisions = new WeakMap<HttpContext, ConsoleAuthorizeDecision>();
+  /** Each request's resolved organization scope (`null` = tenancy off). */
+  private readonly scopes = new WeakMap<HttpContext, ConsoleTenantScope | null>();
+
   async boot() {
     const config = resolveConfig(
       this.app.config.get<PaymentsDashboardConfig>('payments_dashboard', {}),
@@ -146,6 +164,8 @@ export default class PaymentsDashboardProvider {
       handler: (d: Deps, req: ApiRequest) => Promise<ApiResponse>,
       needsActions = false,
       needsCapabilities = false,
+      /** A view over every organization (health, the webhook ledger, the audit trail). */
+      everyOrganization = false,
     ) => {
       return async (ctx: HttpContext) => {
         const guard = await this.enforce(config, ctx, 'api');
@@ -159,6 +179,19 @@ export default class PaymentsDashboardProvider {
           return ctx.response.status(503).json({
             error: error instanceof Error ? error.message : 'billing store unavailable',
           });
+        }
+        // Organizations (tenancy): confine every read to what this viewer may see.
+        const scope = await this.consoleTenantScope(ctx, store);
+        if (scope !== null && scope.ids !== undefined) {
+          if (everyOrganization) {
+            return ctx.response.status(404).json({
+              error: 'This view spans every organization; it is not available in one.',
+            });
+          }
+          store = scopedBillingStore(
+            store,
+            ownerScopeOfConsole(scope, tenantOwnerTypes(this.tenancy())),
+          );
         }
         try {
           const deps: Deps = {
@@ -177,6 +210,9 @@ export default class PaymentsDashboardProvider {
           const result = await handler(deps, toApiRequest(ctx));
           return ctx.response.status(result.status).json(result.body);
         } catch (error) {
+          if (error instanceof OwnerScopingUnsupportedError) {
+            return ctx.response.status(501).json({ error: error.message });
+          }
           return ctx.response
             .status(500)
             .json({ error: error instanceof Error ? error.message : 'internal error' });
@@ -184,7 +220,9 @@ export default class PaymentsDashboardProvider {
       };
     };
 
-    router.get(`${apiBase}/health`, json(health)).as('payments_dashboard.health');
+    router
+      .get(`${apiBase}/health`, json(health, false, false, true))
+      .as('payments_dashboard.health');
     router.get(`${apiBase}/overview`, json(overview)).as('payments_dashboard.overview');
     router
       .get(`${apiBase}/payments`, json(payments, false, true))
@@ -196,7 +234,9 @@ export default class PaymentsDashboardProvider {
       .get(`${apiBase}/payments/:gatewayId`, json(paymentDetail, false, true))
       .as('payments_dashboard.payments.show');
     router.get(`${apiBase}/customers`, json(customers)).as('payments_dashboard.customers');
-    router.get(`${apiBase}/audit`, json(auditEvents)).as('payments_dashboard.audit');
+    router
+      .get(`${apiBase}/audit`, json(auditEvents, false, false, true))
+      .as('payments_dashboard.audit');
     // There is still no "fight" or "accept" route, on purpose: whether to submit evidence or
     // refund is a business rule that stays in the app's code. The `resolve` POST below is a
     // different thing — it records an outcome that already happened at the gateway.
@@ -205,7 +245,7 @@ export default class PaymentsDashboardProvider {
       .get(`${apiBase}/subscriptions`, json(subscriptions))
       .as('payments_dashboard.subscriptions');
     router
-      .get(`${apiBase}/webhook-events`, json(webhookEvents))
+      .get(`${apiBase}/webhook-events`, json(webhookEvents, false, false, true))
       .as('payments_dashboard.webhook_events');
     // `needsCapabilities`: é a única rota que precisa do manager só para LER o que os drivers
     // suportam. Resolvê-lo em toda leitura pagaria o custo em páginas que não usam o dado.
@@ -220,7 +260,10 @@ export default class PaymentsDashboardProvider {
       .post(`${apiBase}/payments/:gatewayId/refund`, json(refundPayment, true))
       .as('payments_dashboard.payments.refund');
     router
-      .post(`${apiBase}/webhook-events/:gatewayEventId/retry`, json(retryWebhookEvent, true))
+      .post(
+        `${apiBase}/webhook-events/:gatewayEventId/retry`,
+        json(retryWebhookEvent, true, false, true),
+      )
       .as('payments_dashboard.webhook_events.retry');
     // No `needsActions`: this one calls no gateway. It records how a dispute ENDED — the loop a
     // gateway that publishes no lost-dispute event never closes on its own — so it stays
@@ -228,6 +271,154 @@ export default class PaymentsDashboardProvider {
     router
       .post(`${apiBase}/disputes/:gatewayId/resolve`, json(resolveDispute))
       .as('payments_dashboard.disputes.resolve');
+
+    // Organizations (tenancy): which ones this viewer may pick, and an audited record of a switch.
+    // Mounted only with tenancy on; without it the console has no organization control.
+    if (this.tenancy().enabled) this.registerTenantRoutes(router, config, apiBase);
+  }
+
+  private registerTenantRoutes(
+    router: HttpRouterService,
+    config: ResolvedPaymentsDashboardConfig,
+    apiBase: string,
+  ): void {
+    router
+      .get(`${apiBase}/tenants`, async (ctx: HttpContext) => {
+        if (!(await this.enforce(config, ctx, 'api')).allowed) return;
+        ctx.response.header('cache-control', 'private, no-store');
+        try {
+          return ctx.response.status(200).json(await this.tenantPicker(ctx));
+        } catch (error) {
+          return ctx.response
+            .status(500)
+            .json({ error: error instanceof Error ? error.message : 'internal error' });
+        }
+      })
+      .as('payments_dashboard.tenants');
+    router
+      .post(`${apiBase}/tenants/:id/select`, async (ctx: HttpContext) => {
+        const guard = await this.enforce(config, ctx, 'api');
+        if (!guard.allowed) return;
+        const id = String(ctx.params.id);
+        const store = findBillingStoreQuietly();
+        const scope = await this.consoleTenantScope(ctx, store, id);
+        const allowed =
+          scope === null ||
+          id === '*' ||
+          scope.authorized === '*' ||
+          (Array.isArray(scope.authorized) && scope.authorized.includes(id));
+        if (allowed && scope !== null) {
+          await store
+            ?.recordAuditEvent({
+              action: AUDIT_ACTIONS.tenantSelected,
+              actor: guard.actor ?? null,
+              subjectType: 'organization',
+              subjectId: id,
+            })
+            .catch(() => {});
+        }
+        return ctx.response
+          .status(allowed ? 200 : 404)
+          .json(allowed ? { tenant: id } : { error: 'not found' });
+      })
+      .as('payments_dashboard.tenants.select');
+  }
+
+  /** `config/payments.ts`'s `tenancy`, resolved against `config/context.ts`. */
+  private tenancy(): ResolvedPaymentsTenancy {
+    return resolvePaymentsTenancy(this.app.config.get<PaymentsConfig>('payments', {}).tenancy);
+  }
+
+  /**
+   * The organizations this viewer may see, once per request, or `null` with tenancy off.
+   * `authorize` may grant `tenants` (`'*'` or a list); otherwise it is the viewer's own active
+   * organization. A `?tenant=` pick outside the grant reads as empty and is audited.
+   */
+  private async consoleTenantScope(
+    ctx: HttpContext,
+    store: BillingStore | undefined,
+    pickOverride?: string,
+  ): Promise<ConsoleTenantScope | null> {
+    const tenancy = this.tenancy();
+    if (!tenancy.enabled) return null;
+    const known = this.scopes.get(ctx);
+    if (known !== undefined && pickOverride === undefined) return known;
+    let decision = this.decisions.get(ctx);
+    if (decision === undefined) {
+      decision = await this.authorizeGuard(ctx);
+      this.decisions.set(ctx, decision);
+    }
+    const granted = decision.allowed ? decision.tenants : undefined;
+    // `required` makes a missing organization throw: in the console that is just "none".
+    let own: { id: string; kind?: string; slug?: string } | undefined;
+    try {
+      const filter = currentTenantFilter(tenancy);
+      if (filter.mode === 'tenant') {
+        own = {
+          id: filter.tenant.id,
+          kind: filter.tenant.kind,
+          ...(filter.tenant.slug !== undefined ? { slug: filter.tenant.slug } : {}),
+        };
+      }
+    } catch {
+      own = undefined;
+    }
+    const picked = pickOverride ?? ctx.request.qs().tenant;
+    const scope = resolveConsoleTenantScope({
+      granted,
+      own,
+      selected: typeof picked === 'string' ? picked : undefined,
+      nullRows: tenancy.nullRows,
+    });
+    if (scope.forged) {
+      await store
+        ?.recordAuditEvent({
+          action: AUDIT_ACTIONS.tenantForged,
+          actor: auditActor(ctx) ?? null,
+          subjectType: 'organization',
+          subjectId: scope.selected ?? null,
+          message: `${ctx.request.method()} ${ctx.request.url(false)}: organization outside the viewer's scope`,
+        })
+        .catch(() => {});
+    }
+    if (pickOverride === undefined) this.scopes.set(ctx, scope);
+    return scope;
+  }
+
+  /**
+   * What the console's "Organization" control shows: `off` (tenancy off), `none` (a viewer with no
+   * organization), `fixed` (one), or `pick` (several, or every one with `all`).
+   */
+  private async tenantPicker(ctx: HttpContext): Promise<{
+    mode: 'off' | 'none' | 'fixed' | 'pick';
+    all: boolean;
+    selected: string | null;
+    ownerTypes: string[];
+    tenants: Array<{ id: string; label: string }>;
+  }> {
+    const store = findBillingStoreQuietly();
+    const scope = await this.consoleTenantScope(ctx, store);
+    const empty = { all: false, selected: null, ownerTypes: [], tenants: [] };
+    if (scope === null) return { mode: 'off', ...empty };
+    const ownerTypes = tenantOwnerTypes(this.tenancy());
+    if (scope.authorized === 'none') return { mode: 'none', ...empty, ownerTypes };
+    const ids =
+      scope.authorized === '*'
+        ? await everyTenantId(store, ownerTypes)
+        : [...new Set(scope.authorized)];
+    const labels = await tenantLabels(ids, scope.own?.kind);
+    if (scope.own?.slug !== undefined && labels[scope.own.id] === scope.own.id) {
+      labels[scope.own.id] = scope.own.slug;
+    }
+    return {
+      mode: scope.authorized === '*' || ids.length > 1 ? 'pick' : 'fixed',
+      all: scope.authorized === '*',
+      selected: scope.selected ?? null,
+      ownerTypes,
+      tenants: ids
+        .map((id) => ({ id, label: labels[id] ?? id }))
+        .sort((x, y) => x.label.localeCompare(y.label)),
+    };
   }
 
   /**
@@ -296,6 +487,7 @@ export default class PaymentsDashboardProvider {
     const processor = new WebhookProcessor({
       store,
       ...(handlers !== undefined ? { handlers } : {}),
+      tenancy: () => resolvePaymentsTenancy(config.tenancy),
     });
 
     const actions: Partial<DashboardActions> = {
@@ -445,6 +637,7 @@ export default class PaymentsDashboardProvider {
   ): Promise<{ allowed: boolean; actor?: string }> {
     // Never `if (!(await authorize(ctx)))`: a `{ allowed: false }` decision is truthy.
     const decision = await this.authorizeGuard(ctx);
+    this.decisions.set(ctx, decision);
     if (!decision.allowed) {
       if (decision.status === 403 && decision.error !== undefined) {
         await this.warnAuthorizeThrow(decision.error);
@@ -543,9 +736,44 @@ export function auditActor(ctx: HttpContext): string | undefined {
 
 /** Adapt an AdonisJS `HttpContext` to the framework-light {@link ApiRequest}. */
 function toApiRequest(ctx: HttpContext): ApiRequest {
+  // `tenant` picks the console's organization (see `consoleTenantScope`); it is not a row filter.
+  const { tenant: _tenant, ...query } = ctx.request.qs() as Record<
+    string,
+    string | string[] | undefined
+  >;
   return {
     params: ctx.params as Record<string, string | undefined>,
-    query: ctx.request.qs() as Record<string, string | string[] | undefined>,
+    query,
     body: ctx.request.body(),
   };
+}
+
+/** The billing store, or `undefined` when the billing layer is off. */
+function findBillingStoreQuietly(): BillingStore | undefined {
+  try {
+    return getBillingStore();
+  } catch {
+    return undefined;
+  }
+}
+
+/** The page size and page cap of the organization listing. */
+const TENANT_SCAN_PAGE = 200;
+const TENANT_SCAN_PAGES = 50;
+
+/** Every organization that owns a billing customer (bounded scan of `billing_customers`). */
+async function everyTenantId(
+  store: BillingStore | undefined,
+  ownerTypes: readonly string[],
+): Promise<string[]> {
+  if (store === undefined) return [];
+  const ids = new Set<string>();
+  for (const ownerType of ownerTypes) {
+    for (let page = 1; page <= TENANT_SCAN_PAGES; page++) {
+      const rows = await store.listCustomers({ ownerType, page, size: TENANT_SCAN_PAGE });
+      for (const row of rows) if (row.ownerId !== null && row.ownerId !== '') ids.add(row.ownerId);
+      if (rows.length < TENANT_SCAN_PAGE) break;
+    }
+  }
+  return [...ids];
 }

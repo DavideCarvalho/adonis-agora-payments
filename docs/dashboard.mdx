@@ -43,8 +43,8 @@ a wildcard, for that reason.
 | --- | --- | --- |
 | **Overview** | `billingHealth` + `billingOverview` | What needs attention today, then revenue — gross **and** net of refunds — and active subscriptions for a period, plus usage per meter. |
 | **Payments** | `listPayments` | A page of payments, filterable by status and gateway, searchable by **your** reference or the gateway id — which charge failed, and when. Refund from here, and open one row in full. |
-| **Customers** | `listCustomers` | The `billing_customers` mapping — which app user a `cus_…` belongs to, filterable by owner, gateway id and provider. |
-| **Subscriptions** | `listSubscriptions` | Who is `past_due` or `paused`, on which plan, with the trial and period end dates. |
+| **Customers** | `listCustomers` | The `billing_customers` mapping — which app user a `cus_…` belongs to, filterable by owner, gateway id and provider. Jump to a customer's payments or subscriptions. |
+| **Subscriptions** | `listSubscriptions` | Who is `past_due` or `paused`, on which plan, with the trial and period end dates. Open one in full: its customer, the payments charged for it, the deliveries naming them, and what people did to it. |
 | **Disputes** | `listDisputes` / `listDisputesDueWithin` | Every chargeback and pre-chargeback alert, and — the reason the screen exists — which evidence windows close next. Record how one ended from here. |
 | **Webhook events** | `listWebhookEvents` | The ledger, defaulting to `failed`, filterable by event **type**, with each handler's error rendered in full. Retry from here. |
 | **Activity** | `listAuditEvents` | Who refunded what, who closed which dispute, and every delivery this endpoint **refused**. |
@@ -61,6 +61,8 @@ same place, and a view can be pasted into a ticket:
 | `#/activity?status=webhook.rejected` | the activity screen narrowed to one action |
 | `#/payments?customer=cus_9f2` | every payment recorded for one gateway customer |
 | `#/payments/pay_8f2…` | the payments screen with that one payment open in full |
+| `#/subscriptions?customer=cus_9f2` | every subscription of one gateway customer |
+| `#/subscriptions/<id>` | the subscriptions screen with that one subscription open in full (its id or gateway id) |
 
 It is a fragment rather than a path on purpose. The provider registers `<path>` as an **exact** route
 and no catch-all — the prefix is shared with the package's own webhook endpoints — so
@@ -583,9 +585,9 @@ console, or none this viewer may open, the heading stays as it is. There is noth
 
 <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>K</kbd> opens a search across those consoles. Here, a payment's
 gateway id or your app's reference opens the payment, a customer's gateway id or owner id opens
-their payments, and a subscription's gateway id or reference opens the subscriptions with its
-status. With organizations on, only rows of the organizations this viewer may see are found. The
-other consoles answer with their own hits (runs, media records, users).
+their payments, and a subscription's gateway id or reference opens that subscription. With
+organizations on, only rows of the organizations this viewer may see are found. The other consoles
+answer with their own hits (runs, media records, users).
 
 The menu runs the other consoles' `authorize` on each page load. If yours writes an audit trail,
 skip it for these checks: the request carries `ctx.agoraProbe === true` while they run.

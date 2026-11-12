@@ -270,7 +270,11 @@ describe('paymentsConsoleSearch', () => {
     }
     const hits = await paymentsConsoleSearch(async () => store, '/payments')(ctx, 'team-9', 5);
     expect(hits.map((hit) => hit.title).sort()).toEqual(['sub_1', 'sub_2']);
-    expect(hits[0]?.href).toBe('/payments#/subscriptions?status=active');
+    // Straight to each subscription's own view, by this store's id.
+    const [sub1] = await store.listSubscriptions({ gatewayId: 'sub_1' });
+    expect(hits.find((hit) => hit.title === 'sub_1')?.href).toBe(
+      `/payments#/subscriptions/${sub1?.id}`,
+    );
   });
 
   it('links from the root mount, and answers nothing without a store', async () => {

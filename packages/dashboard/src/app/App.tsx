@@ -89,6 +89,16 @@ export function App() {
   /** "Which of these charges are this user's" — the jump the console could not make at all
    *  before, because a payment row carried the gateway's customer id and nothing else. */
   const openCustomerPayments = (customerId: string) => navigate({ screen: 'payments', customerId });
+  /** Every subscription of one gateway customer. */
+  const openCustomerSubscriptions = (customerId: string) =>
+    navigate({ screen: 'subscriptions', customerId });
+
+  /** Open (or close, with `null`) one subscription's detail on top of the CURRENT list. */
+  const openSubscription = (subscriptionId: string | null) =>
+    navigate({ ...route, screen: 'subscriptions', subscriptionId: subscriptionId ?? undefined });
+
+  /** A payment named in a subscription's detail: the payments screen with its detail open. */
+  const openPaymentDetail = (paymentId: string) => navigate({ screen: 'payments', paymentId });
 
   /** Open (or close, with `null`) one payment's detail on top of the CURRENT list, seed intact. */
   const openPayment = (paymentId: string | null) =>
@@ -157,10 +167,22 @@ export function App() {
           />
         )}
         {route.screen === 'customers' && (
-          <Customers key={key} onOpenPayments={openCustomerPayments} />
+          <Customers
+            key={key}
+            onOpenPayments={openCustomerPayments}
+            onOpenSubscriptions={openCustomerSubscriptions}
+          />
         )}
         {route.screen === 'subscriptions' && (
-          <Subscriptions key={key} initialStatus={route.status} />
+          <Subscriptions
+            key={key}
+            initialStatus={route.status}
+            customerId={route.customerId}
+            openedId={route.subscriptionId ?? null}
+            onOpen={openSubscription}
+            onOpenPayment={openPaymentDetail}
+            onOpenCustomer={openCustomerPayments}
+          />
         )}
         {route.screen === 'disputes' && <Disputes key={key} initialStatus={route.status} />}
         {route.screen === 'webhooks' && <WebhookEvents key={key} initialStatus={route.status} />}

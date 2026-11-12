@@ -322,8 +322,8 @@ export type PaymentsSearchStore = Pick<
 /**
  * The payments console's global search, over the rows the viewer may see (pass a store already
  * scoped to their organizations): a payment by gateway id or by your app's reference, a customer
- * by gateway id or owner id, a subscription by gateway id or reference. All exact matches. `base`
- * is the console's mount path (`''` at the root).
+ * by gateway id or owner id, a subscription by gateway id or reference (opening its detail). All
+ * exact matches. `base` is the console's mount path (`''` at the root).
  */
 export function paymentsConsoleSearch(
   store: (ctx: HttpContext) => Promise<PaymentsSearchStore | undefined>,
@@ -345,10 +345,9 @@ export function paymentsConsoleSearch(
       ]);
     const hits: AgoraConsoleSearchHit[] = [];
     const seen = new Set<string>();
-    /** One hit per row: `key` is the row's identity (two subscriptions may share an href). */
-    const push = (hit: AgoraConsoleSearchHit, key = hit.href) => {
-      if (seen.has(key)) return;
-      seen.add(key);
+    const push = (hit: AgoraConsoleSearchHit) => {
+      if (seen.has(hit.href)) return;
+      seen.add(hit.href);
       hits.push(hit);
     };
     for (const payment of [...byGatewayId, ...byReference]) {
@@ -375,16 +374,11 @@ export function paymentsConsoleSearch(
       });
     }
     for (const subscription of [...subsById, ...subsByReference]) {
-      const id = subscription.gatewayId ?? subscription.id;
-      // The subscriptions screen opens on the row's status.
-      push(
-        {
-          title: id,
-          subtitle: ['subscription', subscription.status, subscription.planId].join(' · '),
-          href: `${shell}#/subscriptions?status=${encodeURIComponent(subscription.status)}`,
-        },
-        `subscription:${subscription.id}`,
-      );
+      push({
+        title: subscription.gatewayId ?? subscription.id,
+        subtitle: ['subscription', subscription.status, subscription.planId].join(' · '),
+        href: `${shell}#/subscriptions/${encodeURIComponent(subscription.id)}`,
+      });
     }
     return hits.slice(0, limit);
   };

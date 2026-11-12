@@ -21,7 +21,13 @@ const PAGE_SIZE = 50;
  * being taken through a gateway customer nobody mapped, and no screen here will ever be able to
  * name who they belong to.
  */
-export function Customers({ onOpenPayments }: { onOpenPayments?: (customerId: string) => void }) {
+export function Customers({
+  onOpenPayments,
+  onOpenSubscriptions,
+}: {
+  onOpenPayments?: (customerId: string) => void;
+  onOpenSubscriptions?: (customerId: string) => void;
+}) {
   const [provider, setProvider] = useState<string | undefined>(undefined);
   const [owner, setOwner] = useState('');
   const [page, setPage] = useState(1);
@@ -103,7 +109,16 @@ export function Customers({ onOpenPayments }: { onOpenPayments?: (customerId: st
                   <Badge variant="provider">{row.provider}</Badge>
                 </td>
                 <td className="mono px-4 py-2 text-zinc-500">{formatWhen(row.createdAt)}</td>
-                <td className="px-4 py-2 text-right">
+                <td className="space-x-2 whitespace-nowrap px-4 py-2 text-right">
+                  {onOpenSubscriptions !== undefined && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenSubscriptions(row.gatewayId)}
+                      className="rounded-sm border border-line px-2 py-1 text-xs text-zinc-300 hover:bg-panel-2 hover:text-zinc-100"
+                    >
+                      Subscriptions
+                    </button>
+                  )}
                   {onOpenPayments !== undefined && (
                     <button
                       type="button"

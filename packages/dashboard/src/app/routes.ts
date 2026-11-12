@@ -55,6 +55,8 @@ export interface Route {
   customerId?: string | undefined;
   /** The payment open in the detail dialog — `#/payments/<gatewayId>`. Payments screen only. */
   paymentId?: string | undefined;
+  /** The subscription open in the detail dialog — `#/subscriptions/<id>`. Subscriptions only. */
+  subscriptionId?: string | undefined;
 }
 
 /** Parse `window.location.hash` (with or without the leading `#`) into a {@link Route}. */
@@ -75,6 +77,7 @@ export function parseRoute(hash: string): Route {
   const customer = query.get('customer');
   if (customer !== null && customer !== '') route.customerId = customer;
   if (screen === 'payments' && id !== '') route.paymentId = safeDecode(id);
+  if (screen === 'subscriptions' && id !== '') route.subscriptionId = safeDecode(id);
   return route;
 }
 
@@ -83,6 +86,13 @@ export function formatRoute(route: Route): string {
   let hash = `#/${route.screen}`;
   if (route.screen === 'payments' && route.paymentId !== undefined && route.paymentId !== '') {
     hash += `/${encodeURIComponent(route.paymentId)}`;
+  }
+  if (
+    route.screen === 'subscriptions' &&
+    route.subscriptionId !== undefined &&
+    route.subscriptionId !== ''
+  ) {
+    hash += `/${encodeURIComponent(route.subscriptionId)}`;
   }
   const query = new URLSearchParams();
   if (route.status !== undefined && route.status !== '') query.set('status', route.status);

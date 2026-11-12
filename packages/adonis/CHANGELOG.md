@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.8
+
+### Minor Changes
+
+- [#234](https://github.com/DavideCarvalho/adonis-agora-payments/pull/234) [`09f49a8`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/09f49a8d3bde85c9b38517c5bb08349351561fc7) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - `billing.connection` and `billing.schema` put the billing tables on their own Lucid connection and in their own Postgres schema (MySQL: database), e.g. `"billing"."billing_payments"` while the app stays in `public`. Every statement names the schema: the DDL, the column checks, the store's reads and writes (so the dashboard, account console and dev MCP reads too), the published migration and `agora:doctor`. Nothing relies on `search_path`, so this is safe behind PgBouncer in transaction mode. The schema is created on first use (or by the migration), the name is validated at boot, and SQLite with a `schema` fails the boot. `billingStores.lucid(...)` inherits both options; `createBillingTables`/`dropBillingTables`/`truncateBillingTables` take `{ schema }`. Without either option, behaviour is unchanged.
+
 ## 1.0.0-rc.7
 
 ### Patch Changes

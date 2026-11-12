@@ -1,5 +1,17 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.5
+
+### Minor Changes
+
+- [#227](https://github.com/DavideCarvalho/adonis-agora-payments/pull/227) [`78d6fdf`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/78d6fdfbff204063059b3a8157a43db8cb42c973) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - The payments console now serves its data to coding agents on the app's dev MCP endpoint (`/mcp/agora`) when the app registers `@adonis-agora/agent/mcp_provider`. Fourteen `payments_*` tools, gated by the console's own `authorize` and, with organizations on, scoped to the organizations the console shows the caller (`tenant` narrows to one). Reads (`payments_get_overview`, `payments_get_health`, `payments_list_payments`, `payments_get_payment`, `payments_list_subscriptions`, `payments_get_subscription`, `payments_list_disputes`, `payments_list_webhook_events`, `payments_list_customers`, `payments_list_audit`, `payments_list_organizations`) are listed by default and return what the console's JSON API returns. The actions (`payments_refund_payment`, `payments_retry_webhook_event`, `payments_resolve_dispute`) only when the app opts in on the dev endpoint; each is recorded in the activity trail as `mcp:<caller>`. No configuration in this package.
+  
+  New `anyAuthorize(...authorizers)` in `@adonis-agora/payments/dashboard`: allows a request when any of the given `authorize` forms does, e.g. a console token for MCP clients or a signed-in admin.
+
+- [#227](https://github.com/DavideCarvalho/adonis-agora-payments/pull/227) [`78d6fdf`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/78d6fdfbff204063059b3a8157a43db8cb42c973) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - New `GET <path>/api/subscriptions/:id` in the payments console API: one subscription, by its id or its gateway id, with its current state, the customer it bills, the payments charged for it, the webhook events naming those payments and its audit rows. Scoped to the viewer's organizations like every other read (another organization's subscription is `404`). `GET <path>/api/subscriptions` also takes `customerId`. The billing store's `listSubscriptions` takes `id` and `listPayments` takes `subscriptionId` (exact matches; a custom store that ignores them still answers correctly in the console), and with organizations on, a subscription's audit rows are visible to a viewer who can see the subscription.
+
+- [#227](https://github.com/DavideCarvalho/adonis-agora-payments/pull/227) [`78d6fdf`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/78d6fdfbff204063059b3a8157a43db8cb42c973) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - A webhook retry from the payments console is now recorded in the activity trail as `webhook.retried`, with who ran it (the console viewer, or `mcp:<caller>` from the dev MCP tools: both paths write the same row), the gateway, and the event's type and previous error. The retry response carries the audit row. The Activity screen can filter retries.
+
 ## 1.0.0-rc.4
 
 ### Minor Changes

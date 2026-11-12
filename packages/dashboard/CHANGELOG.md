@@ -1,5 +1,11 @@
 # @adonis-agora/payments-dashboard
 
+## 1.0.0-rc.3
+
+### Minor Changes
+
+- [#227](https://github.com/DavideCarvalho/adonis-agora-payments/pull/227) [`78d6fdf`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/78d6fdfbff204063059b3a8157a43db8cb42c973) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - A webhook retry from the payments console is now recorded in the activity trail as `webhook.retried`, with who ran it (the console viewer, or `mcp:<caller>` from the dev MCP tools: both paths write the same row), the gateway, and the event's type and previous error. The retry response carries the audit row. The Activity screen can filter retries.
+
 ## 1.0.0-rc.2
 
 ### Minor Changes

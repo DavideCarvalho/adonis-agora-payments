@@ -28,6 +28,11 @@ import {
   type ResolvedPaymentsDashboardConfig,
   resolveConfig,
 } from '../src/dashboard/define_config.js';
+import {
+  type DevToolsDecision,
+  type PaymentsApiRoute,
+  registerPaymentsDevTools,
+} from '../src/dashboard/dev_tools.js';
 import type { ProviderCapabilities } from '../src/dashboard/handlers.js';
 import {
   type ApiRequest,
@@ -45,6 +50,7 @@ import {
   refundPayment,
   resolveDispute,
   retryWebhookEvent,
+  subscriptionDetail,
   subscriptions,
   webhookEvents,
 } from '../src/dashboard/handlers.js';
@@ -110,7 +116,9 @@ export const NO_AUTHORIZE_WARNING =
  *                                   the gateway deliveries this endpoint REFUSED
  * - `GET  /api/disputes`         -> a page of `billing_disputes`; `?dueWithin=<hours>` for the
  *                                   open windows closing soonest
- * - `GET  /api/subscriptions`    -> a page of `billing_subscriptions` (status/provider filters)
+ * - `GET  /api/subscriptions`    -> a page of `billing_subscriptions` (status/provider/customer filters)
+ * - `GET  /api/subscriptions/:id` -> one subscription: state, customer, its payments, the ledger
+ *                                   rows naming them, and its audit rows
  * - `GET  /api/webhook-events`   -> a page of `billing_webhook_events` (status/provider/type)
  * - `GET  /api/providers`        -> the gateways and event types this install has data for
  * - `POST /api/payments/:gatewayId/refund`           -> refund through the payment's own gateway
@@ -146,6 +154,10 @@ export default class PaymentsDashboardProvider {
     if (!config.enabled) return;
     this.authorizeGuard = await this.resolveGuard(config);
 
+    // Developer tools on the app's dev MCP endpoint, when `@adonis-agora/agent/mcp_provider` bound
+    // its hub (its `register()` ran before any `boot()`). Gated by this console's own `authorize`.
+    await this.registerDevTools(config);
+
     // Route registration can't happen synchronously in `boot()`: the router singleton isn't
     // committed until the app's "booted" hooks run, which fire strictly AFTER every provider's
     // own `boot()`. Same note `@adonis-agora/durable`'s dashboard provider carries.
@@ -170,53 +182,14 @@ export default class PaymentsDashboardProvider {
       return async (ctx: HttpContext) => {
         const guard = await this.enforce(config, ctx, 'api');
         if (!guard.allowed) return;
-        let store: BillingStore;
-        try {
-          store = getBillingStore();
-        } catch (error) {
-          // The billing layer is off (or the app hasn't booted it). That is a deployment state,
-          // not a bug in the request — say so with a 503 rather than a stack-trace-shaped 500.
-          return ctx.response.status(503).json({
-            error: error instanceof Error ? error.message : 'billing store unavailable',
-          });
-        }
-        // Organizations (tenancy): confine every read to what this viewer may see.
-        const scope = await this.consoleTenantScope(ctx, store);
-        if (scope !== null && scope.ids !== undefined) {
-          if (everyOrganization) {
-            return ctx.response.status(404).json({
-              error: 'This view spans every organization; it is not available in one.',
-            });
-          }
-          store = scopedBillingStore(
-            store,
-            ownerScopeOfConsole(scope, tenantOwnerTypes(this.tenancy())),
-          );
-        }
-        try {
-          const deps: Deps = {
-            store,
-            currency: config.currency,
-            // WHO is asking: the app's signed-in user (`ctx.auth.user`), or `bearer` for a
-            // token caller. It lets a refund and a dispute resolution be recorded against a
-            // person. Absent when nobody is identifiable — recorded as "unattributed", never
-            // invented.
-            ...(guard.actor !== undefined ? { actor: guard.actor } : {}),
-            // Resolved lazily and only for the routes that need it: a console whose payments
-            // manager is unreachable must still serve every read.
-            ...(needsActions ? { actions: await this.actions(store) } : {}),
-            ...(await this.capabilityDeps(needsCapabilities)),
-          };
-          const result = await handler(deps, toApiRequest(ctx));
-          return ctx.response.status(result.status).json(result.body);
-        } catch (error) {
-          if (error instanceof OwnerScopingUnsupportedError) {
-            return ctx.response.status(501).json({ error: error.message });
-          }
-          return ctx.response
-            .status(500)
-            .json({ error: error instanceof Error ? error.message : 'internal error' });
-        }
+        const result = await this.serveApi(
+          config,
+          ctx,
+          { handler, needsActions, needsCapabilities, everyOrganization },
+          toApiRequest(ctx),
+          guard.actor,
+        );
+        return ctx.response.status(result.status).json(result.body);
       };
     };
 
@@ -244,6 +217,10 @@ export default class PaymentsDashboardProvider {
     router
       .get(`${apiBase}/subscriptions`, json(subscriptions))
       .as('payments_dashboard.subscriptions');
+    // One subscription in full (by this store's id or the gateway's), scoped like every read.
+    router
+      .get(`${apiBase}/subscriptions/:id`, json(subscriptionDetail, false, true))
+      .as('payments_dashboard.subscriptions.show');
     router
       .get(`${apiBase}/webhook-events`, json(webhookEvents, false, false, true))
       .as('payments_dashboard.webhook_events');
@@ -275,6 +252,115 @@ export default class PaymentsDashboardProvider {
     // Organizations (tenancy): which ones this viewer may pick, and an audited record of a switch.
     // Mounted only with tenancy on; without it the console has no organization control.
     if (this.tenancy().enabled) this.registerTenantRoutes(router, config, apiBase);
+  }
+
+  /**
+   * Serve one console API handler for a request that already passed `authorize`: the viewer's
+   * organization scope (narrowed to `tenant` when given), the deps, the handler, and the console's
+   * error answers. The JSON API and the dev tools both come through here, so both answer the same.
+   */
+  private async serveApi(
+    config: ResolvedPaymentsDashboardConfig,
+    ctx: HttpContext,
+    route: PaymentsApiRoute,
+    req: ApiRequest,
+    actor: string | undefined,
+    tenant?: string,
+  ): Promise<ApiResponse> {
+    let store: BillingStore;
+    try {
+      store = getBillingStore();
+    } catch (error) {
+      // The billing layer is off (or the app hasn't booted it). That is a deployment state,
+      // not a bug in the request — say so with a 503 rather than a stack-trace-shaped 500.
+      return {
+        status: 503,
+        body: { error: error instanceof Error ? error.message : 'billing store unavailable' },
+      };
+    }
+    // Organizations (tenancy): confine every read to what this viewer may see.
+    const scope = await this.consoleTenantScope(ctx, store, tenant);
+    if (scope !== null && scope.ids !== undefined) {
+      if (route.everyOrganization === true) {
+        return {
+          status: 404,
+          body: { error: 'This view spans every organization; it is not available in one.' },
+        };
+      }
+      store = scopedBillingStore(
+        store,
+        ownerScopeOfConsole(scope, tenantOwnerTypes(this.tenancy())),
+      );
+    }
+    try {
+      const deps: Deps = {
+        store,
+        currency: config.currency,
+        // WHO is asking: the app's signed-in user (`ctx.auth.user`), or `bearer` for a
+        // token caller. It lets a refund and a dispute resolution be recorded against a
+        // person. Absent when nobody is identifiable — recorded as "unattributed", never
+        // invented.
+        ...(actor !== undefined ? { actor } : {}),
+        // Resolved lazily and only for the routes that need it: a console whose payments
+        // manager is unreachable must still serve every read.
+        ...(route.needsActions === true ? { actions: await this.actions(store) } : {}),
+        ...(await this.capabilityDeps(route.needsCapabilities === true)),
+      };
+      return await route.handler(deps, req);
+    } catch (error) {
+      if (error instanceof OwnerScopingUnsupportedError) {
+        return { status: 501, body: { error: error.message } };
+      }
+      return {
+        status: 500,
+        body: { error: error instanceof Error ? error.message : 'internal error' },
+      };
+    }
+  }
+
+  /** The console gate, remembered for the request so its organization scope reads the same verdict. */
+  private async decide(ctx: HttpContext): Promise<ConsoleAuthorizeDecision> {
+    const decision = await this.authorizeGuard(ctx);
+    this.decisions.set(ctx, decision);
+    return decision;
+  }
+
+  /** Register the console's tools into the app's dev-tools hub, when it has one. */
+  private async registerDevTools(config: ResolvedPaymentsDashboardConfig): Promise<void> {
+    try {
+      await registerPaymentsDevTools(
+        this.app.container as unknown as Parameters<typeof registerPaymentsDevTools>[0],
+        {
+          authorize: async (ctx) => devToolsDecisionOf(await this.decide(ctx)),
+          serve: async (ctx, route, req, { actor, tenant }) => {
+            // The hub ran `authorize` for this request already; a call without it still gets it.
+            const decision = this.decisions.get(ctx) ?? (await this.decide(ctx));
+            if (!decision.allowed) {
+              const status = decision.status === 403 ? 403 : 401;
+              return {
+                status,
+                body: { error: status === 403 ? 'forbidden' : 'unauthenticated' },
+              };
+            }
+            return this.serveApi(config, ctx, route, req, actor, tenant);
+          },
+          canRefund: async () =>
+            Object.values((await this.capabilities()) ?? {}).some((c) => c.refunds),
+          tenancyEnabled: () => this.tenancy().enabled,
+          organizations: (ctx) => this.tenantPicker(ctx),
+        },
+      );
+    } catch (error) {
+      // An auxiliary feature: a hub that throws must not take the app's boot down with it.
+      try {
+        const logger = await this.app.container.make('logger');
+        logger.warn(
+          `[@adonis-agora/payments] could not register the developer tools: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      } catch {
+        // Logging is best-effort.
+      }
+    }
   }
 
   private registerTenantRoutes(
@@ -639,8 +725,7 @@ export default class PaymentsDashboardProvider {
     mode: 'page' | 'api',
   ): Promise<{ allowed: boolean; actor?: string }> {
     // Never `if (!(await authorize(ctx)))`: a `{ allowed: false }` decision is truthy.
-    const decision = await this.authorizeGuard(ctx);
-    this.decisions.set(ctx, decision);
+    const decision = await this.decide(ctx);
     if (!decision.allowed) {
       if (decision.status === 403 && decision.error !== undefined) {
         await this.warnAuthorizeThrow(decision.error);
@@ -779,4 +864,18 @@ async function everyTenantId(
     }
   }
   return [...ids];
+}
+
+/** The console decision as the dev-tools hub reads it. */
+function devToolsDecisionOf(decision: ConsoleAuthorizeDecision): DevToolsDecision {
+  if (decision.allowed) return { allowed: true };
+  if (decision.status === 302) {
+    return { allowed: false, reason: 'unauthenticated', redirectTo: decision.redirectTo };
+  }
+  if (decision.status === 401) return { allowed: false, reason: 'unauthenticated' };
+  return {
+    allowed: false,
+    reason: 'forbidden',
+    ...(decision.error !== undefined ? { error: decision.error } : {}),
+  };
 }

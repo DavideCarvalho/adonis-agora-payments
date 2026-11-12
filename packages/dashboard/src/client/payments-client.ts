@@ -90,7 +90,7 @@ export interface CustomerRow {
 /** One audit row — who did what, and when. `actor: null` means unattributed, not "the system". */
 export interface AuditRow {
   id: string;
-  /** `payment.refunded` | `dispute.resolved` | `webhook.rejected`. */
+  /** `payment.refunded` | `dispute.resolved` | `webhook.rejected` | `webhook.retried`. */
   action: string;
   actor: string | null;
   provider: string | null;

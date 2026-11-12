@@ -280,7 +280,9 @@ event described never happened and nothing will retry it. Retry re-runs the even
 `WebhookProcessor` your app uses — built-in store sync **plus your own handlers**.
 
 It is safe to repeat. The ledger re-claims a `failed` event and refuses an in-flight or already
-processed one, which is the same guard that makes a gateway redelivery a no-op.
+processed one, which is the same guard that makes a gateway redelivery a no-op. A retry that went
+through is recorded in [Activity](#activity--the-trail-nothing-else-keeps) as `webhook.retried`,
+with who ran it.
 
 **Every gateway replays, signed ones included.** The event is rebuilt from the ledger row's own two
 columns — the raw `payload` and the `normalized` event recorded beside it — and handed straight to
@@ -420,6 +422,21 @@ export default defineConfig({
 })
 ```
 
+To let both operators and scripts in, pass both to `anyAuthorize`. It allows a request when any of
+them does, tried in order (the first one that allows also decides the `tenants`):
+
+```ts title="config/payments_dashboard.ts"
+import env from '#start/env'
+import { anyAuthorize, authorizeByToken, defineConfig } from '@adonis-agora/payments/dashboard'
+
+export default defineConfig({
+  authorize: anyAuthorize(
+    authorizeByToken({ token: env.get('CONSOLE_TOKEN') }),
+    (ctx) => ctx.auth.user?.isAdmin === true,
+  ),
+})
+```
+
 
 With [`@adonis-agora/authz`](/docs/authz) the shared helper reads your user and roles for you — the
 same one every Agora console takes, so one RBAC gate reads identically across durable, telescope,
@@ -518,13 +535,14 @@ The SPA is a client of a plain API, and so can you be — the same guard covers 
 | `GET <path>/api/customers` | `provider`, `ownerType`, `ownerId`, `gatewayId`, `page`, `size` | a page of the owner mapping, newest first |
 | `GET <path>/api/disputes` | `status`, `provider`, `page`, `size` | a page of disputes, newest first |
 | `GET <path>/api/disputes` | `dueWithin` (hours), `provider`, `page`, `size` | only the OPEN windows closing inside the horizon, soonest first, plus the full `dueWithin.total` |
-| `GET <path>/api/subscriptions` | `status`, `provider`, `page`, `size` | a page of subscriptions, plus the whole-table `past_due` count |
+| `GET <path>/api/subscriptions` | `status`, `provider`, `customerId`, `page`, `size` | a page of subscriptions, plus the whole-table `past_due` count |
+| `GET <path>/api/subscriptions/:id` | — | one subscription, by its id or gateway id: current state, customer, the payments charged for it, the ledger rows naming them, and its audit rows |
 | `GET <path>/api/webhook-events` | `status`, `provider`, `type`, `page`, `size` | a page of the ledger, newest first |
 | `GET <path>/api/audit` | `action`, `actor`, `provider`, `subjectType`, `subjectId`, `page`, `size` | the audit trail, newest first, plus the action filter list |
 | `GET <path>/api/providers` | — | the gateways **and the event types** present in your data |
 | `POST <path>/api/payments/:gatewayId/refund` | `{ amount? }` | the gateway's refund; `amount` is integer minor units |
 | `POST <path>/api/disputes/:gatewayId/resolve` | `{ status, outcome?, note? }` | the closed dispute plus the audit row; sends nothing to a gateway |
-| `POST <path>/api/webhook-events/:gatewayEventId/retry` | — | `{ status: 'processed' }` |
+| `POST <path>/api/webhook-events/:gatewayEventId/retry` | — | `{ status: 'processed' }` plus the audit row |
 
 `?reference=` also accepts `?externalReference=`, so a link built from either keeps working. All
 three payment lookups are exact matches. The response echoes them back under `filters`, so the SPA
@@ -554,9 +572,52 @@ that refused, and `503` when the payments manager is not reachable at all.
 When the billing layer is disabled (`billing.enabled: false`) the API answers `503` rather than
 `500` — the store being absent is a deployment state, not a crash.
 
+## MCP tools
+
+When the app registers `@adonis-agora/agent/mcp_provider`, the console's data is also served to
+coding agents (Claude Code, Cursor, Claude Desktop) on the app's dev MCP endpoint, `/mcp/agora`.
+There is nothing to configure here: the tools follow this console's `authorize`, so whoever can open
+the console can use them, and nobody else. With organizations on, they see the same organizations
+the console shows them. A disabled console (`enabled: false`) serves no tools. The
+[agent docs](/docs/agent/dev-tools) show how to connect a client.
+
+```sh
+claude mcp add --transport http agora http://localhost:3333/mcp/agora \
+  --header "Authorization: Bearer $CONSOLE_TOKEN"
+```
+
+Reads are listed by default. They return what the console's JSON API returns, never a gateway
+payload. Lists take `page` and `limit` (20 by default, at most 100) and answer `{ items, next }`.
+
+| Tool | What it returns |
+| --- | --- |
+| `payments_get_overview` | Revenue, active subscriptions and usage for a `period` (or `from`/`to`). |
+| `payments_get_health` | What needs attention: failed events, stuck payments, closing dispute windows, failing renewals. |
+| `payments_list_payments` | Payments, newest first. Filters: `status`, `provider`, `reference`, `gatewayId`, `customerId`. |
+| `payments_get_payment` | One payment with its owner, disputes, webhook events and audit rows. |
+| `payments_list_subscriptions` | Subscriptions, plus the `past_due` and failing-renewal totals. Filter by `customerId`. |
+| `payments_get_subscription` | One subscription (`id` or gateway id) with its customer, payments, webhook events and audit rows. |
+| `payments_list_disputes` | Disputes; with `dueWithin` (hours), only the open windows closing soonest. |
+| `payments_list_webhook_events` | The webhook ledger, with the error of each failed event. |
+| `payments_list_customers` | The mapping from gateway customers to your app's owners. |
+| `payments_list_audit` | The [activity trail](#activity--the-trail-nothing-else-keeps). |
+| `payments_list_organizations` | With organizations on: the ones you may see. |
+
+With organizations on, pass `tenant: '<organization id>'` to narrow a read to one of them, like the
+console's Organization picker.
+
+The three actions are hidden until the app opts in with `devTools: { actions: ['payments'] }` in
+`config/mcp.ts`. Each is recorded in the activity trail with the actor `mcp:<caller>`.
+
+| Action | What it does |
+| --- | --- |
+| `payments_refund_payment` | Refunds a paid payment, in full or `amount` (integer minor units). Moves money. Listed only when a configured gateway supports refunds. |
+| `payments_retry_webhook_event` | Re-runs a failed webhook event through your handlers. |
+| `payments_resolve_dispute` | Records how a dispute ended at the gateway (`status`, `outcome`, `note`). Sends nothing to the gateway. |
+
 ## Activity — the trail nothing else keeps
 
-Three kinds of row, each of which is otherwise only a diagnostic — a log line, gone by the time
+Four kinds of row, each of which is otherwise only a diagnostic — a log line, gone by the time
 somebody asks:
 
 | Action | Written when |
@@ -564,6 +625,7 @@ somebody asks:
 | `webhook.rejected` | the endpoint answered `400`. **The one that matters most**: a rejected delivery never becomes a ledger row, so a rotated webhook secret looks exactly like a quiet week while every refund, chargeback and dispute closure is dropped on the floor |
 | `payment.refunded` | someone refunded from this console. The payment row moves only when the gateway's webhook lands, and that row names no person |
 | `dispute.resolved` | someone closed a dispute the gateway will never close itself |
+| `webhook.retried` | someone re-ran a failed webhook event, from this console or its MCP tools. The ledger row only says it is `processed` now |
 
 `actor` is `null` when nothing authorised it in a human sense — a rejected delivery has none, and a
 request with no signed-in user or token cannot name one. `null` means **unattributed**, never "the system".

@@ -41,6 +41,7 @@ export type {
   ConsoleTenants,
 } from './console_authorize.js';
 export {
+  anyAuthorize,
   authorizeByToken,
   normalizeConsoleAuthorizeResult,
   resolveConsoleAuthorize,
@@ -53,6 +54,20 @@ export type {
   ResolvedPaymentsDashboardConfig,
 } from './define_config.js';
 export { defineConfig, resolveConfig } from './define_config.js';
+export type {
+  DevTool,
+  DevToolCall,
+  DevToolInputProperty,
+  DevToolInputSchema,
+  DevToolsCaller,
+  DevToolsDecision,
+  DevToolsHub,
+  DevToolsLib,
+  PaymentsApiRoute,
+  PaymentsDevToolsOptions,
+} from './dev_tools.js';
+// Developer tools for the app's dev MCP endpoint (`@adonis-agora/agent`), when it has one.
+export { DEV_TOOLS_BINDING, paymentsDevTools, registerPaymentsDevTools } from './dev_tools.js';
 export type { ApiRequest, ApiResponse, DashboardActions, Deps } from './handlers.js';
 export {
   AUDIT_ACTION_FILTERS,
@@ -74,6 +89,7 @@ export {
   retryWebhookEvent,
   SUBSCRIPTION_DEFAULT_STATUS,
   SUBSCRIPTION_STATUSES,
+  subscriptionDetail,
   subscriptions,
   WEBHOOK_EVENT_STATUSES,
   webhookEvents,

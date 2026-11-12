@@ -8,6 +8,7 @@ import {
   type DisputeListItem,
   OPEN_DISPUTE_STATUSES,
   type PaymentListItem,
+  type SubscriptionListItem,
 } from '../billing/billing_store.js';
 import { BILLING_LIST_DEFAULT_SIZE, clampPage, clampSize } from '../billing/list_query.js';
 import type { RefundAction, ReplayAction } from './actions.js';
@@ -617,6 +618,8 @@ const PAYMENT_TIMELINE_LIMIT = 50;
 export async function subscriptions(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
   const status = filterQuery(req.query.status);
   const provider = filterQuery(req.query.provider);
+  /** The gateway customer id: every subscription of one customer. */
+  const customerId = filterQuery(req.query.customerId);
   const paging = pageOf(req);
   // The page and both totals are independent reads, so they go out together instead of as three
   // sequential round trips.
@@ -626,6 +629,7 @@ export async function subscriptions(deps: Deps, req: ApiRequest): Promise<ApiRes
         deps.store.listSubscriptions({
           ...(status !== undefined ? { status } : {}),
           ...(provider !== undefined ? { provider } : {}),
+          ...(customerId !== undefined ? { customerId } : {}),
           size,
           page,
         }),
@@ -644,36 +648,141 @@ export async function subscriptions(deps: Deps, req: ApiRequest): Promise<ApiRes
     }),
   ]);
   return ok({
-    subscriptions: filtered.rows.map((row) => ({
-      id: row.id,
-      gatewayId: row.gatewayId,
-      provider: row.provider,
-      status: row.status,
-      planId: row.planId,
-      customerId: row.customerId,
-      trialEndsAt: iso(row.trialEndsAt),
-      endsAt: iso(row.endsAt),
-      createdAt: iso(row.createdAt),
-      // Numa linha GERENCIADA não há `gatewayId` para abrir no painel do gateway, então isto
-      // é a única descrição da assinatura que existe. Sem estes campos a tela mostrava um id
-      // nulo e nada sobre quanto cobra ou quando.
-      managed: row.managed,
-      amount: row.amount,
-      currency: row.currency,
-      cycle: row.cycle,
-      currentPeriodEnd: iso(row.currentPeriodEnd),
-      nextChargeAt: iso(row.nextChargeAt),
-      cancelAtPeriodEnd: row.cancelAtPeriodEnd,
-      lastRenewalError: row.lastRenewalError,
-      lastRenewalAttemptAt: iso(row.lastRenewalAttemptAt),
-      renewalFailureCount: row.renewalFailureCount,
-    })),
+    subscriptions: filtered.rows.map(subscriptionJson),
     meta: listMeta(paging, filtered),
     statuses: SUBSCRIPTION_STATUSES,
     counts: {
       past_due: pastDue,
       failing_renewals: failingRenewals,
     },
+  });
+}
+
+/** One subscription row as JSON: the list's row and the detail's header. */
+function subscriptionJson(row: SubscriptionListItem) {
+  return {
+    id: row.id,
+    gatewayId: row.gatewayId,
+    provider: row.provider,
+    status: row.status,
+    planId: row.planId,
+    customerId: row.customerId,
+    /** The APP's own id for this subscription. `null` when it set none. */
+    externalReference: row.externalReference,
+    trialEndsAt: iso(row.trialEndsAt),
+    endsAt: iso(row.endsAt),
+    createdAt: iso(row.createdAt),
+    // Numa linha GERENCIADA não há `gatewayId` para abrir no painel do gateway, então isto
+    // é a única descrição da assinatura que existe. Sem estes campos a tela mostrava um id
+    // nulo e nada sobre quanto cobra ou quando.
+    managed: row.managed,
+    amount: row.amount,
+    currency: row.currency,
+    cycle: row.cycle,
+    currentPeriodEnd: iso(row.currentPeriodEnd),
+    nextChargeAt: iso(row.nextChargeAt),
+    cancelAtPeriodEnd: row.cancelAtPeriodEnd,
+    lastRenewalError: row.lastRenewalError,
+    lastRenewalAttemptAt: iso(row.lastRenewalAttemptAt),
+    renewalFailureCount: row.renewalFailureCount,
+  };
+}
+
+/** How many payments, ledger rows and audit rows the subscription view returns. */
+const SUBSCRIPTION_TIMELINE_LIMIT = 50;
+/** The ledger rows are gathered from this many of its newest payments. */
+const SUBSCRIPTION_EVENT_PAYMENTS = 10;
+
+/**
+ * `GET <api>/subscriptions/:id` — everything this system knows about ONE subscription, by this
+ * store's id or the gateway's subscription id.
+ *
+ * - its CURRENT state: status, plan, amount and cycle, trial and period dates, cancellation,
+ *   renewal failures;
+ * - the CUSTOMER it bills (the owner mapping), when one is recorded;
+ * - the PAYMENTS charged for it, newest first (matched on the payment's recorded subscription);
+ * - the LEDGER rows naming those payments, newest first;
+ * - the AUDIT rows naming the subscription.
+ *
+ * Outside the viewer's organizations the subscription does not exist (`404`), like a payment.
+ */
+export async function subscriptionDetail(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
+  const id = req.params.id;
+  if (id === undefined || id === '') return badRequest('A subscription id is required.');
+
+  // The gateway id first (what a gateway dashboard shows), then this store's own row id (a
+  // managed subscription has no gateway id). Filtered again for a custom store that ignores
+  // either filter: it would answer someone else's row, and that must read as "not found".
+  const [byGateway] = (await deps.store.listSubscriptions({ gatewayId: id, size: 1 })).filter(
+    (row) => row.gatewayId === id,
+  );
+  const row =
+    byGateway ??
+    (await deps.store.listSubscriptions({ id, size: 1 })).filter((r) => r.id === id)[0];
+  if (row === undefined) return notFound(`No subscription "${id}" is recorded locally.`);
+
+  // A payment records the subscription it was charged for by the gateway's id, or, for a managed
+  // one, by this store's id.
+  const refs = [...new Set([row.gatewayId, row.id].filter((ref): ref is string => !!ref))];
+  const [customerRows, paymentPages, auditPages] = await Promise.all([
+    row.customerId !== null
+      ? deps.store.listCustomers({ gatewayId: row.customerId, size: 1 })
+      : Promise.resolve([]),
+    Promise.all(
+      refs.map((ref) =>
+        deps.store.listPayments({ subscriptionId: ref, size: SUBSCRIPTION_TIMELINE_LIMIT }),
+      ),
+    ),
+    Promise.all(
+      refs.map((ref) =>
+        deps.store.listAuditEvents({
+          subjectType: 'subscription',
+          subjectId: ref,
+          size: SUBSCRIPTION_TIMELINE_LIMIT,
+        }),
+      ),
+    ),
+  ]);
+  const newestFirst = (a: Date | null, b: Date | null) => (b?.getTime() ?? 0) - (a?.getTime() ?? 0);
+  const paymentRows = uniqueBy(
+    paymentPages.flat().filter((p) => p.subscriptionId !== null && refs.includes(p.subscriptionId)),
+    (p) => p.id,
+  )
+    .sort((a, b) => newestFirst(a.createdAt, b.createdAt))
+    .slice(0, SUBSCRIPTION_TIMELINE_LIMIT);
+  const customer = customerRows.find((c) => c.gatewayId === row.customerId) ?? null;
+  const owner: OwnerJson | null = customer
+    ? { type: customer.ownerType, id: customer.ownerId, name: customer.name, email: customer.email }
+    : null;
+  const eventPages = await Promise.all(
+    paymentRows
+      .slice(0, SUBSCRIPTION_EVENT_PAYMENTS)
+      .map((p) => deps.store.listWebhookEventsForPayment(p.gatewayId, { size: 20 })),
+  );
+  const events = uniqueBy(eventPages.flat(), (e) => e.id)
+    .sort((a, b) => newestFirst(a.createdAt, b.createdAt))
+    .slice(0, SUBSCRIPTION_TIMELINE_LIMIT);
+  const audit = uniqueBy(auditPages.flat(), (a) => a.id)
+    .sort((a, b) => newestFirst(a.createdAt, b.createdAt))
+    .slice(0, SUBSCRIPTION_TIMELINE_LIMIT);
+
+  return ok({
+    subscription: subscriptionJson(row),
+    customer: customer === null ? null : customerJson(customer),
+    payments: paymentRows.map((p) => paymentJson(p, owner, deps.capabilities)),
+    events: { rows: events.map(webhookEventJson), matchedBy: 'payment-gateway-id' },
+    audit: audit.map(auditJson),
+    currency: deps.currency,
+  });
+}
+
+function uniqueBy<T>(rows: readonly T[], key: (row: T) => string): T[] {
+  const seen = new Set<string>();
+  return rows.filter((row) => {
+    const k = key(row);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
   });
 }
 
@@ -810,6 +919,7 @@ export const AUDIT_ACTION_FILTERS = [
   AUDIT_ACTIONS.webhookRejected,
   AUDIT_ACTIONS.refund,
   AUDIT_ACTIONS.disputeResolved,
+  AUDIT_ACTIONS.webhookRetried,
 ] as const;
 
 /**
@@ -1162,8 +1272,24 @@ export async function retryWebhookEvent(deps: Deps, req: ApiRequest): Promise<Ap
     previousError: row.error,
   });
   switch (outcome.kind) {
-    case 'processed':
-      return ok({ gatewayEventId, status: 'processed' });
+    case 'processed': {
+      // WHO re-ran it, from the console or its dev tools. The ledger row only says it is
+      // `processed` now; this is the one record that a person made it so.
+      const audit = await deps.store.recordAuditEvent({
+        action: AUDIT_ACTIONS.webhookRetried,
+        ...(deps.actor !== undefined ? { actor: deps.actor } : {}),
+        provider: row.provider,
+        subjectType: 'webhook',
+        subjectId: gatewayEventId,
+        metadata: { type: row.type, previousError: row.error },
+      });
+      return ok({
+        gatewayEventId,
+        status: 'processed',
+        /** `null` on an install whose `billing_audit_events` table is not there yet. */
+        audit: audit === null ? null : auditJson(audit),
+      });
+    }
     case 'conflict':
       return conflict(
         `Event "${gatewayEventId}" was claimed by something else before the retry started.`,

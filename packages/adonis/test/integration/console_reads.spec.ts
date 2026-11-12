@@ -31,6 +31,39 @@ describe('console reads (integration)', () => {
     await database?.teardown();
   });
 
+  describe('one subscription', () => {
+    it('finds a subscription by its own id, and the payments charged for it', async () => {
+      const sub = await store.saveSubscription({
+        gatewayId: 'sub_detail',
+        provider: 'asaas',
+        customerId: 'cus_detail',
+        status: 'active',
+        planId: 'pro',
+      });
+      await store.savePayment({
+        gatewayId: 'pay_detail',
+        provider: 'asaas',
+        status: 'paid',
+        amount: 100,
+        currency: 'BRL',
+        customerId: 'cus_detail',
+        subscriptionId: 'sub_detail',
+      });
+      await store.savePayment({
+        gatewayId: 'pay_detail_other',
+        provider: 'asaas',
+        status: 'paid',
+        amount: 100,
+        currency: 'BRL',
+        customerId: 'cus_detail',
+      });
+      const byId = await store.listSubscriptions({ id: String(sub.id) });
+      expect(byId.map((row) => row.gatewayId)).toEqual(['sub_detail']);
+      const payments = await store.listPayments({ subscriptionId: 'sub_detail' });
+      expect(payments.map((row) => row.gatewayId)).toEqual(['pay_detail']);
+    });
+  });
+
   describe('payment lookups', () => {
     beforeAll(async () => {
       await store.saveCustomer({

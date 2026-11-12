@@ -216,6 +216,17 @@ describe('payments dev tools catalogue', () => {
     });
   });
 
+  it('forwards a malformed refund amount so the console refuses it, never a full refund', async () => {
+    const serve = vi.fn(async () => ({
+      status: 400,
+      body: { error: '`amount` must be a positive integer' },
+    }));
+    const tools = paymentsDevTools({ ...options, serve });
+    const refund = tools.find((t) => t.name === 'payments_refund_payment') as DevTool;
+    await expect(refund.run({ gatewayId: 'pi_1', amount: '50' }, call({}))).rejects.toThrow(/^400/);
+    expect(serve.mock.calls[0]?.[2]).toMatchObject({ body: { amount: '50' } });
+  });
+
   it('pages lists as { items, next }, limit capped at 100 and mapped to the console size', async () => {
     const serve = vi.fn(async (_ctx: unknown, _route: unknown, req: { query: unknown }) => ({
       status: 200,

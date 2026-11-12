@@ -533,7 +533,9 @@ export function paymentsDevTools(options: PaymentsDevToolsOptions): DevTool[] {
           ROUTES.refund,
           {
             params: { gatewayId: required(input, 'gatewayId') },
-            body: typeof amount === 'number' ? { amount } : {},
+            // Forwarded as given: the console rejects anything but a positive integer (400), so
+            // a malformed amount never becomes a full refund.
+            body: amount !== undefined && amount !== null ? { amount } : {},
           },
           input,
         );

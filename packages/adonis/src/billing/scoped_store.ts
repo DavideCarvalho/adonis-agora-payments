@@ -1,5 +1,4 @@
-import type { BillingStore, DisputeListItem } from './billing_store.js';
-import { BILLING_LIST_MAX_SIZE } from './list_query.js';
+import type { BillingStore } from './billing_store.js';
 import { type BillingOwnerScope, ownerInScope } from './owner_scope.js';
 
 /** Thrown by a scoped read over a store that cannot apply the scope (no `ownerScoping`). */
@@ -51,11 +50,6 @@ export function scopedBillingStore<S extends AnyStore>(
   const disputeVisible = async (paymentGatewayId: string): Promise<boolean> => {
     const payment = await store.findPaymentByGatewayId(paymentGatewayId);
     return customerVisible(field(payment, 'customerId'));
-  };
-  const visibleDisputes = async (rows: DisputeListItem[]): Promise<DisputeListItem[]> => {
-    const out: DisputeListItem[] = [];
-    for (const row of rows) if (await disputeVisible(row.paymentGatewayId)) out.push(row);
-    return out;
   };
 
   const overrides: Partial<AnyStore> = {
@@ -147,28 +141,33 @@ export function scopedBillingStore<S extends AnyStore>(
       }
       return store.listAuditEvents(query);
     },
-    countAuditEvents: async () => 0,
+    countAuditEvents: async (query) => {
+      if (query.subjectType !== 'payment' || query.subjectId === undefined) return 0;
+      if ((await rowVisible(await store.findPaymentByGatewayId(query.subjectId))) === null) {
+        return 0;
+      }
+      return store.countAuditEvents(query);
+    },
     listWebhookEventsForPayment: async (paymentGatewayId, query) =>
       (await rowVisible(await store.findPaymentByGatewayId(paymentGatewayId))) === null
         ? []
         : store.listWebhookEventsForPayment(paymentGatewayId, query),
-    // The deadline/open work lists have no `owners` filter: scoped after the read, over a bounded
-    // page, so a short page means "none of these were yours".
-    listDisputesDueWithin: async (query) =>
-      visibleDisputes(await store.listDisputesDueWithin(query)),
-    listOpenDisputes: async (query) => visibleDisputes(await store.listOpenDisputes(query)),
-    countDisputesDueWithin: async (query) =>
-      (
-        await visibleDisputes(
-          await store.listDisputesDueWithin({ ...query, page: 1, size: BILLING_LIST_MAX_SIZE }),
-        )
-      ).length,
-    countOpenDisputes: async (query) =>
-      (
-        await visibleDisputes(
-          await store.listOpenDisputes({ ...query, page: 1, size: BILLING_LIST_MAX_SIZE }),
-        )
-      ).length,
+    listDisputesDueWithin: async (query) => {
+      guard();
+      return store.listDisputesDueWithin({ ...query, owners: scope });
+    },
+    listOpenDisputes: async (query) => {
+      guard();
+      return store.listOpenDisputes({ ...query, owners: scope });
+    },
+    countDisputesDueWithin: async (query) => {
+      guard();
+      return store.countDisputesDueWithin({ ...query, owners: scope });
+    },
+    countOpenDisputes: async (query) => {
+      guard();
+      return store.countOpenDisputes({ ...query, owners: scope });
+    },
   };
 
   return new Proxy(store, {

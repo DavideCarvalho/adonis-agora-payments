@@ -686,6 +686,16 @@ describe('payments console under tenancy (routes)', () => {
     expect(recorded.status).toBe(404);
   });
 
+  it('an explicit empty grant is "no organization" in the picker', async () => {
+    const context = installContext({ enabled: true });
+    const { find } = await boot(() => ({ allowed: true, tenants: [] }));
+    const picker: Recorded = {};
+    await context.as({ tenant: org('a') }, () =>
+      find('get', '/payments/api/tenants')(fakeCtx(picker)),
+    );
+    expect(picker.body).toMatchObject({ mode: 'none' });
+  });
+
   it('a viewer with no organization sees nothing (and the picker says so)', async () => {
     const context = installContext({ enabled: true });
     const { find } = await boot(() => true);
@@ -743,5 +753,100 @@ describe('payments:sync --backfill-owner', () => {
       ownerType: 'Organization',
       ownerId: 'a',
     });
+  });
+});
+
+describe('pullfrog review follow-ups', () => {
+  it('the scoped dispute work-lists are scoped in the store, past any first page', async () => {
+    const store = new InMemoryBillingStore();
+    await store.saveCustomer({
+      gatewayId: 'cus_a',
+      provider: 'fake',
+      ownerType: 'organization',
+      ownerId: 'a',
+    });
+    await store.saveCustomer({
+      gatewayId: 'cus_b',
+      provider: 'fake',
+      ownerType: 'organization',
+      ownerId: 'b',
+    });
+    const now = new Date('2026-11-12T00:00:00.000Z');
+    const due = new Date('2026-11-12T06:00:00.000Z');
+    // Another organization's due disputes fill more than a page before ours.
+    for (let i = 0; i < 205; i++) {
+      await store.savePayment({
+        gatewayId: `pay_b${i}`,
+        provider: 'fake',
+        status: 'disputed',
+        amount: 1,
+        currency: 'BRL',
+        customerId: 'cus_b',
+      });
+      await store.saveDispute({
+        gatewayId: `dp_b${i}`,
+        paymentGatewayId: `pay_b${i}`,
+        provider: 'fake',
+        status: 'open',
+        evidenceDueBy: due,
+      });
+    }
+    await store.savePayment({
+      gatewayId: 'pay_a',
+      provider: 'fake',
+      status: 'disputed',
+      amount: 1,
+      currency: 'BRL',
+      customerId: 'cus_a',
+    });
+    await store.saveDispute({
+      gatewayId: 'dp_a',
+      paymentGatewayId: 'pay_a',
+      provider: 'fake',
+      status: 'open',
+      evidenceDueBy: new Date('2026-11-12T07:00:00.000Z'),
+    });
+    const scoped = scopedBillingStore(store, {
+      tenantOwnerTypes: ['organization'],
+      tenantIds: ['a'],
+      includeNull: false,
+    });
+    const rows = await scoped.listDisputesDueWithin({ withinHours: 24, now, size: 200 });
+    expect(rows.map((r) => r.gatewayId)).toEqual(['dp_a']);
+    expect(await scoped.countDisputesDueWithin({ withinHours: 24, now })).toBe(1);
+    expect(await scoped.countOpenDisputes({})).toBe(1);
+    expect((await scoped.listOpenDisputes({})).map((r) => r.gatewayId)).toEqual(['dp_a']);
+  });
+
+  it("a visible payment's audit count agrees with its audit list", async () => {
+    const store = new InMemoryBillingStore();
+    await store.saveCustomer({
+      gatewayId: 'cus_a',
+      provider: 'fake',
+      ownerType: 'organization',
+      ownerId: 'a',
+    });
+    await store.savePayment({
+      gatewayId: 'pay_a',
+      provider: 'fake',
+      status: 'paid',
+      amount: 1,
+      currency: 'BRL',
+      customerId: 'cus_a',
+    });
+    await store.recordAuditEvent({
+      action: AUDIT_ACTIONS.refund,
+      subjectType: 'payment',
+      subjectId: 'pay_a',
+    });
+    const scoped = scopedBillingStore(store, {
+      tenantOwnerTypes: ['organization'],
+      tenantIds: ['a'],
+      includeNull: false,
+    });
+    const query = { subjectType: 'payment', subjectId: 'pay_a' };
+    expect(await scoped.listAuditEvents(query)).toHaveLength(1);
+    expect(await scoped.countAuditEvents(query)).toBe(1);
+    expect(await scoped.countAuditEvents({})).toBe(0);
   });
 });

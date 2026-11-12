@@ -420,6 +420,21 @@ export default defineConfig({
 })
 ```
 
+To let both operators and scripts in, pass both to `anyAuthorize`. It allows a request when any of
+them does, tried in order (the first one that allows also decides the `tenants`):
+
+```ts title="config/payments_dashboard.ts"
+import env from '#start/env'
+import { anyAuthorize, authorizeByToken, defineConfig } from '@adonis-agora/payments/dashboard'
+
+export default defineConfig({
+  authorize: anyAuthorize(
+    authorizeByToken({ token: env.get('CONSOLE_TOKEN') }),
+    (ctx) => ctx.auth.user?.isAdmin === true,
+  ),
+})
+```
+
 
 With [`@adonis-agora/authz`](/docs/authz) the shared helper reads your user and roles for you — the
 same one every Agora console takes, so one RBAC gate reads identically across durable, telescope,
@@ -553,6 +568,48 @@ that refused, and `503` when the payments manager is not reachable at all.
 
 When the billing layer is disabled (`billing.enabled: false`) the API answers `503` rather than
 `500` — the store being absent is a deployment state, not a crash.
+
+## MCP tools
+
+When the app registers `@adonis-agora/agent/mcp_provider`, the console's data is also served to
+coding agents (Claude Code, Cursor, Claude Desktop) on the app's dev MCP endpoint, `/mcp/agora`.
+There is nothing to configure here: the tools follow this console's `authorize`, so whoever can open
+the console can use them, and nobody else. With organizations on, they see the same organizations
+the console shows them. A disabled console (`enabled: false`) serves no tools. The
+[agent docs](/docs/agent/dev-tools) show how to connect a client.
+
+```sh
+claude mcp add --transport http agora http://localhost:3333/mcp/agora \
+  --header "Authorization: Bearer $CONSOLE_TOKEN"
+```
+
+Reads are listed by default. They return what the console's JSON API returns, never a gateway
+payload. Lists take `page` and `limit` (20 by default, at most 100) and answer `{ items, next }`.
+
+| Tool | What it returns |
+| --- | --- |
+| `payments_get_overview` | Revenue, active subscriptions and usage for a `period` (or `from`/`to`). |
+| `payments_get_health` | What needs attention: failed events, stuck payments, closing dispute windows, failing renewals. |
+| `payments_list_payments` | Payments, newest first. Filters: `status`, `provider`, `reference`, `gatewayId`, `customerId`. |
+| `payments_get_payment` | One payment with its owner, disputes, webhook events and audit rows. |
+| `payments_list_subscriptions` | Subscriptions, plus the `past_due` and failing-renewal totals. |
+| `payments_list_disputes` | Disputes; with `dueWithin` (hours), only the open windows closing soonest. |
+| `payments_list_webhook_events` | The webhook ledger, with the error of each failed event. |
+| `payments_list_customers` | The mapping from gateway customers to your app's owners. |
+| `payments_list_audit` | The [activity trail](#activity--the-trail-nothing-else-keeps). |
+| `payments_list_organizations` | With organizations on: the ones you may see. |
+
+With organizations on, pass `tenant: '<organization id>'` to narrow a read to one of them, like the
+console's Organization picker.
+
+The three actions are hidden until the app opts in with `devTools: { actions: ['payments'] }` in
+`config/mcp.ts`. Each is recorded in the activity trail with the actor `mcp:<caller>`.
+
+| Action | What it does |
+| --- | --- |
+| `payments_refund_payment` | Refunds a paid payment, in full or `amount` (integer minor units). Moves money. Listed only when a configured gateway supports refunds. |
+| `payments_retry_webhook_event` | Re-runs a failed webhook event through your handlers. |
+| `payments_resolve_dispute` | Records how a dispute ended at the gateway (`status`, `outcome`, `note`). Sends nothing to the gateway. |
 
 ## Activity — the trail nothing else keeps
 

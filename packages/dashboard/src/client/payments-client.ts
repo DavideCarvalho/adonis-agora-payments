@@ -633,7 +633,7 @@ export interface DisputeListOptions extends ListOptions {
 }
 
 export const paymentsClient = {
-  /** The organization picker. Tenancy off (the route is not mounted) reads as `mode: 'off'`. */
+  /** The organization picker. Tenancy off answers `mode: 'off'` (a server without the route, too). */
   async tenants(): Promise<TenantPicker> {
     const res = await fetch(`${apiBase()}/tenants`);
     if (res.status === 404 || !res.ok) return TENANCY_OFF;

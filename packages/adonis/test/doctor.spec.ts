@@ -70,12 +70,18 @@ describe('payments.webhook-csrf', () => {
     expect(checkWebhookCsrf(payments, undefined).status).toBe('ok');
     expect(checkWebhookCsrf(payments, { csrf: { enabled: false } }).status).toBe('ok');
     expect(checkWebhookCsrf(payments, shield({ methods: ['PUT'] })).status).toBe('ok');
+    // Shield validates every method when the list is empty.
+    expect(checkWebhookCsrf(payments, shield({ methods: [] })).status).toBe('error');
   });
 
   it('reads an exceptRoutes array', () => {
     expect(
       checkWebhookCsrf(payments, shield({ exceptRoutes: ['/payments/webhook/:provider'] })).status,
     ).toBe('ok');
+    // Shield matches the route pattern, never the URL.
+    expect(
+      checkWebhookCsrf(payments, shield({ exceptRoutes: ['/payments/webhook/asaas'] })).status,
+    ).toBe('error');
     const blocked = checkWebhookCsrf(payments, shield({ exceptRoutes: ['/api/*'] }));
     expect(blocked.status).toBe('error');
     expect(blocked.fix).toContain('/payments/webhook/:provider');
@@ -96,13 +102,13 @@ describe('payments.webhook-csrf', () => {
     expect(checkWebhookCsrf(payments, shield({ exceptRoutes: () => false })).status).toBe('error');
   });
 
-  it('errors with a hedged message when the function throws', () => {
+  it('warns when the function throws when the function throws', () => {
     const throws = () => {
       throw new Error('needs a full ctx');
     };
     expect(csrfBlocksRoute(shield({ exceptRoutes: throws }), '/x', '/x')).toBe('unknown');
     const result = checkWebhookCsrf(payments, shield({ exceptRoutes: throws }));
-    expect(result.status).toBe('error');
+    expect(result.status).toBe('warn');
     expect(result.message).toContain('threw');
   });
 });

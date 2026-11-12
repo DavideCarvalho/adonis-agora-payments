@@ -69,7 +69,7 @@ interface ShieldCsrfLike {
 /**
  * Whether shield's CSRF check would reject a gateway's `POST` to `url` (route `pattern`). `false`
  * when CSRF is off, `POST` is not a checked method, or `exceptRoutes` exempts the route (an array
- * naming the pattern, or a function answering `true` for a minimal context of that request);
+ * naming the route pattern, or a function answering `true` for a minimal context of that request);
  * `'unknown'` when the function throws on that minimal context.
  */
 export function csrfBlocksRoute(
@@ -79,8 +79,11 @@ export function csrfBlocksRoute(
 ): boolean | 'unknown' {
   const csrf = (shield as { csrf?: ShieldCsrfLike } | undefined)?.csrf;
   if (csrf === undefined || csrf.enabled !== true) return false;
+  // An explicit, non-empty method list without POST never checks a delivery. Shield reads an empty
+  // list as "validate every method", like an absent one.
   if (
     Array.isArray(csrf.methods) &&
+    csrf.methods.length > 0 &&
     !csrf.methods.some((method) => method.toUpperCase() === 'POST')
   ) {
     return false;
@@ -98,7 +101,8 @@ export function csrfBlocksRoute(
       return 'unknown';
     }
   }
-  if (Array.isArray(except)) return !except.includes(pattern) && !except.includes(url);
+  // Shield matches an array against the route PATTERN only, never the URL.
+  if (Array.isArray(except)) return !except.includes(pattern);
   return true;
 }
 
@@ -114,12 +118,18 @@ export function checkWebhookCsrf(
   const provider = Object.keys(payments.providers ?? {})[0] ?? 'stripe';
   const verdict = csrfBlocksRoute(shield, WEBHOOK_ROUTE_PATTERN, `/payments/webhook/${provider}`);
   if (verdict === false) return { status: 'ok', message: 'Webhook deliveries pass CSRF.' };
+  if (verdict === 'unknown') {
+    return {
+      status: 'warn',
+      message:
+        'shield csrf.exceptRoutes threw when probed, so whether it exempts /payments/webhook/:provider is unknown.',
+      fix: 'Make sure `csrf.exceptRoutes` (config/shield.ts) exempts `/payments/webhook/:provider`.',
+      docs: `${DOCS}/webhooks`,
+    };
+  }
   return {
     status: 'error',
-    message:
-      verdict === 'unknown'
-        ? 'shield csrf.exceptRoutes threw when probed: it may reject every gateway delivery to /payments/webhook/*.'
-        : "Shield's CSRF check rejects every gateway delivery to /payments/webhook/*.",
+    message: "Shield's CSRF check rejects every gateway delivery to /payments/webhook/*.",
     fix: 'Exempt `/payments/webhook/:provider` in `csrf.exceptRoutes` (config/shield.ts).',
     docs: `${DOCS}/webhooks`,
   };

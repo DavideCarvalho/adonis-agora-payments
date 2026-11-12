@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.4
+
+### Minor Changes
+
+- [#229](https://github.com/DavideCarvalho/adonis-agora-payments/pull/229) [`771cf19`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/771cf19a7ef13bde72b993b6e82a9014c811335e) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Account console pages. When `@adonis-agora/authkit-server` (or authkit-client) is in the app, payments registers itself into authkit's `authkit.accountExtensions` registry, with no import of authkit. Signed-in users get `/account/billing` (cancel at period end, keep subscription, change plan, update card — each with confirmation and a recent sign-in), `/account/payment-method` (the card updated in place with the gateway's own component: Stripe Payment Element, Mercado Pago Secure Fields, Pagar.me, Square Web Payments, PayPal button, and an Asaas card form tokenized by the app) and `/account/invoices` (payments and gateway invoices, with download). Gateways without a component send the user to their own page (Stripe billing portal, Lemon Squeezy, Paddle, Polar, Dodo). New `accountConsole` option in `config/payments.ts`: `false`, or `{ owner, organizationRoles, pages, actions, plans, changePlan, invoiceUrl, path, publicUrl, returnUrl }`; with organizations on, the pages bill the active organization for its owners and admins. Drivers gain optional `cardSetup`, `saveCard` and `cardUpdateUrl`; `UpdateSubscriptionInput.planId` (Stripe swaps the price); new driver options `publishableKey` (Stripe), `publicKey` (Pagar.me, Mercado Pago), `applicationId` (Square).
+
 ## 1.0.0-rc.3
 
 ### Minor Changes

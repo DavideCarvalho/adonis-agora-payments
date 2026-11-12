@@ -5,11 +5,15 @@ import {
   publishSubscriptionDiagnostics,
 } from '../diagnostics.js';
 import type {
+  CardSetupInput,
+  CardSetupSession,
   ChargeInput,
   CheckoutInput,
   CreateCustomerInput,
   CreateSubscriptionInput,
   PaymentsDriver,
+  SaveCardInput,
+  SavedCard,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
   WebhookVerificationState,
@@ -51,6 +55,11 @@ export interface MercadoPagoDriverConfig {
    * notifications without a valid signature are rejected.
    */
   webhookSecret?: string;
+  /**
+   * Public key (`APP_USR-…`, `TEST-…` in the sandbox), for updating a card in place with Mercado
+   * Pago's Secure Fields in the account console. Defaults to `env.get('MERCADOPAGO_PUBLIC_KEY')`.
+   */
+  publicKey?: string;
 }
 
 interface MercadoPagoCustomerResponse {
@@ -187,6 +196,8 @@ export class MercadoPagoDriver implements PaymentsDriver {
   #accessToken: string;
   #currency: string;
   #webhookSecret: string | undefined;
+  /** Public key the browser's Secure Fields tokenize a card with (account console). */
+  #publicKey: string | undefined;
   #invoiceCtx: EmitInvoiceContext;
 
   constructor(ctx: EmitInvoiceContext, config: MercadoPagoDriverConfig) {
@@ -199,6 +210,7 @@ export class MercadoPagoDriver implements PaymentsDriver {
     });
     this.#currency = requireCurrency('mercadopago', config.currency);
     this.#webhookSecret = config.webhookSecret ?? process.env.MERCADOPAGO_WEBHOOK_SECRET;
+    this.#publicKey = config.publicKey ?? process.env.MERCADOPAGO_PUBLIC_KEY;
   }
 
   // ── Customers ────────────────────────────────────────────────────────────────────────
@@ -512,6 +524,49 @@ export class MercadoPagoDriver implements PaymentsDriver {
       if (isNotFound(error)) return null;
       throw error;
     }
+  }
+
+  // ── Saved card ───────────────────────────────────────────────────────────────────────
+
+  /**
+   * Mercado Pago's Secure Fields (SDK v2) collect the card in the browser and hand back a card
+   * token. Needs the public key (`publicKey`, or `MERCADOPAGO_PUBLIC_KEY`).
+   */
+  async cardSetup(_input: CardSetupInput): Promise<CardSetupSession> {
+    if (this.#publicKey === undefined) {
+      throw new Error(
+        '[payments] Mercado Pago card update needs the public key. Set `MERCADOPAGO_PUBLIC_KEY` or pass `publicKey` to `payments.mercadopago()`.',
+      );
+    }
+    return {
+      scripts: [{ src: 'https://sdk.mercadopago.com/js/v2' }],
+      props: { publicKey: this.#publicKey },
+    };
+  }
+
+  /**
+   * `token` is the card token Secure Fields produced; each preapproval moves to it
+   * (`PUT /preapproval/{id}` with `card_token_id`).
+   *
+   * Only gateway subscriptions: a Mercado Pago card token is single use, and a saved card cannot
+   * be charged off-session without its CVV, so a library-managed subscription has nothing to
+   * renew with. Without gateway subscriptions this refuses rather than save a card no renewal
+   * can charge.
+   */
+  async saveCard(input: SaveCardInput): Promise<SavedCard> {
+    const subscriptions = input.subscriptionGatewayIds ?? [];
+    if (subscriptions.length === 0) {
+      throw new Error(
+        '[payments] Mercado Pago can only change the card of its own subscriptions (preapprovals): a library-managed subscription cannot renew on a Mercado Pago saved card, which needs the CVV on every charge.',
+      );
+    }
+    for (const subscription of subscriptions) {
+      await this.#request<MercadoPagoPreapprovalResponse>(`/preapproval/${subscription}`, {
+        method: 'PUT',
+        body: { card_token_id: input.token },
+      });
+    }
+    return { paymentMethodId: input.token };
   }
 
   // ── Invoices ─────────────────────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { publishRefundDiagnostics, publishSubscriptionDiagnostics } from '../diagnostics.js';
 import type {
+  CardUpdateUrlInput,
   ChargeInput,
   CheckoutInput,
   CreateCustomerInput,
@@ -488,6 +489,40 @@ export class PaddleDriver implements PaymentsDriver {
       if (isNotFound(error)) return null;
       throw error;
     }
+  }
+
+  // ── Saved card ───────────────────────────────────────────────────────────────────────
+
+  /**
+   * A zero-amount "update payment method" transaction for the subscription
+   * (`GET /subscriptions/{id}/update-payment-method-transaction`), and its checkout URL. That URL
+   * is your **default payment link** (Checkout settings) with `?_ptxn=…`, so the page there must
+   * load Paddle.js, which opens the checkout for the transaction. Paddle's page is per
+   * subscription, so `subscriptionGatewayId` is required; it has no return URL.
+   */
+  async cardUpdateUrl(input: CardUpdateUrlInput): Promise<string> {
+    if (input.subscriptionGatewayId === undefined) {
+      throw new Error(
+        '[payments] Paddle updates the card of one subscription at a time: pass `subscriptionGatewayId`.',
+      );
+    }
+    const { data } = await this.#request<PaddleEnvelope<PaddleTransactionResponse>>(
+      `/subscriptions/${encodeURIComponent(input.subscriptionGatewayId)}/update-payment-method-transaction`,
+    );
+    if (
+      data.customer_id !== undefined &&
+      data.customer_id !== null &&
+      data.customer_id !== input.customerId
+    ) {
+      throw new Error('[payments] This Paddle subscription belongs to another customer.');
+    }
+    const url = data.checkout?.url;
+    if (typeof url !== 'string' || url === '') {
+      throw new Error(
+        '[payments] Paddle returned no checkout URL for the update transaction. Set a default payment link in Paddle (Checkout → Checkout settings).',
+      );
+    }
+    return url;
   }
 
   // ── Invoices ─────────────────────────────────────────────────────────────────────────

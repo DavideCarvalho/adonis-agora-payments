@@ -6,11 +6,15 @@ import {
   publishSubscriptionDiagnostics,
 } from '../diagnostics.js';
 import type {
+  CardSetupInput,
+  CardSetupSession,
   ChargeInput,
   CheckoutInput,
   CreateCustomerInput,
   CreateSubscriptionInput,
   PaymentsDriver,
+  SaveCardInput,
+  SavedCard,
   TokenizeCardInput,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
@@ -352,6 +356,38 @@ export class AsaasDriver implements PaymentsDriver {
       brand: data.creditCardBrand,
       provider: this.provider,
     };
+  }
+
+  // ── Saved card ───────────────────────────────────────────────────────────────────────
+
+  /**
+   * O Asaas não tem componente de browser: o console desenha o próprio formulário de cartão e
+   * tokeniza pelo servidor ({@link tokenizeCard}). Nada a carregar, nada a montar.
+   */
+  async cardSetup(_input: CardSetupInput): Promise<CardSetupSession> {
+    return { scripts: [], props: {} };
+  }
+
+  /**
+   * `token` é o `creditCardToken` de {@link tokenizeCard}. Cada assinatura troca de cartão sem
+   * cobrar nada agora — `PUT /subscriptions/{id}/creditCard` — e o token é o que as renovações
+   * de uma assinatura gerida pela biblioteca passam a `charge()` (`paymentMethodId`).
+   */
+  async saveCard(input: SaveCardInput): Promise<SavedCard> {
+    if (input.token === '') {
+      throw new Error('[payments] Asaas expects the creditCardToken returned by tokenizeCard.');
+    }
+    for (const subscription of input.subscriptionGatewayIds ?? []) {
+      await this.#request<AsaasSubscriptionResponse>(`/subscriptions/${subscription}/creditCard`, {
+        method: 'PUT',
+        body: {
+          creditCardToken: input.token,
+          // Antifraude do Asaas: o IP do pagador vai quando se sabe qual é.
+          ...(input.remoteIp !== undefined ? { remoteIp: input.remoteIp } : {}),
+        },
+      });
+    }
+    return { paymentMethodId: input.token };
   }
 
   async charge(input: ChargeInput): Promise<Payment> {

@@ -11,6 +11,7 @@
     "client",
     "billing",
     "organizations",
+    "account-console",
     "invoices",
     "---Extending---",
     "custom-providers",

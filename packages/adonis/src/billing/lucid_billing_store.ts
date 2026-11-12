@@ -723,6 +723,7 @@ export class LucidBillingStore
       row.endsAt = patch.endsAt ? DateTime.fromJSDate(patch.endsAt) : null;
     }
     if (patch.paymentMethodId !== undefined) row.paymentMethodId = patch.paymentMethodId;
+    if (patch.planId !== undefined) row.planId = patch.planId;
     // Without these three the failure streak never reached the database: the console's
     // "failing renewals" list stayed empty and a retry delay would restart from the first step.
     if (patch.lastRenewalError !== undefined) row.lastRenewalError = patch.lastRenewalError;

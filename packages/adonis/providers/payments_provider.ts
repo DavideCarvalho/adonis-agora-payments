@@ -1,6 +1,14 @@
+import { randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import type { HttpContext } from '@adonisjs/core/http';
 import type { ApplicationService, HttpRouterService } from '@adonisjs/core/types';
+import { CARD_SCRIPT } from '../src/account_console/card_script.js';
+import {
+  ACCOUNT_EXTENSIONS_BINDING,
+  type AccountExtensionRegistry,
+} from '../src/account_console/contract.js';
+import { accountPath, paymentsAccountExtension } from '../src/account_console/extension.js';
+import { handleCardTokenize } from '../src/account_console/tokenize_endpoint.js';
 import { resolvePaymentsTenancy } from '../src/agora/tenancy.js';
 import type { BillingStore } from '../src/billing/billing_store.js';
 import { AUDIT_ACTIONS } from '../src/billing/billing_store.js';
@@ -55,6 +63,7 @@ export default class PaymentsProvider {
   #webhook: WebhookDispatcher | undefined;
   /** Held for the webhook route: a REFUSED delivery is filed here, having no ledger row. */
   #store: BillingStore | undefined;
+  #secret: string | undefined;
 
   constructor(protected app: ApplicationService) {}
 
@@ -108,6 +117,10 @@ export default class PaymentsProvider {
       paymentsDoctorChecks({ store: () => this.#store }),
     ).catch(() => undefined);
 
+    // The billing pages in the authkit account console, when authkit's registry is in the app. No
+    // import of authkit: a binding name and an object literal.
+    await this.#registerAccountPages();
+
     await this.app.booted(async () => {
       const config = this.app.config.get<PaymentsConfig>('payments', {});
       // Build the billing layer here (async — resolves the app emitter + handler
@@ -134,8 +147,122 @@ export default class PaymentsProvider {
       if (resolveRole(config) !== 'worker') {
         const router = await this.app.container.make('router');
         this.#registerWebhookRoute(router);
+        this.#registerAccountRoutes(router, config);
       }
     });
+  }
+
+  /** The HMAC secret of the card form's tickets: the app key, else a process key. */
+  #accountSecret(): string {
+    if (this.#secret !== undefined) return this.#secret;
+    const key = this.app.config.get<unknown>('app.appKey', undefined);
+    const released =
+      typeof key === 'string'
+        ? key
+        : typeof (key as { release?: unknown } | undefined)?.release === 'function'
+          ? String((key as { release(): unknown }).release())
+          : '';
+    this.#secret = released !== '' ? released : randomBytes(32).toString('hex');
+    return this.#secret;
+  }
+
+  /** Whether authkit's account console registry is bound (read structurally). */
+  #hasAccountRegistry(): boolean {
+    const container = this.app.container as unknown as { hasBinding?: (key: string) => boolean };
+    return (
+      typeof container.hasBinding === 'function' && container.hasBinding(ACCOUNT_EXTENSIONS_BINDING)
+    );
+  }
+
+  async #registerAccountPages(): Promise<void> {
+    const config = this.app.config.get<PaymentsConfig>('payments', {});
+    if (config.accountConsole === false) return;
+    const container = this.app.container as unknown as {
+      hasBinding(key: string): boolean;
+      make(key: string): Promise<unknown>;
+    };
+    try {
+      if (typeof container.hasBinding !== 'function') return;
+      if (!container.hasBinding(ACCOUNT_EXTENSIONS_BINDING)) return;
+      const registry = (await container.make(ACCOUNT_EXTENSIONS_BINDING)) as
+        | Partial<AccountExtensionRegistry>
+        | undefined;
+      if (typeof registry?.register !== 'function' || (registry.contract ?? 0) < 1) return;
+      registry.register(
+        paymentsAccountExtension({
+          manager: () => this.app.container.make(PaymentsManager),
+          store: () => this.#store,
+          options: config.accountConsole ?? {},
+          ...(config.userOwnerType !== undefined ? { userOwnerType: config.userOwnerType } : {}),
+          secret: this.#accountSecret(),
+        }),
+      );
+    } catch (error) {
+      try {
+        const logger = await this.app.container.make('logger');
+        logger.warn(
+          `[@adonis-agora/payments] could not add the account console pages: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      } catch {
+        /* logging must never break boot */
+      }
+    }
+  }
+
+  /**
+   * The account console card form's script and its tokenize endpoint, under
+   * `accountConsole.path` (default `/payments/account`). With `publicUrl` (pages shown by an IdP
+   * in another app) both answer CORS.
+   */
+  #registerAccountRoutes(router: HttpRouterService, config: PaymentsConfig): void {
+    if (config.accountConsole === false || !this.#hasAccountRegistry()) return;
+    const options = config.accountConsole ?? {};
+    const base = accountPath(options);
+    const remote = options.publicUrl !== undefined;
+    const cors = (ctx: HttpContext) => {
+      if (!remote) return;
+      ctx.response.header('access-control-allow-origin', '*');
+      ctx.response.header('access-control-allow-methods', 'POST, OPTIONS');
+      ctx.response.header('access-control-allow-headers', 'content-type, x-payments-card-ticket');
+    };
+    router
+      .get(`${base}/card.js`, async (ctx: HttpContext) => {
+        if (remote) ctx.response.header('access-control-allow-origin', '*');
+        return ctx.response
+          .header('content-type', 'text/javascript; charset=utf-8')
+          .header('cache-control', 'public, max-age=300')
+          .send(CARD_SCRIPT);
+      })
+      .as('payments.account.card_script');
+    if (remote) {
+      router
+        .route(`${base}/card/tokenize`, ['OPTIONS'], async (ctx: HttpContext) => {
+          cors(ctx);
+          return ctx.response.status(204).send('');
+        })
+        .as('payments.account.card_tokenize.preflight');
+    }
+    router
+      .post(`${base}/card/tokenize`, async (ctx: HttpContext) => {
+        cors(ctx);
+        ctx.response.header('cache-control', 'no-store');
+        const manager = await this.app.container.make(PaymentsManager);
+        const result = await handleCardTokenize(
+          {
+            header: (name) => ctx.request.header(name),
+            body: ctx.request.body(),
+            ip: ctx.request.ip(),
+          },
+          {
+            driver: async (provider) =>
+              manager.drivers.get(provider) ??
+              [...manager.drivers.values()].find((d) => d.provider === provider),
+            secret: this.#accountSecret(),
+          },
+        );
+        return ctx.response.status(result.status).json(result.body);
+      })
+      .as('payments.account.card_tokenize');
   }
 
   /**

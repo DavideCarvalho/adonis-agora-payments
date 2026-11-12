@@ -5,11 +5,15 @@ import {
   publishSubscriptionDiagnostics,
 } from '../diagnostics.js';
 import type {
+  CardSetupInput,
+  CardSetupSession,
   ChargeInput,
   CheckoutInput,
   CreateCustomerInput,
   CreateSubscriptionInput,
   PaymentsDriver,
+  SaveCardInput,
+  SavedCard,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
   WebhookVerificationState,
@@ -115,6 +119,13 @@ interface PagarmeSubscriptionResponse {
   metadata?: Record<string, unknown>;
 }
 
+/** `POST /customers/{id}/cards` — only the fields the driver reads. */
+interface PagarmeCardResponse {
+  id: string;
+  brand?: string;
+  last_four_digits?: string;
+}
+
 interface PagarmeInvoiceResponse {
   id: string;
   code?: string;
@@ -178,6 +189,8 @@ export class PagarmeDriver implements PaymentsDriver {
   #webhookPassword: string | undefined;
   /** Default Pix expiry (seconds) when the charge doesn't name one. */
   #pixExpiresIn: number;
+  /** Public key the browser tokenizes a card with (account console). */
+  #publicKey: string | undefined;
 
   constructor(ctx: EmitInvoiceContext, config: PagarmeDriverConfig = {}) {
     this.#invoiceCtx = ctx;
@@ -196,6 +209,7 @@ export class PagarmeDriver implements PaymentsDriver {
     this.#webhookUser = config.webhookUser ?? process.env.PAGARME_WEBHOOK_USER;
     this.#webhookPassword = config.webhookPassword ?? process.env.PAGARME_WEBHOOK_PASSWORD;
     this.#pixExpiresIn = config.pixExpiresIn ?? 86_400;
+    this.#publicKey = config.publicKey ?? process.env.PAGARME_PUBLIC_KEY;
   }
 
   // ── Customers ────────────────────────────────────────────────────────────────────────
@@ -504,6 +518,45 @@ export class PagarmeDriver implements PaymentsDriver {
       if (isNotFound(error)) return null;
       throw error;
     }
+  }
+
+  // ── Saved card ───────────────────────────────────────────────────────────────────────
+
+  /**
+   * Pagar.me has no hosted card component: the console draws its own fields and the browser
+   * tokenizes them straight with Pagar.me (`POST /tokens?appId=<publicKey>`), so the card never
+   * reaches your server. Needs the public key (`publicKey`, or `PAGARME_PUBLIC_KEY`).
+   */
+  async cardSetup(_input: CardSetupInput): Promise<CardSetupSession> {
+    if (this.#publicKey === undefined) {
+      throw new Error(
+        '[payments] Pagar.me card update needs the public key. Set `PAGARME_PUBLIC_KEY` or pass `publicKey` to `payments.pagarme()`.',
+      );
+    }
+    return { scripts: [], props: { publicKey: this.#publicKey } };
+  }
+
+  /**
+   * `token` is the single-use card token (`token_…`) the browser got. It becomes a card on the
+   * customer (`POST /customers/{id}/cards`), each subscription moves to it
+   * (`PATCH /subscriptions/{id}/card`), and the card id (`card_…`) is what renewals charge.
+   */
+  async saveCard(input: SaveCardInput): Promise<SavedCard> {
+    const card = await this.#request<PagarmeCardResponse>(
+      `/customers/${encodeURIComponent(input.customerId)}/cards`,
+      { method: 'POST', body: { token: input.token } },
+    );
+    for (const subscription of input.subscriptionGatewayIds ?? []) {
+      await this.#request<PagarmeSubscriptionResponse>(
+        `/subscriptions/${encodeURIComponent(subscription)}/card`,
+        { method: 'PATCH', body: { card_id: card.id } },
+      );
+    }
+    return {
+      paymentMethodId: card.id,
+      ...(card.brand !== undefined ? { brand: card.brand } : {}),
+      ...(card.last_four_digits !== undefined ? { last4: card.last_four_digits } : {}),
+    };
   }
 
   // ── Invoices ─────────────────────────────────────────────────────────────────────────

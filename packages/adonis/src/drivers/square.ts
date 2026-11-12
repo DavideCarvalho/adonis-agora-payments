@@ -5,11 +5,15 @@ import {
   publishSubscriptionDiagnostics,
 } from '../diagnostics.js';
 import type {
+  CardSetupInput,
+  CardSetupSession,
   ChargeInput,
   CheckoutInput,
   CreateCustomerInput,
   CreateSubscriptionInput,
   PaymentsDriver,
+  SaveCardInput,
+  SavedCard,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
   WebhookVerificationState,
@@ -78,6 +82,12 @@ export interface SquareDriverConfig {
    * default version, which is exactly the drift this avoids.
    */
   apiVersion?: string;
+  /**
+   * Application id (`sq0idp-…`, `sandbox-sq0idb-…` in the sandbox), for updating a card in place
+   * with Square's Web Payments SDK in the account console. Defaults to
+   * `env.get('SQUARE_APPLICATION_ID')`.
+   */
+  applicationId?: string;
 }
 
 /** The `Square-Version` these mappings were written against. */
@@ -175,6 +185,13 @@ interface SquareSubscriptionResponse {
   version?: number;
   created_at?: string;
   invoice_ids?: string[];
+}
+
+/** `POST /v2/cards` — only the fields the driver reads. */
+interface SquareCardResponse {
+  id: string;
+  card_brand?: string;
+  last_4?: string;
 }
 
 interface SquareInvoiceResponse {
@@ -285,6 +302,9 @@ export class SquareDriver implements PaymentsDriver {
   #apiVersion: string;
   #webhookSignatureKey: string | undefined;
   #notificationUrl: string | undefined;
+  /** Application id the Web Payments SDK is initialized with (account console). */
+  #applicationId: string | undefined;
+  #sandbox: boolean;
   #invoiceCtx: EmitInvoiceContext;
 
   constructor(ctx: EmitInvoiceContext, config: SquareDriverConfig) {
@@ -311,6 +331,8 @@ export class SquareDriver implements PaymentsDriver {
         '[payments] Driver "square" has a webhookSignatureKey but no notificationUrl. Square signs `notificationUrl + body`, so the URL is part of the secret: set `SQUARE_WEBHOOK_NOTIFICATION_URL` (or pass `notificationUrl`) to the exact URL registered on the webhook subscription.',
       );
     }
+    this.#applicationId = config.applicationId ?? process.env.SQUARE_APPLICATION_ID;
+    this.#sandbox = config.sandbox === true;
     this.#baseUrl =
       config.sandbox === true
         ? 'https://connect.squareupsandbox.com/v2'
@@ -703,6 +725,58 @@ export class SquareDriver implements PaymentsDriver {
       if (isNotFound(error)) return null;
       throw error;
     }
+  }
+
+  // ── Saved card ───────────────────────────────────────────────────────────────────────
+
+  /**
+   * Square's Web Payments SDK card form, which tokenizes the card in the browser into a
+   * single-use nonce. Needs the application id (`applicationId`, or `SQUARE_APPLICATION_ID`).
+   */
+  async cardSetup(_input: CardSetupInput): Promise<CardSetupSession> {
+    if (this.#applicationId === undefined) {
+      throw new Error(
+        '[payments] Square card update needs the application id. Set `SQUARE_APPLICATION_ID` or pass `applicationId` to `payments.square()`.',
+      );
+    }
+    return {
+      scripts: [
+        {
+          src: this.#sandbox
+            ? 'https://sandbox.web.squarecdn.com/v1/square.js'
+            : 'https://web.squarecdn.com/v1/square.js',
+        },
+      ],
+      props: { applicationId: this.#applicationId, locationId: this.#locationId },
+    };
+  }
+
+  /**
+   * `token` is the Web Payments SDK nonce. It becomes a card on file for the customer
+   * (`POST /v2/cards`), each subscription moves to it (`PUT /v2/subscriptions/{id}`), and the card
+   * id (`ccof:…`) is what renewals charge, together with the customer.
+   */
+  async saveCard(input: SaveCardInput): Promise<SavedCard> {
+    const data = await this.#request<{ card: SquareCardResponse }>('/cards', {
+      method: 'POST',
+      body: {
+        idempotency_key: randomUUID(),
+        source_id: input.token,
+        card: { customer_id: input.customerId },
+      },
+    });
+    const card = data.card;
+    for (const subscription of input.subscriptionGatewayIds ?? []) {
+      await this.#request<{ subscription: SquareSubscriptionResponse }>(
+        `/subscriptions/${subscription}`,
+        { method: 'PUT', body: { subscription: { card_id: card.id } } },
+      );
+    }
+    return {
+      paymentMethodId: card.id,
+      ...(card.card_brand !== undefined ? { brand: card.card_brand } : {}),
+      ...(card.last_4 !== undefined ? { last4: card.last_4 } : {}),
+    };
   }
 
   // ── Invoices ─────────────────────────────────────────────────────────────────────────

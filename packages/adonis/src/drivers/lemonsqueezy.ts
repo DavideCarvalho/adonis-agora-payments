@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { publishRefundDiagnostics, publishSubscriptionDiagnostics } from '../diagnostics.js';
 import type {
+  CardUpdateUrlInput,
   ChargeInput,
   CheckoutInput,
   CreateCustomerInput,
@@ -116,6 +117,8 @@ interface LemonSqueezySubscriptionAttributes {
   ends_at?: string | null;
   created_at?: string;
   test_mode?: boolean;
+  /** Signed links Lemon Squeezy mints per subscription; they expire after 24 hours. */
+  urls?: { update_payment_method?: string | null; customer_portal?: string | null };
 }
 
 interface LemonSqueezySubscriptionInvoiceAttributes {
@@ -517,6 +520,35 @@ export class LemonSqueezyDriver implements PaymentsDriver {
       if (isNotFound(error)) return null;
       throw error;
     }
+  }
+
+  // ── Saved card ───────────────────────────────────────────────────────────────────────
+
+  /**
+   * The subscription's own signed `urls.update_payment_method`, read fresh from
+   * `GET /v1/subscriptions/{id}` (the link expires after 24 hours). Lemon Squeezy's page is per
+   * subscription, so `subscriptionGatewayId` is required. It has no return URL.
+   */
+  async cardUpdateUrl(input: CardUpdateUrlInput): Promise<string> {
+    if (input.subscriptionGatewayId === undefined) {
+      throw new Error(
+        '[payments] Lemon Squeezy updates the card of one subscription at a time: pass `subscriptionGatewayId`.',
+      );
+    }
+    const document = await this.#request<JsonApiDocument<LemonSqueezySubscriptionAttributes>>(
+      `/subscriptions/${encodeURIComponent(input.subscriptionGatewayId)}`,
+    );
+    const owner = document.data.attributes.customer_id;
+    if (owner !== undefined && String(owner) !== input.customerId) {
+      throw new Error('[payments] This Lemon Squeezy subscription belongs to another customer.');
+    }
+    const url = document.data.attributes.urls?.update_payment_method;
+    if (typeof url !== 'string' || url === '') {
+      throw new Error(
+        `[payments] Lemon Squeezy returned no update_payment_method link for subscription "${input.subscriptionGatewayId}".`,
+      );
+    }
+    return url;
   }
 
   // ── Invoices ─────────────────────────────────────────────────────────────────────────

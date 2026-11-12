@@ -1,5 +1,11 @@
 import './container_bindings.js';
 
+export type { AccountExtensionContext as PaymentsAccountContext } from './account_console/contract.js';
+export type {
+  AccountConsolePlan,
+  PaymentOwner as AccountConsoleOwner,
+  PaymentsAccountConsoleOptions,
+} from './account_console/extension.js';
 export type {
   PaymentsTenancyOption,
   ResolvedPaymentsTenancy,
@@ -208,11 +214,16 @@ export {
 } from './diagnostics.js';
 export type {
   CardInput,
+  CardSetupInput,
+  CardSetupSession,
+  CardUpdateUrlInput,
   ChargeInput,
   CheckoutInput,
   CreateCustomerInput,
   CreateSubscriptionInput,
   PaymentsDriver,
+  SaveCardInput,
+  SavedCard,
   TokenizeCardInput,
   UpdateCustomerInput,
   UpdateSubscriptionInput,

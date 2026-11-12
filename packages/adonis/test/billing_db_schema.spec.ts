@@ -97,8 +97,16 @@ describe('billing.schema', () => {
         billing: { schema: 'billing', store: () => new LucidBillingStore() },
       }),
     ).rejects.toThrow(
-      /billing.schema is "billing" but billing.store built a LucidBillingStore with no schema/,
+      /built a LucidBillingStore on the default connection, no schema, but the config says the default connection, schema "billing"/,
     );
+  });
+
+  it('refuses a hand-built store on another connection than billing.connection', async () => {
+    await expect(
+      resolveBillingStore({
+        billing: { connection: 'billing', store: () => new LucidBillingStore() },
+      }),
+    ).rejects.toThrow(/the config says connection "billing"/);
   });
 
   it('qualifies the models it queries, and leaves an already-qualified table alone', async () => {

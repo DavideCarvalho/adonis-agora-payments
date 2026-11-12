@@ -151,8 +151,9 @@ export function billingTableRef(
 /** Whether a driver error is "permission denied" — on the schema or database itself. */
 function isPermissionError(error: unknown): boolean {
   const e = error as { code?: unknown; errno?: unknown } | null;
-  // Postgres `insufficient_privilege`; MySQL `ER_DBACCESS_DENIED_ERROR`, `ER_ACCESS_DENIED_ERROR`.
-  return e?.code === '42501' || e?.errno === 1044 || e?.errno === 1045;
+  // Postgres `insufficient_privilege`; MySQL `ER_DBACCESS_DENIED_ERROR`. (1045 is a wrong
+  // password, not a missing grant — that one keeps the driver's own message.)
+  return e?.code === '42501' || e?.errno === 1044;
 }
 
 /**

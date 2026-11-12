@@ -198,7 +198,17 @@ export async function checkTables(
       message: 'Lucid is not registered: the billing tables cannot be read.',
     };
   }
-  const client = db.connection(payments?.billing?.connection);
+  let client: ReturnType<LucidLike['connection']>;
+  try {
+    client = db.connection(payments?.billing?.connection);
+  } catch (error) {
+    return {
+      status: 'error',
+      message: `billing.connection "${payments?.billing?.connection}" cannot be opened: ${(error as Error).message}`,
+      fix: 'Use a connection name declared in config/database.ts.',
+      docs: `${DOCS}/configuration`,
+    };
+  }
   const autoCreate = payments?.billing?.autoCreateSchema !== false;
   const schema = payments?.billing?.schema;
   if (schema !== undefined) return checkSchemaTables(client, schema, autoCreate);

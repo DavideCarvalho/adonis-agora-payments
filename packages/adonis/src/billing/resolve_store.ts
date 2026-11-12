@@ -41,12 +41,17 @@ export async function resolveBillingStore(config: PaymentsConfig): Promise<Billi
   // switch schema creation ON for behind its back.
   if (!autoCreateSchema && store instanceof LucidBillingStore) store.disableAutoCreateSchema();
   if (store instanceof LucidBillingStore) {
-    // `billingStores.lucid(...)` inherits `billing.schema`; a store built by hand takes its own
+    // `billingStores.lucid(...)` inherits `billing.connection`/`billing.schema`; a store built by hand takes its own
     // options. One that disagrees with the config would put the tables somewhere the config,
     // the docs and `agora:doctor` do not look — refused rather than guessed between.
-    if (schema !== undefined && store.database.schema !== schema) {
+    const where = (db: { connection?: string | undefined; schema?: string | undefined }) =>
+      `${db.connection === undefined ? 'the default connection' : `connection "${db.connection}"`}${db.schema === undefined ? ', no schema' : `, schema "${db.schema}"`}`;
+    if (
+      (schema !== undefined && store.database.schema !== schema) ||
+      (connection !== undefined && store.database.connection !== connection)
+    ) {
       throw new Error(
-        `[@adonis-agora/payments] billing.schema is "${schema}" but billing.store built a LucidBillingStore with ${store.database.schema === undefined ? 'no schema' : `schema "${store.database.schema}"`}. Use billingStores.lucid({ models }) (it inherits billing.schema), or pass the same schema to the store.`,
+        `[@adonis-agora/payments] billing.store built a LucidBillingStore on ${where(store.database)}, but the config says ${where({ connection, schema })}. Use billingStores.lucid({ models }) (it inherits billing.connection and billing.schema), or pass the same options to the store.`,
       );
     }
     store.assertDatabase();

@@ -143,6 +143,19 @@ describe('payments.tables', () => {
     expect((await checkTables({}, undefined)).status).toBe('skip');
   });
 
+  it('errors, rather than throwing, on a billing.connection that does not exist', async () => {
+    const missing = {
+      connection: () => {
+        throw new Error(
+          'E_UNMANAGED_DB_CONNECTION: Cannot connect to unregistered connection nope',
+        );
+      },
+    } as never;
+    const result = await checkTables({ billing: { connection: 'nope' } }, missing);
+    expect(result.status).toBe('error');
+    expect(result.message).toContain('"nope"');
+  });
+
   it('is ok when every table exists', async () => {
     expect((await checkTables({}, db(BILLING_TABLES))).status).toBe('ok');
   });

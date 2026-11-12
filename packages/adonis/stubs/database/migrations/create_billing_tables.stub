@@ -38,18 +38,18 @@ import { createBillingTables, dropBillingTables } from '@adonis-agora/payments'
  * them (and the schema is created when missing). With `billing.connection` set, run it on that
  * connection: `node ace migration:run --connection=<name>`.
  */
-const schema = app.config.get<string | undefined>('payments.billing.schema', undefined)
+const billingSchema = () => app.config.get<string | undefined>('payments.billing.schema', undefined)
 
 export default class extends BaseSchema {
   async up() {
     this.defer(async (db) => {
-      await createBillingTables(db, { schema })
+      await createBillingTables(db, { schema: billingSchema() })
     })
   }
 
   async down() {
     this.defer(async (db) => {
-      await dropBillingTables(db, { schema })
+      await dropBillingTables(db, { schema: billingSchema() })
     })
   }
 }

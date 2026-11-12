@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { isScopedView } from '../client/payments-client';
+import { readSwitcherConfig } from '../client/console-switcher';
+import { CONFIG_ELEMENT_ID, isScopedView } from '../client/payments-client';
 import { Activity } from './Activity';
+import { ConsoleSwitcher } from './ConsoleSwitcher';
 import { Customers } from './Customers';
 import { Disputes } from './Disputes';
 import { OrgPicker, useTenantPicker } from './OrgPicker';
@@ -47,6 +49,9 @@ function useHashRoute(): [Route, (next: Route) => void] {
 
   return [route, navigate];
 }
+
+/** The console switcher config the provider put in the page (absent when this console is alone). */
+const switcherConfig = readSwitcherConfig(CONFIG_ELEMENT_ID);
 
 /** Screens that read across every organization: not offered when the view is one organization. */
 const EVERY_ORGANIZATION_SCREENS = new Set<Route['screen']>(['webhooks', 'activity']);
@@ -95,9 +100,16 @@ export function App() {
       <div className="relative z-10 mx-auto max-w-6xl px-3 py-4 sm:px-4 sm:py-6">
         <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h1 className="text-lg text-zinc-100">
-              payments <span className="text-brand">·</span> billing console
-            </h1>
+            <ConsoleSwitcher
+              config={switcherConfig}
+              current={{ title: 'Payments', package: '@adonis-agora/payments' }}
+              brandClassName="text-lg text-zinc-100"
+              brand={
+                <>
+                  payments <span className="text-brand">·</span> billing console
+                </>
+              }
+            />
             <p className="mt-0.5 text-[11px] text-zinc-500">
               Reads the billing store directly. Refunds and retries are the only calls that leave
               this app.

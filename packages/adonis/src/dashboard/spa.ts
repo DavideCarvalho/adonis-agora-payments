@@ -42,6 +42,16 @@ export interface InjectedConfig {
   api: string;
   /** ISO 4217 display currency. */
   currency: string;
+  /** The console switcher, present only when other Agora consoles are registered in the app. */
+  switcher?: SwitcherConfig;
+}
+
+/** Where the SPA asks which other consoles the viewer may open, and how many are registered. */
+export interface SwitcherConfig {
+  /** `GET` it for the consoles the viewer may open; `<endpoint>/search?q=` searches them. */
+  endpoint: string;
+  /** Registered consoles other than this one (before any `authorize` runs). */
+  others: number;
 }
 
 /**
@@ -67,12 +77,15 @@ export function renderIndexHtml(
   basePath: string,
   apiBasePath: string,
   currency: string,
+  switcher?: SwitcherConfig,
 ): string {
   const based = html.split(BASE_PLACEHOLDER).join(`${basePath}/`);
   const config: InjectedConfig = {
     base: basePath,
     api: apiBasePath,
     currency,
+    // Only when there is another console to switch to: otherwise the SPA makes no request.
+    ...(switcher !== undefined && switcher.others > 0 ? { switcher } : {}),
   };
   // `<` escaped as `\u003c` inside the JSON: a data block ends at the first `</script`, and a
   // config value must not be able to close it early. Valid JSON either way.

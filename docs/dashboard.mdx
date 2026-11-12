@@ -543,6 +543,8 @@ The SPA is a client of a plain API, and so can you be — the same guard covers 
 | `POST <path>/api/payments/:gatewayId/refund` | `{ amount? }` | the gateway's refund; `amount` is integer minor units |
 | `POST <path>/api/disputes/:gatewayId/resolve` | `{ status, outcome?, note? }` | the closed dispute plus the audit row; sends nothing to a gateway |
 | `POST <path>/api/webhook-events/:gatewayEventId/retry` | — | `{ status: 'processed' }` plus the audit row |
+| `GET <path>/api/consoles` | — | the other Agora consoles this viewer may open ([switcher](#switching-between-consoles)) |
+| `GET <path>/api/consoles/search` | `q` | search across those consoles and this one |
 
 `?reference=` also accepts `?externalReference=`, so a link built from either keeps working. All
 three payment lookups are exact matches. The response echoes them back under `filters`, so the SPA
@@ -571,6 +573,55 @@ that refused, and `503` when the payments manager is not reachable at all.
 
 When the billing layer is disabled (`billing.enabled: false`) the API answers `503` rather than
 `500` — the store being absent is a deployment state, not a crash.
+
+## Switching between consoles
+
+When the app has other Agora consoles (durable, telescope, media, the agent console, the authkit
+admin), the console heading at the top left becomes a menu that links to them. It lists only the
+consoles the current viewer may open: each one is asked through its own `authorize`. With no other
+console, or none this viewer may open, the heading stays as it is. There is nothing to configure.
+
+<kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>K</kbd> opens a search across those consoles. Here, a payment's
+gateway id or your app's reference opens the payment, a customer's gateway id or owner id opens
+their payments, and a subscription's gateway id or reference opens the subscriptions with its
+status. With organizations on, only rows of the organizations this viewer may see are found. The
+other consoles answer with their own hits (runs, media records, users).
+
+The menu runs the other consoles' `authorize` on each page load. If yours writes an audit trail,
+skip it for these checks: the request carries `ctx.agoraProbe === true` while they run.
+
+```ts title="app/policies/console_access.ts"
+export default class ConsoleAccess {
+  async authorize(ctx: HttpContext) {
+    const allowed = ctx.auth.user?.isAdmin === true
+    if (!(ctx as { agoraProbe?: boolean }).agoraProbe) await audit.record('console.open', ctx)
+    return allowed
+  }
+}
+```
+
+A console your app mounts by itself can join the menu with `registerAgoraConsole` from a provider's
+`boot()`:
+
+```ts title="providers/reports_provider.ts"
+import type { ApplicationService } from '@adonisjs/core/types'
+import { registerAgoraConsole } from '@adonis-agora/payments/dashboard'
+
+export default class ReportsProvider {
+  constructor(protected app: ApplicationService) {}
+
+  async boot() {
+    await registerAgoraConsole(this.app.container, {
+      id: 'reports',
+      title: 'Reports',
+      icon: 'generic',
+      path: '/reports',
+      order: 60,
+      authorize: async (ctx) => ({ allowed: ctx.auth.user?.isAdmin === true }),
+    })
+  }
+}
+```
 
 ## MCP tools
 

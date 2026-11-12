@@ -47,6 +47,14 @@ export {
   resolveConsoleAuthorize,
 } from './console_authorize.js';
 export type {
+  AgoraConsoleEntry,
+  AgoraConsoleIcon,
+  AgoraConsoleRegistry,
+  AgoraConsoleSearchHit,
+} from './console_switcher.js';
+// The Agora console switcher: join it from a console the app mounts itself.
+export { AGORA_CONSOLES_BINDING, registerAgoraConsole } from './console_switcher.js';
+export type {
   AccessDeniedOption,
   AccessDeniedRenderer,
   AuthorizeHook,
@@ -96,7 +104,7 @@ export {
 } from './handlers.js';
 export type { Period, PeriodPreset } from './period.js';
 export { DEFAULT_PERIOD, PERIOD_PRESETS, resolvePeriod } from './period.js';
-export type { InjectedConfig } from './spa.js';
+export type { InjectedConfig, SwitcherConfig } from './spa.js';
 export {
   BASE_PLACEHOLDER,
   CONFIG_ELEMENT_ID,

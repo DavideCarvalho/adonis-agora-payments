@@ -667,6 +667,8 @@ function subscriptionJson(row: SubscriptionListItem) {
     status: row.status,
     planId: row.planId,
     customerId: row.customerId,
+    /** The APP's own id for this subscription. `null` when it set none. */
+    externalReference: row.externalReference,
     trialEndsAt: iso(row.trialEndsAt),
     endsAt: iso(row.endsAt),
     createdAt: iso(row.createdAt),

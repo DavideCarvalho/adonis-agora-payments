@@ -30,6 +30,7 @@ async function seed(store: InMemoryBillingStore) {
       customerId: `cus_${owner}`,
       status: 'active',
       planId: 'pro',
+      externalReference: `team-${owner}`,
     });
     await store.savePayment({
       gatewayId: `pay_${owner}`,
@@ -78,6 +79,7 @@ describe('subscriptionDetail (handler)', () => {
       gatewayId: 'sub_a',
       status: 'active',
       planId: 'pro',
+      externalReference: 'team-a',
     });
     expect(body.customer).toMatchObject({ gatewayId: 'cus_a', email: 'a@example.com' });
     expect(body.payments.map((p) => p.gatewayId)).toEqual(['pay_a']);

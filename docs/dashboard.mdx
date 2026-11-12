@@ -438,6 +438,12 @@ Payment amounts and customer ids are reachable through it, and the refund action
 gateway. Set `authorize` to a real guard before you deploy.
 </Callout>
 
+### Organizations
+
+With tenancy on, `authorize` may also answer `{ allowed: true, tenants: '*' | string[] }`, and the
+console shows each viewer only their organizations, with an Organization picker in the header. See
+[Organizations](/docs/payments/organizations#the-console).
+
 ### The access-denied page
 
 A refused **API** request gets JSON (`403 { "error": "forbidden" }`, `401 { "error": "unauthenticated" }`

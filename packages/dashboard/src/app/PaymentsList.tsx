@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import type { PaymentRow } from '../client/payments-client';
+import type { PaymentRow, TenantPicker } from '../client/payments-client';
 import { paymentsClient } from '../client/payments-client';
 import { formatCents, formatWhen } from './money';
 import { PaymentDetail } from './PaymentDetail';
@@ -29,6 +29,7 @@ export function PaymentsList({
   initialCustomerId,
   openedGatewayId,
   onOpen,
+  organizations,
 }: {
   initialStatus?: string | undefined;
   initialCustomerId?: string | undefined;
@@ -40,6 +41,8 @@ export function PaymentsList({
   openedGatewayId?: string | null | undefined;
   /** Open (`gatewayId`) or close (`null`) the detail dialog. */
   onOpen?: ((gatewayId: string | null) => void) | undefined;
+  /** Viewing every organization at once (tenancy): adds an "Organization" column. */
+  organizations?: TenantPicker | undefined;
 } = {}) {
   const [status, setStatus] = useState<string | undefined>(initialStatus);
   const [provider, setProvider] = useState<string | undefined>(undefined);
@@ -147,6 +150,9 @@ export function PaymentsList({
               {/* The APP's own id leads the two identity columns: it is the one an operator
                   arrives holding, and the one this table used to hide entirely. */}
               <th className="px-4 py-2 font-normal">Reference</th>
+              {organizations !== undefined && (
+                <th className="px-4 py-2 font-normal">Organization</th>
+              )}
               <th className="px-4 py-2 font-normal">Owner</th>
               <th className="px-4 py-2 font-normal">Gateway id</th>
               <th className="px-4 py-2 font-normal">Provider</th>
@@ -175,6 +181,11 @@ export function PaymentsList({
                 <td className="mono px-4 py-2 text-zinc-200">{row.externalReference ?? '—'}</td>
                 {/* The app-side owner, not the gateway's `cus_…`: the gateway id names nobody,
                     and it is what this column used to show. The raw id stays in the tooltip. */}
+                {organizations !== undefined && (
+                  <td className="px-4 py-2 text-zinc-300" data-column="organization">
+                    {organizationOf(row, organizations)}
+                  </td>
+                )}
                 <td className="px-4 py-2 text-zinc-400" title={row.customerId ?? ''}>
                   {ownerCell(row)}
                 </td>
@@ -245,6 +256,14 @@ export function PaymentsList({
  * so no screen in this console can ever say whose payment it is. That is a finding about the
  * install (`ensureCustomer` is not being called), and it should read like one.
  */
+/** The organization a payment belongs to (its customer's owner, when that is an organization). */
+function organizationOf(row: PaymentRow, picker: TenantPicker): string {
+  const owner = row.owner;
+  if (owner === null || owner.id === null || owner.type === null) return '—';
+  if (!picker.ownerTypes.includes(owner.type)) return '—';
+  return picker.tenants.find((t) => t.id === owner.id)?.label ?? owner.id;
+}
+
 function ownerCell(row: PaymentRow) {
   const owner = row.owner;
   if (owner === null || owner.id === null) {

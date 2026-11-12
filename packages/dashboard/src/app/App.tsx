@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
+import { isScopedView } from '../client/payments-client';
 import { Activity } from './Activity';
 import { Customers } from './Customers';
 import { Disputes } from './Disputes';
+import { OrgPicker, useTenantPicker } from './OrgPicker';
 import { Overview } from './Overview';
 import { PaymentsList } from './PaymentsList';
 import { formatRoute, parseRoute, type Route, SCREENS, screenKey } from './routes';
@@ -46,9 +48,24 @@ function useHashRoute(): [Route, (next: Route) => void] {
   return [route, navigate];
 }
 
+/** Screens that read across every organization: not offered when the view is one organization. */
+const EVERY_ORGANIZATION_SCREENS = new Set<Route['screen']>(['webhooks', 'activity']);
+
 export function App() {
   const [route, navigate] = useHashRoute();
   const key = screenKey(route);
+  const picker = useTenantPicker();
+  // Re-read on a switch of organization (the pick lives in the page URL, not in state).
+  const [, setPickVersion] = useState(0);
+  const scoped = isScopedView(picker);
+  const screens = scoped
+    ? SCREENS.filter((screen) => !EVERY_ORGANIZATION_SCREENS.has(screen.value))
+    : SCREENS;
+  const noOrganization = picker?.mode === 'none';
+
+  useEffect(() => {
+    if (scoped && EVERY_ORGANIZATION_SCREENS.has(route.screen)) navigate({ screen: 'overview' });
+  }, [scoped, route.screen, navigate]);
 
   /** Switching tabs by hand: no seed — each screen opens on its own sensible default. */
   const openScreen = (screen: Route['screen']) => navigate({ screen });
@@ -86,17 +103,35 @@ export function App() {
               this app.
             </p>
           </div>
+          <OrgPicker onChange={() => setPickVersion((version) => version + 1)} />
         </header>
 
+        {noOrganization ? (
+          <p
+            className="rounded-sm border border-line bg-panel p-4 text-sm text-zinc-400"
+            data-org-empty
+          >
+            Choose an organization to see its data.
+          </p>
+        ) : (
+          renderScreens()
+        )}
+      </div>
+    </div>
+  );
+
+  function renderScreens() {
+    return (
+      <>
         <Segmented
           aria-label="Screen"
           className="mb-4"
-          options={SCREENS}
+          options={screens}
           value={route.screen}
           onChange={openScreen}
         />
 
-        {route.screen === 'overview' && <Overview onNavigate={focusRows} />}
+        {route.screen === 'overview' && <Overview onNavigate={focusRows} showHealth={!scoped} />}
         {route.screen === 'payments' && (
           <PaymentsList
             key={key}
@@ -104,6 +139,9 @@ export function App() {
             initialCustomerId={route.customerId}
             openedGatewayId={route.paymentId ?? null}
             onOpen={openPayment}
+            organizations={
+              picker !== undefined && picker.mode !== 'off' && !scoped ? picker : undefined
+            }
           />
         )}
         {route.screen === 'customers' && (
@@ -115,7 +153,7 @@ export function App() {
         {route.screen === 'disputes' && <Disputes key={key} initialStatus={route.status} />}
         {route.screen === 'webhooks' && <WebhookEvents key={key} initialStatus={route.status} />}
         {route.screen === 'activity' && <Activity key={key} initialAction={route.status} />}
-      </div>
-    </div>
-  );
+      </>
+    );
+  }
 }

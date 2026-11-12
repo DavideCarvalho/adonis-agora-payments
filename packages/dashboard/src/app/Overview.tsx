@@ -81,7 +81,10 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
 
 export function Overview({
   onNavigate,
+  showHealth = true,
 }: {
+  /** Show the health panel (it reads across every organization, so not in one). */
+  showHealth?: boolean;
   /** Jump to the screen that shows a failing check's actual rows. */
   onNavigate: (
     screen: 'payments' | 'webhooks' | 'disputes' | 'activity' | 'subscriptions',
@@ -103,7 +106,7 @@ export function Overview({
       {/* Health comes FIRST, above the money. Revenue answers "how did we do"; this answers "is
           anything broken right now", and an operator opening the console in the morning needs the
           second one before the first. */}
-      <HealthPanel onNavigate={onNavigate} />
+      {showHealth && <HealthPanel onNavigate={onNavigate} />}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <Segmented

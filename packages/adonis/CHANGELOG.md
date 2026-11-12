@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.9
+
+### Patch Changes
+
+- [#235](https://github.com/DavideCarvalho/adonis-agora-payments/pull/235) [`13c4b2d`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/13c4b2debac163f0990d9ca005d5720b111cfba1) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - The payments console no longer gets a 404 on load with tenancy off. `GET <path>/api/tenants` is now always mounted and answers `{ mode: 'off' }` when tenancy is off, the same way telescope's console answers. The audited organization switch (`POST <path>/api/tenants/:id/select`) is still mounted only with tenancy on.
+
 ## 1.0.0-rc.8
 
 ### Minor Changes

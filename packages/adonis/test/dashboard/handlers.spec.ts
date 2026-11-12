@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { AUDIT_ACTIONS } from '../../src/billing/billing_store.js';
 import type {
   RefundAction,
   RefundOutcome,
@@ -795,6 +796,33 @@ describe('retryWebhookEvent', () => {
     expect((res.body as { status: string }).status).toBe('processed');
     expect(spy.calls[0]?.provider).toBe('stripe');
     expect(spy.calls[0]?.previousError).toContain('handler threw');
+  });
+
+  it('records who retried it, from the console or the dev tools, in the same shape', async () => {
+    for (const actor of ['ana@example.com', 'mcp:token:abc123']) {
+      const store = await seed();
+      const res = await retryWebhookEvent(
+        { ...withReplay(store, spyReplay().action), actor },
+        target('evt_bad'),
+      );
+      expect((res.body as { audit: { action: string } | null }).audit?.action).toBe(
+        AUDIT_ACTIONS.webhookRetried,
+      );
+      const [row] = await store.listAuditEvents({ action: AUDIT_ACTIONS.webhookRetried });
+      expect(row).toMatchObject({
+        actor,
+        provider: 'stripe',
+        subjectType: 'webhook',
+        subjectId: 'evt_bad',
+      });
+    }
+  });
+
+  it('records nothing when the retry did not go through', async () => {
+    const store = await seed();
+    const spy = spyReplay({ kind: 'failed', message: 'still broken' });
+    await retryWebhookEvent(withReplay(store, spy.action), target('evt_bad'));
+    expect(await store.listAuditEvents({ action: AUDIT_ACTIONS.webhookRetried })).toEqual([]);
   });
 
   it('404s an event that never reached the ledger', async () => {

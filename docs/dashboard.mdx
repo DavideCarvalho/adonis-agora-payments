@@ -280,7 +280,9 @@ event described never happened and nothing will retry it. Retry re-runs the even
 `WebhookProcessor` your app uses — built-in store sync **plus your own handlers**.
 
 It is safe to repeat. The ledger re-claims a `failed` event and refuses an in-flight or already
-processed one, which is the same guard that makes a gateway redelivery a no-op.
+processed one, which is the same guard that makes a gateway redelivery a no-op. A retry that went
+through is recorded in [Activity](#activity--the-trail-nothing-else-keeps) as `webhook.retried`,
+with who ran it.
 
 **Every gateway replays, signed ones included.** The event is rebuilt from the ledger row's own two
 columns — the raw `payload` and the `normalized` event recorded beside it — and handed straight to
@@ -540,7 +542,7 @@ The SPA is a client of a plain API, and so can you be — the same guard covers 
 | `GET <path>/api/providers` | — | the gateways **and the event types** present in your data |
 | `POST <path>/api/payments/:gatewayId/refund` | `{ amount? }` | the gateway's refund; `amount` is integer minor units |
 | `POST <path>/api/disputes/:gatewayId/resolve` | `{ status, outcome?, note? }` | the closed dispute plus the audit row; sends nothing to a gateway |
-| `POST <path>/api/webhook-events/:gatewayEventId/retry` | — | `{ status: 'processed' }` |
+| `POST <path>/api/webhook-events/:gatewayEventId/retry` | — | `{ status: 'processed' }` plus the audit row |
 
 `?reference=` also accepts `?externalReference=`, so a link built from either keeps working. All
 three payment lookups are exact matches. The response echoes them back under `filters`, so the SPA
@@ -615,7 +617,7 @@ The three actions are hidden until the app opts in with `devTools: { actions: ['
 
 ## Activity — the trail nothing else keeps
 
-Three kinds of row, each of which is otherwise only a diagnostic — a log line, gone by the time
+Four kinds of row, each of which is otherwise only a diagnostic — a log line, gone by the time
 somebody asks:
 
 | Action | Written when |
@@ -623,6 +625,7 @@ somebody asks:
 | `webhook.rejected` | the endpoint answered `400`. **The one that matters most**: a rejected delivery never becomes a ledger row, so a rotated webhook secret looks exactly like a quiet week while every refund, chargeback and dispute closure is dropped on the floor |
 | `payment.refunded` | someone refunded from this console. The payment row moves only when the gateway's webhook lands, and that row names no person |
 | `dispute.resolved` | someone closed a dispute the gateway will never close itself |
+| `webhook.retried` | someone re-ran a failed webhook event, from this console or its MCP tools. The ledger row only says it is `processed` now |
 
 `actor` is `null` when nothing authorised it in a human sense — a rejected delivery has none, and a
 request with no signed-in user or token cannot name one. `null` means **unattributed**, never "the system".

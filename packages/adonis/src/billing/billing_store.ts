@@ -438,7 +438,7 @@ export const AUDIT_ACTIONS = {
   tenantSelected: 'console.tenant_selected',
   /** A console request named an organization outside the viewer's scope; it saw nothing. */
   tenantForged: 'console.tenant_forged',
-  /** A failed webhook event re-run from the dev MCP tools. `subjectId` is the gateway event id. */
+  /** A failed webhook event re-run from the console or its dev tools. `subjectId` is the gateway event id. */
   webhookRetried: 'webhook.retried',
 } as const;
 

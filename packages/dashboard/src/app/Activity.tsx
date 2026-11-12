@@ -22,12 +22,14 @@ const ACTION_OPTIONS: ReadonlyArray<{ value: string | undefined; label: string }
   { value: 'webhook.rejected', label: 'Refused deliveries' },
   { value: 'payment.refunded', label: 'Refunds' },
   { value: 'dispute.resolved', label: 'Dispute outcomes' },
+  { value: 'webhook.retried', label: 'Retries' },
 ];
 
 const ACTION_LABEL: Record<string, string> = {
   'webhook.rejected': 'refused delivery',
   'payment.refunded': 'refund',
   'dispute.resolved': 'dispute resolved',
+  'webhook.retried': 'event retried',
 };
 
 /**
@@ -141,5 +143,6 @@ function emptyMessage(action: string | undefined): string {
   }
   if (action === 'payment.refunded') return 'No refund has been issued from this console.';
   if (action === 'dispute.resolved') return 'No dispute outcome has been recorded here.';
+  if (action === 'webhook.retried') return 'No failed event has been retried from here.';
   return 'Nothing recorded yet.';
 }

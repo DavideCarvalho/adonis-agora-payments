@@ -13,6 +13,7 @@ import {
   paymentsDevTools,
   registerPaymentsDevTools,
 } from '../../src/dashboard/dev_tools.js';
+import { retryWebhookEvent } from '../../src/dashboard/handlers.js';
 import { resetBillingStore, setBillingStore } from '../../src/services/main.js';
 import { InMemoryBillingStore } from '../../src/testing/in_memory_billing_store.js';
 
@@ -137,7 +138,6 @@ describe('payments dev tools catalogue', () => {
     canRefund: async () => true,
     tenancyEnabled: () => false,
     organizations: async () => ({ mode: 'off', all: false, tenants: [] }),
-    recordAudit: async () => {},
   };
 
   it('declares the tools, every name prefixed, in the JSON Schema subset', () => {
@@ -190,31 +190,24 @@ describe('payments dev tools catalogue', () => {
     await expect(get.run({}, call({}))).rejects.toThrow('gatewayId is required');
   });
 
-  it('records an MCP webhook retry in the audit trail, attributed to the caller', async () => {
-    const recordAudit = vi.fn(async () => {});
+  it('runs a webhook retry through the console retry, attributed to the caller', async () => {
     const serve = vi.fn(async () => ({
       status: 200,
-      body: { gatewayEventId: 'evt_1', status: 'processed' },
+      body: { gatewayEventId: 'evt_1', status: 'processed', audit: null },
     }));
-    const tools = paymentsDevTools({ ...options, serve, recordAudit });
+    const tools = paymentsDevTools({ ...options, serve });
     const retry = tools.find((t) => t.name === 'payments_retry_webhook_event') as DevTool;
-    expect(await retry.run({ gatewayEventId: 'evt_1' }, call({}))).toEqual({
+    expect(await retry.run({ gatewayEventId: 'evt_1' }, call({}))).toMatchObject({
       gatewayEventId: 'evt_1',
       status: 'processed',
     });
+    // The handler records `webhook.retried` with this actor: the same path as the console.
     expect(serve).toHaveBeenCalledWith(
       {},
-      expect.objectContaining({ needsActions: true, everyOrganization: true }),
+      expect.objectContaining({ handler: retryWebhookEvent, needsActions: true }),
       { params: { gatewayEventId: 'evt_1' }, query: {} },
       { actor: 'mcp:token:abc123', tenant: undefined },
     );
-    expect(recordAudit).toHaveBeenCalledWith({
-      action: AUDIT_ACTIONS.webhookRetried,
-      actor: 'mcp:token:abc123',
-      provider: null,
-      subjectType: 'webhook',
-      subjectId: 'evt_1',
-    });
   });
 
   it('forwards a malformed refund amount so the console refuses it, never a full refund', async () => {
@@ -257,7 +250,6 @@ describe('registerPaymentsDevTools', () => {
     canRefund: async () => false,
     tenancyEnabled: () => false,
     organizations: async () => ({ mode: 'off', all: false, tenants: [] }),
-    recordAudit: async () => {},
   };
 
   it('does nothing without the hub binding', async () => {

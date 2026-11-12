@@ -1,5 +1,4 @@
 import type { HttpContext } from '@adonisjs/core/http';
-import { AUDIT_ACTIONS } from '../billing/billing_store.js';
 import {
   type ApiRequest,
   type ApiResponse,
@@ -134,15 +133,6 @@ export interface PaymentsDevToolsOptions {
     all: boolean;
     tenants: Array<{ id: string; label: string }>;
   }>;
-  /** Append a row to the billing audit trail (best effort). */
-  recordAudit(event: {
-    action: string;
-    actor: string;
-    provider: string | null;
-    subjectType: string;
-    subjectId: string;
-    message?: string | null;
-  }): Promise<void>;
 }
 
 /** List tools default to this many rows. */
@@ -564,7 +554,7 @@ export function paymentsDevTools(options: PaymentsDevToolsOptions): DevTool[] {
       name: 'payments_retry_webhook_event',
       kind: 'action',
       description:
-        "Re-run a FAILED webhook event through the app's handlers, from the stored event (the ledger refuses an in-flight or processed one, so it never applies twice). Recorded in the billing audit trail. Returns { gatewayEventId, status }.",
+        "Re-run a FAILED webhook event through the app's handlers, from the stored event (the ledger refuses an in-flight or processed one, so it never applies twice). Recorded in the billing audit trail. Returns { gatewayEventId, status, audit }.",
       input: {
         type: 'object',
         properties: {
@@ -573,18 +563,9 @@ export function paymentsDevTools(options: PaymentsDevToolsOptions): DevTool[] {
         required: ['gatewayEventId'],
       },
       run: async (input, call) => {
+        // The console's retry records it in the audit trail (`webhook.retried`, actor `mcp:…`).
         const gatewayEventId = required(input, 'gatewayEventId');
-        const out = await serve(call, ROUTES.retry, { params: { gatewayEventId } }, input);
-        await options
-          .recordAudit({
-            action: AUDIT_ACTIONS.webhookRetried,
-            actor: actor(call),
-            provider: null,
-            subjectType: 'webhook',
-            subjectId: gatewayEventId,
-          })
-          .catch(() => {});
-        return out;
+        return serve(call, ROUTES.retry, { params: { gatewayEventId } }, input);
       },
     },
     {

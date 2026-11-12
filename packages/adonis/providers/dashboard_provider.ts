@@ -348,9 +348,6 @@ export default class PaymentsDashboardProvider {
             Object.values((await this.capabilities()) ?? {}).some((c) => c.refunds),
           tenancyEnabled: () => this.tenancy().enabled,
           organizations: (ctx) => this.tenantPicker(ctx),
-          recordAudit: async (event) => {
-            await findBillingStoreQuietly()?.recordAuditEvent(event);
-          },
         },
       );
     } catch (error) {

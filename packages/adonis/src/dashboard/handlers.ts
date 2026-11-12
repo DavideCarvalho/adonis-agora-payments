@@ -917,6 +917,7 @@ export const AUDIT_ACTION_FILTERS = [
   AUDIT_ACTIONS.webhookRejected,
   AUDIT_ACTIONS.refund,
   AUDIT_ACTIONS.disputeResolved,
+  AUDIT_ACTIONS.webhookRetried,
 ] as const;
 
 /**
@@ -1269,8 +1270,24 @@ export async function retryWebhookEvent(deps: Deps, req: ApiRequest): Promise<Ap
     previousError: row.error,
   });
   switch (outcome.kind) {
-    case 'processed':
-      return ok({ gatewayEventId, status: 'processed' });
+    case 'processed': {
+      // WHO re-ran it, from the console or its dev tools. The ledger row only says it is
+      // `processed` now; this is the one record that a person made it so.
+      const audit = await deps.store.recordAuditEvent({
+        action: AUDIT_ACTIONS.webhookRetried,
+        ...(deps.actor !== undefined ? { actor: deps.actor } : {}),
+        provider: row.provider,
+        subjectType: 'webhook',
+        subjectId: gatewayEventId,
+        metadata: { type: row.type, previousError: row.error },
+      });
+      return ok({
+        gatewayEventId,
+        status: 'processed',
+        /** `null` on an install whose `billing_audit_events` table is not there yet. */
+        audit: audit === null ? null : auditJson(audit),
+      });
+    }
     case 'conflict':
       return conflict(
         `Event "${gatewayEventId}" was claimed by something else before the retry started.`,

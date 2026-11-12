@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.2
+
+### Minor Changes
+
+- [#224](https://github.com/DavideCarvalho/adonis-agora-payments/pull/224) [`2cc413d`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/2cc413d2889a40e6d6f4f443dad315043247be64) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - `node ace agora:doctor` (and `payments:doctor`). The commands barrel now ships the shared Agora health check, and the payments provider registers its checks into the `'agora.doctor'` registry: `payments.webhook-secret`, `payments.webhook-csrf`, `payments.console-gate`, and with `--deep` `payments.tables` and `payments.health` (the `payments:health` report). The new `@adonis-agora/payments/doctor` entry serves `--no-boot`.
+
 ## 1.0.0-rc.1
 
 ### Major Changes

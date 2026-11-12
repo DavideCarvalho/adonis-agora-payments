@@ -1,3 +1,4 @@
+import { type ResolvedPaymentsTenancy, runInOwnerTenant } from '../agora/tenancy.js';
 import { publishPayments } from '../diagnostics.js';
 import type { PaymentsDriver } from '../driver.js';
 import type { WebhookEvent } from '../types.js';
@@ -25,6 +26,19 @@ export interface WebhookProcessorOptions {
   driver?: PaymentsDriver;
   /** Map of gateway event type → handler. Apps register their business logic here. */
   handlers?: Record<string, WebhookHandler>;
+  /**
+   * Organizations (tenancy). When on, an app handler runs inside the organization that owns the
+   * event's customer, so work it starts (jobs, durable runs, media) is stamped with it. The
+   * built-in sync is unchanged.
+   */
+  tenancy?: () => ResolvedPaymentsTenancy;
+}
+
+/** A string field read structurally off any store's row (Lucid model or plain object). */
+function rowField(row: unknown, key: string): string | null {
+  if (row === null || typeof row !== 'object') return null;
+  const value = (row as Record<string, unknown>)[key];
+  return typeof value === 'string' && value !== '' ? value : null;
 }
 
 /**
@@ -56,11 +70,45 @@ export class WebhookProcessor {
   #store: BillingStore;
   #driver: PaymentsDriver | undefined;
   #handlers: Record<string, WebhookHandler>;
+  #tenancy: (() => ResolvedPaymentsTenancy) | undefined;
 
   constructor(options: WebhookProcessorOptions) {
     this.#store = options.store;
     this.#driver = options.driver;
     this.#handlers = options.handlers ?? {};
+    this.#tenancy = options.tenancy;
+  }
+
+  /**
+   * Run an app handler inside the organization that owns the event's customer (tenancy on), found
+   * through the event's `customerId`, else the payment or subscription row the built-in sync just
+   * wrote. A customer no organization owns runs the handler as it is.
+   */
+  async #inCustomerTenant(event: WebhookEvent, fn: () => Promise<void>): Promise<void> {
+    const tenancy = this.#tenancy?.();
+    if (tenancy === undefined || !tenancy.enabled) return fn();
+    const data = event.data;
+    let customerId = rowField(data, 'customerId');
+    const gatewayId = rowField(data, 'gatewayId');
+    if (customerId === null && gatewayId !== null) {
+      customerId =
+        rowField(await this.#store.findPaymentByGatewayId(gatewayId), 'customerId') ??
+        rowField(await this.#store.findSubscriptionByGatewayId(gatewayId), 'customerId');
+    }
+    const subscriptionId = rowField(data, 'subscriptionId');
+    if (customerId === null && subscriptionId !== null) {
+      customerId = rowField(
+        await this.#store.findSubscriptionByGatewayId(subscriptionId),
+        'customerId',
+      );
+    }
+    if (customerId === null) return fn();
+    const customer = await this.#store.findCustomerByGatewayId(customerId);
+    return runInOwnerTenant(
+      tenancy,
+      { type: rowField(customer, 'ownerType'), id: rowField(customer, 'ownerId') },
+      fn,
+    );
   }
 
   /**
@@ -91,7 +139,7 @@ export class WebhookProcessor {
     try {
       await this.#runBuiltIn(event);
       const handler = this.#handlers[event.type];
-      if (handler) await handler(event);
+      if (handler) await this.#inCustomerTenant(event, async () => handler(event));
       await this.#store.markWebhookProcessed(ledger.id);
       publishPayments('webhook.processed', {
         id: event.id,

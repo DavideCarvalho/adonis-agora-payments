@@ -1,6 +1,7 @@
 import type { HttpContext } from '@adonisjs/core/http';
 import type { BillingStore } from '../billing/billing_store.js';
 import type { AuthorizeResult } from '../dashboard/authorize_decision.js';
+import { findPayments } from '../services/main.js';
 
 /**
  * The app-side row a payment belongs to — the same `{ type, id }` pair
@@ -176,8 +177,20 @@ export async function defaultAuthorize(ctx: HttpContext): Promise<boolean> {
   return (await resolveRequestUser(ctx)) !== null;
 }
 
-/** The default {@link PaymentsClientConfig.owner}: `{ type: 'User', id: String(user.id) }`. */
+/**
+ * The default {@link PaymentsClientConfig.owner}: `{ type: 'User', id: String(user.id) }`. With
+ * tenancy on it is `payments.currentOwner()`: the active organization, else that user (a
+ * `required` tenancy with no organization is `null`, a `401`).
+ */
 export async function defaultOwner(ctx: HttpContext): Promise<PaymentOwner | null> {
+  const manager = findPayments();
+  if (manager?.tenancy().enabled) {
+    try {
+      return manager.currentOwner({ ctx });
+    } catch {
+      return null;
+    }
+  }
   const user = (await resolveRequestUser(ctx)) as { id?: unknown } | null;
   const id = user?.id;
   if (id === undefined || id === null || id === '') return null;

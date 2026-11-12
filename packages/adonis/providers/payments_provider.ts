@@ -1,6 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import type { HttpContext } from '@adonisjs/core/http';
 import type { ApplicationService, HttpRouterService } from '@adonisjs/core/types';
+import { resolvePaymentsTenancy } from '../src/agora/tenancy.js';
 import type { BillingStore } from '../src/billing/billing_store.js';
 import { AUDIT_ACTIONS } from '../src/billing/billing_store.js';
 import { LucidBillingStore } from '../src/billing/lucid_billing_store.js';
@@ -84,6 +85,8 @@ export default class PaymentsProvider {
         ...(config.methods !== undefined ? { methods: config.methods } : {}),
         ...(config.default !== undefined ? { defaultName: config.default } : {}),
         ...(config.subscriptions !== undefined ? { subscriptions: config.subscriptions } : {}),
+        ...(config.tenancy !== undefined ? { tenancy: config.tenancy } : {}),
+        ...(config.userOwnerType !== undefined ? { userOwnerType: config.userOwnerType } : {}),
         // Lazy on purpose: this runs before the billing layer is built in `boot()`, so
         // resolving the store here would either fail or force billing on apps that route
         // every subscription to the gateway and never need it.
@@ -193,6 +196,7 @@ export default class PaymentsProvider {
     const processor = new WebhookProcessor({
       store,
       ...(handlers !== undefined ? { handlers } : {}),
+      tenancy: () => resolvePaymentsTenancy(config.tenancy),
     });
     const dispatcher = new WebhookDispatcher({
       processor,

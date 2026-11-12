@@ -1,5 +1,11 @@
+import {
+  currentTenantOwner,
+  type PaymentsTenancyOption,
+  resolvePaymentsTenancy,
+} from './agora/tenancy.js';
 import type { BillingStore } from './billing/billing_store.js';
 import type { CreateCustomerInput, PaymentsDriver } from './driver.js';
+import { findPayments } from './services/main.js';
 import type { Customer } from './types.js';
 
 /** Recording options for {@link ensureCustomer}. */
@@ -17,8 +23,16 @@ export interface EnsureCustomerOptions {
    *
    * Without it the row still records the gateway id and provider (enough for
    * `payments:sync --all` to reconcile over), but nothing maps it back to your data.
+   *
+   * With tenancy on and no `owner`, the customer belongs to the active organization
+   * (`{ type: ownerType(tenant), id: tenant.id }`). An explicit `owner` always wins.
    */
   owner?: { type: string; id: string | number };
+  /**
+   * The tenancy option to apply when `owner` is absent. Default: the app's `config/payments.ts`
+   * `tenancy` (`'inherit'` when payments has not booted).
+   */
+  tenancy?: PaymentsTenancyOption;
 }
 
 /**
@@ -57,15 +71,25 @@ export async function ensureCustomer(
   input: CreateCustomerInput,
   options: EnsureCustomerOptions = {},
 ): Promise<Customer> {
+  // Resolved BEFORE the gateway call: a `required` tenancy with no organization throws here,
+  // not after a gateway customer nobody will ever map was created.
+  const owner = options.store
+    ? (options.owner ??
+      currentTenantOwner(
+        options.tenancy !== undefined
+          ? resolvePaymentsTenancy(options.tenancy)
+          : (findPayments()?.tenancy() ?? resolvePaymentsTenancy('inherit')),
+      ) ??
+      undefined)
+    : undefined;
+
   const customer: Customer = existingId ? { id: existingId } : await driver.createCustomer(input);
 
   if (options.store) {
     await options.store.saveCustomer({
       gatewayId: customer.id,
       provider: driver.provider,
-      ...(options.owner !== undefined
-        ? { ownerType: options.owner.type, ownerId: String(options.owner.id) }
-        : {}),
+      ...(owner !== undefined ? { ownerType: owner.type, ownerId: String(owner.id) } : {}),
       // Only what the caller actually supplied: the store leaves absent fields alone rather
       // than blanking what a better-informed earlier call recorded.
       ...(input.email !== undefined ? { email: input.email } : {}),

@@ -286,6 +286,7 @@ export function ConsoleSearch({
     const query = q.trim();
     if (query === '') {
       setGroups([]);
+      setLoading(false);
       return;
     }
     const controller = new AbortController();

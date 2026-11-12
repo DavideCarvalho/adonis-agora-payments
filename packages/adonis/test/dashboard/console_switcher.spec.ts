@@ -256,6 +256,23 @@ describe('paymentsConsoleSearch', () => {
     expect(await search(ctx, 'nothing', 5)).toEqual([]);
   });
 
+  it('keeps every matching subscription, even two with the same status', async () => {
+    const store = await seeded();
+    for (const id of ['sub_1', 'sub_2']) {
+      await store.saveSubscription({
+        gatewayId: id,
+        provider: 'stripe',
+        customerId: 'cus_1',
+        status: 'active',
+        planId: 'pro',
+        externalReference: 'team-9',
+      });
+    }
+    const hits = await paymentsConsoleSearch(async () => store, '/payments')(ctx, 'team-9', 5);
+    expect(hits.map((hit) => hit.title).sort()).toEqual(['sub_1', 'sub_2']);
+    expect(hits[0]?.href).toBe('/payments#/subscriptions?status=active');
+  });
+
   it('links from the root mount, and answers nothing without a store', async () => {
     const store = await seeded();
     expect((await paymentsConsoleSearch(async () => store, '')(ctx, 'pi_1', 5))[0]?.href).toBe(

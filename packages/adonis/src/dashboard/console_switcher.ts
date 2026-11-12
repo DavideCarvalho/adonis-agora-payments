@@ -345,9 +345,10 @@ export function paymentsConsoleSearch(
       ]);
     const hits: AgoraConsoleSearchHit[] = [];
     const seen = new Set<string>();
-    const push = (hit: AgoraConsoleSearchHit) => {
-      if (seen.has(hit.href)) return;
-      seen.add(hit.href);
+    /** One hit per row: `key` is the row's identity (two subscriptions may share an href). */
+    const push = (hit: AgoraConsoleSearchHit, key = hit.href) => {
+      if (seen.has(key)) return;
+      seen.add(key);
       hits.push(hit);
     };
     for (const payment of [...byGatewayId, ...byReference]) {
@@ -375,12 +376,15 @@ export function paymentsConsoleSearch(
     }
     for (const subscription of [...subsById, ...subsByReference]) {
       const id = subscription.gatewayId ?? subscription.id;
-      push({
-        title: id,
-        subtitle: ['subscription', subscription.status, subscription.planId].join(' · '),
-        // The subscriptions screen opens on the row's status; `subscription` keeps each hit distinct.
-        href: `${shell}#/subscriptions?status=${encodeURIComponent(subscription.status)}&subscription=${encodeURIComponent(id)}`,
-      });
+      // The subscriptions screen opens on the row's status.
+      push(
+        {
+          title: id,
+          subtitle: ['subscription', subscription.status, subscription.planId].join(' · '),
+          href: `${shell}#/subscriptions?status=${encodeURIComponent(subscription.status)}`,
+        },
+        `subscription:${subscription.id}`,
+      );
     }
     return hits.slice(0, limit);
   };

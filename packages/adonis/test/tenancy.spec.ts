@@ -601,10 +601,22 @@ describe('payments console under tenancy (routes)', () => {
     }
   });
 
-  it('mounts no organization routes with tenancy off', async () => {
+  it('with tenancy off, the picker route answers `off` (no 404 on load) and no switch is mounted', async () => {
     installContext({ enabled: false });
-    const { routes } = await boot(() => true);
-    expect(routes.some((r) => r.pattern.includes('/tenants'))).toBe(false);
+    const { routes, find } = await boot(() => true);
+    expect(routes.filter((r) => r.pattern.includes('/tenants')).map((r) => r.method)).toEqual([
+      'get',
+    ]);
+    const picker: Recorded = {};
+    await find('get', '/payments/api/tenants')(fakeCtx(picker));
+    expect(picker.status).toBe(200);
+    expect(picker.body).toEqual({
+      mode: 'off',
+      all: false,
+      selected: null,
+      ownerTypes: [],
+      tenants: [],
+    });
   });
 
   it("shows a viewer their own organization's rows only", async () => {

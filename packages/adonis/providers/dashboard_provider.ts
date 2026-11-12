@@ -286,8 +286,9 @@ export default class PaymentsDashboardProvider {
       .as('payments_dashboard.consoles.search');
 
     // Organizations (tenancy): which ones this viewer may pick, and an audited record of a switch.
-    // Mounted only with tenancy on; without it the console has no organization control.
-    if (this.tenancy().enabled) this.registerTenantRoutes(router, config, apiBase);
+    // The picker route is always mounted (the console asks it on load) and answers `mode: 'off'`
+    // with tenancy off; the switch is mounted only with tenancy on.
+    this.registerTenantRoutes(router, config, apiBase, this.tenancy().enabled);
   }
 
   /**
@@ -453,6 +454,7 @@ export default class PaymentsDashboardProvider {
     router: HttpRouterService,
     config: ResolvedPaymentsDashboardConfig,
     apiBase: string,
+    tenancyEnabled: boolean,
   ): void {
     router
       .get(`${apiBase}/tenants`, async (ctx: HttpContext) => {
@@ -467,6 +469,7 @@ export default class PaymentsDashboardProvider {
         }
       })
       .as('payments_dashboard.tenants');
+    if (!tenancyEnabled) return;
     router
       .post(`${apiBase}/tenants/:id/select`, async (ctx: HttpContext) => {
         const guard = await this.enforce(config, ctx, 'api');

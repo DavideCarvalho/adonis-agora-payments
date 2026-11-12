@@ -89,6 +89,7 @@ describe('PaymentsDashboardProvider route registration', () => {
       'POST /payments/api/disputes/:gatewayId/resolve',
       'GET /payments/api/consoles',
       'GET /payments/api/consoles/search',
+      'GET /payments/api/tenants',
     ]);
   });
 
@@ -157,6 +158,7 @@ describe('PaymentsDashboardProvider route registration', () => {
       '/ops/billing/api/disputes/:gatewayId/resolve',
       '/ops/billing/api/consoles',
       '/ops/billing/api/consoles/search',
+      '/ops/billing/api/tenants',
     ]);
   });
 
@@ -181,6 +183,7 @@ describe('PaymentsDashboardProvider route registration', () => {
       '/api/disputes/:gatewayId/resolve',
       '/api/consoles',
       '/api/consoles/search',
+      '/api/tenants',
     ]);
   });
 

@@ -401,7 +401,10 @@ export default class PaymentsDashboardProvider {
     const empty = { all: false, selected: null, ownerTypes: [], tenants: [] };
     if (scope === null) return { mode: 'off', ...empty };
     const ownerTypes = tenantOwnerTypes(this.tenancy());
-    if (scope.authorized === 'none') return { mode: 'none', ...empty, ownerTypes };
+    // An explicit empty grant (`tenants: []`) is "no organization" too, not an empty chip.
+    if (scope.authorized === 'none' || scope.authorized.length === 0) {
+      return { mode: 'none', ...empty, ownerTypes };
+    }
     const ids =
       scope.authorized === '*'
         ? await everyTenantId(store, ownerTypes)

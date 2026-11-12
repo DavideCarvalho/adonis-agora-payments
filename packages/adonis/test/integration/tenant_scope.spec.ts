@@ -71,6 +71,7 @@ describe('tenant scope (integration)', () => {
       paymentGatewayId: 'pay_b',
       provider: 'stripe',
       status: 'open',
+      evidenceDueBy: new Date('2026-11-12T06:00:00.000Z'),
     });
     await store.recordUsage({ customerId: 'cus_a', meter: 'ai', quantity: 5 });
     await store.recordUsage({ customerId: 'cus_b', meter: 'ai', quantity: 9 });
@@ -118,6 +119,18 @@ describe('tenant scope (integration)', () => {
     expect(ids(await store.listDisputes({ owners: scope(['b']) }))).toEqual(['dp_b']);
     expect(await store.listDisputes({ owners: scope(['a']) })).toEqual([]);
     expect(await store.countDisputes({ owners: scope(['a', 'b']) })).toBe(1);
+  });
+
+  it('the dispute work-lists and their counts are scoped too', async () => {
+    const now = new Date('2026-11-12T00:00:00.000Z');
+    expect(
+      ids(await store.listDisputesDueWithin({ withinHours: 24, now, owners: scope(['b']) })),
+    ).toEqual(['dp_b']);
+    expect(await store.countDisputesDueWithin({ withinHours: 24, now, owners: scope(['a']) })).toBe(
+      0,
+    );
+    expect(ids(await store.listOpenDisputes({ owners: scope(['b']) }))).toEqual(['dp_b']);
+    expect(await store.countOpenDisputes({ owners: scope(['a']) })).toBe(0);
   });
 
   it('an empty scope is empty, and no scope is everything', async () => {

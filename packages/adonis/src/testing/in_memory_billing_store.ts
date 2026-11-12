@@ -845,7 +845,8 @@ export class InMemoryBillingStore
         isOpenDispute(row.status) &&
         row.evidenceDueBy !== null &&
         row.evidenceDueBy.getTime() <= cutoff &&
-        (query.provider === undefined || row.provider === query.provider),
+        (query.provider === undefined || row.provider === query.provider) &&
+        this.#disputeInScope(row.paymentGatewayId, query.owners),
     );
   }
 
@@ -854,7 +855,8 @@ export class InMemoryBillingStore
       .filter(
         (row) =>
           isOpenDispute(row.status) &&
-          (query.provider === undefined || row.provider === query.provider),
+          (query.provider === undefined || row.provider === query.provider) &&
+          this.#disputeInScope(row.paymentGatewayId, query.owners),
       )
       // Oldest FIRST — mirrors the Lucid store's `order by created_at asc`. With no deadline
       // to rank on, how long a dispute has gone unanswered is the only priority left.
@@ -863,10 +865,11 @@ export class InMemoryBillingStore
     return matching.slice(offset, offset + clampSize(query.size)).map(disputeItem);
   }
 
-  async countOpenDisputes(query: { provider?: string }): Promise<number> {
+  async countOpenDisputes(query: { provider?: string } & OwnerScoped): Promise<number> {
     let count = 0;
     for (const row of this.disputes.values()) {
       if (!isOpenDispute(row.status)) continue;
+      if (!this.#disputeInScope(row.paymentGatewayId, query.owners)) continue;
       if (query.provider !== undefined && row.provider !== query.provider) continue;
       count += 1;
     }

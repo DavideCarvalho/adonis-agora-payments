@@ -219,7 +219,7 @@ export const OPEN_DISPUTE_STATUSES = ['warning', 'open', 'under_review'] as cons
  * not on a creation time, and it is the read an alert is built on, so a store that quietly
  * ignored the window would report a healthy zero.
  */
-export interface DisputeDeadlineQuery {
+export interface DisputeDeadlineQuery extends OwnerScoped {
   /** How far ahead to look, in HOURS. `72` = "everything due in the next three days". */
   withinHours: number;
   /** Overridable clock — the tests pass a fixed instant. Defaults to now. */
@@ -371,7 +371,7 @@ export interface CustomerListQuery extends BillingListQuery, OwnerScoped {
  * receive one. On those, `countDisputesDueWithin` returns zero while a chargeback sits open with
  * the money already pulled — a healthy report about an install that is losing money by default.
  */
-export interface OpenDisputeQuery {
+export interface OpenDisputeQuery extends OwnerScoped {
   /** Exact provider match. Omit for every provider. */
   provider?: string;
   /**
@@ -830,7 +830,7 @@ export interface BillingStore<
   listOpenDisputes(query: OpenDisputeQuery): Promise<DisputeListItem[]>;
 
   /** The unbounded count behind {@link listOpenDisputes} — what a health check alerts on. */
-  countOpenDisputes(query: { provider?: string }): Promise<number>;
+  countOpenDisputes(query: { provider?: string } & OwnerScoped): Promise<number>;
 
   // ── Webhook idempotency ledger ───────────────────────────────────────────────────
 

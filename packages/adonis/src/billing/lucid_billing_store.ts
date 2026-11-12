@@ -1098,6 +1098,7 @@ export class LucidBillingStore
       // that is not newest-first.
       .orderBy('evidence_due_by', 'asc');
     if (query.provider !== undefined) builder.where('provider', query.provider);
+    this.#scopeDisputes(builder, query.owners);
     const rows = (await builder
       .limit(clampSize(query.size))
       .offset(listOffset(query.page, query.size))) as DisputeInstance[];
@@ -1117,6 +1118,7 @@ export class LucidBillingStore
       .count('* as total')
       .pojo();
     if (query.provider !== undefined) builder.where('provider', query.provider);
+    this.#scopeDisputes(builder, query.owners);
     return toCount(await builder);
   }
 
@@ -1130,13 +1132,14 @@ export class LucidBillingStore
       .whereIn('status', [...OPEN_DISPUTE_STATUSES])
       .orderBy('created_at', 'asc');
     if (query.provider !== undefined) builder.where('provider', query.provider);
+    this.#scopeDisputes(builder, query.owners);
     const rows = (await builder
       .limit(clampSize(query.size))
       .offset(listOffset(query.page, query.size))) as DisputeInstance[];
     return rows.map(disputeItem);
   }
 
-  async countOpenDisputes(query: { provider?: string }): Promise<number> {
+  async countOpenDisputes(query: { provider?: string } & OwnerScoped): Promise<number> {
     await this.#ready();
     if (!(await this.#hasDisputesTable())) return 0;
     const builder = this.#disputeModel
@@ -1145,6 +1148,7 @@ export class LucidBillingStore
       .count('* as total')
       .pojo();
     if (query.provider !== undefined) builder.where('provider', query.provider);
+    this.#scopeDisputes(builder, query.owners);
     return toCount(await builder);
   }
 

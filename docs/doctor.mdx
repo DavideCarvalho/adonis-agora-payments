@@ -30,5 +30,6 @@ NODE_ENV=production node ace agora:doctor --json --strict
 | `payments.tables` (`--deep`) | The billing tables exist. | Warns when `autoCreateSchema` will create them; error when it is off. |
 | `payments.health` (`--deep`) | The [`payments:health`](/docs/payments/cli#paymentshealth) report. | Warns with the count of each problem. |
 
-Every lib also reports `payments.registered`, `payments.peers` (peer dependencies in range) and
+Like every Agora lib, payments also gets the three built-in checks: `payments.registered` (the
+provider is in `adonisrc.ts`), `payments.peers` (peer dependencies in range) and
 `payments.agora-siblings` (Agora libs of one release line).

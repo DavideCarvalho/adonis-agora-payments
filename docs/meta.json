@@ -10,6 +10,7 @@
     "webhooks",
     "client",
     "billing",
+    "organizations",
     "invoices",
     "---Extending---",
     "custom-providers",

@@ -293,15 +293,15 @@ export default class PaymentsSync extends BaseCommand {
     if (this.tenant !== undefined && slot?.withTenant !== undefined) {
       // Work started from here (handlers, jobs) is stamped with that organization.
       await slot.withTenant({ id: this.tenant, kind: this.tenantKind ?? 'organization' }, () =>
-        this.#run(),
+        this.reconcile(),
       );
       return;
     }
-    await this.#run();
+    await this.reconcile();
   }
 
   /** The configured store, confined to `--tenant` when one is given. */
-  async #store(config: PaymentsConfig): Promise<BillingStore> {
+  protected async tenantStore(config: PaymentsConfig): Promise<BillingStore> {
     const store = await resolveBillingStore(config);
     if (this.tenant === undefined) return store;
     const tenancy = resolvePaymentsTenancy(config.tenancy === false ? undefined : config.tenancy);
@@ -313,7 +313,7 @@ export default class PaymentsSync extends BaseCommand {
     });
   }
 
-  async #run(): Promise<void> {
+  protected async reconcile(): Promise<void> {
     const config = this.app.config.get<PaymentsConfig>('payments', {});
     if (config.billing?.enabled === false) {
       this.logger.error(
@@ -344,7 +344,7 @@ export default class PaymentsSync extends BaseCommand {
     // Assinaturas ANTES do guard de customer: este modo não itera customers, e exigir
     // `--all`/`--customer` para rodá-lo seria pedir um argumento que ele ignora.
     if (this.subscriptions) {
-      await reconcileSubscriptions(manager, await this.#store(config), {
+      await reconcileSubscriptions(manager, await this.tenantStore(config), {
         provider: this.provider,
         log: this.logger,
       });
@@ -365,7 +365,7 @@ export default class PaymentsSync extends BaseCommand {
     // The CONFIGURED store, not a fresh Lucid one: an app that pointed `billing.store`
     // somewhere else would otherwise have its reconcile write to a database the rest of
     // the billing layer never reads.
-    const store = await this.#store(config);
+    const store = await this.tenantStore(config);
     if (this.tenant !== undefined && this.customer !== undefined) {
       const [own] = await store.listCustomers({ gatewayId: this.customer, size: 1 });
       if (own === undefined) {

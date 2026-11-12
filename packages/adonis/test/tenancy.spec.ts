@@ -697,3 +697,51 @@ describe('payments console under tenancy (routes)', () => {
     expect(picker.body).toMatchObject({ mode: 'none' });
   });
 });
+
+describe('payments:sync --backfill-owner', () => {
+  const log = { info: () => undefined, warning: () => undefined };
+
+  it('assigns an owner to one ownerless customer, never to an owned one', async () => {
+    const { backfillCustomerOwners } = await import('../commands/payments_sync.js');
+    const store = new InMemoryBillingStore();
+    await store.saveCustomer({ gatewayId: 'cus_1', provider: 'fake' });
+    await store.saveCustomer({
+      gatewayId: 'cus_2',
+      provider: 'fake',
+      ownerType: 'User',
+      ownerId: '9',
+    });
+    const one = await backfillCustomerOwners(store, {
+      ownerType: 'Organization',
+      customer: 'cus_1',
+      ownerId: 'a',
+      log,
+    });
+    expect(one).toEqual({ updated: 1, owned: 0, unresolved: 0 });
+    const owned = await backfillCustomerOwners(store, {
+      ownerType: 'Organization',
+      customer: 'cus_2',
+      ownerId: 'a',
+      log,
+    });
+    expect(owned).toEqual({ updated: 0, owned: 1, unresolved: 0 });
+    expect(await store.findCustomerByGatewayId('cus_2')).toMatchObject({ ownerType: 'User' });
+  });
+
+  it('reads the owner id from stored metadata for every ownerless customer', async () => {
+    const { backfillCustomerOwners } = await import('../commands/payments_sync.js');
+    const store = new InMemoryBillingStore();
+    await store.saveCustomer({ gatewayId: 'cus_1', provider: 'fake', metadata: { orgId: 'a' } });
+    await store.saveCustomer({ gatewayId: 'cus_2', provider: 'fake', metadata: {} });
+    const result = await backfillCustomerOwners(store, {
+      ownerType: 'Organization',
+      ownerKey: 'orgId',
+      log,
+    });
+    expect(result).toEqual({ updated: 1, owned: 0, unresolved: 1 });
+    expect(await store.findCustomerByGatewayId('cus_1')).toMatchObject({
+      ownerType: 'Organization',
+      ownerId: 'a',
+    });
+  });
+});

@@ -24,6 +24,14 @@ import {
   resolveConsoleAuthorize,
 } from '../src/dashboard/console_authorize.js';
 import {
+  listVisibleConsoles,
+  otherConsoles,
+  paymentsConsoleSearch,
+  readAgoraConsoles,
+  registerAgoraConsole,
+  searchConsoles,
+} from '../src/dashboard/console_switcher.js';
+import {
   type PaymentsDashboardConfig,
   type ResolvedPaymentsDashboardConfig,
   resolveConfig,
@@ -87,6 +95,9 @@ function spaDirectory(): string {
   spaDir ??= fileURLToPath(new URL('../assets/spa/', import.meta.url));
   return spaDir;
 }
+
+/** This console's id in the app's `'agora.consoles'` registry. */
+const CONSOLE_ID = 'payments';
 
 /** Logged once at boot when `authorize` is omitted. Same wording in every Agora console. */
 export const NO_AUTHORIZE_WARNING =
@@ -157,6 +168,10 @@ export default class PaymentsDashboardProvider {
     // Developer tools on the app's dev MCP endpoint, when `@adonis-agora/agent/mcp_provider` bound
     // its hub (its `register()` ran before any `boot()`). Gated by this console's own `authorize`.
     await this.registerDevTools(config);
+
+    // The console switcher: this console joins the app's `'agora.consoles'` registry so the other
+    // Agora consoles can link to it (and search it), and it can link to them.
+    await this.registerConsole(config);
 
     // Route registration can't happen synchronously in `boot()`: the router singleton isn't
     // committed until the app's "booted" hooks run, which fire strictly AFTER every provider's
@@ -249,6 +264,27 @@ export default class PaymentsDashboardProvider {
       .post(`${apiBase}/disputes/:gatewayId/resolve`, json(resolveDispute))
       .as('payments_dashboard.disputes.resolve');
 
+    // The console switcher: the other Agora consoles this viewer may open, and a search across them.
+    router
+      .get(`${apiBase}/consoles`, async (ctx: HttpContext) => {
+        if (!(await this.enforce(config, ctx, 'api')).allowed) return;
+        const registry = await readAgoraConsoles(this.app.container as never);
+        ctx.response.header('cache-control', 'private, no-store');
+        return ctx.response.status(200).json(await listVisibleConsoles(registry, CONSOLE_ID, ctx));
+      })
+      .as('payments_dashboard.consoles');
+    router
+      .get(`${apiBase}/consoles/search`, async (ctx: HttpContext) => {
+        if (!(await this.enforce(config, ctx, 'api')).allowed) return;
+        const registry = await readAgoraConsoles(this.app.container as never);
+        const q = ctx.request.qs().q;
+        ctx.response.header('cache-control', 'private, no-store');
+        return ctx.response
+          .status(200)
+          .json(await searchConsoles(registry, CONSOLE_ID, ctx, typeof q === 'string' ? q : ''));
+      })
+      .as('payments_dashboard.consoles.search');
+
     // Organizations (tenancy): which ones this viewer may pick, and an audited record of a switch.
     // Mounted only with tenancy on; without it the console has no organization control.
     if (this.tenancy().enabled) this.registerTenantRoutes(router, config, apiBase);
@@ -323,6 +359,56 @@ export default class PaymentsDashboardProvider {
     const decision = await this.authorizeGuard(ctx);
     this.decisions.set(ctx, decision);
     return decision;
+  }
+
+  /** Join the app's console switcher, searchable over the rows this viewer may see. */
+  private async registerConsole(config: ResolvedPaymentsDashboardConfig): Promise<void> {
+    try {
+      await registerAgoraConsole(
+        this.app.container as never,
+        {
+          id: CONSOLE_ID,
+          title: 'Payments',
+          package: '@adonis-agora/payments',
+          icon: 'payments',
+          path: config.path === '' ? '/' : config.path,
+          order: 40,
+          authorize: (ctx) => this.decide(ctx),
+          search: paymentsConsoleSearch((ctx) => this.searchStore(ctx), config.path),
+        },
+        { warn: (message) => void this.warn(message) },
+      );
+    } catch (error) {
+      await this.warn(
+        `[@adonis-agora/payments] could not join the console switcher: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * The billing store as this viewer may read it: confined to their organizations when tenancy is
+   * on (the grant of `authorize`, or their own; never a `?tenant=` of another console's page), or
+   * `undefined` when there is nothing they may search.
+   */
+  private async searchStore(ctx: HttpContext): Promise<BillingStore | undefined> {
+    const store = findBillingStoreQuietly();
+    if (store === undefined) return undefined;
+    const decision = this.decisions.get(ctx) ?? (await this.decide(ctx));
+    if (!decision.allowed) return undefined;
+    const scope = await this.consoleTenantScope(ctx, store, '*');
+    if (scope === null || scope.ids === undefined) return store;
+    if (scope.ids.length === 0 && !scope.includeNull) return undefined;
+    return scopedBillingStore(store, ownerScopeOfConsole(scope, tenantOwnerTypes(this.tenancy())));
+  }
+
+  /** Best-effort warning: a missing logger never stops the app. */
+  private async warn(message: string): Promise<void> {
+    try {
+      const logger = await this.app.container.make('logger');
+      logger.warn(message);
+    } catch {
+      // Logging is best-effort.
+    }
   }
 
   /** Register the console's tools into the app's dev-tools hub, when it has one. */
@@ -649,7 +735,15 @@ export default class PaymentsDashboardProvider {
         return ctx.response
           .header('content-type', 'text/html; charset=utf-8')
           .header('cache-control', 'no-store, must-revalidate')
-          .send(renderIndexHtml(html, config.path, apiBase, config.currency));
+          .send(
+            renderIndexHtml(html, config.path, apiBase, config.currency, {
+              endpoint: `${apiBase}/consoles`,
+              others: otherConsoles(
+                await readAgoraConsoles(this.app.container as never),
+                CONSOLE_ID,
+              ),
+            }),
+          );
       })
       .as('payments_dashboard.index');
 

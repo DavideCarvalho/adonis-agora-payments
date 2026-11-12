@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { paymentsClient } from '../client/payments-client';
 import { formatCents, formatCount, formatDay, formatDaysUntil, formatWhen } from './money';
+import { SubscriptionDetail } from './SubscriptionDetail';
 import { Pager, Panel, QueryState, ScanNotice } from './shell';
 import {
   subscriptionIsBilling,
@@ -39,14 +40,38 @@ const STATUS_OPTIONS: ReadonlyArray<{ value: string | undefined; label: string }
  * exists, will bill again, and is NOT billing now. Several gateways collapse the two, and an
  * operator who reads them as the same grants access to someone who is not paying.
  */
-export function Subscriptions({ initialStatus }: { initialStatus?: string | undefined } = {}) {
-  const [status, setStatus] = useState<string | undefined>(initialStatus ?? 'past_due');
+export function Subscriptions({
+  initialStatus,
+  customerId,
+  openedId,
+  onOpen,
+  onOpenPayment,
+  onOpenCustomer,
+}: {
+  initialStatus?: string | undefined;
+  /** Only this gateway customer's subscriptions (`#/subscriptions?customer=…`). */
+  customerId?: string | undefined;
+  /** The subscription open in the detail dialog (`#/subscriptions/<id>`). */
+  openedId?: string | null | undefined;
+  /** Open (or close, with `null`) one subscription's detail. Without it the dialog is local. */
+  onOpen?: ((id: string | null) => void) | undefined;
+  onOpenPayment?: ((gatewayId: string) => void) | undefined;
+  onOpenCustomer?: ((customerId: string) => void) | undefined;
+} = {}) {
+  // One customer's subscriptions open on all of them: a past-due default would hide the rest.
+  const [status, setStatus] = useState<string | undefined>(
+    initialStatus ?? (customerId !== undefined ? undefined : 'past_due'),
+  );
   const [provider, setProvider] = useState<string | undefined>(undefined);
   const [page, setPage] = useState(1);
+  const [openedLocal, setOpenedLocal] = useState<string | null>(null);
+  const opened = onOpen === undefined ? openedLocal : (openedId ?? null);
+  const setOpened = onOpen ?? setOpenedLocal;
 
   const query = useQuery({
-    queryKey: ['subscriptions', status, provider, page],
-    queryFn: () => paymentsClient.subscriptions({ status, provider, size: PAGE_SIZE, page }),
+    queryKey: ['subscriptions', status, provider, customerId, page],
+    queryFn: () =>
+      paymentsClient.subscriptions({ status, provider, customerId, size: PAGE_SIZE, page }),
   });
 
   const rows = query.data?.subscriptions ?? [];
@@ -60,9 +85,12 @@ export function Subscriptions({ initialStatus }: { initialStatus?: string | unde
     <Panel
       title="Subscriptions"
       subtitle={
-        pastDue > 0
-          ? `${formatCount(pastDue)} past due — payments failing, access about to lapse.`
-          : 'Recurring subscriptions, newest first. Nothing is past due.'
+        // The past-due total is the whole install's: on one customer's view it would read as theirs.
+        customerId !== undefined
+          ? `Subscriptions of customer ${customerId}, newest first.`
+          : pastDue > 0
+            ? `${formatCount(pastDue)} past due — payments failing, access about to lapse.`
+            : 'Recurring subscriptions, newest first. Nothing is past due.'
       }
       actions={
         <div className="flex flex-wrap items-center gap-3">
@@ -70,7 +98,7 @@ export function Subscriptions({ initialStatus }: { initialStatus?: string | unde
           <Segmented
             aria-label="Subscription status"
             options={STATUS_OPTIONS.map((option) =>
-              option.value === 'past_due' && pastDue > 0
+              option.value === 'past_due' && pastDue > 0 && customerId === undefined
                 ? { ...option, hint: formatCount(pastDue) }
                 : option,
             )}
@@ -83,12 +111,13 @@ export function Subscriptions({ initialStatus }: { initialStatus?: string | unde
       <QueryState
         query={query}
         empty={rows.length === 0}
-        emptyMessage={emptyMessage(status, provider)}
+        emptyMessage={emptyMessage(status, provider, customerId)}
       >
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-line text-left text-[10px] uppercase tracking-wider text-zinc-500">
               <th className="px-4 py-2 font-normal">Status</th>
+              <th className="px-4 py-2 font-normal">Subscription</th>
               <th className="px-4 py-2 font-normal">Plan</th>
               <th className="px-4 py-2 font-normal">Customer</th>
               <th className="px-4 py-2 font-normal">Provider</th>
@@ -120,6 +149,15 @@ export function Subscriptions({ initialStatus }: { initialStatus?: string | unde
                       not billing
                     </span>
                   )}
+                </td>
+                <td className="px-4 py-2">
+                  <button
+                    type="button"
+                    onClick={() => setOpened(row.id)}
+                    className="mono text-left text-zinc-300 underline decoration-line underline-offset-2 hover:text-zinc-100"
+                  >
+                    {row.gatewayId ?? row.id}
+                  </button>
                 </td>
                 <td className="mono px-4 py-2 text-zinc-300">{row.planId || '—'}</td>
                 <td className="mono px-4 py-2 text-zinc-400">{row.customerId ?? '—'}</td>
@@ -174,6 +212,14 @@ export function Subscriptions({ initialStatus }: { initialStatus?: string | unde
           onPage={setPage}
         />
       </QueryState>
+      {opened !== null && (
+        <SubscriptionDetail
+          id={opened}
+          onClose={() => setOpened(null)}
+          onOpenPayment={onOpenPayment}
+          onOpenCustomer={onOpenCustomer}
+        />
+      )}
     </Panel>
   );
 }
@@ -190,7 +236,20 @@ function WhenCell({ iso }: { iso: string | null }) {
   );
 }
 
-function emptyMessage(status: string | undefined, provider: string | undefined): string {
+function emptyMessage(
+  status: string | undefined,
+  provider: string | undefined,
+  customerId?: string | undefined,
+): string {
+  if (customerId !== undefined) {
+    const narrowed = [
+      status !== undefined ? `status “${status}”` : undefined,
+      provider !== undefined ? `gateway “${provider}”` : undefined,
+    ].filter((part): part is string => part !== undefined);
+    return narrowed.length === 0
+      ? `Customer ${customerId} has no subscriptions.`
+      : `Customer ${customerId} has no subscriptions with ${narrowed.join(' and ')}.`;
+  }
   if (status === 'past_due' && provider === undefined) {
     return 'Nothing is past due. Every subscription is paying.';
   }

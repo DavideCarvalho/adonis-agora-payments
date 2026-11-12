@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { isScopedView } from '../client/payments-client';
+import { readSwitcherConfig } from '../client/console-switcher';
+import { CONFIG_ELEMENT_ID, isScopedView } from '../client/payments-client';
 import { Activity } from './Activity';
+import { ConsoleSwitcher } from './ConsoleSwitcher';
 import { Customers } from './Customers';
 import { Disputes } from './Disputes';
 import { OrgPicker, useTenantPicker } from './OrgPicker';
@@ -48,6 +50,9 @@ function useHashRoute(): [Route, (next: Route) => void] {
   return [route, navigate];
 }
 
+/** The console switcher config the provider put in the page (absent when this console is alone). */
+const switcherConfig = readSwitcherConfig(CONFIG_ELEMENT_ID);
+
 /** Screens that read across every organization: not offered when the view is one organization. */
 const EVERY_ORGANIZATION_SCREENS = new Set<Route['screen']>(['webhooks', 'activity']);
 
@@ -84,6 +89,16 @@ export function App() {
   /** "Which of these charges are this user's" — the jump the console could not make at all
    *  before, because a payment row carried the gateway's customer id and nothing else. */
   const openCustomerPayments = (customerId: string) => navigate({ screen: 'payments', customerId });
+  /** Every subscription of one gateway customer. */
+  const openCustomerSubscriptions = (customerId: string) =>
+    navigate({ screen: 'subscriptions', customerId });
+
+  /** Open (or close, with `null`) one subscription's detail on top of the CURRENT list. */
+  const openSubscription = (subscriptionId: string | null) =>
+    navigate({ ...route, screen: 'subscriptions', subscriptionId: subscriptionId ?? undefined });
+
+  /** A payment named in a subscription's detail: the payments screen with its detail open. */
+  const openPaymentDetail = (paymentId: string) => navigate({ screen: 'payments', paymentId });
 
   /** Open (or close, with `null`) one payment's detail on top of the CURRENT list, seed intact. */
   const openPayment = (paymentId: string | null) =>
@@ -95,9 +110,16 @@ export function App() {
       <div className="relative z-10 mx-auto max-w-6xl px-3 py-4 sm:px-4 sm:py-6">
         <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h1 className="text-lg text-zinc-100">
-              payments <span className="text-brand">·</span> billing console
-            </h1>
+            <ConsoleSwitcher
+              config={switcherConfig}
+              current={{ title: 'Payments', package: '@adonis-agora/payments' }}
+              brandClassName="text-lg text-zinc-100"
+              brand={
+                <>
+                  payments <span className="text-brand">·</span> billing console
+                </>
+              }
+            />
             <p className="mt-0.5 text-[11px] text-zinc-500">
               Reads the billing store directly. Refunds and retries are the only calls that leave
               this app.
@@ -145,10 +167,22 @@ export function App() {
           />
         )}
         {route.screen === 'customers' && (
-          <Customers key={key} onOpenPayments={openCustomerPayments} />
+          <Customers
+            key={key}
+            onOpenPayments={openCustomerPayments}
+            onOpenSubscriptions={openCustomerSubscriptions}
+          />
         )}
         {route.screen === 'subscriptions' && (
-          <Subscriptions key={key} initialStatus={route.status} />
+          <Subscriptions
+            key={key}
+            initialStatus={route.status}
+            customerId={route.customerId}
+            openedId={route.subscriptionId ?? null}
+            onOpen={openSubscription}
+            onOpenPayment={openPaymentDetail}
+            onOpenCustomer={openCustomerPayments}
+          />
         )}
         {route.screen === 'disputes' && <Disputes key={key} initialStatus={route.status} />}
         {route.screen === 'webhooks' && <WebhookEvents key={key} initialStatus={route.status} />}

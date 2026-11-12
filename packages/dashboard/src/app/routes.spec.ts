@@ -79,6 +79,24 @@ describe('formatRoute', () => {
   });
 });
 
+describe('subscription detail route', () => {
+  it('reads and writes the open subscription on the subscriptions screen only', () => {
+    expect(parseRoute('#/subscriptions/sub%2F1')).toEqual({
+      screen: 'subscriptions',
+      subscriptionId: 'sub/1',
+    });
+    expect(parseRoute('#/payments/x').subscriptionId).toBeUndefined();
+    expect(formatRoute({ screen: 'subscriptions', subscriptionId: 'sub/1' })).toBe(
+      '#/subscriptions/sub%2F1',
+    );
+    expect(formatRoute({ screen: 'overview', subscriptionId: 'sub_1' })).toBe('#/overview');
+    expect(parseRoute('#/subscriptions?customer=cus_1')).toEqual({
+      screen: 'subscriptions',
+      customerId: 'cus_1',
+    });
+  });
+});
+
 describe('screenKey', () => {
   it('changes with the seed, so a new seed remounts the screen', () => {
     expect(screenKey({ screen: 'payments', status: 'pending' })).not.toBe(

@@ -275,6 +275,18 @@ export interface PaymentDetail {
   currency: string;
 }
 
+/** Everything knowable about ONE subscription: `GET <api>/subscriptions/:id`. */
+export interface SubscriptionDetail {
+  subscription: SubscriptionRow & { externalReference?: string | null };
+  /** The customer it bills, when one is recorded. */
+  customer: CustomerRow | null;
+  /** The payments charged for it, newest first. */
+  payments: PaymentRow[];
+  events: { rows: WebhookEventRow[]; matchedBy: string };
+  audit: AuditRow[];
+  currency: string;
+}
+
 export interface AuditPage {
   audit: AuditRow[];
   meta: { page: number; size: number; count: number };
@@ -580,6 +592,11 @@ export interface PaymentListOptions extends ListOptions {
   customerId?: string | undefined;
 }
 
+/** {@link ListOptions} plus every subscription of one gateway customer. Exact match. */
+export interface SubscriptionListOptions extends ListOptions {
+  customerId?: string | undefined;
+}
+
 /** {@link ListOptions} plus the ledger's own filter: which EVENT TYPE. */
 export interface WebhookEventListOptions extends ListOptions {
   type?: string | undefined;
@@ -613,16 +630,6 @@ export interface DisputeListOptions extends ListOptions {
    * and still unanswered.
    */
   dueWithin?: number | undefined;
-}
-
-/** The query every list endpoint takes, built once so the three screens cannot drift apart. */
-function listQuery(opts: ListOptions): string {
-  return buildQuery({
-    status: opts.status,
-    provider: opts.provider,
-    page: opts.page,
-    size: opts.size,
-  });
 }
 
 export const paymentsClient = {
@@ -701,8 +708,20 @@ export const paymentsClient = {
       })}`,
     );
   },
-  subscriptions(opts: ListOptions = {}): Promise<SubscriptionsPage> {
-    return http<SubscriptionsPage>(`/subscriptions${listQuery(opts)}`);
+  subscriptions(opts: SubscriptionListOptions = {}): Promise<SubscriptionsPage> {
+    return http<SubscriptionsPage>(
+      `/subscriptions${buildQuery({
+        status: opts.status,
+        provider: opts.provider,
+        customerId: opts.customerId,
+        page: opts.page,
+        size: opts.size,
+      })}`,
+    );
+  },
+  /** Everything knowable about ONE subscription (its id or gateway id) — see {@link SubscriptionDetail}. */
+  subscription(id: string): Promise<SubscriptionDetail> {
+    return http<SubscriptionDetail>(`/subscriptions/${encodeURIComponent(id)}`);
   },
   webhookEvents(opts: WebhookEventListOptions = {}): Promise<WebhookEventsPage> {
     return http<WebhookEventsPage>(

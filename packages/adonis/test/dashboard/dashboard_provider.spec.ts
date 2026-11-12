@@ -87,6 +87,8 @@ describe('PaymentsDashboardProvider route registration', () => {
       'POST /payments/api/payments/:gatewayId/refund',
       'POST /payments/api/webhook-events/:gatewayEventId/retry',
       'POST /payments/api/disputes/:gatewayId/resolve',
+      'GET /payments/api/consoles',
+      'GET /payments/api/consoles/search',
     ]);
   });
 
@@ -153,6 +155,8 @@ describe('PaymentsDashboardProvider route registration', () => {
       '/ops/billing/api/payments/:gatewayId/refund',
       '/ops/billing/api/webhook-events/:gatewayEventId/retry',
       '/ops/billing/api/disputes/:gatewayId/resolve',
+      '/ops/billing/api/consoles',
+      '/ops/billing/api/consoles/search',
     ]);
   });
 
@@ -175,6 +179,8 @@ describe('PaymentsDashboardProvider route registration', () => {
       '/api/payments/:gatewayId/refund',
       '/api/webhook-events/:gatewayEventId/retry',
       '/api/disputes/:gatewayId/resolve',
+      '/api/consoles',
+      '/api/consoles/search',
     ]);
   });
 

@@ -50,6 +50,7 @@ import {
   refundPayment,
   resolveDispute,
   retryWebhookEvent,
+  subscriptionDetail,
   subscriptions,
   webhookEvents,
 } from '../src/dashboard/handlers.js';
@@ -115,7 +116,9 @@ export const NO_AUTHORIZE_WARNING =
  *                                   the gateway deliveries this endpoint REFUSED
  * - `GET  /api/disputes`         -> a page of `billing_disputes`; `?dueWithin=<hours>` for the
  *                                   open windows closing soonest
- * - `GET  /api/subscriptions`    -> a page of `billing_subscriptions` (status/provider filters)
+ * - `GET  /api/subscriptions`    -> a page of `billing_subscriptions` (status/provider/customer filters)
+ * - `GET  /api/subscriptions/:id` -> one subscription: state, customer, its payments, the ledger
+ *                                   rows naming them, and its audit rows
  * - `GET  /api/webhook-events`   -> a page of `billing_webhook_events` (status/provider/type)
  * - `GET  /api/providers`        -> the gateways and event types this install has data for
  * - `POST /api/payments/:gatewayId/refund`           -> refund through the payment's own gateway
@@ -214,6 +217,10 @@ export default class PaymentsDashboardProvider {
     router
       .get(`${apiBase}/subscriptions`, json(subscriptions))
       .as('payments_dashboard.subscriptions');
+    // One subscription in full (by this store's id or the gateway's), scoped like every read.
+    router
+      .get(`${apiBase}/subscriptions/:id`, json(subscriptionDetail, false, true))
+      .as('payments_dashboard.subscriptions.show');
     router
       .get(`${apiBase}/webhook-events`, json(webhookEvents, false, false, true))
       .as('payments_dashboard.webhook_events');

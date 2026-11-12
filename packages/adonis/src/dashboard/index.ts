@@ -89,6 +89,7 @@ export {
   retryWebhookEvent,
   SUBSCRIPTION_DEFAULT_STATUS,
   SUBSCRIPTION_STATUSES,
+  subscriptionDetail,
   subscriptions,
   WEBHOOK_EVENT_STATUSES,
   webhookEvents,

@@ -762,6 +762,7 @@ export class LucidBillingStore
     }
     if (query.gatewayId !== undefined) builder.where('gateway_id', query.gatewayId);
     if (query.customerId !== undefined) builder.where('customer_id', query.customerId);
+    if (query.id !== undefined) builder.where('id', query.id);
     this.#scopeByCustomer(builder, 'customer_id', query.owners);
     const rows = (await builder
       .limit(clampSize(query.size))
@@ -940,6 +941,7 @@ export class LucidBillingStore
     if (query.provider !== undefined) builder.where('provider', query.provider);
     if (query.gatewayId !== undefined) builder.where('gateway_id', query.gatewayId);
     if (query.customerId !== undefined) builder.where('customer_id', query.customerId);
+    if (query.subscriptionId !== undefined) builder.where('subscription_id', query.subscriptionId);
     // Guarded like `findPaymentByExternalReference`: an install that has not run the ALTER has
     // no column to match on, and every row it holds would answer nothing anyway. Returning an
     // empty page beats raising `column "external_reference" does not exist` at a filter box.

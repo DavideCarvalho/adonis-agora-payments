@@ -533,7 +533,8 @@ The SPA is a client of a plain API, and so can you be — the same guard covers 
 | `GET <path>/api/customers` | `provider`, `ownerType`, `ownerId`, `gatewayId`, `page`, `size` | a page of the owner mapping, newest first |
 | `GET <path>/api/disputes` | `status`, `provider`, `page`, `size` | a page of disputes, newest first |
 | `GET <path>/api/disputes` | `dueWithin` (hours), `provider`, `page`, `size` | only the OPEN windows closing inside the horizon, soonest first, plus the full `dueWithin.total` |
-| `GET <path>/api/subscriptions` | `status`, `provider`, `page`, `size` | a page of subscriptions, plus the whole-table `past_due` count |
+| `GET <path>/api/subscriptions` | `status`, `provider`, `customerId`, `page`, `size` | a page of subscriptions, plus the whole-table `past_due` count |
+| `GET <path>/api/subscriptions/:id` | — | one subscription, by its id or gateway id: current state, customer, the payments charged for it, the ledger rows naming them, and its audit rows |
 | `GET <path>/api/webhook-events` | `status`, `provider`, `type`, `page`, `size` | a page of the ledger, newest first |
 | `GET <path>/api/audit` | `action`, `actor`, `provider`, `subjectType`, `subjectId`, `page`, `size` | the audit trail, newest first, plus the action filter list |
 | `GET <path>/api/providers` | — | the gateways **and the event types** present in your data |
@@ -592,7 +593,8 @@ payload. Lists take `page` and `limit` (20 by default, at most 100) and answer `
 | `payments_get_health` | What needs attention: failed events, stuck payments, closing dispute windows, failing renewals. |
 | `payments_list_payments` | Payments, newest first. Filters: `status`, `provider`, `reference`, `gatewayId`, `customerId`. |
 | `payments_get_payment` | One payment with its owner, disputes, webhook events and audit rows. |
-| `payments_list_subscriptions` | Subscriptions, plus the `past_due` and failing-renewal totals. |
+| `payments_list_subscriptions` | Subscriptions, plus the `past_due` and failing-renewal totals. Filter by `customerId`. |
+| `payments_get_subscription` | One subscription (`id` or gateway id) with its customer, payments, webhook events and audit rows. |
 | `payments_list_disputes` | Disputes; with `dueWithin` (hours), only the open windows closing soonest. |
 | `payments_list_webhook_events` | The webhook ledger, with the error of each failed event. |
 | `payments_list_customers` | The mapping from gateway customers to your app's owners. |

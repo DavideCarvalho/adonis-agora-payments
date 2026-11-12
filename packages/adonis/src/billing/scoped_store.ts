@@ -47,6 +47,20 @@ export function scopedBillingStore<S extends AnyStore>(
   };
   const rowVisible = async <R>(row: R | null): Promise<R | null> =>
     row !== null && (await customerVisible(field(row, 'customerId'))) ? row : null;
+  /** Whether the audit rows of this subject are visible: a payment or subscription in scope. */
+  const subjectVisible = async (subjectType?: string, subjectId?: string): Promise<boolean> => {
+    if (subjectId === undefined) return false;
+    if (subjectType === 'payment') {
+      return (await rowVisible(await store.findPaymentByGatewayId(subjectId))) !== null;
+    }
+    if (subjectType === 'subscription') {
+      const row =
+        (await store.findSubscriptionByGatewayId(subjectId)) ??
+        (await store.findSubscriptionById(subjectId));
+      return (await rowVisible(row)) !== null;
+    }
+    return false;
+  };
   const disputeVisible = async (paymentGatewayId: string): Promise<boolean> => {
     const payment = await store.findPaymentByGatewayId(paymentGatewayId);
     return customerVisible(field(payment, 'customerId'));
@@ -130,24 +144,18 @@ export function scopedBillingStore<S extends AnyStore>(
         ? store.findOpenDisputeByPayment(paymentGatewayId)
         : null,
     // The webhook ledger and the audit trail are not owned by any organization: a scoped view
-    // sees none of them, except the audit rows of a payment it can see.
+    // sees none of them, except the audit rows of a payment or subscription it can see.
     listWebhookEvents: async () => [],
     countWebhookEvents: async () => 0,
     webhookEventBreakdown: async () => [],
-    listAuditEvents: async (query) => {
-      if (query.subjectType !== 'payment' || query.subjectId === undefined) return [];
-      if ((await rowVisible(await store.findPaymentByGatewayId(query.subjectId))) === null) {
-        return [];
-      }
-      return store.listAuditEvents(query);
-    },
-    countAuditEvents: async (query) => {
-      if (query.subjectType !== 'payment' || query.subjectId === undefined) return 0;
-      if ((await rowVisible(await store.findPaymentByGatewayId(query.subjectId))) === null) {
-        return 0;
-      }
-      return store.countAuditEvents(query);
-    },
+    listAuditEvents: async (query) =>
+      (await subjectVisible(query.subjectType, query.subjectId))
+        ? store.listAuditEvents(query)
+        : [],
+    countAuditEvents: async (query) =>
+      (await subjectVisible(query.subjectType, query.subjectId))
+        ? store.countAuditEvents(query)
+        : 0,
     listWebhookEventsForPayment: async (paymentGatewayId, query) =>
       (await rowVisible(await store.findPaymentByGatewayId(paymentGatewayId))) === null
         ? []

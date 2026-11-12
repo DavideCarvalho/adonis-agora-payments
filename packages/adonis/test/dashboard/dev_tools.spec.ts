@@ -148,6 +148,7 @@ describe('payments dev tools catalogue', () => {
       'read:payments_list_payments',
       'read:payments_get_payment',
       'read:payments_list_subscriptions',
+      'read:payments_get_subscription',
       'read:payments_list_disputes',
       'read:payments_list_webhook_events',
       'read:payments_list_customers',
@@ -274,7 +275,7 @@ describe('registerPaymentsDevTools', () => {
     expect(await registerPaymentsDevTools(container, options)).toBe(true);
     expect(registered[0]?.lib).toBe('payments');
     expect(registered[0]?.authorize).toBe(options.authorize);
-    expect(registered[0]?.tools).toHaveLength(13);
+    expect(registered[0]?.tools).toHaveLength(14);
   });
 
   it('skips a hub of another version', async () => {

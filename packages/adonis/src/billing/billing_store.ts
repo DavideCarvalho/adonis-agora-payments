@@ -310,6 +310,8 @@ export interface PaymentListQuery extends BillingListQuery, OwnerScoped {
   gatewayId?: string;
   /** The gateway's customer id — every payment recorded for one customer. */
   customerId?: string;
+  /** The subscription a payment was charged for (as the payment row recorded it), exact. */
+  subscriptionId?: string;
 }
 
 /**
@@ -332,6 +334,8 @@ export interface SubscriptionListQuery extends BillingListQuery, OwnerScoped {
   gatewayId?: string;
   /** The gateway's customer id — every subscription recorded for one customer. */
   customerId?: string;
+  /** This store's own row id, exact (a managed subscription has no gateway id). */
+  id?: string;
 }
 
 /** Filter + page for {@link BillingStore.listDisputes}. */

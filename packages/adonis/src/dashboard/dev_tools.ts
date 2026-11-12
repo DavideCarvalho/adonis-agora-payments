@@ -18,6 +18,7 @@ import {
   resolveDispute,
   retryWebhookEvent,
   SUBSCRIPTION_STATUSES,
+  subscriptionDetail,
   subscriptions,
   WEBHOOK_EVENT_STATUSES,
   webhookEvents,
@@ -248,6 +249,7 @@ const ROUTES = {
   audit: { handler: auditEvents, everyOrganization: true },
   disputes: { handler: disputes },
   subscriptions: { handler: subscriptions },
+  subscriptionDetail: { handler: subscriptionDetail, needsCapabilities: true },
   webhookEvents: { handler: webhookEvents, everyOrganization: true },
   refund: { handler: refundPayment, needsActions: true },
   retry: { handler: retryWebhookEvent, needsActions: true, everyOrganization: true },
@@ -382,16 +384,33 @@ export function paymentsDevTools(options: PaymentsDevToolsOptions): DevTool[] {
             description: 'Subscription status.',
           },
           provider: PROVIDER_PROPERTY,
+          customerId: { type: 'string', description: 'Gateway customer id (exact).' },
           tenant: TENANT_PROPERTY,
           page: PAGE_PROPERTY,
           limit: LIMIT_PROPERTY,
         },
       },
       run: async (input, call) => {
-        const list = listQuery(input, call, ['status', 'provider']);
+        const list = listQuery(input, call, ['status', 'provider', 'customerId']);
         const out = await serve(call, ROUTES.subscriptions, { query: list.query }, input);
         return page(out, 'subscriptions', list, ['counts']);
       },
+    },
+    {
+      name: 'payments_get_subscription',
+      kind: 'read',
+      description:
+        'One subscription in full, by its id or gateway id: status, plan, amount and cycle, trial and period dates, cancellation, renewal failures, the customer it bills, the payments charged for it, the webhook events naming those payments, and its audit rows. Never a gateway payload. Returns { subscription, customer, payments, events, audit, currency }.',
+      input: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Subscription id or gateway subscription id.' },
+          tenant: TENANT_PROPERTY,
+        },
+        required: ['id'],
+      },
+      run: async (input, call) =>
+        serve(call, ROUTES.subscriptionDetail, { params: { id: required(input, 'id') } }, input),
     },
     {
       name: 'payments_list_disputes',

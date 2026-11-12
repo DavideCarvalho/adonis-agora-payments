@@ -463,6 +463,7 @@ export class InMemoryBillingStore
           (row.externalReference ?? null) === query.externalReference) &&
         (query.gatewayId === undefined || row.gatewayId === query.gatewayId) &&
         (query.customerId === undefined || row.customerId === query.customerId) &&
+        (query.id === undefined || row.id === query.id) &&
         this.#customerInScope(row.customerId, query.owners),
     );
     return this.#page(matching, query).map((row) => ({
@@ -694,6 +695,7 @@ export class InMemoryBillingStore
         (query.provider === undefined || row.provider === query.provider) &&
         (query.gatewayId === undefined || row.gatewayId === query.gatewayId) &&
         (query.customerId === undefined || row.customerId === query.customerId) &&
+        (query.subscriptionId === undefined || row.subscriptionId === query.subscriptionId) &&
         // EXACT, like the Lucid store's `where('external_reference', ?)`. A substring match
         // here would make `order-4` return `order-42` in tests and not in production.
         (query.externalReference === undefined ||

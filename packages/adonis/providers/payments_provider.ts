@@ -22,6 +22,8 @@ import {
   runWithPaymentsTrace,
   webhookVerificationOutcome,
 } from '../src/diagnostics.js';
+import { registerDoctorChecks } from '../src/doctor/agora_doctor.js';
+import { paymentsDoctorChecks } from '../src/doctor/checks.js';
 import type { PaymentsDriver } from '../src/driver.js';
 import { InvoiceManager, resolveInvoiceProviders } from '../src/invoice/invoice_manager.js';
 import { PaymentsManager, resolveDrivers } from '../src/payments_manager.js';
@@ -97,6 +99,12 @@ export default class PaymentsProvider {
   #telescopeWatcher: { dispose(): void } | undefined;
 
   async boot() {
+    // `node ace agora:doctor` reads these after boot.
+    await registerDoctorChecks(
+      this.app.container,
+      paymentsDoctorChecks({ store: () => this.#store }),
+    ).catch(() => undefined);
+
     await this.app.booted(async () => {
       const config = this.app.config.get<PaymentsConfig>('payments', {});
       // Build the billing layer here (async — resolves the app emitter + handler

@@ -22,6 +22,7 @@
     "---Tooling---",
     "testing",
     "cli",
+    "doctor",
     "---Reference---",
     "api-reference",
     "migrating-to-1.0",

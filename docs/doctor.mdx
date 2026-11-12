@@ -1,0 +1,35 @@
+---
+title: Health check
+description: node ace agora:doctor checks the payments configuration (and every other installed Agora lib's) before production finds the problem.
+icon: Stethoscope
+---
+
+```sh
+node ace agora:doctor
+```
+
+One report for every installed `@adonis-agora` lib. `node ace payments:doctor` runs the payments
+checks only. Flags: `--json` (one object on stdout), `--deep` (checks that touch the database),
+`--strict` (warnings fail too), `--only=<id>`, `--lib=payments,durable`, `--verbose`, and
+`--no-boot` when the app itself does not boot. Exit code `0` when nothing is an error, `1`
+otherwise, `2` when the doctor cannot run.
+
+In CI:
+
+```sh
+NODE_ENV=production node ace agora:doctor --json --strict
+```
+
+## The payments checks
+
+| Id | What it checks | When it fails |
+| --- | --- | --- |
+| `payments.webhook-secret` | Every gateway that signs its webhooks has its webhook secret or token. | Warns here, error in production. A gateway listed in `allowUnverifiedWebhooks` warns. |
+| `payments.webhook-csrf` | Shield's `csrf.exceptRoutes` lets `POST /payments/webhook/:provider` through. | Error, naming the route to exempt. |
+| `payments.console-gate` | The console has `authorize` in `config/payments_dashboard.ts`. | Warns here; in production the console refuses everyone (error). |
+| `payments.tables` (`--deep`) | The billing tables exist. | Warns when `autoCreateSchema` will create them; error when it is off. |
+| `payments.health` (`--deep`) | The [`payments:health`](/docs/payments/cli#paymentshealth) report. | Warns with the count of each problem. |
+
+Like every Agora lib, payments also gets the three built-in checks: `payments.registered` (the
+provider is in `adonisrc.ts`), `payments.peers` (peer dependencies in range) and
+`payments.agora-siblings` (Agora libs of one release line).

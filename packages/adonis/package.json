@@ -114,6 +114,11 @@
       "import": "./dist/src/dashboard/index.js",
       "default": "./dist/src/dashboard/index.js"
     },
+    "./doctor": {
+      "types": "./dist/src/doctor/index.d.ts",
+      "import": "./dist/src/doctor/index.js",
+      "default": "./dist/src/doctor/index.js"
+    },
     "./client": {
       "types": "./dist/src/client/index.d.ts",
       "import": "./dist/src/client/index.js",
@@ -154,7 +159,8 @@
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:integration": "vitest run -c vitest.integration.config.ts"
+    "test:integration": "vitest run -c vitest.integration.config.ts",
+    "check:agora-doctor": "node ../../scripts/check-agora-doctor.mjs ."
   },
   "peerDependencies": {
     "@adonis-agora/durable": ">=0.1.0 <2.0.0 || >=1.0.0-rc.0 <2.0.0",

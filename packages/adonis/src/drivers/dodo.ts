@@ -4,6 +4,7 @@ import {
   publishSubscriptionDiagnostics,
 } from '../diagnostics.js';
 import type {
+  CardUpdateUrlInput,
   ChargeInput,
   CheckoutInput,
   CreateCustomerInput,
@@ -598,6 +599,23 @@ export class DodoDriver implements PaymentsDriver {
       if (isNotFound(error)) return null;
       throw error;
     }
+  }
+
+  // ── Saved card ───────────────────────────────────────────────────────────────────────
+
+  /**
+   * A customer portal session (`POST /customers/{id}/customer-portal/session`), where the
+   * customer manages their payment methods. No email is sent; the link is returned instead.
+   */
+  async cardUpdateUrl(input: CardUpdateUrlInput): Promise<string> {
+    const session = await this.#request<{ link?: string }>(
+      `/customers/${encodeURIComponent(input.customerId)}/customer-portal/session?send_email=false`,
+      { method: 'POST' },
+    );
+    if (typeof session.link !== 'string' || session.link === '') {
+      throw new Error('[payments] Dodo returned a customer portal session without a link.');
+    }
+    return session.link;
   }
 
   // ── Invoices ─────────────────────────────────────────────────────────────────────────

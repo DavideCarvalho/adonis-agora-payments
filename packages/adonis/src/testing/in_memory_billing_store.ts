@@ -600,6 +600,7 @@ export class InMemoryBillingStore
     if (patch.cancelAtPeriodEnd !== undefined) row.cancelAtPeriodEnd = patch.cancelAtPeriodEnd;
     if (patch.endsAt !== undefined) row.endsAt = patch.endsAt;
     if (patch.paymentMethodId !== undefined) row.paymentMethodId = patch.paymentMethodId;
+    if (patch.planId !== undefined) row.planId = patch.planId;
     if (patch.lastRenewalError !== undefined) row.lastRenewalError = patch.lastRenewalError;
     if (patch.lastRenewalAttemptAt !== undefined) {
       row.lastRenewalAttemptAt = patch.lastRenewalAttemptAt;

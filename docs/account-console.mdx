@@ -1,0 +1,126 @@
+---
+title: Account console
+description: Your users see their subscription, change plan, cancel or resume, update their card in place and download their invoices from the authkit account console — no code.
+icon: UserCog
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+When `@adonis-agora/authkit-server` runs in the same app, payments adds its pages to the account
+console (`/account/*`), the page every signed-in user already has:
+
+| Page | URL | What the user sees and does |
+| --- | --- | --- |
+| Billing | `/account/billing` | Each running subscription: plan, price, status, renewal or end date. **Cancel** (at the end of the paid period), **Keep subscription** (undo a scheduled cancel), **Change plan** and **Update card**. |
+| Payment method | `/account/payment-method` | The gateway's own card form, opened from **Update card**. The card goes straight to the gateway. |
+| Payments and invoices | `/account/invoices` | Their payments, and the gateway's invoices, with **Download**. |
+
+The pages show up once the account has a customer, and only ever show that customer's own data:
+an action on anything else answers "not found". Every action that moves money asks for
+confirmation and a recent sign-in. Each one is recorded in the [audit trail](/docs/payments/dashboard)
+with the account as the actor.
+
+## Configure it
+
+Nothing is required. To tune it, `config/payments.ts`:
+
+```ts title="config/payments.ts"
+import { defineConfig } from '@adonis-agora/payments'
+
+export default defineConfig({
+  // …providers, billing…
+  accountConsole: {
+    // The plans users can switch between. `id` is what `planId` holds on your subscriptions.
+    plans: [
+      { id: 'basic', label: 'Basic', amount: 2990, currency: 'BRL' },
+      { id: 'pro', label: 'Pro', amount: 7990, currency: 'BRL', prices: { stripe: 'price_pro' } },
+    ],
+    // A download link for a payment's receipt or fiscal invoice (NFS-e), when you keep one.
+    invoiceUrl: async (payment) => {
+      const note = await FiscalNote.findBy('paymentId', payment.gatewayId)
+      return note?.pdfUrl ?? null
+    },
+    // Turn single actions or pages off.
+    actions: { changePlan: false },
+  },
+})
+```
+
+`accountConsole: false` adds no page. Rename or reorder the pages from `config/authkit.ts`
+(`accountConsole.extensions.payments`).
+
+| Option | Default | |
+| --- | --- | --- |
+| `owner(ctx)` | the active organization, else the account's app user | Who pays, as `{ type, id }` in `billing_customers`. |
+| `organizationRoles` | `['owner', 'admin']` | Organization roles that see and manage its billing. Other members see a notice. |
+| `pages` | all on | `{ billing: false }` or `{ invoices: false }`. |
+| `actions` | all on | `cancel`, `resume`, `changePlan`, `updateMethod`, `download`. |
+| `plans` | none | "Change plan" shows with two or more. |
+| `changePlan(input)` | built in | Change the plan yourself (proration, entitlements…). |
+| `invoiceUrl(payment)` | none | An https link per payment. |
+| `returnUrl` | `APP_URL` + `/account/billing` | Where a gateway's own card page sends the user back to. |
+
+### Changing plan
+
+A subscription the library manages takes the new price, cycle and plan id from its next renewal.
+For a subscription the gateway owns, Stripe moves to the plan's `prices.stripe`; other gateways
+re-price to `amount`. To do it your way, pass `changePlan`:
+
+```ts title="config/payments.ts"
+accountConsole: {
+  plans,
+  changePlan: async ({ subscription, plan, owner }) => {
+    await PlanChange.request(owner, subscription.id, plan.id)
+  },
+},
+```
+
+## Updating the card
+
+The user types the card into the gateway's own component, on the account console page; the card
+never reaches your server. Each gateway needs its public key:
+
+| Gateway | Component | Configure |
+| --- | --- | --- |
+| Stripe | Payment Element | `publishableKey` (or `STRIPE_PUBLISHABLE_KEY`) |
+| Mercado Pago | Secure Fields | `publicKey` (or `MERCADOPAGO_PUBLIC_KEY`). Updates subscriptions Mercado Pago owns. |
+| Pagar.me | card tokenization | `publicKey` (or `PAGARME_PUBLIC_KEY`), with your domain allowed for it in the Pagar.me dashboard |
+| Square | Web Payments SDK | `applicationId` (or `SQUARE_APPLICATION_ID`) and `locationId` |
+| PayPal | PayPal button (saves the PayPal account) | the driver's `clientId`. For subscriptions the library manages. |
+| Asaas | card form served by this app | nothing: Asaas tokenizes on the server, so the card goes to your app's `/payments/account/card/tokenize` and only the token is kept. Each customer and each IP get 10 attempts an hour, counted per app instance. |
+
+```ts title="config/payments.ts"
+providers: {
+  stripe: payments.stripe({ currency: 'brl', publishableKey: env.get('STRIPE_PUBLISHABLE_KEY') }),
+},
+```
+
+Gateways with no embeddable form send the user to their own page instead: Stripe's billing portal
+(when no publishable key is set), Lemon Squeezy, Paddle, Polar and Dodo. Other gateways do not offer
+**Update card**.
+
+<Callout title="Content Security Policy">
+The gateway's scripts get the page's CSP nonce. Your CSP must also allow the gateway's frames and
+API calls, for example `frame-src https://js.stripe.com` and
+`connect-src https://api.stripe.com` for Stripe, `connect-src https://api.pagar.me` for Pagar.me.
+</Callout>
+
+## Organizations
+
+With [organizations](/docs/payments/organizations) on, the pages follow the organization picked in
+the account menu: its subscription and invoices, for its owners and admins.
+
+## IdP in another app
+
+When authkit-server runs in another app and yours signs in through it (authkit-client with
+`accountConsole: { remote: true }`), the same pages are served by your app to the IdP. Set
+`publicUrl` so the card form loads from your app, and exempt the tokenize endpoint from CSRF (it is
+authorized by a signed ticket):
+
+```ts title="config/payments.ts"
+accountConsole: { publicUrl: 'https://app.example.com' },
+```
+
+```ts title="config/shield.ts"
+csrf: { exceptRoutes: ['/payments/account/card/tokenize'] },
+```

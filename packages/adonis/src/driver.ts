@@ -89,6 +89,11 @@ export interface PaymentsDriver {
      * answerable before a card is typed, instead of at the gateway.
      */
     cardTokenization?: boolean;
+    /**
+     * Which subscriptions {@link PaymentsDriver.saveCard} can move to a new card: the ones the
+     * library manages, the ones the gateway owns, or both (the default when omitted).
+     */
+    cardUpdate?: { managed?: boolean; gateway?: boolean };
   };
 
   /**
@@ -212,6 +217,31 @@ export interface PaymentsDriver {
    * ends at making the deadline visible and the submission one honest call.
    */
   submitDisputeEvidence?(disputeGatewayId: string, evidence: DisputeEvidence): Promise<Dispute>;
+
+  // ── Saved card (account console) ─────────────────────────────────────────────────────
+
+  /**
+   * Start an in-place card update with the gateway's own browser component (Stripe Elements,
+   * Mercado Pago's card form, Square's Web Payments SDK…): what the page loads and what the
+   * component is mounted with. The card never reaches your server; the component hands back a
+   * token, and {@link saveCard} finishes the update with it.
+   *
+   * Optional: a gateway with no embeddable component omits it, and {@link cardUpdateUrl} (a
+   * gateway-hosted page) is used instead when there is one.
+   */
+  cardSetup?(input: CardSetupInput): Promise<CardSetupSession>;
+  /**
+   * Finish an in-place card update: the token {@link cardSetup}'s component produced becomes the
+   * customer's card, and the card of the given gateway subscriptions. Returns the reusable id a
+   * library-managed subscription charges on its renewals.
+   */
+  saveCard?(input: SaveCardInput): Promise<SavedCard>;
+  /**
+   * A gateway-hosted page where the payer updates their card (Stripe's billing portal, Lemon
+   * Squeezy's update link, Paddle's update transaction…), for gateways without a component or
+   * when the component cannot be configured. Returns an `https` URL.
+   */
+  cardUpdateUrl?(input: CardUpdateUrlInput): Promise<string>;
 
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
 
@@ -572,6 +602,63 @@ export interface UpdateSubscriptionInput {
   amount?: Money;
   /** New description. */
   description?: string;
+  /**
+   * Move the subscription to another price/plan at the gateway. Stripe swaps the
+   * subscription's price to this id; gateways that re-price by `amount` ignore it.
+   */
+  planId?: string;
   /** Extra provider-specific fields. */
   metadata?: Record<string, unknown>;
+}
+
+/** What {@link PaymentsDriver.cardSetup} receives. */
+export interface CardSetupInput {
+  /** Gateway customer id the new card belongs to. */
+  customerId: string;
+  /** Gateway subscriptions of that customer whose card changes too. */
+  subscriptionGatewayIds?: readonly string[];
+  /** The page the payer is on, for gateways whose component flow names one. */
+  returnUrl?: string;
+}
+
+/**
+ * What the browser needs to collect a card with the gateway's own component. Plain JSON: it is
+ * rendered into the page.
+ */
+export interface CardSetupSession {
+  /** The gateway's browser SDK, loaded before the component is mounted. */
+  scripts: ReadonlyArray<{ src: string; integrity?: string }>;
+  /**
+   * What the component is mounted with: publishable keys, a setup intent's client secret…
+   * Never a secret key.
+   */
+  props: Record<string, unknown>;
+}
+
+/** What {@link PaymentsDriver.saveCard} receives. */
+export interface SaveCardInput {
+  customerId: string;
+  /** What the component produced (a SetupIntent id, a card token, a nonce, a vault token…). */
+  token: string;
+  /** Gateway subscriptions whose card changes too. */
+  subscriptionGatewayIds?: readonly string[];
+  /** The payer's IP, for gateways that score it. */
+  remoteIp?: string;
+}
+
+/** What {@link PaymentsDriver.saveCard} returns. */
+export interface SavedCard {
+  /** The reusable id renewals charge (`ChargeInput.paymentMethodId`). */
+  paymentMethodId: string;
+  brand?: string;
+  last4?: string;
+}
+
+/** What {@link PaymentsDriver.cardUpdateUrl} receives. */
+export interface CardUpdateUrlInput {
+  customerId: string;
+  /** The gateway subscription the update is for, when the gateway's page is per subscription. */
+  subscriptionGatewayId?: string;
+  /** Where the gateway sends the payer back to. */
+  returnUrl?: string;
 }

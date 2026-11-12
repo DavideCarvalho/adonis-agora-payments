@@ -1,3 +1,4 @@
+import type { PaymentsAccountConsoleOptions } from './account_console/extension.js';
 import type { PaymentsTenancyOption } from './agora/tenancy.js';
 import type { BillingStore } from './billing/billing_store.js';
 import type { BillingModels } from './billing/lucid_billing_store.js';
@@ -73,6 +74,11 @@ export interface StripeDriverConfig {
    * to `env.get('STRIPE_WEBHOOK_SECRET')`. Required to parse Stripe webhooks.
    */
   webhookSecret?: string;
+  /**
+   * Publishable key (`pk_...`), for updating a card in place with Stripe's Payment Element in
+   * the account console. Defaults to `env.get('STRIPE_PUBLISHABLE_KEY')`.
+   */
+  publishableKey?: string;
 }
 
 export interface AbacateDriverConfig {
@@ -123,6 +129,11 @@ export interface PagarmeDriverConfig {
    * requires `expires_in` on every Pix payment. Defaults to 86400 (24h).
    */
   pixExpiresIn?: number;
+  /**
+   * Public key (`pk_…`), for updating a card in place in the account console: the browser
+   * tokenizes the card with it. Defaults to `env.get('PAGARME_PUBLIC_KEY')`.
+   */
+  publicKey?: string;
   // No `currency`: Pagar.me is BRL-only, so there is nothing to choose.
 }
 
@@ -365,6 +376,13 @@ export interface PaymentsConfig {
    * `payments.currentCustomer()` outside an organization. Default `'User'`.
    */
   userOwnerType?: string;
+  /**
+   * Billing pages in the authkit account console (`/account/billing`, `/account/invoices`),
+   * added automatically when `@adonis-agora/authkit-server` (or authkit-client) runs in the app.
+   * `false` adds nothing; the object picks the payer, the plans users can switch between, and
+   * turns single pages or actions off.
+   */
+  accountConsole?: false | PaymentsAccountConsoleOptions;
   /** Invoice emission settings. */
   invoice?: InvoiceSectionConfig;
   /**

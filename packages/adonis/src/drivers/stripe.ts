@@ -6,11 +6,16 @@ import {
   publishSubscriptionDiagnostics,
 } from '../diagnostics.js';
 import type {
+  CardSetupInput,
+  CardSetupSession,
+  CardUpdateUrlInput,
   ChargeInput,
   CheckoutInput,
   CreateCustomerInput,
   CreateSubscriptionInput,
   PaymentsDriver,
+  SaveCardInput,
+  SavedCard,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
   WebhookVerificationState,
@@ -247,6 +252,7 @@ export class StripeDriver implements PaymentsDriver {
   #stripe: Stripe;
   #currency: string;
   #webhookSecret: string | undefined;
+  #publishableKey: string | undefined;
   #invoiceCtx: EmitInvoiceContext;
   /** Holds a PaymentIntent to the given method types, in the installed SDK's API dialect. */
   #restrictMethods: (types: string[]) => MethodRestriction;
@@ -267,6 +273,7 @@ export class StripeDriver implements PaymentsDriver {
     // public entry point too — this is the one boundary every path crosses.
     this.#currency = requireCurrency('stripe', config.currency);
     this.#webhookSecret = config.webhookSecret ?? process.env.STRIPE_WEBHOOK_SECRET;
+    this.#publishableKey = config.publishableKey ?? process.env.STRIPE_PUBLISHABLE_KEY;
   }
 
   // ── Customers ────────────────────────────────────────────────────────────────────────
@@ -578,9 +585,21 @@ export class StripeDriver implements PaymentsDriver {
     subscriptionGatewayId: string,
     input: UpdateSubscriptionInput,
   ): Promise<Subscription> {
-    // Stripe changes prices by subscription item id (the billing layer's swap); here we
-    // support description/metadata only.
+    // Stripe re-prices by swapping the subscription item's price (`planId`); `amount` has no
+    // meaning here, since a Stripe price carries its own amount.
+    let items: Stripe.SubscriptionUpdateParams.Item[] | undefined;
+    if (input.planId !== undefined) {
+      const current = await this.#stripe.subscriptions.retrieve(subscriptionGatewayId);
+      const [item] = current.items.data;
+      if (item === undefined) {
+        throw new Error(
+          `[payments] Stripe subscription ${subscriptionGatewayId} has no item to move to price ${input.planId}.`,
+        );
+      }
+      items = [{ id: item.id, price: input.planId }];
+    }
     const params: Stripe.SubscriptionUpdateParams = {
+      ...(items !== undefined ? { items } : {}),
       ...(input.description !== undefined ? { description: input.description } : {}),
       ...(input.metadata !== undefined
         ? { metadata: input.metadata as Record<string, string> }
@@ -592,6 +611,79 @@ export class StripeDriver implements PaymentsDriver {
       this.#requestOptions(input.idempotencyKey),
     );
     return this.#mapSubscription(subscription);
+  }
+
+  // ── Saved card ───────────────────────────────────────────────────────────────────────
+
+  /**
+   * A SetupIntent for the customer, confirmed in the browser by Stripe's Payment Element. Needs
+   * the publishable key (`publishableKey`, or `STRIPE_PUBLISHABLE_KEY`).
+   */
+  async cardSetup(input: CardSetupInput): Promise<CardSetupSession> {
+    if (this.#publishableKey === undefined) {
+      throw new Error(
+        '[payments] Stripe card update needs the publishable key. Set `STRIPE_PUBLISHABLE_KEY` or pass `publishableKey` to `payments.stripe()`.',
+      );
+    }
+    const intent = await this.#stripe.setupIntents.create({
+      customer: input.customerId,
+      usage: 'off_session',
+      // The installed SDK's dialect, like PaymentIntents: `allowed_payment_method_types` on
+      // newer API versions, `payment_method_types` before.
+      ...(this.#restrictMethods(['card']) as Partial<Stripe.SetupIntentCreateParams>),
+    });
+    if (intent.client_secret === null) {
+      throw new Error('[payments] Stripe returned a SetupIntent without a client secret.');
+    }
+    return {
+      scripts: [{ src: 'https://js.stripe.com/v3/' }],
+      props: { publishableKey: this.#publishableKey, clientSecret: intent.client_secret },
+    };
+  }
+
+  /**
+   * `token` is the SetupIntent id the Payment Element confirmed. It must belong to this customer
+   * and have succeeded; its card becomes the customer's default and each subscription's.
+   */
+  async saveCard(input: SaveCardInput): Promise<SavedCard> {
+    if (!input.token.startsWith('seti_')) {
+      throw new Error('[payments] Stripe expects the confirmed SetupIntent id (seti_…).');
+    }
+    const intent = await this.#stripe.setupIntents.retrieve(input.token, {
+      expand: ['payment_method'],
+    });
+    const customer = typeof intent.customer === 'string' ? intent.customer : intent.customer?.id;
+    if (customer !== input.customerId) {
+      throw new Error('[payments] This SetupIntent belongs to another customer.');
+    }
+    if (intent.status !== 'succeeded' || intent.payment_method === null) {
+      throw new Error(`[payments] The card was not confirmed (SetupIntent ${intent.status}).`);
+    }
+    const method = intent.payment_method;
+    const paymentMethodId = typeof method === 'string' ? method : method.id;
+    await this.#stripe.customers.update(input.customerId, {
+      invoice_settings: { default_payment_method: paymentMethodId },
+    });
+    for (const subscription of input.subscriptionGatewayIds ?? []) {
+      await this.#stripe.subscriptions.update(subscription, {
+        default_payment_method: paymentMethodId,
+      });
+    }
+    const card = typeof method === 'string' ? undefined : method.card;
+    return {
+      paymentMethodId,
+      ...(card?.brand !== undefined ? { brand: card.brand } : {}),
+      ...(card?.last4 !== undefined ? { last4: card.last4 } : {}),
+    };
+  }
+
+  /** A billing portal session, where the customer manages their cards. */
+  async cardUpdateUrl(input: CardUpdateUrlInput): Promise<string> {
+    const session = await this.#stripe.billingPortal.sessions.create({
+      customer: input.customerId,
+      ...(input.returnUrl !== undefined ? { return_url: input.returnUrl } : {}),
+    });
+    return session.url;
   }
 
   // ── Invoices ─────────────────────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 import { publishRefundDiagnostics, publishSubscriptionDiagnostics } from '../diagnostics.js';
 import type {
+  CardUpdateUrlInput,
   ChargeInput,
   CheckoutInput,
   CreateCustomerInput,
@@ -498,6 +499,29 @@ export class PolarDriver implements PaymentsDriver {
       if (isNotFound(error)) return null;
       throw error;
     }
+  }
+
+  // ── Saved card ───────────────────────────────────────────────────────────────────────
+
+  /**
+   * A customer session (`POST /v1/customer-sessions/`) and its customer portal URL, where the
+   * customer manages their payment methods. The portal shows a back link to `returnUrl` when one is given.
+   */
+  async cardUpdateUrl(input: CardUpdateUrlInput): Promise<string> {
+    const session = await this.#request<{ customer_portal_url?: string }>(
+      '/v1/customer-sessions/',
+      {
+        method: 'POST',
+        body: {
+          customer_id: input.customerId,
+          ...(input.returnUrl !== undefined ? { return_url: input.returnUrl } : {}),
+        },
+      },
+    );
+    if (typeof session.customer_portal_url !== 'string' || session.customer_portal_url === '') {
+      throw new Error('[payments] Polar returned a customer session without a portal URL.');
+    }
+    return session.customer_portal_url;
   }
 
   // ── Invoices ─────────────────────────────────────────────────────────────────────────

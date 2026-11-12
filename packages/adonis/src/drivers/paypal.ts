@@ -4,11 +4,15 @@ import {
   publishSubscriptionDiagnostics,
 } from '../diagnostics.js';
 import type {
+  CardSetupInput,
+  CardSetupSession,
   ChargeInput,
   CheckoutInput,
   CreateCustomerInput,
   CreateSubscriptionInput,
   PaymentsDriver,
+  SaveCardInput,
+  SavedCard,
   UpdateCustomerInput,
   UpdateSubscriptionInput,
   WebhookVerificationState,
@@ -197,9 +201,17 @@ export class PayPalDriver implements PaymentsDriver {
    * reach a driver that cannot make one.
    */
   readonly supportedMethods = ['wallet', 'undefined'] as const;
-  readonly capabilities = { refunds: true, invoices: false, subscriptions: true };
+  readonly capabilities = {
+    refunds: true,
+    invoices: false,
+    subscriptions: true,
+    // A PayPal subscription's funding changes on paypal.com only; managed ones take the vault id.
+    cardUpdate: { managed: true, gateway: false },
+  };
 
   #baseUrl: string;
+  /** Public half of the REST app credentials: the JS SDK is loaded with it. */
+  #clientId: string;
   #basicAuth: string;
   #currency: string;
   #webhookId: string | undefined;
@@ -223,6 +235,7 @@ export class PayPalDriver implements PaymentsDriver {
       env: 'PAYPAL_CLIENT_SECRET',
       value: config.clientSecret,
     });
+    this.#clientId = clientId;
     this.#basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
     this.#currency = requireCurrency('paypal', config.currency);
     const sandbox = config.sandbox ?? process.env.NODE_ENV !== 'production';
@@ -593,6 +606,63 @@ export class PayPalDriver implements PaymentsDriver {
       if (isNotFound(error)) return null;
       throw error;
     }
+  }
+
+  // ── Saved payment method ─────────────────────────────────────────────────────────────
+
+  /**
+   * A vault setup token for a PayPal wallet (`POST /v3/vault/setup-tokens`), approved by the payer
+   * in the JS SDK's buttons. `customerId` travels as `merchant_customer_id`, your own id for the
+   * payer, since PayPal mints its own customer ids.
+   */
+  async cardSetup(input: CardSetupInput): Promise<CardSetupSession> {
+    const token = await this.#request<{ id: string }>('/v3/vault/setup-tokens', {
+      method: 'POST',
+      body: {
+        customer: { merchant_customer_id: input.customerId },
+        payment_source: {
+          paypal: {
+            usage_type: 'MERCHANT',
+            ...(input.returnUrl !== undefined
+              ? {
+                  experience_context: {
+                    return_url: input.returnUrl,
+                    cancel_url: input.returnUrl,
+                  },
+                }
+              : {}),
+          },
+        },
+      },
+    });
+    return {
+      scripts: [
+        {
+          src: `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(this.#clientId)}&vault=true&components=buttons`,
+        },
+      ],
+      props: { setupToken: token.id },
+    };
+  }
+
+  /**
+   * `token` is the setup token the payer approved. It becomes a payment token
+   * (`POST /v3/vault/payment-tokens`), whose id is the `vault_id` renewals charge.
+   *
+   * A PayPal subscription (`/v1/billing/subscriptions`) cannot have its funding changed by
+   * API — the payer changes it on paypal.com — so gateway subscriptions are refused.
+   */
+  async saveCard(input: SaveCardInput): Promise<SavedCard> {
+    if ((input.subscriptionGatewayIds ?? []).length > 0) {
+      throw new Error(
+        '[payments] PayPal subscriptions cannot change their payment method by API: the payer changes it in their PayPal account. Only library-managed subscriptions can move to a vaulted PayPal wallet.',
+      );
+    }
+    const paymentToken = await this.#request<{ id: string }>('/v3/vault/payment-tokens', {
+      method: 'POST',
+      body: { payment_source: { token: { id: input.token, type: 'SETUP_TOKEN' } } },
+    });
+    return { paymentMethodId: paymentToken.id };
   }
 
   // ── Invoices ─────────────────────────────────────────────────────────────────────────

@@ -113,6 +113,8 @@ export interface ManagedSubscriptionPatch {
   cancelAtPeriodEnd?: boolean;
   endsAt?: Date | null;
   paymentMethodId?: string | null;
+  /** Move the subscription to another of your plans (takes effect on the next cycle). */
+  planId?: string;
 }
 
 /** One `billing_subscriptions` row, normalized for reading. See {@link PaymentListItem}. */

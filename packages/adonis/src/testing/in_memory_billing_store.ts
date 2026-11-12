@@ -14,6 +14,7 @@ import {
   type ManagedSubscriptionPatch,
   OPEN_DISPUTE_STATUSES,
   type OpenDisputeQuery,
+  type OwnerScoped,
   type PaymentListItem,
   type PaymentListQuery,
   type SubscriptionCycleTotal,
@@ -25,6 +26,7 @@ import {
   type WebhookEventListQuery,
 } from '../billing/billing_store.js';
 import { clampSize, listOffset } from '../billing/list_query.js';
+import { type BillingOwnerScope, ownerInScope } from '../billing/owner_scope.js';
 
 /** Is this status one that still needs an answer? Shares the constant with the Lucid store. */
 function isOpenDispute(status: string): boolean {
@@ -304,6 +306,23 @@ export class InMemoryBillingStore
     return sorted.slice(offset, offset + clampSize(query.size));
   }
 
+  /** Reads honour `owners` (tenant scope), like the Lucid store. */
+  readonly ownerScoping = true;
+
+  /** Whether a row whose gateway customer is `customerId` is inside `scope`. */
+  #customerInScope(customerId: string | null | undefined, scope: BillingOwnerScope | undefined) {
+    if (scope === undefined) return true;
+    const customer =
+      customerId === null || customerId === undefined ? null : this.customers.get(customerId);
+    return ownerInScope(scope, customer ?? null);
+  }
+
+  /** Whether a dispute is inside `scope`, through its payment's customer. */
+  #disputeInScope(paymentGatewayId: string, scope: BillingOwnerScope | undefined) {
+    if (scope === undefined) return true;
+    return this.#customerInScope(this.payments.get(paymentGatewayId)?.customerId ?? null, scope);
+  }
+
   async saveCustomer(customer: {
     gatewayId: string;
     provider: string;
@@ -363,7 +382,8 @@ export class InMemoryBillingStore
         (query.provider === undefined || row.provider === query.provider) &&
         (query.ownerType === undefined || row.ownerType === query.ownerType) &&
         (query.ownerId === undefined || row.ownerId === query.ownerId) &&
-        (query.gatewayId === undefined || row.gatewayId === query.gatewayId),
+        (query.gatewayId === undefined || row.gatewayId === query.gatewayId) &&
+        ownerInScope(query.owners, row),
     );
     return this.#page(matching, query).map(customerItem);
   }
@@ -442,7 +462,8 @@ export class InMemoryBillingStore
         (query.externalReference === undefined ||
           (row.externalReference ?? null) === query.externalReference) &&
         (query.gatewayId === undefined || row.gatewayId === query.gatewayId) &&
-        (query.customerId === undefined || row.customerId === query.customerId),
+        (query.customerId === undefined || row.customerId === query.customerId) &&
+        this.#customerInScope(row.customerId, query.owners),
     );
     return this.#page(matching, query).map((row) => ({
       id: row.id,
@@ -468,7 +489,7 @@ export class InMemoryBillingStore
     }));
   }
 
-  async countSubscriptions(query: BillingCountQuery): Promise<number> {
+  async countSubscriptions(query: BillingCountQuery & OwnerScoped): Promise<number> {
     let count = 0;
     for (const row of this.#allSubscriptions()) {
       if (this.#matchesCount(row, query) && this.#matchesSubscriptionCount(row, query)) count += 1;
@@ -477,7 +498,11 @@ export class InMemoryBillingStore
   }
 
   /** Os filtros de assinatura que `#matchesCount` (genérico a todas as tabelas) não conhece. */
-  #matchesSubscriptionCount(row: InMemorySubscriptionRow, query: BillingCountQuery): boolean {
+  #matchesSubscriptionCount(
+    row: InMemorySubscriptionRow,
+    query: BillingCountQuery & OwnerScoped,
+  ): boolean {
+    if (!this.#customerInScope(row.customerId, query.owners)) return false;
     if (query.managed !== undefined && (row.managed === true) !== query.managed) return false;
     if (query.nextChargeBefore !== undefined) {
       // Nulo é "não renova mais", e isso NÃO é "vencido".
@@ -493,7 +518,9 @@ export class InMemoryBillingStore
     return true;
   }
 
-  async subscriptionAmountByCycle(query: BillingCountQuery): Promise<SubscriptionCycleTotal[]> {
+  async subscriptionAmountByCycle(
+    query: BillingCountQuery & OwnerScoped,
+  ): Promise<SubscriptionCycleTotal[]> {
     const totals = new Map<string, { total: number; count: number }>();
     for (const row of this.#allSubscriptions()) {
       if (!this.#matchesCount(row, query) || !this.#matchesSubscriptionCount(row, query)) continue;
@@ -669,7 +696,8 @@ export class InMemoryBillingStore
         // EXACT, like the Lucid store's `where('external_reference', ?)`. A substring match
         // here would make `order-4` return `order-42` in tests and not in production.
         (query.externalReference === undefined ||
-          row.externalReference === query.externalReference),
+          row.externalReference === query.externalReference) &&
+        this.#customerInScope(row.customerId, query.owners),
     );
     return this.#page(matching, query).map((row) => ({
       id: row.id,
@@ -687,10 +715,11 @@ export class InMemoryBillingStore
     }));
   }
 
-  async countPayments(query: BillingCountQuery): Promise<number> {
+  async countPayments(query: BillingCountQuery & OwnerScoped): Promise<number> {
     let count = 0;
     for (const row of this.payments.values()) {
-      if (this.#matchesCount(row, query)) count += 1;
+      if (this.#matchesCount(row, query) && this.#customerInScope(row.customerId, query.owners))
+        count += 1;
     }
     return count;
   }
@@ -768,15 +797,20 @@ export class InMemoryBillingStore
       (row) =>
         (query.status === undefined || row.status === query.status) &&
         (query.provider === undefined || row.provider === query.provider) &&
-        (query.paymentGatewayId === undefined || row.paymentGatewayId === query.paymentGatewayId),
+        (query.paymentGatewayId === undefined || row.paymentGatewayId === query.paymentGatewayId) &&
+        this.#disputeInScope(row.paymentGatewayId, query.owners),
     );
     return this.#page(matching, query).map(disputeItem);
   }
 
-  async countDisputes(query: BillingCountQuery): Promise<number> {
+  async countDisputes(query: BillingCountQuery & OwnerScoped): Promise<number> {
     let count = 0;
     for (const row of this.disputes.values()) {
-      if (this.#matchesCount(row, query)) count += 1;
+      if (
+        this.#matchesCount(row, query) &&
+        this.#disputeInScope(row.paymentGatewayId, query.owners)
+      )
+        count += 1;
     }
     return count;
   }
@@ -811,7 +845,8 @@ export class InMemoryBillingStore
         isOpenDispute(row.status) &&
         row.evidenceDueBy !== null &&
         row.evidenceDueBy.getTime() <= cutoff &&
-        (query.provider === undefined || row.provider === query.provider),
+        (query.provider === undefined || row.provider === query.provider) &&
+        this.#disputeInScope(row.paymentGatewayId, query.owners),
     );
   }
 
@@ -820,7 +855,8 @@ export class InMemoryBillingStore
       .filter(
         (row) =>
           isOpenDispute(row.status) &&
-          (query.provider === undefined || row.provider === query.provider),
+          (query.provider === undefined || row.provider === query.provider) &&
+          this.#disputeInScope(row.paymentGatewayId, query.owners),
       )
       // Oldest FIRST — mirrors the Lucid store's `order by created_at asc`. With no deadline
       // to rank on, how long a dispute has gone unanswered is the only priority left.
@@ -829,10 +865,11 @@ export class InMemoryBillingStore
     return matching.slice(offset, offset + clampSize(query.size)).map(disputeItem);
   }
 
-  async countOpenDisputes(query: { provider?: string }): Promise<number> {
+  async countOpenDisputes(query: { provider?: string } & OwnerScoped): Promise<number> {
     let count = 0;
     for (const row of this.disputes.values()) {
       if (!isOpenDispute(row.status)) continue;
+      if (!this.#disputeInScope(row.paymentGatewayId, query.owners)) continue;
       if (query.provider !== undefined && row.provider !== query.provider) continue;
       count += 1;
     }
@@ -1039,16 +1076,19 @@ export class InMemoryBillingStore
     return row;
   }
 
-  async usageReport(query: {
-    subscriptionId?: string;
-    customerId?: string;
-    scope?: UsageScope;
-    meter?: string;
-    from?: Date;
-    to?: Date;
-  }): Promise<Array<{ meter: string; quantity: number }>> {
+  async usageReport(
+    query: {
+      subscriptionId?: string;
+      customerId?: string;
+      scope?: UsageScope;
+      meter?: string;
+      from?: Date;
+      to?: Date;
+    } & OwnerScoped,
+  ): Promise<Array<{ meter: string; quantity: number }>> {
     const totals = new Map<string, number>();
     for (const row of this.usageEvents.values()) {
+      if (!this.#customerInScope(row.customerId, query.owners)) continue;
       if (query.subscriptionId !== undefined && row.subscriptionId !== query.subscriptionId)
         continue;
       if (query.customerId !== undefined && row.customerId !== query.customerId) {
@@ -1068,7 +1108,7 @@ export class InMemoryBillingStore
     return [...totals.entries()].map(([meter, quantity]) => ({ meter, quantity }));
   }
 
-  async revenue(query: { from?: Date; to?: Date }): Promise<number> {
+  async revenue(query: { from?: Date; to?: Date } & OwnerScoped): Promise<number> {
     return this.#sumPaid(query, (row) => row.amount);
   }
 
@@ -1081,15 +1121,19 @@ export class InMemoryBillingStore
    * disagree with the database, which is the one thing a fake store must never do: a contract
    * fixed in one implementation of two is not fixed.
    */
-  async netRevenue(query: { from?: Date; to?: Date }): Promise<number> {
+  async netRevenue(query: { from?: Date; to?: Date } & OwnerScoped): Promise<number> {
     return this.#sumPaid(query, (row) => row.amount - (row.refundedAmount ?? 0));
   }
 
   /** The row selection `revenue()` and `netRevenue()` share; only the summed figure differs. */
-  #sumPaid(query: { from?: Date; to?: Date }, figure: (row: InMemoryPaymentRow) => number): number {
+  #sumPaid(
+    query: { from?: Date; to?: Date } & OwnerScoped,
+    figure: (row: InMemoryPaymentRow) => number,
+  ): number {
     let total = 0;
     for (const row of this.payments.values()) {
       if (row.status !== 'paid') continue;
+      if (!this.#customerInScope(row.customerId, query.owners)) continue;
       // A row with NO `paid_at` is in no window at all. The Lucid store emits
       // `paid_at >= from AND paid_at < to`, and SQL `NULL` satisfies neither comparison — so
       // counting it here would make the in-memory store report revenue the database cannot,
@@ -1104,9 +1148,10 @@ export class InMemoryBillingStore
     return total;
   }
 
-  async countActiveSubscriptions(): Promise<number> {
+  async countActiveSubscriptions(query: OwnerScoped = {}): Promise<number> {
     let count = 0;
     for (const row of this.subscriptions.values()) {
+      if (!this.#customerInScope(row.customerId, query.owners)) continue;
       if (row.status === 'active' || row.status === 'trialing') count += 1;
     }
     return count;

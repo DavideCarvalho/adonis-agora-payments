@@ -187,16 +187,60 @@ export interface UsageApi {
   period(subscription: string, at?: Date): Promise<{ from: Date; to: Date }>;
 }
 
+/** Options of {@link createUsageApi}. */
+export interface UsageApiOptions {
+  /**
+   * The gateway customer id usage with no `customerId` belongs to: `undefined` = no default (the
+   * call is used as given), `null` = there should be one and nobody is a customer (the call
+   * throws rather than recording or reading unattributed usage).
+   */
+  currentCustomerId?: () => Promise<string | null | undefined>;
+}
+
+const NO_CUSTOMER =
+  '[payments] No current customer: the active organization (or the signed-in user) has no ' +
+  'billing customer. Pass `customerId`, or create the customer first with `ensureCustomer`.';
+
 /** Bind the usage helpers to a (lazily resolved) store. */
-export function createUsageApi(store: () => UsageStore): UsageApi {
+export function createUsageApi(store: () => UsageStore, options: UsageApiOptions = {}): UsageApi {
+  /** Fill `customerId` from the current customer when the call names no customer. */
+  const attribute = async <Q extends { customerId?: string | undefined }>(
+    query: Q,
+    unattributed: boolean,
+  ): Promise<Q> => {
+    if (query.customerId !== undefined || options.currentCustomerId === undefined) return query;
+    const current = await options.currentCustomerId();
+    if (current === undefined) return query;
+    if (current === null) {
+      if (unattributed) throw new Error(NO_CUSTOMER);
+      return query;
+    }
+    return { ...query, customerId: current };
+  };
   return {
     async record(event) {
-      await store().recordUsage(event);
+      const attributed = await attribute(
+        event,
+        (event.subscriptionId ?? null) === null && (event.scope ?? null) === null,
+      );
+      await store().recordUsage(attributed);
     },
     // `async`, so a missing store surfaces as a rejection like every other failure here
     // rather than a synchronous throw from a method that returns a promise.
-    total: async (query) => usageTotal(store(), query),
-    remaining: async (query) => usageRemaining(store(), query),
+    total: async (query) =>
+      usageTotal(
+        store(),
+        query.subscriptionId === undefined && query.scope === undefined
+          ? await attribute(query, true)
+          : query,
+      ),
+    remaining: async (query) =>
+      usageRemaining(
+        store(),
+        query.subscriptionId === undefined && query.scope === undefined
+          ? await attribute(query, true)
+          : query,
+      ),
     async period(subscription, at) {
       const window = await resolvePeriod(store(), {
         subscription,

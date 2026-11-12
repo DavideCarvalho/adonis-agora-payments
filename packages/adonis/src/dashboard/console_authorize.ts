@@ -11,11 +11,21 @@ import type { HttpContext } from '@adonisjs/core/http';
 /** What an authorizer may answer. */
 export type ConsoleAuthorizeResult =
   | boolean
-  | { allowed: true }
+  | {
+      allowed: true;
+      /**
+       * With tenancy on: the organizations this viewer may see. `'*'` = every organization, plus
+       * rows that belong to none. Omitted = the viewer's own active organization.
+       */
+      tenants?: ConsoleTenants;
+    }
   | { allowed: false; reason?: 'unauthenticated' | 'forbidden' }
   | { redirectTo: string };
 
 /** A class form, for an authorizer in its own file (`@inject()` works). */
+/** The organizations (tenants) a console viewer may see: every one (`'*'`), or these ids. */
+export type ConsoleTenants = '*' | string[];
+
 export interface ConsoleAuthorizer {
   authorize(ctx: HttpContext): ConsoleAuthorizeResult | Promise<ConsoleAuthorizeResult>;
 }
@@ -31,7 +41,7 @@ export type ConsoleAuthorize =
 
 /** A {@link ConsoleAuthorizeResult} normalized to the answer the console writes. */
 export type ConsoleAuthorizeDecision =
-  | { allowed: true }
+  | { allowed: true; tenants?: ConsoleTenants }
   | { allowed: false; status: 401; reason: 'unauthenticated' }
   | { allowed: false; status: 403; reason: 'forbidden'; error?: unknown }
   | { allowed: false; status: 302; redirectTo: string };
@@ -61,7 +71,10 @@ export function normalizeConsoleAuthorizeResult(result: unknown): ConsoleAuthori
   if (result === true) return { allowed: true };
   if (typeof result !== 'object' || result === null) return FORBIDDEN;
   const value = result as { allowed?: unknown; reason?: unknown; redirectTo?: unknown };
-  if (value.allowed === true) return { allowed: true };
+  if (value.allowed === true) {
+    const tenants = consoleTenantsOf(result);
+    return tenants === undefined ? { allowed: true } : { allowed: true, tenants };
+  }
   if (value.allowed === undefined && typeof value.redirectTo === 'string' && value.redirectTo) {
     return { allowed: false, status: 302, redirectTo: value.redirectTo };
   }
@@ -69,6 +82,16 @@ export function normalizeConsoleAuthorizeResult(result: unknown): ConsoleAuthori
     return { allowed: false, status: 401, reason: 'unauthenticated' };
   }
   return FORBIDDEN;
+}
+
+/** The `tenants` an allowing result carried (`'*'`, or the non-empty string ids), when valid. */
+function consoleTenantsOf(result: unknown): ConsoleTenants | undefined {
+  const tenants = (result as { tenants?: unknown }).tenants;
+  if (tenants === '*') return '*';
+  if (Array.isArray(tenants)) {
+    return tenants.filter((id): id is string => typeof id === 'string' && id !== '');
+  }
+  return undefined;
 }
 
 async function instantiate(

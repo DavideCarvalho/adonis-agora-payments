@@ -15,6 +15,7 @@ import {
   type ManagedSubscriptionPatch,
   OPEN_DISPUTE_STATUSES,
   type OpenDisputeQuery,
+  type OwnerScoped,
   type PaymentListItem,
   type PaymentListQuery,
   type SubscriptionCycleTotal,
@@ -35,6 +36,7 @@ import {
   BillingUsageEvent as DefaultUsageEvent,
   BillingWebhookEvent as DefaultWebhookEvent,
 } from './mixins/index.js';
+import type { BillingOwnerScope } from './owner_scope.js';
 import {
   createBillingTables,
   detectDialect,
@@ -243,6 +245,22 @@ interface SubscriptionQuery {
   whereNotNull(column: string): SubscriptionQuery;
 }
 
+/**
+ * The part of a Lucid query builder the tenant (owner) scope uses. Structural for the same reason
+ * as {@link SubscriptionQuery}: list, count and sum builders differ only in their generics.
+ */
+interface ScopeQuery {
+  where(callback: (query: ScopeQuery) => void): ScopeQuery;
+  orWhere(callback: (query: ScopeQuery) => void): ScopeQuery;
+  whereIn(column: string, values: readonly unknown[] | object): ScopeQuery;
+  whereNotIn(column: string, values: readonly unknown[] | object): ScopeQuery;
+  orWhereNotIn(column: string, values: readonly unknown[] | object): ScopeQuery;
+  whereNull(column: string): ScopeQuery;
+  orWhereNull(column: string): ScopeQuery;
+  whereNotNull(column: string): ScopeQuery;
+  whereRaw(sql: string): ScopeQuery;
+}
+
 export class LucidBillingStore
   implements
     BillingStore<
@@ -269,6 +287,9 @@ export class LucidBillingStore
    * of the two failures, and the real INSERT will then say exactly what is wrong.
    */
   #columnCache: Map<string, Promise<boolean>> = new Map();
+
+  /** Reads honour `owners` (tenant scope). See {@link BillingStore.ownerScoping}. */
+  readonly ownerScoping = true;
 
   /**
    * Whether to create the billing tables on first use. On by default — the ecosystem
@@ -430,6 +451,100 @@ export class LucidBillingStore
     return answer;
   }
 
+  /** `gateway_id`s of the customers owned by one of the scope's tenants. */
+  #tenantCustomerIds(scope: BillingOwnerScope): object {
+    return this.#customerModel
+      .query()
+      .select('gateway_id')
+      .whereIn('owner_type', [...scope.tenantOwnerTypes])
+      .whereIn('owner_id', [...scope.tenantIds]);
+  }
+
+  /** `gateway_id`s of every customer owned by SOME tenant. */
+  #stampedCustomerIds(scope: BillingOwnerScope): object {
+    return this.#customerModel
+      .query()
+      .select('gateway_id')
+      .whereIn('owner_type', [...scope.tenantOwnerTypes])
+      .whereNotNull('owner_id');
+  }
+
+  /**
+   * Confine a read to `scope` through a column holding a gateway CUSTOMER id (`customer_id` on
+   * payments, subscriptions and usage). A row with no customer, or whose customer no tenant owns,
+   * is a "no tenant" row.
+   */
+  #scopeByCustomer(builder: unknown, column: string, scope: BillingOwnerScope | undefined): void {
+    if (scope === undefined) return;
+    const query = builder as ScopeQuery;
+    const tenants = scope.tenantIds.length > 0 && scope.tenantOwnerTypes.length > 0;
+    if (!tenants && !scope.includeNull) {
+      query.whereRaw('1 = 0');
+      return;
+    }
+    if (scope.includeNull && scope.tenantOwnerTypes.length === 0) return;
+    query.where((group) => {
+      if (tenants) group.whereIn(column, this.#tenantCustomerIds(scope));
+      if (scope.includeNull) {
+        group.orWhere((none) => {
+          none.whereNull(column).orWhereNotIn(column, this.#stampedCustomerIds(scope));
+        });
+      }
+    });
+  }
+
+  /** {@link #scopeByCustomer} for `billing_customers` itself. */
+  #scopeCustomers(builder: unknown, scope: BillingOwnerScope | undefined): void {
+    if (scope === undefined) return;
+    const query = builder as ScopeQuery;
+    const types = [...scope.tenantOwnerTypes];
+    const tenants = scope.tenantIds.length > 0 && types.length > 0;
+    if (!tenants && !scope.includeNull) {
+      query.whereRaw('1 = 0');
+      return;
+    }
+    if (scope.includeNull && types.length === 0) return;
+    query.where((group) => {
+      if (tenants) {
+        group.where((own) => {
+          own.whereIn('owner_type', types).whereIn('owner_id', [...scope.tenantIds]);
+        });
+      }
+      if (scope.includeNull) {
+        group.orWhere((none) => {
+          none.whereNull('owner_type').orWhereNull('owner_id').orWhereNotIn('owner_type', types);
+        });
+      }
+    });
+  }
+
+  /** {@link #scopeByCustomer} for disputes, through the disputed payment's customer. */
+  #scopeDisputes(builder: unknown, scope: BillingOwnerScope | undefined): void {
+    if (scope === undefined) return;
+    const query = builder as ScopeQuery;
+    const tenants = scope.tenantIds.length > 0 && scope.tenantOwnerTypes.length > 0;
+    if (!tenants && !scope.includeNull) {
+      query.whereRaw('1 = 0');
+      return;
+    }
+    if (scope.includeNull && scope.tenantOwnerTypes.length === 0) return;
+    const paymentsOf = (customers: object): object =>
+      (this.#paymentModel.query().select('gateway_id') as unknown as ScopeQuery).whereIn(
+        'customer_id',
+        customers,
+      );
+    query.where((group) => {
+      if (tenants) {
+        group.whereIn('payment_gateway_id', paymentsOf(this.#tenantCustomerIds(scope)));
+      }
+      if (scope.includeNull) {
+        group.orWhere((none) => {
+          none.whereNotIn('payment_gateway_id', paymentsOf(this.#stampedCustomerIds(scope)));
+        });
+      }
+    });
+  }
+
   async saveCustomer(customer: {
     gatewayId: string;
     provider: string;
@@ -484,6 +599,7 @@ export class LucidBillingStore
     if (query.ownerType !== undefined) builder.where('owner_type', query.ownerType);
     if (query.ownerId !== undefined) builder.where('owner_id', query.ownerId);
     if (query.gatewayId !== undefined) builder.where('gateway_id', query.gatewayId);
+    this.#scopeCustomers(builder, query.owners);
     const rows = (await builder
       .limit(clampSize(query.size))
       .offset(listOffset(query.page, query.size))) as CustomerInstance[];
@@ -645,6 +761,7 @@ export class LucidBillingStore
     }
     if (query.gatewayId !== undefined) builder.where('gateway_id', query.gatewayId);
     if (query.customerId !== undefined) builder.where('customer_id', query.customerId);
+    this.#scopeByCustomer(builder, 'customer_id', query.owners);
     const rows = (await builder
       .limit(clampSize(query.size))
       .offset(listOffset(query.page, query.size))) as SubscriptionInstance[];
@@ -676,7 +793,11 @@ export class LucidBillingStore
   }
 
   /** Os filtros que `countSubscriptions` e `subscriptionAmountByCycle` compartilham. */
-  #applySubscriptionFilters(builder: SubscriptionQuery, query: BillingCountQuery): void {
+  #applySubscriptionFilters(
+    builder: SubscriptionQuery,
+    query: BillingCountQuery & OwnerScoped,
+  ): void {
+    this.#scopeByCustomer(builder, 'customer_id', query.owners);
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
     if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
@@ -691,14 +812,16 @@ export class LucidBillingStore
     }
   }
 
-  async countSubscriptions(query: BillingCountQuery): Promise<number> {
+  async countSubscriptions(query: BillingCountQuery & OwnerScoped): Promise<number> {
     await this.#ready();
     const builder = this.#subscriptionModel.query().count('* as total').pojo();
     this.#applySubscriptionFilters(builder as unknown as SubscriptionQuery, query);
     return toCount(await builder);
   }
 
-  async subscriptionAmountByCycle(query: BillingCountQuery): Promise<SubscriptionCycleTotal[]> {
+  async subscriptionAmountByCycle(
+    query: BillingCountQuery & OwnerScoped,
+  ): Promise<SubscriptionCycleTotal[]> {
     await this.#ready();
     const builder = this.#subscriptionModel
       .query()
@@ -823,6 +946,7 @@ export class LucidBillingStore
       if (!(await this.#hasColumn(this.#paymentModel, 'external_reference'))) return [];
       builder.where('external_reference', query.externalReference);
     }
+    this.#scopeByCustomer(builder, 'customer_id', query.owners);
     const rows = (await builder
       .limit(clampSize(query.size))
       .offset(listOffset(query.page, query.size))) as PaymentInstance[];
@@ -847,9 +971,10 @@ export class LucidBillingStore
     }));
   }
 
-  async countPayments(query: BillingCountQuery): Promise<number> {
+  async countPayments(query: BillingCountQuery & OwnerScoped): Promise<number> {
     await this.#ready();
     const builder = this.#paymentModel.query().count('* as total').pojo();
+    this.#scopeByCustomer(builder, 'customer_id', query.owners);
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
     if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
@@ -940,16 +1065,18 @@ export class LucidBillingStore
     if (query.paymentGatewayId !== undefined) {
       builder.where('payment_gateway_id', query.paymentGatewayId);
     }
+    this.#scopeDisputes(builder, query.owners);
     const rows = (await builder
       .limit(clampSize(query.size))
       .offset(listOffset(query.page, query.size))) as DisputeInstance[];
     return rows.map(disputeItem);
   }
 
-  async countDisputes(query: BillingCountQuery): Promise<number> {
+  async countDisputes(query: BillingCountQuery & OwnerScoped): Promise<number> {
     await this.#ready();
     if (!(await this.#hasDisputesTable())) return 0;
     const builder = this.#disputeModel.query().count('* as total').pojo();
+    this.#scopeDisputes(builder, query.owners);
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
     if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
@@ -971,6 +1098,7 @@ export class LucidBillingStore
       // that is not newest-first.
       .orderBy('evidence_due_by', 'asc');
     if (query.provider !== undefined) builder.where('provider', query.provider);
+    this.#scopeDisputes(builder, query.owners);
     const rows = (await builder
       .limit(clampSize(query.size))
       .offset(listOffset(query.page, query.size))) as DisputeInstance[];
@@ -990,6 +1118,7 @@ export class LucidBillingStore
       .count('* as total')
       .pojo();
     if (query.provider !== undefined) builder.where('provider', query.provider);
+    this.#scopeDisputes(builder, query.owners);
     return toCount(await builder);
   }
 
@@ -1003,13 +1132,14 @@ export class LucidBillingStore
       .whereIn('status', [...OPEN_DISPUTE_STATUSES])
       .orderBy('created_at', 'asc');
     if (query.provider !== undefined) builder.where('provider', query.provider);
+    this.#scopeDisputes(builder, query.owners);
     const rows = (await builder
       .limit(clampSize(query.size))
       .offset(listOffset(query.page, query.size))) as DisputeInstance[];
     return rows.map(disputeItem);
   }
 
-  async countOpenDisputes(query: { provider?: string }): Promise<number> {
+  async countOpenDisputes(query: { provider?: string } & OwnerScoped): Promise<number> {
     await this.#ready();
     if (!(await this.#hasDisputesTable())) return 0;
     const builder = this.#disputeModel
@@ -1018,6 +1148,7 @@ export class LucidBillingStore
       .count('* as total')
       .pojo();
     if (query.provider !== undefined) builder.where('provider', query.provider);
+    this.#scopeDisputes(builder, query.owners);
     return toCount(await builder);
   }
 
@@ -1308,14 +1439,16 @@ export class LucidBillingStore
     return row;
   }
 
-  async usageReport(query: {
-    subscriptionId?: string;
-    customerId?: string;
-    scope?: UsageScope;
-    meter?: string;
-    from?: Date;
-    to?: Date;
-  }): Promise<Array<{ meter: string; quantity: number }>> {
+  async usageReport(
+    query: {
+      subscriptionId?: string;
+      customerId?: string;
+      scope?: UsageScope;
+      meter?: string;
+      from?: Date;
+      to?: Date;
+    } & OwnerScoped,
+  ): Promise<Array<{ meter: string; quantity: number }>> {
     await this.#ready();
     const builder = this.#usageEventModel
       .query()
@@ -1334,6 +1467,7 @@ export class LucidBillingStore
     if (query.meter !== undefined) builder.where('meter', query.meter);
     if (query.from !== undefined) builder.where('recorded_at', '>=', query.from);
     if (query.to !== undefined) builder.where('recorded_at', '<', query.to);
+    this.#scopeByCustomer(builder, 'customer_id', query.owners);
     const rows = await builder;
     return (rows as Array<{ meter: string; quantity: string | number }>).map((row) => ({
       meter: row.meter,
@@ -1341,13 +1475,14 @@ export class LucidBillingStore
     }));
   }
 
-  async revenue(query: { from?: Date; to?: Date }): Promise<number> {
+  async revenue(query: { from?: Date; to?: Date } & OwnerScoped): Promise<number> {
     await this.#ready();
     const builder = this.#paymentModel
       .query()
       .where('status', 'paid')
       .sum('amount as total')
       .pojo();
+    this.#scopeByCustomer(builder, 'customer_id', query.owners);
     if (query.from !== undefined) builder.where('paid_at', '>=', query.from);
     if (query.to !== undefined) builder.where('paid_at', '<', query.to);
     return toCount(await builder);
@@ -1372,27 +1507,28 @@ export class LucidBillingStore
    * gross — and asking for a column Postgres does not have would raise `column
    * "refunded_amount" does not exist` at a dashboard that is merely loading its overview.
    */
-  async netRevenue(query: { from?: Date; to?: Date }): Promise<number> {
+  async netRevenue(query: { from?: Date; to?: Date } & OwnerScoped): Promise<number> {
     await this.#ready();
     if (!(await this.#hasColumn(this.#paymentModel, 'refunded_amount'))) {
       return this.revenue(query);
     }
     const builder = this.#paymentModel.query().where('status', 'paid').pojo();
     builder.select(builder.client.raw('SUM(amount - COALESCE(refunded_amount, 0)) as total'));
+    this.#scopeByCustomer(builder, 'customer_id', query.owners);
     if (query.from !== undefined) builder.where('paid_at', '>=', query.from);
     if (query.to !== undefined) builder.where('paid_at', '<', query.to);
     return toCount(await builder);
   }
 
-  async countActiveSubscriptions(): Promise<number> {
+  async countActiveSubscriptions(query: OwnerScoped = {}): Promise<number> {
     await this.#ready();
-    return toCount(
-      await this.#subscriptionModel
-        .query()
-        .whereIn('status', ['active', 'trialing'])
-        .count('* as total')
-        .pojo(),
-    );
+    const builder = this.#subscriptionModel
+      .query()
+      .whereIn('status', ['active', 'trialing'])
+      .count('* as total')
+      .pojo();
+    this.#scopeByCustomer(builder, 'customer_id', query.owners);
+    return toCount(await builder);
   }
 }
 

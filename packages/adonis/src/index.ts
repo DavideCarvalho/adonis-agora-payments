@@ -1,5 +1,21 @@
 import './container_bindings.js';
 
+export type {
+  PaymentsTenancyOption,
+  ResolvedPaymentsTenancy,
+  TenantFilter,
+  TenantLevel,
+  TenantOwner,
+  TenantRef,
+} from './agora/tenancy.js';
+export {
+  currentTenantFilter,
+  currentTenantOwner,
+  resolvePaymentsTenancy,
+  runInOwnerTenant,
+  tenantOwner,
+  tenantOwnerTypes,
+} from './agora/tenancy.js';
 export type { Arrears, ArrearsQuery } from './billing/arrears.js';
 export { arrears } from './billing/arrears.js';
 export type {
@@ -23,6 +39,7 @@ export type {
   DisputeListItem,
   DisputeListQuery,
   OpenDisputeQuery,
+  OwnerScoped,
   PaymentListItem,
   PaymentListQuery,
   SubscriptionListItem,
@@ -61,6 +78,8 @@ export { BillingAuditEvent } from './billing/mixins/with_audit_event.js';
 export { BillingCustomer } from './billing/mixins/with_customer.js';
 export { BillingDispute } from './billing/mixins/with_dispute.js';
 export { BillingUsageEvent } from './billing/mixins/with_usage_event.js';
+export type { BillingOwnerScope } from './billing/owner_scope.js';
+export { ownerInScope, ownerScopeOfFilter, tenantOfOwner } from './billing/owner_scope.js';
 export { resolveBillingStore } from './billing/resolve_store.js';
 export type {
   LucidDatabase,
@@ -73,9 +92,11 @@ export {
   dropBillingTables,
   truncateBillingTables,
 } from './billing/schema.js';
+export { OwnerScopingUnsupportedError, scopedBillingStore } from './billing/scoped_store.js';
 export type {
   UsageAllowance,
   UsageApi,
+  UsageApiOptions,
   UsagePeriod,
   UsageQuery,
   UsageStore,
@@ -114,6 +135,8 @@ export {
 } from './billing/webhook_events.js';
 export type { WebhookHandler } from './billing/webhook_processor.js';
 export { WebhookProcessor } from './billing/webhook_processor.js';
+export type { CurrentCustomerOptions } from './current_customer.js';
+export { findOwnedCustomer, resolveCurrentOwner } from './current_customer.js';
 export type {
   AbacateDriverConfig,
   AdyenDriverConfig,

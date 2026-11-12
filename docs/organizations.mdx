@@ -1,0 +1,232 @@
+---
+title: Organizations
+description: Bill the active organization by default, read the current customer, run webhook handlers inside the customer's organization, and give each console viewer their own organizations.
+icon: Building2
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+When tenancy is on in `@adonis-agora/context`, the active organization of the request (with authkit,
+the session's active org) is the tenant, and payments follows it:
+
+- a customer you create without an `owner` belongs to the active organization;
+- `payments.currentCustomer()` is the organization's customer, else the signed-in user's;
+- metered usage with no `customerId` is the current customer's;
+- your webhook handlers run inside the organization that owns the customer;
+- the console shows each viewer their own organizations, with an "Organization" picker.
+
+Nothing changes until you turn it on.
+
+---
+
+## Turn it on
+
+```ts title="config/context.ts"
+import { defineConfig } from '@adonis-agora/context'
+
+export default defineConfig({
+  tenancy: { enabled: true, kinds: ['organization'] },
+})
+```
+
+Payments follows that switch by default. Its own options live in `config/payments.ts`:
+
+```ts title="config/payments.ts"
+import { defineConfig } from '@adonis-agora/payments'
+
+export default defineConfig({
+  // …providers, billing…
+  tenancy: {
+    // the owner_type your organization customers are recorded under
+    ownerType: 'Organization',
+  },
+})
+```
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `tenancy` | `'inherit'` | `'inherit'` follows `config/context.ts`; `false` keeps payments out of tenancy. |
+| `tenancy.enabled` | `'inherit'` | `true` / `false` to override context's switch for payments only. |
+| `tenancy.kinds` | context's `kinds` | Tenant kinds payments honours. With nested tenants (`clinic` → `unit`), the level whose kind is listed is the one billed. |
+| `tenancy.family` | none | Only consider tenants of this family, when a request carries several. |
+| `tenancy.ownerType` | the tenant's kind | The `owner_type` an organization's customer is recorded under: a string, or `(tenant) => string`. |
+| `tenancy.ownerKinds` | from `ownerType` | Which owner types are organizations, and of which kind: `{ Organization: 'organization' }`. Set it when `ownerType` is a function. |
+| `tenancy.nullRows` | `'tenantless'` | Customers no organization owns: shown only outside an organization, or also inside every one with `'shared'`. |
+| `tenancy.required` | context's `required` | No organization is an error (`E_TENANT_REQUIRED`, 403) instead of falling back to the user. |
+| `userOwnerType` | `'User'` | The `owner_type` a signed-in user's own customer is recorded under. |
+
+---
+
+## Create the organization's customer
+
+With tenancy on, `ensureCustomer` with a `store` and no `owner` records the active organization as the
+owner:
+
+```ts title="app/controllers/billing_controller.ts"
+import { inject } from '@adonisjs/core'
+import type { HttpContext } from '@adonisjs/core/http'
+import { ensureCustomer, LucidBillingStore } from '@adonis-agora/payments'
+import payments from '@adonis-agora/payments/services/main'
+
+@inject()
+export default class BillingController {
+  constructor(private store: LucidBillingStore) {}
+
+  async setup({ request, response }: HttpContext) {
+    const { name, email } = request.only(['name', 'email'])
+    await ensureCustomer(payments.driver('stripe'), null, { name, email }, { store: this.store })
+    return response.redirect('/billing')
+  }
+}
+```
+
+An explicit `owner` always wins, so a personal subscription stays the user's:
+
+```ts
+await ensureCustomer(driver, user.stripeId, input, {
+  store: this.store,
+  owner: { type: 'User', id: user.id },
+})
+```
+
+---
+
+## The current customer
+
+```ts title="app/controllers/billing_controller.ts"
+import type { HttpContext } from '@adonisjs/core/http'
+import payments from '@adonis-agora/payments/services/main'
+
+export default class BillingController {
+  async show({ inertia, response }: HttpContext) {
+    const customer = await payments.currentCustomer()
+    if (!customer) return response.redirect('/billing/setup')
+
+    const subscriptions = await payments.scopedStore().listSubscriptions({ customerId: customer.gatewayId })
+    return inertia.render('billing/show', { customer, subscriptions })
+  }
+}
+```
+
+`currentCustomer()` is the active organization's customer. Outside an organization it is the
+signed-in user's (`{ type: 'User', id }`, read from the context or from `{ ctx }` when you pass it).
+An organization without a customer answers `null`; it never falls back to the user's.
+
+| Call | Returns |
+| --- | --- |
+| `payments.currentOwner({ ctx? })` | `{ type, id }` of whoever is paying right now, or `null` |
+| `payments.currentCustomer({ ctx?, provider? })` | their `billing_customers` row, or `null` |
+| `payments.scopedStore()` | the billing store as this request may see it (below) |
+
+### Metered usage
+
+With tenancy on, usage without a `customerId` is the current customer's:
+
+```ts title="app/services/ai_chat_service.ts"
+import payments from '@adonis-agora/payments/services/main'
+
+export default class AiChatService {
+  async reply(message: string) {
+    const { remaining } = await payments.usage().remaining({ meter: 'ai_chat', limit: 500 })
+    if (remaining === 0) throw new Error('Monthly AI quota reached')
+    // …
+    await payments.usage().record({ meter: 'ai_chat', quantity: 1 })
+  }
+}
+```
+
+When nobody is a customer, `record` and the reads throw instead of counting usage against nobody.
+A call with a `subscriptionId` or a `scope` works as before.
+
+### Reading only this organization's billing
+
+`payments.scopedStore()` is the billing store with every read confined to the current organization:
+its customers, payments, subscriptions, usage, revenue and disputes. A row of another organization
+reads as not found. A request with no organization sees only the rows no organization owns.
+Inside `Context.allTenants()` it sees everything.
+
+---
+
+## Webhook handlers
+
+Webhooks are processed as the system, as before. Your handler then runs inside the organization
+that owns the event's customer, so the jobs, durable runs and uploads it starts belong to that
+organization:
+
+```ts title="app/payment_handlers/payment_succeeded.ts"
+import { Context } from '@adonis-agora/context'
+import type { WebhookEvent } from '@adonis-agora/payments'
+
+export default async function paymentSucceeded(event: WebhookEvent) {
+  const org = Context.tenant() // the customer's organization, when one owns it
+  // …
+}
+```
+
+A customer owned by a user (or by nobody) runs the handler as it is.
+
+---
+
+## The console
+
+With tenancy on, the console header shows an **Organization** control and every read is confined to
+what the viewer may see. By default that is the viewer's own active organization. `authorize` can
+grant more:
+
+```ts title="config/payments_dashboard.ts"
+import { defineConfig } from '@adonis-agora/payments/dashboard'
+
+export default defineConfig({
+  authorize: async (ctx) => {
+    const user = ctx.auth.user
+    if (!user) return { redirectTo: '/login' }
+    if (user.isStaff) return { allowed: true, tenants: '*' } // every organization
+    return { allowed: true, tenants: await user.billingOrganizationIds() }
+  },
+})
+```
+
+| `authorize` answers | The viewer sees |
+| --- | --- |
+| `true` / `{ allowed: true }` | their active organization; with none, "Choose an organization to see its data" |
+| `{ allowed: true, tenants: ['a', 'b'] }` | those organizations, with a picker |
+| `{ allowed: true, tenants: '*' }` | every organization and the rows of none, "All organizations" first, plus an Organization column |
+
+The pick lives in the URL (`?tenant=<id>`) and travels with every request. An organization outside
+what `authorize` granted reads as empty and is written to the audit trail (`console.tenant_forged`);
+a switch is recorded as `console.tenant_selected`. Refunds and dispute resolutions are checked against
+the payment's organization. Health, webhook events and activity cover every organization, so they
+only show when the viewer sees all of them.
+
+Labels come from `tenancy.label` in `config/context.ts` (authkit installs one); otherwise the picker
+shows ids.
+
+<Callout type="info">
+  A custom `billing.store` must set `ownerScoping: true` and honour `owners` on its reads to serve an
+  organization-scoped console. Without it, those reads answer `501` instead of showing other
+  organizations' rows.
+</Callout>
+
+---
+
+## Existing customers
+
+Customers recorded before tenancy have no owner, so only requests without an organization see them.
+Give them one with `payments:sync`:
+
+```sh
+# one customer
+node ace payments:sync --backfill-owner=Organization --customer=cus_123 --owner-id=42
+
+# every ownerless customer whose stored metadata names its organization
+node ace payments:sync --backfill-owner=Organization --all --owner-key=organizationId
+```
+
+A customer that already has an owner is never changed.
+
+Reconcile one organization only:
+
+```sh
+node ace payments:sync --all --tenant=42
+node ace payments:sync --subscriptions --tenant=42
+```

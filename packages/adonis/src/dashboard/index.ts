@@ -38,6 +38,7 @@ export type {
   ConsoleAuthorizeResult,
   ConsoleAuthorizer,
   ConsoleAuthorizerClass,
+  ConsoleTenants,
 } from './console_authorize.js';
 export {
   authorizeByToken,
@@ -87,3 +88,5 @@ export {
   contentTypeFor,
   renderIndexHtml,
 } from './spa.js';
+export type { ConsoleTenantScope } from './tenant_scope.js';
+export { resolveConsoleTenantScope } from './tenant_scope.js';

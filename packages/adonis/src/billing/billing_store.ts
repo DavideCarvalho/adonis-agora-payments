@@ -6,6 +6,7 @@ import type {
   BillingUsageEvent,
   BillingWebhookEvent,
 } from './mixins/index.js';
+import type { BillingOwnerScope } from './owner_scope.js';
 
 /**
  * One `billing_payments` row, normalized for reading.
@@ -218,7 +219,7 @@ export const OPEN_DISPUTE_STATUSES = ['warning', 'open', 'under_review'] as cons
  * not on a creation time, and it is the read an alert is built on, so a store that quietly
  * ignored the window would report a healthy zero.
  */
-export interface DisputeDeadlineQuery {
+export interface DisputeDeadlineQuery extends OwnerScoped {
   /** How far ahead to look, in HOURS. `72` = "everything due in the next three days". */
   withinHours: number;
   /** Overridable clock — the tests pass a fixed instant. Defaults to now. */
@@ -244,6 +245,14 @@ export interface WebhookEventBreakdownLine {
   provider: string;
   type: string;
   count: number;
+}
+
+/**
+ * Confine a read to the rows of some tenants (organizations). Set by tenant-scoped readers (the
+ * console, `payments.scopedStore()`); absent means every row, as before.
+ */
+export interface OwnerScoped {
+  owners?: BillingOwnerScope;
 }
 
 /**
@@ -285,7 +294,7 @@ export interface BillingCountQuery {
  * a substring match on `externalReference` would let `order-4` return `order-42`, and the whole
  * point of the lookup is that the row it returns is the row that was asked for.
  */
-export interface PaymentListQuery extends BillingListQuery {
+export interface PaymentListQuery extends BillingListQuery, OwnerScoped {
   /**
    * The app's own id for the charge (`ChargeInput.externalReference`), exactly as
    * {@link BillingStore.findPaymentByExternalReference} matches it.
@@ -308,7 +317,7 @@ export interface PaymentListQuery extends BillingListQuery {
  * `externalReference` the app set when creating it, and the same exact-match rule applies —
  * a substring match would let `clinic-4` return `clinic-42`.
  */
-export interface SubscriptionListQuery extends BillingListQuery {
+export interface SubscriptionListQuery extends BillingListQuery, OwnerScoped {
   /**
    * The app's own id for the subscription (`CreateSubscriptionInput.externalReference`).
    *
@@ -324,7 +333,7 @@ export interface SubscriptionListQuery extends BillingListQuery {
 }
 
 /** Filter + page for {@link BillingStore.listDisputes}. */
-export interface DisputeListQuery extends BillingListQuery {
+export interface DisputeListQuery extends BillingListQuery, OwnerScoped {
   /** The disputed payment's gateway id — every dispute filed against one payment. Exact match. */
   paymentGatewayId?: string;
 }
@@ -344,7 +353,7 @@ export interface WebhookEventListQuery extends BillingListQuery {
 }
 
 /** Filter + page for {@link BillingStore.listCustomers}. */
-export interface CustomerListQuery extends BillingListQuery {
+export interface CustomerListQuery extends BillingListQuery, OwnerScoped {
   /** The app-side owner type (`'users'`) written by `ensureCustomer`. Exact match. */
   ownerType?: string;
   /** The app-side owner id. Exact match; pair it with `ownerType`. */
@@ -362,7 +371,7 @@ export interface CustomerListQuery extends BillingListQuery {
  * receive one. On those, `countDisputesDueWithin` returns zero while a chargeback sits open with
  * the money already pulled — a healthy report about an install that is losing money by default.
  */
-export interface OpenDisputeQuery {
+export interface OpenDisputeQuery extends OwnerScoped {
   /** Exact provider match. Omit for every provider. */
   provider?: string;
   /**
@@ -419,6 +428,10 @@ export const AUDIT_ACTIONS = {
   disputeResolved: 'dispute.resolved',
   /** A delivery the webhook endpoint refused: bad signature, unparsable body, unknown provider. */
   webhookRejected: 'webhook.rejected',
+  /** A console viewer switched organization (tenancy). `subjectId` is the organization. */
+  tenantSelected: 'console.tenant_selected',
+  /** A console request named an organization outside the viewer's scope; it saw nothing. */
+  tenantForged: 'console.tenant_forged',
 } as const;
 
 /** Filter + page for {@link BillingStore.listAuditEvents}. */
@@ -495,6 +508,12 @@ export interface BillingStore<
   CustomerRow = BillingCustomer,
   DisputeRow = BillingDispute,
 > {
+  /**
+   * `true` when this store honours `owners` ({@link OwnerScoped}) on its reads. A store without
+   * it cannot serve a tenant-scoped console: those reads answer `501` instead of leaking rows.
+   */
+  readonly ownerScoping?: boolean;
+
   // ── Customers ────────────────────────────────────────────────────────────────────
 
   /**
@@ -628,7 +647,7 @@ export interface BillingStore<
   listSubscriptions(query: SubscriptionListQuery): Promise<SubscriptionListItem[]>;
 
   /** How many subscriptions match a status and/or a creation window. */
-  countSubscriptions(query: BillingCountQuery): Promise<number>;
+  countSubscriptions(query: BillingCountQuery & OwnerScoped): Promise<number>;
 
   /**
    * Sum of `amount` grouped by billing cycle, for computing recurring revenue.
@@ -637,7 +656,9 @@ export interface BillingStore<
    * one is a business decision (divide by 12) that belongs above the store, not inside a SQL
    * expression written once per dialect.
    */
-  subscriptionAmountByCycle(query: BillingCountQuery): Promise<SubscriptionCycleTotal[]>;
+  subscriptionAmountByCycle(
+    query: BillingCountQuery & OwnerScoped,
+  ): Promise<SubscriptionCycleTotal[]>;
 
   // ── Payments ─────────────────────────────────────────────────────────────────────
 
@@ -708,7 +729,7 @@ export interface BillingStore<
    * (`{ status: 'pending', createdBefore: twoHoursAgo }`). A webhook endpoint that stops
    * being reachable produces exactly that and nothing else in the system errors.
    */
-  countPayments(query: BillingCountQuery): Promise<number>;
+  countPayments(query: BillingCountQuery & OwnerScoped): Promise<number>;
 
   // ── Disputes ─────────────────────────────────────────────────────────────────────
 
@@ -766,7 +787,7 @@ export interface BillingStore<
   listDisputes(query: DisputeListQuery): Promise<DisputeListItem[]>;
 
   /** How many disputes match a status and/or a creation window. */
-  countDisputes(query: BillingCountQuery): Promise<number>;
+  countDisputes(query: BillingCountQuery & OwnerScoped): Promise<number>;
 
   /**
    * The open disputes whose response window closes within `withinHours` — ordered by the
@@ -809,7 +830,7 @@ export interface BillingStore<
   listOpenDisputes(query: OpenDisputeQuery): Promise<DisputeListItem[]>;
 
   /** The unbounded count behind {@link listOpenDisputes} — what a health check alerts on. */
-  countOpenDisputes(query: { provider?: string }): Promise<number>;
+  countOpenDisputes(query: { provider?: string } & OwnerScoped): Promise<number>;
 
   // ── Webhook idempotency ledger ───────────────────────────────────────────────────
 
@@ -959,14 +980,16 @@ export interface BillingStore<
    * `scope` is exact on BOTH halves and combines with the other filters: `{ type: 'project',
    * id: 'p1' }` never matches a `workspace` whose id happens to be `p1`.
    */
-  usageReport(query: {
-    subscriptionId?: string;
-    customerId?: string;
-    scope?: UsageScope;
-    meter?: string;
-    from?: Date;
-    to?: Date;
-  }): Promise<Array<{ meter: string; quantity: number }>>;
+  usageReport(
+    query: {
+      subscriptionId?: string;
+      customerId?: string;
+      scope?: UsageScope;
+      meter?: string;
+      from?: Date;
+      to?: Date;
+    } & OwnerScoped,
+  ): Promise<Array<{ meter: string; quantity: number }>>;
 
   /**
    * Sum of paid payments within a window, **GROSS** — `amount` on `status = 'paid'` rows,
@@ -978,7 +1001,7 @@ export interface BillingStore<
    * the other's replacement — a screen that shows one without saying which is the screen that
    * misleads. Integer minor units; NEVER divide.
    */
-  revenue(query: { from?: Date; to?: Date }): Promise<number>;
+  revenue(query: { from?: Date; to?: Date } & OwnerScoped): Promise<number>;
 
   /**
    * The same rows and the same window as {@link BillingStore.revenue}, **NET of refunds**:
@@ -1000,8 +1023,8 @@ export interface BillingStore<
    *
    * Integer minor units, like everything else here. NEVER divide — format at the edge.
    */
-  netRevenue(query: { from?: Date; to?: Date }): Promise<number>;
+  netRevenue(query: { from?: Date; to?: Date } & OwnerScoped): Promise<number>;
 
   /** Count of active subscriptions (status `'active'`/`'trialing'`). */
-  countActiveSubscriptions(): Promise<number>;
+  countActiveSubscriptions(query?: OwnerScoped): Promise<number>;
 }

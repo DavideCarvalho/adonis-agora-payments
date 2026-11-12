@@ -443,8 +443,51 @@ function redirectToAuthSurface(redirectTo: string | undefined): void {
   window.location.href = redirectTo ?? (uiBase() || '/');
 }
 
+/**
+ * The organization picked in the console (`?tenant=` in the page URL), when tenancy is on. Every API
+ * call carries it; the server intersects it with what the viewer may see.
+ */
+export function selectedTenant(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  const value = new URLSearchParams(window.location.search).get('tenant');
+  return value === null || value === '' ? undefined : value;
+}
+
+/** `path` with the picked organization added to its query string. */
+export function withTenant(path: string): string {
+  const tenant = selectedTenant();
+  if (tenant === undefined) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}tenant=${encodeURIComponent(tenant)}`;
+}
+
+/** What the header's "Organization" control shows (`GET <api>/tenants`). */
+export interface TenantPicker {
+  /** `off`: tenancy off · `none`: the viewer has no organization · `fixed`: one · `pick`: several. */
+  mode: 'off' | 'none' | 'fixed' | 'pick';
+  /** The viewer may see every organization ("All organizations" is offered). */
+  all: boolean;
+  selected: string | null;
+  /** `billing_customers.owner_type`s that are organizations. */
+  ownerTypes: string[];
+  tenants: Array<{ id: string; label: string }>;
+}
+
+const TENANCY_OFF: TenantPicker = {
+  mode: 'off',
+  all: false,
+  selected: null,
+  ownerTypes: [],
+  tenants: [],
+};
+
+/** Whether a picker's reads are confined to some organizations (no view over every one). */
+export function isScopedView(picker: TenantPicker | undefined): boolean {
+  if (picker === undefined || picker.mode === 'off') return false;
+  return !(picker.all && selectedTenant() === undefined);
+}
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(apiBase() + path, init);
+  const res = await fetch(apiBase() + withTenant(path), init);
   if (res.status === 401) {
     redirectToAuthSurface(await readRedirectTo(res));
     throw new Error('Not signed in; redirecting.');
@@ -583,6 +626,25 @@ function listQuery(opts: ListOptions): string {
 }
 
 export const paymentsClient = {
+  /** The organization picker. Tenancy off (the route is not mounted) reads as `mode: 'off'`. */
+  async tenants(): Promise<TenantPicker> {
+    const res = await fetch(`${apiBase()}/tenants`);
+    if (res.status === 404 || !res.ok) return TENANCY_OFF;
+    const body = (await res.json()) as Partial<TenantPicker>;
+    const modes = ['off', 'none', 'fixed', 'pick'];
+    if (typeof body?.mode !== 'string' || !modes.includes(body.mode)) return TENANCY_OFF;
+    return {
+      mode: body.mode,
+      all: body.all === true,
+      selected: typeof body.selected === 'string' ? body.selected : null,
+      ownerTypes: Array.isArray(body.ownerTypes) ? body.ownerTypes : [],
+      tenants: Array.isArray(body.tenants) ? body.tenants : [],
+    };
+  },
+  /** Record a switch of organization (`'*'` = all) in the audit trail. */
+  selectTenant(id: string): Promise<{ tenant: string }> {
+    return post<{ tenant: string }>(`/tenants/${encodeURIComponent(id)}/select`);
+  },
   health(): Promise<Health> {
     return http<Health>('/health');
   },

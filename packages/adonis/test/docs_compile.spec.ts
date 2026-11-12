@@ -50,5 +50,5 @@ describe('docs compile as MDX', () => {
     expect(broken, `pages that would break the docs site's build:\n${broken.join('\n')}`).toEqual(
       [],
     );
-  });
+  }, 30_000); // every page is compiled; under a loaded runner that outgrows the 5s default
 });

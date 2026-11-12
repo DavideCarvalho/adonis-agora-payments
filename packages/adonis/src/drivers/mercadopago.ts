@@ -190,7 +190,13 @@ export class MercadoPagoDriver implements PaymentsDriver {
    * Checkout Pro flow ({@link createCheckout}), not a charge.
    */
   readonly supportedMethods = ['pix', 'boleto', 'credit_card', 'debit_card'] as const;
-  readonly capabilities = { refunds: true, invoices: false, subscriptions: true };
+  readonly capabilities = {
+    refunds: true,
+    invoices: false,
+    subscriptions: true,
+    // Card tokens are single use and a saved card needs its CVV again: only preapprovals move.
+    cardUpdate: { managed: false, gateway: true },
+  };
 
   #baseUrl = 'https://api.mercadopago.com';
   #accessToken: string;

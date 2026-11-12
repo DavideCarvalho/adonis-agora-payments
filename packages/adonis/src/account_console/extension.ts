@@ -218,11 +218,13 @@ function isHttps(url: unknown): url is string {
 }
 
 /** The `{ t, ip }` the tokenize endpoint sealed. */
-function openSealed(value: string | null): { t: string; ip?: string } | null {
+function openSealed(value: string | null, now: number): { t: string; ip?: string } | null {
   if (value === null) return null;
   try {
-    const parsed = JSON.parse(value) as { t?: unknown; ip?: unknown };
+    const parsed = JSON.parse(value) as { t?: unknown; ip?: unknown; e?: unknown };
     if (typeof parsed.t !== 'string' || parsed.t === '') return null;
+    // Only as long as the ticket it was sealed under.
+    if (typeof parsed.e !== 'number' || parsed.e < now) return null;
     return { t: parsed.t, ...(typeof parsed.ip === 'string' ? { ip: parsed.ip } : {}) };
   } catch {
     return null;
@@ -436,7 +438,15 @@ export function paymentsAccountExtension(deps: PaymentsAccountDeps): AccountExte
     const driver = await driverOf(customer.provider);
     if (driver === undefined) return { driver, mode: 'none' as const };
     if (typeof driver.cardSetup === 'function' && typeof driver.saveCard === 'function') {
-      return { driver, mode: 'component' as const };
+      // Only when the gateway can move every running subscription of this customer: the user
+      // must never type a card that `saveCard` is bound to refuse.
+      const can = driver.capabilities?.cardUpdate;
+      const live = (await subscriptionsOf([customer])).filter(
+        (s) => LIVE.has(s.status) && !s.cancelAtPeriodEnd,
+      );
+      const fits = live.every((s) => (s.managed ? can?.managed !== false : can?.gateway !== false));
+      const needsGateway = can?.managed === false && !live.some((s) => !s.managed);
+      if (fits && !needsGateway) return { driver, mode: 'component' as const };
     }
     if (typeof driver.cardUpdateUrl === 'function') return { driver, mode: 'redirect' as const };
     return { driver, mode: 'none' as const };
@@ -845,8 +855,10 @@ export function paymentsAccountExtension(deps: PaymentsAccountDeps): AccountExte
           }
           let session: Awaited<ReturnType<NonNullable<PaymentsDriver['cardSetup']>>>;
           try {
+            const back = returnUrl(ctx);
             session = await driver!.cardSetup!({
               customerId: customer.gatewayId,
+              ...(back !== undefined ? { returnUrl: back } : {}),
               subscriptionGatewayIds: live
                 .filter((s) => !s.managed && s.gatewayId !== null)
                 .map((s) => s.gatewayId as string),
@@ -920,7 +932,10 @@ export function paymentsAccountExtension(deps: PaymentsAccountDeps): AccountExte
               let remoteIp: string | undefined;
               if (driver.provider === 'asaas') {
                 // Sealed by the tokenize endpoint, with the IP the card was typed from.
-                const opened = openSealed(unsealCardToken(deps.secret, token, customer.gatewayId));
+                const opened = openSealed(
+                  unsealCardToken(deps.secret, token, customer.gatewayId),
+                  now(),
+                );
                 if (opened === null) return fail('payments.card.failed', 400);
                 token = opened.t;
                 remoteIp = opened.ip;
@@ -1090,14 +1105,16 @@ export function paymentsAccountExtension(deps: PaymentsAccountDeps): AccountExte
           });
           // `size + 1` asks for one row of the next page; a store that caps the size still pages.
           const shown = rows.slice(0, PAGE_SIZE);
-          const tableRows = [];
-          for (const payment of shown) {
+          const hook = invoiceActions.download ? options.invoiceUrl : undefined;
+          const links = await Promise.all(
+            shown.map((payment) =>
+              hook ? Promise.resolve(hook(payment)).catch(() => null) : Promise.resolve(null),
+            ),
+          );
+          const tableRows = shown.map((payment, index) => {
             const at = asDate(payment.paidAt ?? payment.createdAt);
-            const link =
-              invoiceActions.download && options.invoiceUrl
-                ? await Promise.resolve(options.invoiceUrl(payment)).catch(() => null)
-                : null;
-            tableRows.push({
+            const link = links[index];
+            return {
               cells: {
                 date:
                   at !== null
@@ -1113,8 +1130,8 @@ export function paymentsAccountExtension(deps: PaymentsAccountDeps): AccountExte
               ...(isHttps(link)
                 ? { actions: [{ action: 'download', target: `payment~${payment.gatewayId}` }] }
                 : {}),
-            });
-          }
+            };
+          });
           return {
             blocks: [
               {
@@ -1189,7 +1206,10 @@ export function paymentsAccountExtension(deps: PaymentsAccountDeps): AccountExte
     id: 'payments',
     contract: 1,
     messages: ACCOUNT_MESSAGES,
-    scriptOrigins: [...CARD_SCRIPT_ORIGINS, ...(publicUrl ? [new URL(publicUrl).origin] : [])],
+    scriptOrigins: [
+      ...CARD_SCRIPT_ORIGINS,
+      ...(publicUrl !== undefined && isHttps(publicUrl) ? [new URL(publicUrl).origin] : []),
+    ],
     pages,
   };
 }

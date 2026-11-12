@@ -201,7 +201,13 @@ export class PayPalDriver implements PaymentsDriver {
    * reach a driver that cannot make one.
    */
   readonly supportedMethods = ['wallet', 'undefined'] as const;
-  readonly capabilities = { refunds: true, invoices: false, subscriptions: true };
+  readonly capabilities = {
+    refunds: true,
+    invoices: false,
+    subscriptions: true,
+    // A PayPal subscription's funding changes on paypal.com only; managed ones take the vault id.
+    cardUpdate: { managed: true, gateway: false },
+  };
 
   #baseUrl: string;
   /** Public half of the REST app credentials: the JS SDK is loaded with it. */
@@ -614,7 +620,19 @@ export class PayPalDriver implements PaymentsDriver {
       method: 'POST',
       body: {
         customer: { merchant_customer_id: input.customerId },
-        payment_source: { paypal: { usage_type: 'MERCHANT' } },
+        payment_source: {
+          paypal: {
+            usage_type: 'MERCHANT',
+            ...(input.returnUrl !== undefined
+              ? {
+                  experience_context: {
+                    return_url: input.returnUrl,
+                    cancel_url: input.returnUrl,
+                  },
+                }
+              : {}),
+          },
+        },
       },
     });
     return {

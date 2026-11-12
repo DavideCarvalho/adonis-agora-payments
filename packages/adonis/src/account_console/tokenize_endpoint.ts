@@ -7,16 +7,27 @@ export interface CardTokenizeResponse {
   body: { token: string; last4?: string; brand?: string } | { error: string };
 }
 
-/** Attempts one ticket may make: enough to fix a typo, too few to test stolen cards. */
-const MAX_ATTEMPTS = 5;
+/** Attempts one ticket may make: enough to fix a typo. */
+const MAX_PER_TICKET = 5;
+/** Attempts per customer, and per IP, in a window: fresh tickets do not reset these. */
+const MAX_PER_WINDOW = 10;
+const WINDOW_MS = 60 * 60_000;
 const attempts = new Map<string, { count: number; expiresAt: number }>();
 
-function spend(ticket: string, expiresAt: number, now: number): boolean {
+/**
+ * Counts one attempt against the ticket, the customer and the IP. Counters live in this process:
+ * behind several instances each one keeps its own.
+ */
+function spend(keys: Array<[string, number, number]>, now: number): boolean {
   for (const [key, entry] of attempts) if (entry.expiresAt < now) attempts.delete(key);
-  const entry = attempts.get(ticket) ?? { count: 0, expiresAt };
-  entry.count += 1;
-  attempts.set(ticket, entry);
-  return entry.count <= MAX_ATTEMPTS;
+  let allowed = true;
+  for (const [key, max, expiresAt] of keys) {
+    const entry = attempts.get(key) ?? { count: 0, expiresAt };
+    entry.count += 1;
+    attempts.set(key, entry);
+    if (entry.count > max) allowed = false;
+  }
+  return allowed;
 }
 
 const text = (value: unknown, max: number) =>
@@ -47,7 +58,15 @@ export async function handleCardTokenize(
   if (ticket === null || typeof raw !== 'string') {
     return { status: 401, body: { error: 'invalid or expired ticket' } };
   }
-  if (!spend(raw, ticket.expiresAt, now)) {
+  const allowed = spend(
+    [
+      [`ticket:${raw}`, MAX_PER_TICKET, ticket.expiresAt],
+      [`customer:${ticket.provider}:${ticket.customerId}`, MAX_PER_WINDOW, now + WINDOW_MS],
+      [`ip:${request.ip}`, MAX_PER_WINDOW, now + WINDOW_MS],
+    ],
+    now,
+  );
+  if (!allowed) {
     return { status: 429, body: { error: 'too many attempts' } };
   }
   const driver = await deps.driver(ticket.provider);
@@ -105,7 +124,7 @@ export async function handleCardTokenize(
       body: {
         token: sealCardToken(
           deps.secret,
-          JSON.stringify({ t: tokenized.token, ip: request.ip }),
+          JSON.stringify({ t: tokenized.token, ip: request.ip, e: ticket.expiresAt }),
           ticket.customerId,
         ),
         last4: tokenized.last4,

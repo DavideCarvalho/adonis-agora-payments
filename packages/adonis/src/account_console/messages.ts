@@ -178,7 +178,7 @@ export function cardLabels(locale: string): Record<string, string> {
     ACCOUNT_MESSAGES[locale.split('-')[0] === 'pt' ? 'pt-BR' : 'en'] ??
     ACCOUNT_MESSAGES.en!;
   const label = (key: string) =>
-    catalog[`payments.card.${key}`] ?? ACCOUNT_MESSAGES.en![key] ?? key;
+    catalog[`payments.card.${key}`] ?? ACCOUNT_MESSAGES.en![`payments.card.${key}`] ?? key;
   return {
     number: label('number'),
     holder: label('holder'),

@@ -556,6 +556,71 @@ describe('payments account console — card', () => {
     expect(driver.tokenized).toEqual([]);
   });
 
+  it('caps attempts per customer, so a fresh ticket does not reset the budget', async () => {
+    resetCardTokenizeAttempts();
+    const driver = new AsaasLike();
+    const statuses: number[] = [];
+    for (let i = 0; i < 11; i++) {
+      const ticket = issueCardTicket(SECRET, {
+        customerId: 'c',
+        provider: 'asaas',
+        expiresAt: 9_999_000 + i,
+      });
+      const response = await handleCardTokenize(
+        { header: () => ticket, ip: `10.0.0.${i}`, body: {} },
+        { driver: async () => driver, secret: SECRET, now: () => 1_000 },
+      );
+      statuses.push(response.status);
+    }
+    expect(statuses.slice(0, 10).every((s) => s === 422)).toBe(true);
+    expect(statuses[10]).toBe(429);
+  });
+
+  it('offers the in-place form only when the gateway can move every running subscription', async () => {
+    class ManagedOnly extends CardDriver {
+      constructor() {
+        super({
+          provider: 'fake',
+          capabilities: { cardUpdate: { managed: true, gateway: false } },
+        });
+      }
+    }
+    class GatewayOnly extends PortalDriver {
+      saveCard = CardDriver.prototype.saveCard;
+      cardSetup = CardDriver.prototype.cardSetup;
+      saved: SaveCardInput[] = [];
+      setups: CardSetupInput[] = [];
+      constructor() {
+        super({
+          provider: 'fake',
+          capabilities: { cardUpdate: { managed: false, gateway: true } },
+        });
+      }
+    }
+    const managedOnly = await setup({}, new ManagedOnly());
+    expect(await managedOnly.page('payments.card').visible!(ctxFor('ana'))).toBe(true);
+    await managedOnly.store.saveSubscription({
+      gatewayId: 'sub_gw',
+      provider: 'fake',
+      customerId: 'cus_ana',
+      status: 'active',
+      planId: 'basic',
+    });
+    expect(await managedOnly.page('payments.card').visible!(ctxFor('ana'))).toBe(false);
+
+    // Only managed subscriptions, on a gateway that moves gateway ones only: its own page instead.
+    const gatewayOnly = await setup({}, new GatewayOnly());
+    expect(await gatewayOnly.page('payments.card').visible!(ctxFor('ana'))).toBe(false);
+    expect(
+      await run(
+        gatewayOnly.page('payments.subscription'),
+        'updateMethod',
+        ctxFor('ana'),
+        gatewayOnly.anaCustomer.id,
+      ),
+    ).toEqual({ ok: true, redirectTo: { external: 'https://billing.example/portal/cus_ana' } });
+  });
+
   it('ships a card script that parses and knows every gateway with a component', () => {
     expect(() => new Function(CARD_SCRIPT)).not.toThrow();
     for (const gateway of ['stripe', 'asaas', 'pagarme', 'mercadopago', 'square', 'paypal']) {

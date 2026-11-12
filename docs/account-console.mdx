@@ -87,7 +87,7 @@ never reaches your server. Each gateway needs its public key:
 | Pagar.me | card tokenization | `publicKey` (or `PAGARME_PUBLIC_KEY`), with your domain allowed for it in the Pagar.me dashboard |
 | Square | Web Payments SDK | `applicationId` (or `SQUARE_APPLICATION_ID`) and `locationId` |
 | PayPal | PayPal button (saves the PayPal account) | the driver's `clientId`. For subscriptions the library manages. |
-| Asaas | card form served by this app | nothing: Asaas tokenizes on the server, so the card goes to your app's `/payments/account/card/tokenize` and only the token is kept |
+| Asaas | card form served by this app | nothing: Asaas tokenizes on the server, so the card goes to your app's `/payments/account/card/tokenize` and only the token is kept. Each customer and each IP get 10 attempts an hour, counted per app instance. |
 
 ```ts title="config/payments.ts"
 providers: {

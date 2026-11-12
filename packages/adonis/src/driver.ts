@@ -89,6 +89,11 @@ export interface PaymentsDriver {
      * answerable before a card is typed, instead of at the gateway.
      */
     cardTokenization?: boolean;
+    /**
+     * Which subscriptions {@link PaymentsDriver.saveCard} can move to a new card: the ones the
+     * library manages, the ones the gateway owns, or both (the default when omitted).
+     */
+    cardUpdate?: { managed?: boolean; gateway?: boolean };
   };
 
   /**
@@ -612,6 +617,8 @@ export interface CardSetupInput {
   customerId: string;
   /** Gateway subscriptions of that customer whose card changes too. */
   subscriptionGatewayIds?: readonly string[];
+  /** The page the payer is on, for gateways whose component flow names one. */
+  returnUrl?: string;
 }
 
 /**

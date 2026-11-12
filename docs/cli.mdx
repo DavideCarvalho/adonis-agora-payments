@@ -283,3 +283,10 @@ namespace that is not one of the normalized `WEBHOOK_EVENT_TYPES` throws, naming
 still recorded as processed and the route still answers `200`. Two handler files claiming the same type
 throw too, naming both. See [Webhooks](/docs/payments/webhooks#a-typo-in-eventtype-does-not-boot).
 </Callout>
+
+## `agora:doctor`
+
+`node ace agora:doctor` (or `payments:doctor` for the payments checks only) checks the configuration
+of every installed Agora lib: webhook credentials, the CSRF exemption of the webhook route, console
+access, and with `--deep` the billing tables and the `payments:health` report. See
+[Health check](/docs/payments/doctor).

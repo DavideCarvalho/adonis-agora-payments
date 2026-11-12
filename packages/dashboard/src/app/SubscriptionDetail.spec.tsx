@@ -135,6 +135,25 @@ describe('SubscriptionDetail', () => {
   });
 });
 
+describe('Subscriptions for one customer', () => {
+  it('describes that customer, never the install-wide past-due total', async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).includes('/subscriptions')
+        ? json({
+            subscriptions: [],
+            meta: { page: 1, size: 50, count: 0, scanned: 0, truncated: false },
+            statuses: [],
+            counts: { past_due: 7, failing_renewals: 0 },
+          })
+        : json({ providers: [], eventTypes: [], capabilities: {} }),
+    ) as never;
+    render(wrap(<Subscriptions customerId="cus_1" />));
+    expect(await screen.findByText('Customer cus_1 has no subscriptions.')).toBeTruthy();
+    expect(screen.getByText('Subscriptions of customer cus_1, newest first.')).toBeTruthy();
+    expect(screen.queryByText(/past due — payments failing/)).toBeNull();
+  });
+});
+
 describe('Subscriptions links to the detail', () => {
   it('opens a row, and narrows to one customer when asked', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) =>

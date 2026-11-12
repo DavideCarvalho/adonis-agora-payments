@@ -85,10 +85,11 @@ export function Subscriptions({
     <Panel
       title="Subscriptions"
       subtitle={
-        pastDue > 0
-          ? `${formatCount(pastDue)} past due — payments failing, access about to lapse.`
-          : customerId !== undefined
-            ? `Subscriptions of customer ${customerId}, newest first.`
+        // The past-due total is the whole install's: on one customer's view it would read as theirs.
+        customerId !== undefined
+          ? `Subscriptions of customer ${customerId}, newest first.`
+          : pastDue > 0
+            ? `${formatCount(pastDue)} past due — payments failing, access about to lapse.`
             : 'Recurring subscriptions, newest first. Nothing is past due.'
       }
       actions={
@@ -97,7 +98,7 @@ export function Subscriptions({
           <Segmented
             aria-label="Subscription status"
             options={STATUS_OPTIONS.map((option) =>
-              option.value === 'past_due' && pastDue > 0
+              option.value === 'past_due' && pastDue > 0 && customerId === undefined
                 ? { ...option, hint: formatCount(pastDue) }
                 : option,
             )}
@@ -110,7 +111,7 @@ export function Subscriptions({
       <QueryState
         query={query}
         empty={rows.length === 0}
-        emptyMessage={emptyMessage(status, provider)}
+        emptyMessage={emptyMessage(status, provider, customerId)}
       >
         <table className="w-full text-sm">
           <thead>
@@ -235,7 +236,20 @@ function WhenCell({ iso }: { iso: string | null }) {
   );
 }
 
-function emptyMessage(status: string | undefined, provider: string | undefined): string {
+function emptyMessage(
+  status: string | undefined,
+  provider: string | undefined,
+  customerId?: string | undefined,
+): string {
+  if (customerId !== undefined) {
+    const narrowed = [
+      status !== undefined ? `status “${status}”` : undefined,
+      provider !== undefined ? `gateway “${provider}”` : undefined,
+    ].filter((part): part is string => part !== undefined);
+    return narrowed.length === 0
+      ? `Customer ${customerId} has no subscriptions.`
+      : `Customer ${customerId} has no subscriptions with ${narrowed.join(' and ')}.`;
+  }
   if (status === 'past_due' && provider === undefined) {
     return 'Nothing is past due. Every subscription is paying.';
   }

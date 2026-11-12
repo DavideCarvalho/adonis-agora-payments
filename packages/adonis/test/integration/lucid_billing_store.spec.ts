@@ -1,6 +1,8 @@
 import { DateTime } from 'luxon';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { LucidBillingStore } from '../../src/billing/lucid_billing_store.js';
+import { BillingAuditEvent } from '../../src/billing/mixins/with_audit_event.js';
+import { BillingDispute } from '../../src/billing/mixins/with_dispute.js';
 import { BillingSubscription } from '../../src/billing/mixins/with_subscription.js';
 import { usageRemaining, usageTotal } from '../../src/billing/usage.js';
 import { WebhookProcessor } from '../../src/billing/webhook_processor.js';
@@ -965,6 +967,103 @@ describe('LucidBillingStore (integration)', () => {
       const stored = await legacy.findWebhookEventByGatewayEventId('evt_legacy');
       expect(stored?.status).toBe('failed');
       expect(stored?.error).toBe('handler bug');
+    });
+  });
+
+  describe('a model whose table lives in another schema', () => {
+    // The capability probes used to ask the catalog for `columnsInfo(model.table)`, which only
+    // looks in the connection's CURRENT schema and takes the name verbatim. A model with a
+    // qualified `static table` came back with no columns, read as "table not installed", and
+    // every dispute and audit write was skipped without a word.
+    const other = 'billing_store_spec_other';
+    class OtherDispute extends BillingDispute {
+      static override table = `${other}.billing_disputes`;
+    }
+    class OtherAudit extends BillingAuditEvent {
+      static override table = `${other}.billing_audit_events`;
+    }
+
+    beforeAll(async () => {
+      await database.db.rawQuery(`CREATE SCHEMA IF NOT EXISTS "${other}"`);
+      await database.db.rawQuery(
+        `CREATE TABLE "${other}".billing_disputes (LIKE billing_disputes INCLUDING ALL)`,
+      );
+      await database.db.rawQuery(
+        `CREATE TABLE "${other}".billing_audit_events (LIKE billing_audit_events INCLUDING ALL)`,
+      );
+    });
+
+    afterAll(async () => {
+      await database.db.rawQuery(`DROP SCHEMA IF EXISTS "${other}" CASCADE`);
+    });
+
+    it('writes and reads disputes and audit events there instead of skipping them', async () => {
+      const qualified = new LucidBillingStore(
+        { disputeModel: OtherDispute, auditEventModel: OtherAudit },
+        { autoCreateSchema: false },
+      );
+      const dispute = await qualified.saveDispute({
+        gatewayId: 'dp_other_schema',
+        paymentGatewayId: 'pay_other_schema',
+        provider: 'stripe',
+        status: 'open',
+        evidenceDueBy: new Date(now.getTime() + hour),
+      });
+      expect(dispute).not.toBeNull();
+      expect((await qualified.findDisputeByGatewayId('dp_other_schema'))?.status).toBe('open');
+
+      const audit = await qualified.recordAuditEvent({ action: 'refund', actor: 'ops' });
+      expect(audit).not.toBeNull();
+      expect(await qualified.countAuditEvents({ action: 'refund' })).toBe(1);
+
+      const rows = (await database.db.rawQuery(
+        `SELECT gateway_id FROM "${other}".billing_disputes`,
+      )) as { rows: Array<{ gateway_id: string }> };
+      expect(rows.rows.map((row) => row.gateway_id)).toEqual(['dp_other_schema']);
+    });
+  });
+
+  describe('a model pointing at a table that does not exist', () => {
+    class NowhereDispute extends BillingDispute {
+      static override table = 'billing_disputes_nowhere';
+    }
+
+    it('fails loudly when autoCreateSchema is on: the DDL ran, the model reads elsewhere', async () => {
+      const misconfigured = new LucidBillingStore({ disputeModel: NowhereDispute });
+      await expect(
+        misconfigured.saveDispute({
+          gatewayId: 'dp_nowhere',
+          paymentGatewayId: 'pay_nowhere',
+          provider: 'stripe',
+          status: 'open',
+        }),
+      ).rejects.toThrow(/billing_disputes_nowhere.*does not exist.*autoCreateSchema/);
+    });
+
+    it('skips with a warning when autoCreateSchema is off', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const legacy = new LucidBillingStore(
+          { disputeModel: NowhereDispute },
+          { autoCreateSchema: false },
+        );
+        expect(
+          await legacy.saveDispute({
+            gatewayId: 'dp_nowhere',
+            paymentGatewayId: 'pay_nowhere',
+            provider: 'stripe',
+            status: 'open',
+          }),
+        ).toBeNull();
+        expect(await legacy.countDisputes({})).toBe(0);
+        // Once per process, not once per call.
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(String(warn.mock.calls[0]?.[0])).toMatch(
+          /table "billing_disputes_nowhere" does not exist and autoCreateSchema is off/,
+        );
+      } finally {
+        warn.mockRestore();
+      }
     });
   });
 });

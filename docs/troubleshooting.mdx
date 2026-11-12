@@ -311,8 +311,9 @@ disagrees. If a partial refund still
 does nothing, check in this order:
 
 1. **The column exists.** With `autoCreateSchema: false`, it arrives only when a new migration calls
-   `createBillingTables` again — and the store *skips* the column rather than failing, so nothing
-   raises. Restart afterwards; the probe is cached per process.
+   `createBillingTables` again — and the store *skips* the column rather than failing, logging a
+   `[@adonis-agora/payments] … does not exist and autoCreateSchema is off` warning once per process.
+   Restart afterwards; the probe is cached per process.
 2. **The event arrived.** `store.listWebhookEvents({ type: 'payment.updated' })`.
 3. **The gateway said the refund settled.** Only refunds Asaas reports as `DONE` are counted. A
    `PENDING` refund, one awaiting approval, and a denied one are all money still in the account, so
@@ -351,9 +352,10 @@ export default class extends BaseSchema {
 }
 ```
 
-The harder half of this is that skipping it does not always fail loudly. Three things are probed
-before use and **skipped when absent**, because failing every gateway delivery over a missing column
-is worse than recording less:
+The harder half of this is that skipping it does not fail the request. These are probed before use
+and **skipped when absent**, because failing every gateway delivery over a missing column is worse
+than recording less. Each skip logs a `[@adonis-agora/payments] … does not exist and autoCreateSchema
+is off` warning once per process, naming the table or column:
 
 | Missing | What you see instead of an error |
 | --- | --- |
@@ -366,6 +368,10 @@ is worse than recording less:
 
 Anything else — a table that was never created at all — does raise `relation ... does not exist` or
 `column ... does not exist` on the first query that touches it.
+
+With `autoCreateSchema` on, none of these are skipped: the library just created them, so a model
+that cannot find one points somewhere the DDL did not create (another connection, schema or table
+name), and the write fails with an error saying so.
 
 <Callout type="warn" title="Restart after running the DDL">
 Each probe runs once per process and the answer is cached for the life of it. Running the migration

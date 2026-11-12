@@ -133,6 +133,7 @@ in-process wait can ever see them.
 import { truncateBillingTables } from '@adonis-agora/payments'
 
 afterEach(() => truncateBillingTables(db))
+// with billing.schema set: truncateBillingTables(db, { schema: 'billing' })
 ```
 
 Leaving the rows in place means one test's webhook ledger deduplicates the next test's event — the

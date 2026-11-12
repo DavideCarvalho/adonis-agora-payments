@@ -11,7 +11,7 @@ export {
   clampSize,
   listOffset,
 } from './list_query.js';
-export type { BillingModels } from './lucid_billing_store.js';
+export type { BillingDatabaseOptions, BillingModels } from './lucid_billing_store.js';
 export { LucidBillingStore, lucidBillingStore } from './lucid_billing_store.js';
 export { withBillable } from './mixins/with_billable.js';
 export { BillingPayment, withPayment } from './mixins/with_payment.js';

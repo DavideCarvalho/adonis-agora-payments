@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { Emitter } from '@adonisjs/core/events';
 import { AppFactory } from '@adonisjs/core/factories/app';
 import { LoggerFactory } from '@adonisjs/core/factories/logger';
+import { setApp } from '@adonisjs/core/services/app';
 import { Database } from '@adonisjs/lucid/database';
 import { BaseModel } from '@adonisjs/lucid/orm';
 import type { BaseSchema } from '@adonisjs/lucid/schema';
@@ -69,7 +70,7 @@ export interface IntegrationDatabase {
  */
 export async function createIntegrationDatabase(
   schemaName: string,
-  options: { migrate?: boolean } = {},
+  options: { migrate?: boolean; billingSchema?: string } = {},
 ): Promise<IntegrationDatabase> {
   const url = process.env.PAYMENTS_TEST_PG_URL;
   if (!url) {
@@ -80,6 +81,12 @@ export async function createIntegrationDatabase(
 
   const app = new AppFactory().create(new URL('./', import.meta.url), () => {});
   await app.init();
+  // The published stub reads `payments.billing.schema` through the app service, as it does in
+  // a real app. Only `config.get` is read, so that is all this app service has.
+  const config: Record<string, unknown> = { 'payments.billing.schema': options.billingSchema };
+  setApp({
+    config: { get: (key: string, fallback?: unknown) => config[key] ?? fallback },
+  } as never);
   const emitter = new Emitter(app);
   const logger = new LoggerFactory().create();
 

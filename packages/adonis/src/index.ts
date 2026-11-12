@@ -65,7 +65,7 @@ export {
   BILLING_LIST_DEFAULT_SIZE,
   BILLING_LIST_MAX_SIZE,
 } from './billing/list_query.js';
-export type { BillingModels } from './billing/lucid_billing_store.js';
+export type { BillingDatabaseOptions, BillingModels } from './billing/lucid_billing_store.js';
 export { LucidBillingStore, lucidBillingStore } from './billing/lucid_billing_store.js';
 export type { ManagedCycle, RenewalOutcome } from './billing/managed_subscriptions.js';
 export {
@@ -88,6 +88,7 @@ export type { BillingOwnerScope } from './billing/owner_scope.js';
 export { ownerInScope, ownerScopeOfFilter, tenantOfOwner } from './billing/owner_scope.js';
 export { resolveBillingStore } from './billing/resolve_store.js';
 export type {
+  BillingSchemaOptions,
   LucidDatabase,
   LucidQueryBindings,
   LucidQueryClient,

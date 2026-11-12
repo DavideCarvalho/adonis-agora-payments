@@ -433,6 +433,22 @@ export interface PaymentsConfig {
      */
     autoCreateSchema?: boolean;
     /**
+     * The Lucid connection the billing tables live on. Default: the app's default connection.
+     * Inherited by the default store and by `billingStores.lucid(...)`; a model that sets its
+     * own `static connection` keeps it.
+     */
+    connection?: string;
+    /**
+     * The Postgres schema (MySQL: database) the billing tables live in, created on first use
+     * when `autoCreateSchema` is on. Every query names it (`"billing"."billing_payments"`), so
+     * nothing depends on `search_path` — safe behind PgBouncer in transaction mode. Do NOT use
+     * a connection with `searchPath` for this.
+     *
+     * Not available on SQLite: setting it there fails the boot. Default: none — unqualified
+     * table names, wherever the connection resolves them.
+     */
+    schema?: string;
+    /**
      * How webhook events are processed:
      *
      * - `'auto'` (default) — `@adonis-agora/durable` when its provider is registered;
@@ -668,10 +684,22 @@ export type {
  * needs naming when you swap the models it reads and writes.
  */
 export const billingStores = {
-  lucid(config: { models?: BillingModels } = {}): BillingStoreFactory {
-    return async () => {
+  /**
+   * The Lucid store over your own models. `connection` and `schema` default to
+   * `billing.connection` / `billing.schema`; pass them here only to override.
+   */
+  lucid(
+    config: { models?: BillingModels; connection?: string; schema?: string } = {},
+  ): BillingStoreFactory {
+    return async (ctx) => {
       const { LucidBillingStore } = await import('./billing/lucid_billing_store.js');
-      return new LucidBillingStore(config.models ?? {});
+      const billing = ctx?.config?.().billing;
+      const connection = config.connection ?? billing?.connection;
+      const schema = config.schema ?? billing?.schema;
+      return new LucidBillingStore(config.models ?? {}, {
+        ...(connection !== undefined ? { connection } : {}),
+        ...(schema !== undefined ? { schema } : {}),
+      });
     };
   },
 };

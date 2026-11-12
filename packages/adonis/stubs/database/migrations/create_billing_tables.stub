@@ -1,6 +1,7 @@
 {{{
   exports({ to: app.migrationsPath(`${new Date().getTime()}_create_billing_tables.ts`) })
 }}}
+import app from '@adonisjs/core/services/app'
 import { BaseSchema } from '@adonisjs/lucid/schema'
 import { createBillingTables, dropBillingTables } from '@adonis-agora/payments'
 
@@ -32,17 +33,23 @@ import { createBillingTables, dropBillingTables } from '@adonis-agora/payments'
  * applies the guarded `ALTER`s for columns the library added after a table shipped. So
  * re-running this migration after upgrading the package carries those columns — which is
  * why running it twice is safe and why there is no second file.
+ *
+ * `billing.schema` is read from config/payments.ts, so the tables land where the store reads
+ * them (and the schema is created when missing). With `billing.connection` set, run it on that
+ * connection: `node ace migration:run --connection=<name>`.
  */
+const schema = app.config.get<string | undefined>('payments.billing.schema', undefined)
+
 export default class extends BaseSchema {
   async up() {
     this.defer(async (db) => {
-      await createBillingTables(db)
+      await createBillingTables(db, { schema })
     })
   }
 
   async down() {
     this.defer(async (db) => {
-      await dropBillingTables(db)
+      await dropBillingTables(db, { schema })
     })
   }
 }

@@ -26,6 +26,8 @@ defineConfig({
   billing?: {
     enabled?: boolean
     autoCreateSchema?: boolean
+    connection?: string
+    schema?: string
     dispatcher?: 'auto' | 'durable' | 'in-process'
     role?: 'all' | 'api' | 'worker'
     store?: BillingStoreFactory
@@ -43,6 +45,8 @@ defineConfig({
 | `allowUnverifiedWebhooks` | — | providers allowed to take an **unverified** delivery. Without it, a driver that can verify and has no credential refuses to boot |
 | `billing.enabled` | `true` | `false` skips the store, processor and dispatcher wiring |
 | `billing.autoCreateSchema` | `true` | the library creates its own tables on first use — there is no migration to run |
+| `billing.connection` | the app's default | the Lucid connection the billing tables live on. Inherited by `billingStores.lucid(...)` |
+| `billing.schema` | none | the Postgres schema (MySQL: database) for the billing tables; every query names it. Refused at boot on SQLite. See [Configuration → Database schema](/docs/payments/configuration#database-schema) |
 | `billing.dispatcher` | `'auto'` | `'auto'` is durable when its provider is registered, else in-process. Name the backend explicitly in production |
 | `billing.role` | `'all'` | `'api'` mounts the webhook route and never processes; `'worker'` processes and never mounts. Both require `dispatcher: 'durable'` |
 | `billing.store` | the Lucid store | swap the persistence entirely, or keep it with your own models via `billingStores.lucid({ models })`. `autoCreateSchema: false` still reaches a Lucid store you build — it can only turn auto-creation off, never on |
@@ -702,9 +706,9 @@ default and there is no migration to run. The same DDL is exported, for an app t
 it itself:
 
 ```ts
-createBillingTables(db: LucidDatabase): Promise<void>   // idempotent; also carries later columns
-dropBillingTables(db: LucidDatabase): Promise<void>     // for a migration's down() and for tests
-truncateBillingTables(db: LucidDatabase): Promise<void> // empties the rows, keeps the schema
+createBillingTables(db: LucidDatabase, options?: { schema?: string }): Promise<void>   // idempotent; also carries later columns
+dropBillingTables(db: LucidDatabase, options?: { schema?: string }): Promise<void>     // for a migration's down() and for tests
+truncateBillingTables(db: LucidDatabase, options?: { schema?: string }): Promise<void> // empties the rows, keeps the schema
 BILLING_TABLES  // ['billing_customers', 'billing_subscriptions', 'billing_payments',
                 //  'billing_webhook_events', 'billing_disputes', 'billing_usage_events',
                 //  'billing_audit_events']

@@ -347,6 +347,7 @@ import { createBillingTables } from '@adonis-agora/payments'
 
 export default class extends BaseSchema {
   async up() {
+    // with billing.schema set: createBillingTables(db, { schema: 'billing' })
     this.defer(async (db) => { await createBillingTables(db) })
   }
 }

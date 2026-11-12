@@ -38,6 +38,8 @@ import {
 } from './mixins/index.js';
 import type { BillingOwnerScope } from './owner_scope.js';
 import {
+  assertBillingSchemaName,
+  assertSchemaDialect,
   createBillingTables,
   detectDialect,
   type LucidDatabase,
@@ -56,6 +58,58 @@ export interface BillingModels {
   usageEventModel?: NormalizeConstructor<typeof DefaultUsageEvent>;
   disputeModel?: NormalizeConstructor<typeof DefaultDispute>;
   auditEventModel?: NormalizeConstructor<typeof DefaultAuditEvent>;
+}
+
+/**
+ * Where the Lucid store's tables live. Set once, in `billing` of `config/payments.ts`; the
+ * store and the models it reads through inherit it.
+ */
+export interface BillingDatabaseOptions {
+  /**
+   * The Lucid connection the billing models query. Default: each model's own `connection`, else
+   * the app's default connection. A model that sets its own `static connection` keeps it.
+   */
+  connection?: string | undefined;
+  /**
+   * The Postgres schema (MySQL: database) the billing tables live in. Every query names it —
+   * `"billing"."billing_payments"` — so nothing depends on the connection's `search_path`. A
+   * model whose `static table` is already qualified (`'other.billing_payments'`) keeps it.
+   * Default: none, so table names are unqualified, exactly as before.
+   */
+  schema?: string | undefined;
+}
+
+/** A billing model class, as far as {@link bindModel} needs one. */
+interface BindableModel {
+  table: string;
+  connection?: string | undefined;
+  boot(): void;
+  name: string;
+}
+
+/**
+ * The model the store actually queries: `model` itself when it already reads the right place,
+ * else a subclass that names the configured connection and schema.
+ *
+ * A subclass rather than a mutation: the shipped models are module singletons, and two stores
+ * (two schemas in one test run, or an app's own store beside the default) must not rewrite each
+ * other's table. Columns, hooks and `instanceof` all carry over to the subclass.
+ */
+function bindModel<Model extends BindableModel>(model: Model, db: BillingDatabaseOptions): Model {
+  if (db.connection === undefined && db.schema === undefined) return model;
+  model.boot();
+  const table =
+    db.schema !== undefined && !model.table.includes('.')
+      ? `${db.schema}.${model.table}`
+      : model.table;
+  const connection = model.connection ?? db.connection;
+  if (table === model.table && connection === model.connection) return model;
+  const Base = model as unknown as new (...args: unknown[]) => object;
+  const Bound = class extends Base {} as unknown as Model;
+  Object.defineProperty(Bound, 'name', { value: model.name });
+  Bound.table = table;
+  if (connection !== undefined) Bound.connection = connection;
+  return Bound;
 }
 
 /** Lucid hands back Luxon `DateTime`s; the read SPI speaks plain `Date`. */
@@ -340,19 +394,51 @@ export class LucidBillingStore
   #disputeModel: typeof DefaultDispute;
   #auditEventModel: typeof DefaultAuditEvent;
 
-  constructor(models: BillingModels = {}, options: { autoCreateSchema?: boolean } = {}) {
+  /** `billing.connection` / `billing.schema`, as this store was built with them. */
+  readonly database: Readonly<BillingDatabaseOptions>;
+
+  /** The one-shot "can this connection hold `schema`?" answer. See {@link LucidBillingStore.#ready}. */
+  #dialectChecked = false;
+
+  constructor(
+    models: BillingModels = {},
+    options: { autoCreateSchema?: boolean } & BillingDatabaseOptions = {},
+  ) {
+    if (options.schema !== undefined) assertBillingSchemaName(options.schema);
+    this.database = Object.freeze({
+      ...(options.connection !== undefined ? { connection: options.connection } : {}),
+      ...(options.schema !== undefined ? { schema: options.schema } : {}),
+    });
+    const db = this.database;
     this.#autoCreateSchema = options.autoCreateSchema !== false;
-    this.#customerModel = (models.customerModel ?? DefaultCustomer) as typeof DefaultCustomer;
-    this.#subscriptionModel = (models.subscriptionModel ??
-      DefaultSubscription) as typeof DefaultSubscription;
-    this.#paymentModel = (models.paymentModel ?? DefaultPayment) as typeof DefaultPayment;
-    this.#webhookEventModel = (models.webhookEventModel ??
-      DefaultWebhookEvent) as typeof DefaultWebhookEvent;
-    this.#usageEventModel = (models.usageEventModel ??
-      DefaultUsageEvent) as typeof DefaultUsageEvent;
-    this.#disputeModel = (models.disputeModel ?? DefaultDispute) as typeof DefaultDispute;
-    this.#auditEventModel = (models.auditEventModel ??
-      DefaultAuditEvent) as typeof DefaultAuditEvent;
+    this.#customerModel = bindModel(
+      (models.customerModel ?? DefaultCustomer) as typeof DefaultCustomer,
+      db,
+    );
+    this.#subscriptionModel = bindModel(
+      (models.subscriptionModel ?? DefaultSubscription) as typeof DefaultSubscription,
+      db,
+    );
+    this.#paymentModel = bindModel(
+      (models.paymentModel ?? DefaultPayment) as typeof DefaultPayment,
+      db,
+    );
+    this.#webhookEventModel = bindModel(
+      (models.webhookEventModel ?? DefaultWebhookEvent) as typeof DefaultWebhookEvent,
+      db,
+    );
+    this.#usageEventModel = bindModel(
+      (models.usageEventModel ?? DefaultUsageEvent) as typeof DefaultUsageEvent,
+      db,
+    );
+    this.#disputeModel = bindModel(
+      (models.disputeModel ?? DefaultDispute) as typeof DefaultDispute,
+      db,
+    );
+    this.#auditEventModel = bindModel(
+      (models.auditEventModel ?? DefaultAuditEvent) as typeof DefaultAuditEvent,
+      db,
+    );
     // So `dropBillingTables()` can invalidate the memo below. Without it a suite that drops
     // the tables between groups leaves this store certain they still exist, and every
     // following query fails on a table nothing will re-create.
@@ -388,7 +474,23 @@ export class LucidBillingStore
   async ensureSchema(): Promise<void> {
     // NOT gated by `#ready()`: that is what calls this, and awaiting it here would have the
     // promise await itself. A deadlock, not a crash — every query would hang forever.
-    await createBillingTables(this.#paymentModel.query().client as unknown as LucidDatabase);
+    await createBillingTables(this.#paymentModel.query().client as unknown as LucidDatabase, {
+      schema: this.database.schema,
+    });
+  }
+
+  /**
+   * Refuse a `schema` the billing connection cannot hold (SQLite), before anything is read or
+   * written. Called by the provider at boot, and again on first use for a store built by hand.
+   * Needs no round trip: the dialect is configuration.
+   */
+  assertDatabase(): void {
+    if (this.#dialectChecked || this.database.schema === undefined) return;
+    assertSchemaDialect(
+      this.database.schema,
+      detectDialect(this.#paymentModel.query().client as unknown as LucidDatabase),
+    );
+    this.#dialectChecked = true;
   }
 
   /**
@@ -401,6 +503,7 @@ export class LucidBillingStore
    * a lazily-created schema becomes a schema that exists most of the time.
    */
   async #ready(): Promise<void> {
+    this.assertDatabase();
     if (!this.#autoCreateSchema) return;
     if (!this.#schemaReady) this.#schemaReady = this.ensureSchema();
     return this.#schemaReady;
@@ -1586,6 +1689,9 @@ export class LucidBillingStore
 }
 
 /** Builder matching the authkit `lucidStores(...)` convention. */
-export function lucidBillingStore(models: BillingModels = {}): BillingStore {
-  return new LucidBillingStore(models);
+export function lucidBillingStore(
+  models: BillingModels = {},
+  options: BillingDatabaseOptions = {},
+): BillingStore {
+  return new LucidBillingStore(models, options);
 }

@@ -198,6 +198,8 @@ Every option, and what you get by omitting it:
 | --- | --- | --- |
 | `enabled` | `true` | `false` wires no store, processor or dispatcher. The webhook route still mounts and verifies, and then does nothing with what it verified. |
 | `autoCreateSchema` | `true` | The library creates its own tables on first use. See below. |
+| `connection` | the app's default connection | The Lucid connection the billing tables live on. See [Database schema](#database-schema). |
+| `schema` | none | The Postgres schema (MySQL: database) the billing tables live in. See [Database schema](#database-schema). |
 | `dispatcher` | `'auto'` | Which backend runs a validated webhook. See below. |
 | `role` | `'all'` | `'api'` mounts the route and never processes; `'worker'` processes and never mounts. Both demand an explicit `'durable'` dispatcher — there is no channel between the halves otherwise, and it is refused at boot. See [Production → Splitting api and worker](/docs/payments/production#splitting-api-and-worker). |
 | `store` | the Lucid store over the billing tables | Where the layer persists. `billingStores.lucid({ models })` swaps the models; a factory of your own replaces the store entirely. See [Billing → The billing store](/docs/payments/billing#the-billing-store). |
@@ -227,6 +229,46 @@ node ace migration:run
 
 That file calls the same exported `createBillingTables`, so the two paths cannot drift. Leaving
 both on is harmless; leaving both *off* means the first query fails on a missing table.
+
+### Database schema
+
+By default the billing tables sit next to your own, in whatever schema the connection uses. To keep
+them apart, put them on their own connection, in their own schema, or both:
+
+```ts title="config/payments.ts"
+billing: {
+  connection: 'billing', // a connection name from config/database.ts
+  schema: 'billing',     // tables become "billing"."billing_payments", ...
+}
+```
+
+- Every query the library sends names the schema (`"billing"."billing_payments"`), including the
+  DDL, the column checks and the dashboard and account-console reads. Your connection's default
+  schema stays `public`.
+- With `autoCreateSchema` on, the schema is created on first use (`CREATE SCHEMA IF NOT EXISTS`). If
+  the database user may not create it, the error names the schema and the grant to ask for.
+- With `autoCreateSchema: false`, the published migration reads `billing.schema` from this file and
+  creates the schema too. With `billing.connection` set, run it on that connection:
+  `node ace migration:run --connection=billing`.
+- `billingStores.lucid({ models })` inherits both options. Your own models get the schema as well,
+  unless their `static table` is already qualified (`'other.billing_payments'`). A model that sets
+  its own `static connection` keeps it.
+- If you query the shipped models yourself (`BillingPayment.query()`), they still read the
+  unqualified table. Go through the store (`services/billing_store`) instead, or subclass the model
+  with `static table = 'billing.billing_payments'`.
+
+<Callout type="warn" title="Don't use searchPath">
+Don't do this with a Lucid connection that sets `searchPath`. knex runs `SET search_path` on the
+session, and behind PgBouncer in transaction mode that setting leaks to other clients' connections.
+`schema` writes the schema into each statement, so it works on any connection, PgBouncer included.
+</Callout>
+
+**MySQL / MariaDB:** `schema` is a database name (`` `billing`.`billing_payments` ``), created with
+`CREATE DATABASE IF NOT EXISTS` when the library creates its tables. The connection's user needs
+privileges on it.
+
+**SQLite:** there are no schemas. Setting `schema` on a SQLite connection fails the boot with a message
+saying so. The option is never ignored.
 
 ### `dispatcher` — how a webhook gets processed
 

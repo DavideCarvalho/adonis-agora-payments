@@ -24,6 +24,8 @@ describe('LucidBillingStore schema gate', () => {
         // Everything else on this class talks to the database and must not do so first.
         name !== 'ensureSchema' &&
         name !== 'disableAutoCreateSchema' &&
+        // Reads the dialect off the configuration; never a round trip.
+        name !== 'assertDatabase' &&
         typeof (LucidBillingStore.prototype as unknown as Record<string, unknown>)[name] ===
           'function',
     );

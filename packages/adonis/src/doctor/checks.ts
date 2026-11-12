@@ -3,7 +3,7 @@ import { type BillingHealth, billingHealth } from '../billing/billing_health.js'
 import type { BillingStore } from '../billing/billing_store.js';
 import { resolveRole } from '../billing/resolve_dispatch.js';
 import { resolveBillingStore } from '../billing/resolve_store.js';
-import { BILLING_TABLES } from '../billing/schema.js';
+import { assertSchemaDialect, BILLING_TABLES, billingTableRef } from '../billing/schema.js';
 import { type PaymentsDashboardConfig, resolveConfig } from '../dashboard/define_config.js';
 import type { PaymentsConfig } from '../define_config.js';
 import type { WebhookVerificationState } from '../driver.js';
@@ -162,12 +162,26 @@ export function checkConsoleGate(
   };
 }
 
-/** A Lucid database, duck-typed: only `connection().schema.hasTable`. */
+/** A Lucid database, duck-typed: what the table check reads. */
 interface LucidLike {
-  connection(name?: string): { schema: { hasTable(table: string): Promise<boolean> } };
+  connection(name?: string): {
+    dialect?: { name?: string };
+    schema: {
+      hasTable(table: string): Promise<boolean>;
+      withSchema?(schema: string): { hasTable(table: string): Promise<boolean> };
+    };
+    rawQuery?(sql: string, bindings?: unknown[]): Promise<unknown>;
+  };
 }
 
-/** `payments.tables`: the billing tables exist. */
+/** The rows of a `rawQuery`, on either driver shape (`{ rows }` on pg, `[rows, fields]` on mysql). */
+function rowsOf(result: unknown): unknown[] {
+  if (Array.isArray(result)) return Array.isArray(result[0]) ? result[0] : result;
+  const rows = (result as { rows?: unknown[] } | null)?.rows;
+  return Array.isArray(rows) ? rows : [];
+}
+
+/** `payments.tables`: the billing tables exist (in `billing.schema`, when set, and writable). */
 export async function checkTables(
   payments: PaymentsConfig | undefined,
   db: LucidLike | undefined,
@@ -184,11 +198,24 @@ export async function checkTables(
       message: 'Lucid is not registered: the billing tables cannot be read.',
     };
   }
-  const client = db.connection();
+  let client: ReturnType<LucidLike['connection']>;
+  try {
+    client = db.connection(payments?.billing?.connection);
+  } catch (error) {
+    return {
+      status: 'error',
+      message: `billing.connection "${payments?.billing?.connection}" cannot be opened: ${(error as Error).message}`,
+      fix: 'Use a connection name declared in config/database.ts.',
+      docs: `${DOCS}/configuration`,
+    };
+  }
+  const autoCreate = payments?.billing?.autoCreateSchema !== false;
+  const schema = payments?.billing?.schema;
+  if (schema !== undefined) return checkSchemaTables(client, schema, autoCreate);
+
   const present = await Promise.all(BILLING_TABLES.map((table) => client.schema.hasTable(table)));
   const missing = BILLING_TABLES.filter((_, index) => !present[index]);
   if (missing.length === 0) return { status: 'ok', message: 'Every billing table exists.' };
-  const autoCreate = payments?.billing?.autoCreateSchema !== false;
   return {
     status: autoCreate ? 'warn' : 'error',
     message: autoCreate
@@ -196,6 +223,86 @@ export async function checkTables(
       : `Missing ${missing.join(', ')} and autoCreateSchema is off: billing writes will fail.`,
     fix: 'Publish and run the billing migration: `node ace configure @adonis-agora/payments`, then `node ace migration:run`.',
     docs: `${DOCS}/billing`,
+  };
+}
+
+/**
+ * `payments.tables` with `billing.schema` set: the schema exists, every table is IN it (not
+ * merely somewhere on the search path), and this connection can write there.
+ */
+async function checkSchemaTables(
+  client: ReturnType<LucidLike['connection']>,
+  schema: string,
+  autoCreate: boolean,
+): Promise<AgoraDoctorResult> {
+  const docs = `${DOCS}/configuration`;
+  const dialect = client.dialect?.name;
+  try {
+    assertSchemaDialect(schema, dialect);
+  } catch (error) {
+    return {
+      status: 'error',
+      message: (error as Error).message,
+      fix: 'Remove `billing.schema`, or point `billing.connection` at Postgres or MySQL.',
+      docs,
+    };
+  }
+  if (client.rawQuery === undefined || client.schema.withSchema === undefined) {
+    return { status: 'skip', message: 'This Lucid client cannot read the catalog.' };
+  }
+  const exists =
+    rowsOf(
+      await client.rawQuery(
+        'SELECT schema_name FROM information_schema.schemata WHERE schema_name = ?',
+        [schema],
+      ),
+    ).length > 0;
+  if (!exists) {
+    return {
+      status: autoCreate ? 'warn' : 'error',
+      message: autoCreate
+        ? `The billing schema "${schema}" does not exist yet: it is created with the tables on first use (autoCreateSchema).`
+        : `The billing schema "${schema}" does not exist and autoCreateSchema is off: billing writes will fail.`,
+      fix: 'Run the billing migration (it creates the schema), or create it yourself and grant this connection USAGE and CREATE on it.',
+      docs,
+    };
+  }
+  const builder = client.schema.withSchema.bind(client.schema);
+  const present = await Promise.all(BILLING_TABLES.map((table) => builder(schema).hasTable(table)));
+  const missing = BILLING_TABLES.filter((_, index) => !present[index]);
+  if (missing.length > 0) {
+    return {
+      status: autoCreate ? 'warn' : 'error',
+      message: autoCreate
+        ? `Missing ${missing.join(', ')} in schema "${schema}": they are created on first use (autoCreateSchema).`
+        : `Missing ${missing.join(', ')} in schema "${schema}" and autoCreateSchema is off: billing writes will fail.`,
+      fix: 'Run the billing migration — it reads `billing.schema` from config/payments.ts.',
+      docs,
+    };
+  }
+  // Zero rows, so nothing is written — but the database still checks the INSERT privilege.
+  const from = /mysql|mariadb/i.test(dialect ?? '') ? ' FROM DUAL' : '';
+  const denied: string[] = [];
+  for (const table of BILLING_TABLES) {
+    try {
+      await client.rawQuery(
+        `INSERT INTO ${billingTableRef(dialect, schema, table)} (id) SELECT NULL${from} WHERE 1 = 0`,
+      );
+    } catch {
+      denied.push(table);
+    }
+  }
+  if (denied.length > 0) {
+    return {
+      status: 'error',
+      message: `This connection cannot write to ${denied.join(', ')} in schema "${schema}".`,
+      fix: `Grant the connection's role USAGE on schema "${schema}" and SELECT, INSERT, UPDATE, DELETE on its billing tables.`,
+      docs,
+    };
+  }
+  return {
+    status: 'ok',
+    message: `Every billing table exists in schema "${schema}" and is writable.`,
   };
 }
 

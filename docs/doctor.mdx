@@ -27,7 +27,7 @@ NODE_ENV=production node ace agora:doctor --json --strict
 | `payments.webhook-secret` | Every gateway that signs its webhooks has its webhook secret or token. | Warns here, error in production. A gateway listed in `allowUnverifiedWebhooks` warns. |
 | `payments.webhook-csrf` | Shield's `csrf.exceptRoutes` lets `POST /payments/webhook/:provider` through. | Error, naming the route to exempt. |
 | `payments.console-gate` | The console has `authorize` in `config/payments_dashboard.ts`. | Warns here; in production the console refuses everyone (error). |
-| `payments.tables` (`--deep`) | The billing tables exist. | Warns when `autoCreateSchema` will create them; error when it is off. |
+| `payments.tables` (`--deep`) | The billing tables exist. With `billing.schema`: the schema exists, the tables are in it, and the connection can write to them. | Warns when `autoCreateSchema` will create them; error when it is off, or when the connection cannot write. |
 | `payments.health` (`--deep`) | The [`payments:health`](/docs/payments/cli#paymentshealth) report. | Warns with the count of each problem. |
 
 Like every Agora lib, payments also gets the three built-in checks: `payments.registered` (the

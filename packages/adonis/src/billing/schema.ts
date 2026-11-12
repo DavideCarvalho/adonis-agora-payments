@@ -86,6 +86,104 @@ function isMysql(dialect: string | undefined): boolean {
   return !!dialect && /mysql|mariadb/i.test(dialect);
 }
 
+/** What a schema name may look like: a plain identifier, since it is written into SQL. */
+const SCHEMA_NAME = /^[A-Za-z_][A-Za-z0-9_$]*$/;
+
+/**
+ * Where the billing tables live. Accepted by {@link createBillingTables},
+ * {@link dropBillingTables} and {@link truncateBillingTables}; the store and the provider pass
+ * `billing.schema` through.
+ */
+export interface BillingSchemaOptions {
+  /**
+   * The Postgres schema (MySQL: database) holding the billing tables. Every statement names it
+   * (`"billing"."billing_payments"`), so nothing depends on the connection's `search_path`.
+   * Default: none — unqualified names, wherever the connection resolves them.
+   */
+  schema?: string | undefined;
+}
+
+/**
+ * Refuse a schema name that is not a plain identifier. It is written into SQL — quoted, but a
+ * quote character inside it would still end the identifier.
+ */
+export function assertBillingSchemaName(schema: string): void {
+  if (!SCHEMA_NAME.test(schema) || schema.length > 63) {
+    throw new Error(
+      `[@adonis-agora/payments] Invalid billing.schema "${schema}": use letters, digits, _ and $, not starting with a digit, at most 63 characters.`,
+    );
+  }
+}
+
+/**
+ * Refuse a schema on a dialect without schemas. SQLite has none (an attached database is not
+ * the same thing), and quietly ignoring the option would put the tables somewhere other than
+ * where the config says.
+ */
+export function assertSchemaDialect(schema: string | undefined, dialect: string | undefined): void {
+  if (schema === undefined) return;
+  if (isPostgres(dialect) || isMysql(dialect)) return;
+  throw new Error(
+    `[@adonis-agora/payments] billing.schema is "${schema}", but the billing connection is ${dialect ?? 'of an unknown dialect'}. ` +
+      'A schema needs Postgres (a schema) or MySQL/MariaDB (a database). Remove `billing.schema`, or point `billing.connection` at one of those.',
+  );
+}
+
+/** Quote one identifier the way the dialect does. */
+function quoteIdent(dialect: string | undefined, name: string): string {
+  return isMysql(dialect) ? `\`${name}\`` : `"${name}"`;
+}
+
+/**
+ * The SQL name of a billing table: bare without a schema (today's statements, byte for byte),
+ * `"schema"."table"` with one. Schema and table are quoted SEPARATELY — a single
+ * `"schema.table"` would name a table with a dot in it.
+ */
+export function billingTableRef(
+  dialect: string | undefined,
+  schema: string | undefined,
+  table: string,
+): string {
+  if (schema === undefined) return table;
+  return `${quoteIdent(dialect, schema)}.${quoteIdent(dialect, table)}`;
+}
+
+/** Whether a driver error is "permission denied" — on the schema or database itself. */
+function isPermissionError(error: unknown): boolean {
+  const e = error as { code?: unknown; errno?: unknown } | null;
+  // Postgres `insufficient_privilege`; MySQL `ER_DBACCESS_DENIED_ERROR`. (1045 is a wrong
+  // password, not a missing grant — that one keeps the driver's own message.)
+  return e?.code === '42501' || e?.errno === 1044;
+}
+
+/**
+ * Create the schema (MySQL: database) the billing tables go in, when it is not there.
+ *
+ * A role that may not create it fails with the grant it needs, not a bare driver error: the
+ * fix is a DBA's, and the message is what they will be handed.
+ */
+async function createSchema(
+  db: LucidDatabase,
+  dialect: string | undefined,
+  schema: string,
+): Promise<void> {
+  const sql = isMysql(dialect)
+    ? `CREATE DATABASE IF NOT EXISTS ${quoteIdent(dialect, schema)}`
+    : `CREATE SCHEMA IF NOT EXISTS ${quoteIdent(dialect, schema)}`;
+  try {
+    await db.rawQuery(sql);
+  } catch (error) {
+    if (!isPermissionError(error)) throw error;
+    const grant = isMysql(dialect)
+      ? `create it (CREATE DATABASE \`${schema}\`) or grant ALL ON \`${schema}\`.* to this user`
+      : `create it (CREATE SCHEMA "${schema}") or GRANT CREATE ON DATABASE to this role, then GRANT USAGE, CREATE ON SCHEMA "${schema}"`;
+    throw new Error(
+      `[@adonis-agora/payments] Could not create the billing schema "${schema}": the database user may not. Ask a DBA to ${grant}. (${error instanceof Error ? error.message : String(error)})`,
+      { cause: error },
+    );
+  }
+}
+
 /** The column types that differ by dialect, resolved once. */
 interface Types {
   /** A timestamp that keeps its zone. Every date this package stores is an instant. */
@@ -112,7 +210,7 @@ function typesFor(dialect: string | undefined): Types {
  * run is that the index is already there, which is the outcome asked for. Any other failure
  * still throws.
  */
-async function createIndex(
+async function createIndexOn(
   db: LucidDatabase,
   dialect: string | undefined,
   name: string,
@@ -136,14 +234,16 @@ async function createIndex(
  * `DROP INDEX IF EXISTS`, so there the statement is attempted and a missing-index error is
  * swallowed. Any other failure still throws.
  */
-async function dropIndex(
+async function dropIndexOn(
   db: LucidDatabase,
   dialect: string | undefined,
+  schema: string | undefined,
   name: string,
   table: string,
 ): Promise<void> {
   if (!isMysql(dialect)) {
-    await db.rawQuery(`DROP INDEX IF EXISTS ${name}`);
+    // A Postgres index lives in its table's schema, so dropping it names that schema too.
+    await db.rawQuery(`DROP INDEX IF EXISTS ${billingTableRef(dialect, schema, name)}`);
     return;
   }
   try {
@@ -166,7 +266,7 @@ async function dropIndex(
  * attempted and a duplicate-column error is swallowed: the only way this fails twice is that
  * the column is already there, which is the outcome asked for. Anything else still throws.
  */
-async function addColumn(
+async function addColumnTo(
   db: LucidDatabase,
   dialect: string | undefined,
   table: string,
@@ -198,13 +298,30 @@ async function addColumn(
  * ran the 0.2.0 migration and then upgrades gets the columns the new code reads, without
  * having to be told to publish and run a second migration.
  */
-export async function createBillingTables(db: LucidDatabase): Promise<void> {
+export async function createBillingTables(
+  db: LucidDatabase,
+  options: BillingSchemaOptions = {},
+): Promise<void> {
   const dialect = detectDialect(db);
+  const schema = options.schema;
+  if (schema !== undefined) {
+    assertBillingSchemaName(schema);
+    assertSchemaDialect(schema, dialect);
+    await createSchema(db, dialect, schema);
+  }
   const t = typesFor(dialect);
   const run = (sql: string) => db.rawQuery(sql);
+  // Every table this function names goes through here: bare without a schema, qualified with one.
+  const T = (table: (typeof BILLING_TABLES)[number]) => billingTableRef(dialect, schema, table);
+  const addColumn = (table: (typeof BILLING_TABLES)[number], column: string, type: string) =>
+    addColumnTo(db, dialect, T(table), column, type);
+  const createIndex = (name: string, table: (typeof BILLING_TABLES)[number], columns: string) =>
+    createIndexOn(db, dialect, name, T(table), columns);
+  const dropIndex = (name: string, table: (typeof BILLING_TABLES)[number]) =>
+    dropIndexOn(db, dialect, schema, name, T(table));
 
   await run(
-    `CREATE TABLE IF NOT EXISTS billing_customers (
+    `CREATE TABLE IF NOT EXISTS ${T('billing_customers')} (
       id VARCHAR(36) PRIMARY KEY,
       owner_type VARCHAR(255),
       owner_id VARCHAR(255),
@@ -220,7 +337,7 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   );
 
   await run(
-    `CREATE TABLE IF NOT EXISTS billing_subscriptions (
+    `CREATE TABLE IF NOT EXISTS ${T('billing_subscriptions')} (
       id VARCHAR(36) PRIMARY KEY,
       gateway_id VARCHAR(255) UNIQUE,
       provider VARCHAR(255),
@@ -236,7 +353,7 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   );
 
   await run(
-    `CREATE TABLE IF NOT EXISTS billing_payments (
+    `CREATE TABLE IF NOT EXISTS ${T('billing_payments')} (
       id VARCHAR(36) PRIMARY KEY,
       gateway_id VARCHAR(255) UNIQUE,
       provider VARCHAR(255),
@@ -258,7 +375,7 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   // unindexed lookup here is a sequential scan on a table that grows with every charge.
 
   await run(
-    `CREATE TABLE IF NOT EXISTS billing_webhook_events (
+    `CREATE TABLE IF NOT EXISTS ${T('billing_webhook_events')} (
       id VARCHAR(36) PRIMARY KEY,
       gateway_event_id VARCHAR(255) UNIQUE,
       provider VARCHAR(255),
@@ -274,7 +391,7 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   );
 
   await run(
-    `CREATE TABLE IF NOT EXISTS billing_disputes (
+    `CREATE TABLE IF NOT EXISTS ${T('billing_disputes')} (
       id VARCHAR(36) PRIMARY KEY,
       gateway_id VARCHAR(255) UNIQUE,
       payment_gateway_id VARCHAR(255),
@@ -300,7 +417,7 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   // well as to a fresh one. Only columns added to a table that already shipped have the upgrade
   // problem, and only they belong down there.
   await run(
-    `CREATE TABLE IF NOT EXISTS billing_audit_events (
+    `CREATE TABLE IF NOT EXISTS ${T('billing_audit_events')} (
       id VARCHAR(36) PRIMARY KEY,
       action VARCHAR(255),
       actor VARCHAR(255),
@@ -317,7 +434,7 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   );
 
   await run(
-    `CREATE TABLE IF NOT EXISTS billing_usage_events (
+    `CREATE TABLE IF NOT EXISTS ${T('billing_usage_events')} (
       id VARCHAR(36) PRIMARY KEY,
       subscription_id VARCHAR(255),
       customer_id VARCHAR(255),
@@ -348,15 +465,15 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   // column that exists only above works on every machine that has not shipped yet.
 
   // 0.3.0 — the app's own reference on a payment, and the normalized event on the ledger row.
-  await addColumn(db, dialect, 'billing_payments', 'external_reference', 'VARCHAR(255)');
-  await addColumn(db, dialect, 'billing_webhook_events', 'normalized', t.json);
+  await addColumn('billing_payments', 'external_reference', 'VARCHAR(255)');
+  await addColumn('billing_webhook_events', 'normalized', t.json);
 
   // 0.4.0 — how much of a payment has been refunded, in the same integer minor units as
   // `amount`. A PARTIAL refund had nowhere to be recorded before this, so the only two
   // options were to overwrite the status with `refunded` (writing off the whole charge) or to
   // drop the event — and the library dropped it, leaving revenue overstated forever.
   // `BIGINT`, matching `amount`, so net revenue is one subtraction and never a division.
-  await addColumn(db, dialect, 'billing_payments', 'refunded_amount', 'BIGINT');
+  await addColumn('billing_payments', 'refunded_amount', 'BIGINT');
 
   // 0.7.0 — library-managed subscriptions. When `subscriptions.mode` is `'managed'` the
   // recurrence lives HERE, not at the gateway: there is no `gateway_id` to read the amount,
@@ -366,18 +483,18 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   //
   // Nullable across the board: a gateway-mode row has none of this and must not be forced to
   // invent it.
-  await addColumn(db, dialect, 'billing_subscriptions', 'managed', 'BOOLEAN');
-  await addColumn(db, dialect, 'billing_subscriptions', 'amount', 'BIGINT');
-  await addColumn(db, dialect, 'billing_subscriptions', 'currency', 'VARCHAR(3)');
-  await addColumn(db, dialect, 'billing_subscriptions', 'cycle', 'VARCHAR(32)');
-  await addColumn(db, dialect, 'billing_subscriptions', 'method', 'VARCHAR(32)');
-  await addColumn(db, dialect, 'billing_subscriptions', 'description', 'VARCHAR(255)');
-  await addColumn(db, dialect, 'billing_subscriptions', 'external_reference', 'VARCHAR(255)');
-  await addColumn(db, dialect, 'billing_subscriptions', 'current_period_start', t.timestamp);
-  await addColumn(db, dialect, 'billing_subscriptions', 'current_period_end', t.timestamp);
+  await addColumn('billing_subscriptions', 'managed', 'BOOLEAN');
+  await addColumn('billing_subscriptions', 'amount', 'BIGINT');
+  await addColumn('billing_subscriptions', 'currency', 'VARCHAR(3)');
+  await addColumn('billing_subscriptions', 'cycle', 'VARCHAR(32)');
+  await addColumn('billing_subscriptions', 'method', 'VARCHAR(32)');
+  await addColumn('billing_subscriptions', 'description', 'VARCHAR(255)');
+  await addColumn('billing_subscriptions', 'external_reference', 'VARCHAR(255)');
+  await addColumn('billing_subscriptions', 'current_period_start', t.timestamp);
+  await addColumn('billing_subscriptions', 'current_period_end', t.timestamp);
   // The renewal runner's only input. Indexed below: it is scanned on every tick.
-  await addColumn(db, dialect, 'billing_subscriptions', 'next_charge_at', t.timestamp);
-  await addColumn(db, dialect, 'billing_subscriptions', 'cancel_at_period_end', 'BOOLEAN');
+  await addColumn('billing_subscriptions', 'next_charge_at', t.timestamp);
+  await addColumn('billing_subscriptions', 'cancel_at_period_end', 'BOOLEAN');
 
   // 0.9.0 — o que a renovação gerenciada deixou para trás.
   //
@@ -386,13 +503,13 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   // ledger de webhook responde isso para entregas, e a renovação não tinha equivalente.
   // Três colunas, não uma tabela: a pergunta operacional é sobre o ESTADO ATUAL de cada
   // assinatura, não sobre o histórico de cada tentativa.
-  await addColumn(db, dialect, 'billing_subscriptions', 'last_renewal_error', 'VARCHAR(500)');
-  await addColumn(db, dialect, 'billing_subscriptions', 'last_renewal_attempt_at', t.timestamp);
-  await addColumn(db, dialect, 'billing_subscriptions', 'renewal_failure_count', 'INTEGER');
+  await addColumn('billing_subscriptions', 'last_renewal_error', 'VARCHAR(500)');
+  await addColumn('billing_subscriptions', 'last_renewal_attempt_at', t.timestamp);
+  await addColumn('billing_subscriptions', 'renewal_failure_count', 'INTEGER');
 
   // 0.23.0 — the saved card of a managed subscription. The token is the only thing a renewal
   // can debit with: the customer is not there and the holder data was for the first sale.
-  await addColumn(db, dialect, 'billing_subscriptions', 'payment_method_id', 'VARCHAR(255)');
+  await addColumn('billing_subscriptions', 'payment_method_id', 'VARCHAR(255)');
 
   // 0.18.0 — usage metered against something that is neither the subscription nor the
   // customer: a project shared by several members, a workspace, an environment, a site. Before
@@ -402,14 +519,14 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   // A generic `(type, id)` pair rather than a `project_id`: the library has no business knowing
   // the app's domain, and a pair lets several kinds of scope coexist under one subscription.
   // Nullable: an app that meters per subscription or per customer never sets them.
-  await addColumn(db, dialect, 'billing_usage_events', 'scope_type', 'VARCHAR(255)');
-  await addColumn(db, dialect, 'billing_usage_events', 'scope_id', 'VARCHAR(255)');
+  await addColumn('billing_usage_events', 'scope_type', 'VARCHAR(255)');
+  await addColumn('billing_usage_events', 'scope_id', 'VARCHAR(255)');
 
   // 0.21.0 — the payment a ledger row is about, copied from the normalized event's `gatewayId`
   // when the row is recorded, so a payment's timeline is an indexed equality instead of a
   // substring scan over every stored payload. `''` on a row about something else; `NULL` on rows
   // recorded before the column existed, which the timeline still finds by substring.
-  await addColumn(db, dialect, 'billing_webhook_events', 'payment_gateway_id', 'VARCHAR(255)');
+  await addColumn('billing_webhook_events', 'payment_gateway_id', 'VARCHAR(255)');
 
   // ── Indexes ───────────────────────────────────────────────────────────────────────────
   //
@@ -418,67 +535,25 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   // a column an older install does not have until that ALTER runs. Getting this wrong fails
   // the whole call and leaves the schema half-built on every boot; the integration suite
   // caught both orderings against a real Postgres.
+  await createIndex('billing_customers_owner_idx', 'billing_customers', 'owner_type, owner_id');
+  await createIndex('billing_subscriptions_customer_idx', 'billing_subscriptions', 'customer_id');
+  await createIndex('billing_payments_customer_idx', 'billing_payments', 'customer_id');
+  await createIndex('billing_payments_subscription_idx', 'billing_payments', 'subscription_id');
   await createIndex(
-    db,
-    dialect,
-    'billing_customers_owner_idx',
-    'billing_customers',
-    'owner_type, owner_id',
-  );
-  await createIndex(
-    db,
-    dialect,
-    'billing_subscriptions_customer_idx',
-    'billing_subscriptions',
-    'customer_id',
-  );
-  await createIndex(
-    db,
-    dialect,
-    'billing_payments_customer_idx',
-    'billing_payments',
-    'customer_id',
-  );
-  await createIndex(
-    db,
-    dialect,
-    'billing_payments_subscription_idx',
-    'billing_payments',
-    'subscription_id',
-  );
-  await createIndex(
-    db,
-    dialect,
     'billing_payments_external_reference_idx',
     'billing_payments',
     'external_reference',
   );
-  await createIndex(
-    db,
-    dialect,
-    'billing_disputes_payment_idx',
-    'billing_disputes',
-    'payment_gateway_id',
-  );
-  await createIndex(
-    db,
-    dialect,
-    'billing_disputes_deadline_idx',
-    'billing_disputes',
-    'status, evidence_due_by',
-  );
+  await createIndex('billing_disputes_payment_idx', 'billing_disputes', 'payment_gateway_id');
+  await createIndex('billing_disputes_deadline_idx', 'billing_disputes', 'status, evidence_due_by');
   // The two ways the audit trail is read: "what did the endpoint reject in the last day"
   // (the health check) and "what has anyone done to THIS payment" (the timeline).
   await createIndex(
-    db,
-    dialect,
     'billing_audit_events_action_idx',
     'billing_audit_events',
     'action, created_at',
   );
   await createIndex(
-    db,
-    dialect,
     'billing_audit_events_subject_idx',
     'billing_audit_events',
     'subject_type, subject_id',
@@ -488,44 +563,34 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   // every row the owner ever recorded — `usage().remaining()` runs this before each metered
   // call. The scope index needs the 0.18.0 ALTERs above on an older install.
   await createIndex(
-    db,
-    dialect,
     'billing_usage_subscription_meter_recorded_idx',
     'billing_usage_events',
     'subscription_id, meter, recorded_at',
   );
   await createIndex(
-    db,
-    dialect,
     'billing_usage_customer_meter_recorded_idx',
     'billing_usage_events',
     'customer_id, meter, recorded_at',
   );
   await createIndex(
-    db,
-    dialect,
     'billing_usage_scope_meter_recorded_idx',
     'billing_usage_events',
     'scope_type, scope_id, meter, recorded_at',
   );
   // The overview's read: every meter, one window, no owner.
   await createIndex(
-    db,
-    dialect,
     'billing_usage_recorded_meter_idx',
     'billing_usage_events',
     'recorded_at, meter',
   );
   // Each of these is a leading prefix of an index above, so it only costs writes.
-  await dropIndex(db, dialect, 'billing_usage_subscription_meter_idx', 'billing_usage_events');
-  await dropIndex(db, dialect, 'billing_usage_customer_meter_idx', 'billing_usage_events');
-  await dropIndex(db, dialect, 'billing_usage_scope_meter_idx', 'billing_usage_events');
+  await dropIndex('billing_usage_subscription_meter_idx', 'billing_usage_events');
+  await dropIndex('billing_usage_customer_meter_idx', 'billing_usage_events');
+  await dropIndex('billing_usage_scope_meter_idx', 'billing_usage_events');
 
   // A payment's timeline, newest first. Also serves the `IS NULL` read over rows recorded
   // before the column existed.
   await createIndex(
-    db,
-    dialect,
     'billing_webhook_events_payment_idx',
     'billing_webhook_events',
     'payment_gateway_id, created_at',
@@ -533,37 +598,19 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   // What the console polls: newest-first pages with and without a status filter, the status
   // counts over a creation window, and revenue over a settlement window.
   await createIndex(
-    db,
-    dialect,
     'billing_payments_status_created_idx',
     'billing_payments',
     'status, created_at',
   );
-  await createIndex(db, dialect, 'billing_payments_created_idx', 'billing_payments', 'created_at');
+  await createIndex('billing_payments_created_idx', 'billing_payments', 'created_at');
+  await createIndex('billing_payments_status_paid_idx', 'billing_payments', 'status, paid_at');
   await createIndex(
-    db,
-    dialect,
-    'billing_payments_status_paid_idx',
-    'billing_payments',
-    'status, paid_at',
-  );
-  await createIndex(
-    db,
-    dialect,
     'billing_webhook_events_status_created_idx',
     'billing_webhook_events',
     'status, created_at',
   );
+  await createIndex('billing_webhook_events_created_idx', 'billing_webhook_events', 'created_at');
   await createIndex(
-    db,
-    dialect,
-    'billing_webhook_events_created_idx',
-    'billing_webhook_events',
-    'created_at',
-  );
-  await createIndex(
-    db,
-    dialect,
     'billing_subscriptions_status_created_idx',
     'billing_subscriptions',
     'status, created_at',
@@ -571,8 +618,6 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   // The renewal runner's working set: every tick asks "which managed subscriptions are due".
   // Unindexed, that is a full scan of every subscription ever created, on a schedule.
   await createIndex(
-    db,
-    dialect,
     'billing_subscriptions_due_idx',
     'billing_subscriptions',
     'managed, status, next_charge_at',
@@ -582,8 +627,6 @@ export async function createBillingTables(db: LucidDatabase): Promise<void> {
   // it is a full scan of every subscription ever created, per lookup. The column comes from the
   // ALTER block above, so an older install has it by the time this runs.
   await createIndex(
-    db,
-    dialect,
     'billing_subscriptions_external_reference_idx',
     'billing_subscriptions',
     'external_reference',
@@ -621,9 +664,19 @@ export function registerBillingSchemaCache(reset: () => void): () => void {
  * Every live store is told to forget its cached schema afterwards, so a store built before
  * the drop re-creates the tables on its next query instead of querying tables that are gone.
  */
-export async function dropBillingTables(db: LucidDatabase): Promise<void> {
+export async function dropBillingTables(
+  db: LucidDatabase,
+  options: BillingSchemaOptions = {},
+): Promise<void> {
+  const dialect = detectDialect(db);
+  if (options.schema !== undefined) {
+    assertBillingSchemaName(options.schema);
+    assertSchemaDialect(options.schema, dialect);
+  }
+  // The schema itself is left in place: it may hold other things, and it is not this
+  // library's to remove.
   for (const table of [...BILLING_TABLES].reverse()) {
-    await db.rawQuery(`DROP TABLE IF EXISTS ${table}`);
+    await db.rawQuery(`DROP TABLE IF EXISTS ${billingTableRef(dialect, options.schema, table)}`);
   }
   for (const reset of schemaCacheResets) reset();
 }
@@ -641,12 +694,20 @@ export async function dropBillingTables(db: LucidDatabase): Promise<void> {
  * rather than `TRUNCATE`: it is the one statement every dialect here spells the same way,
  * and these tables are test-sized.
  */
-export async function truncateBillingTables(db: LucidDatabase): Promise<void> {
+export async function truncateBillingTables(
+  db: LucidDatabase,
+  options: BillingSchemaOptions = {},
+): Promise<void> {
+  const dialect = detectDialect(db);
+  if (options.schema !== undefined) {
+    assertBillingSchemaName(options.schema);
+    assertSchemaDialect(options.schema, dialect);
+  }
   for (const table of [...BILLING_TABLES].reverse()) {
     // A table that was never created is not an error to a suite that only wants it empty —
     // and asking `information_schema` per table per group costs more than the delete does.
     try {
-      await db.rawQuery(`DELETE FROM ${table}`);
+      await db.rawQuery(`DELETE FROM ${billingTableRef(dialect, options.schema, table)}`);
     } catch (error) {
       if (!isMissingTableError(error)) throw error;
     }

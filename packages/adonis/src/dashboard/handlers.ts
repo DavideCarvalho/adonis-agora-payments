@@ -12,7 +12,9 @@ import {
   type SubscriptionListItem,
 } from '../billing/billing_store.js';
 import { BILLING_LIST_DEFAULT_SIZE } from '../billing/list_query.js';
-import type { RefundAction, ReplayAction } from './actions.js';
+import type { SubscriptionsApi } from '../subscriptions_api.js';
+import type { DisputeEvidence } from '../types.js';
+import type { EvidenceAction, RefundAction, ReplayAction } from './actions.js';
 import {
   AuditFilter,
   assertSort,
@@ -89,12 +91,19 @@ export interface ProviderCapabilities {
   disputes: boolean;
   /** Se a assinatura pode ser cancelada NO GATEWAY. Irrelevante no modo gerenciado. */
   cancelSubscription: boolean;
+  /** Whether the GATEWAY can re-price a subscription it owns. Irrelevant in managed mode. */
+  updateSubscription: boolean;
 }
 
-/** The two things this console can CHANGE. See `actions.ts`. */
+/** The subscription operations an operator can run (`manager.subscriptions()`). */
+export type SubscriptionOperations = Pick<SubscriptionsApi, 'cancel' | 'resume' | 'update'>;
+
+/** The ports the write handlers call. See `actions.ts`. */
 export interface DashboardActions {
   refund: RefundAction;
   replayWebhook: ReplayAction;
+  subscriptions: SubscriptionOperations;
+  submitEvidence: EvidenceAction;
 }
 
 /** The subset of an HTTP request the handlers read. */
@@ -648,15 +657,7 @@ export async function subscriptionDetail(deps: Deps, req: ApiRequest): Promise<A
   const id = req.params.id;
   if (id === undefined || id === '') return badRequest('A subscription id is required.');
 
-  // The gateway id first (what a gateway dashboard shows), then this store's own row id (a
-  // managed subscription has no gateway id). Filtered again for a custom store that ignores
-  // either filter: it would answer someone else's row, and that must read as "not found".
-  const [byGateway] = (await deps.store.listSubscriptions({ gatewayId: id, size: 1 })).filter(
-    (row) => row.gatewayId === id,
-  );
-  const row =
-    byGateway ??
-    (await deps.store.listSubscriptions({ id, size: 1 })).filter((r) => r.id === id)[0];
+  const row = await findSubscription(deps.store, id);
   if (row === undefined) return notFound(`No subscription "${id}" is recorded locally.`);
 
   // A payment records the subscription it was charged for by the gateway's id, or, for a managed
@@ -712,6 +713,23 @@ export async function subscriptionDetail(deps: Deps, req: ApiRequest): Promise<A
     audit: audit.map(auditJson),
     currency: deps.currency,
   });
+}
+
+/**
+ * One subscription by the gateway's id first (what a gateway dashboard shows), then this store's own
+ * row id (a managed subscription has no gateway id). Filtered again for a custom store that ignores
+ * either filter: it would answer someone else's row, and that must read as "not found".
+ */
+async function findSubscription(
+  store: BillingStore,
+  id: string,
+): Promise<SubscriptionListItem | undefined> {
+  const [byGateway] = (await store.listSubscriptions({ gatewayId: id, size: 1 })).filter(
+    (row) => row.gatewayId === id,
+  );
+  return (
+    byGateway ?? (await store.listSubscriptions({ id, size: 1 })).filter((r) => r.id === id)[0]
+  );
 }
 
 function uniqueBy<T>(rows: readonly T[], key: (row: T) => string): T[] {
@@ -837,6 +855,10 @@ export const AUDIT_ACTION_FILTERS = [
   AUDIT_ACTIONS.refund,
   AUDIT_ACTIONS.disputeResolved,
   AUDIT_ACTIONS.webhookRetried,
+  AUDIT_ACTIONS.subscriptionCanceled,
+  AUDIT_ACTIONS.subscriptionResumed,
+  AUDIT_ACTIONS.subscriptionRepriced,
+  AUDIT_ACTIONS.disputeEvidenceSubmitted,
 ] as const;
 
 /**
@@ -922,8 +944,9 @@ export const DISPUTE_RESOLUTION_STATUSES = DISPUTE_STATUSES.filter(
  * an outcome that has already happened somewhere else, with the status, the outcome and WHO said
  * so, which is the difference between a resolution and an edit box.
  *
- * Body: `{ status, outcome?, note? }`. `status` must be a finished one
- * ({@link DISPUTE_RESOLUTION_STATUSES}); `outcome` defaults to it.
+ * Body: `{ status, outcome?, note?, dryRun? }`. `status` must be a finished one
+ * ({@link DISPUTE_RESOLUTION_STATUSES}); `outcome` defaults to it. `dryRun: true` validates and
+ * answers what would be recorded, writing nothing.
  */
 export async function resolveDispute(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
   const gatewayId = req.params.gatewayId;
@@ -956,6 +979,23 @@ export async function resolveDispute(deps: Deps, req: ApiRequest): Promise<ApiRe
     return notFound(`No dispute "${gatewayId}" is recorded locally.`);
   }
   const dispute = readDisputeRow(existing);
+
+  if (isDryRun(req.body)) {
+    return ok({
+      dryRun: true,
+      dispute: {
+        gatewayId,
+        paymentGatewayId: dispute.paymentGatewayId,
+        provider: dispute.provider,
+        previousStatus: dispute.status,
+        status,
+        outcome,
+        amount: dispute.amount,
+        currency: dispute.currency,
+      },
+      note: 'Nothing was recorded. Without dryRun this closes the row locally; nothing is sent to the gateway.',
+    });
+  }
 
   const now = (deps.now ?? (() => new Date()))();
   // `saveDispute` leaves absent fields alone, so the deadline and the reason the OPENING event
@@ -1005,6 +1045,163 @@ export async function resolveDispute(deps: Deps, req: ApiRequest): Promise<ApiRe
   });
 }
 
+/** The evidence fields a submission may carry (`DisputeEvidence`), and their JSON types. */
+const EVIDENCE_STRING_FIELDS = [
+  'explanation',
+  'shippingCarrier',
+  'shippingTrackingNumber',
+  'shippingDate',
+  'serviceDate',
+  'termsAcceptedAt',
+  'customerName',
+  'customerEmail',
+  'customerIpAddress',
+] as const;
+const EVIDENCE_FIELDS: readonly string[] = [
+  ...EVIDENCE_STRING_FIELDS,
+  'priorUndisputedPayments',
+  'documents',
+  'metadata',
+];
+
+/** Read `DisputeEvidence` off a body, or the sentence saying why it is not one. */
+function readEvidence(raw: unknown): DisputeEvidence | string {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return '`evidence` must be an object.';
+  }
+  const evidence = raw as Record<string, unknown>;
+  const unknown = Object.keys(evidence).filter((key) => !EVIDENCE_FIELDS.includes(key));
+  if (unknown.length > 0) {
+    return `Unknown evidence field(s): ${unknown.join(', ')}. Gateway-specific data goes in \`metadata\`.`;
+  }
+  for (const key of EVIDENCE_STRING_FIELDS) {
+    if (evidence[key] !== undefined && typeof evidence[key] !== 'string') {
+      return `\`${key}\` must be a string.`;
+    }
+  }
+  if (evidence.documents !== undefined) {
+    if (
+      !Array.isArray(evidence.documents) ||
+      !evidence.documents.every(
+        (doc) =>
+          typeof doc === 'object' &&
+          doc !== null &&
+          typeof (doc as { kind?: unknown }).kind === 'string' &&
+          typeof (doc as { id?: unknown }).id === 'string',
+      )
+    ) {
+      return '`documents` must be a list of `{ kind, id }` — files already uploaded to the gateway.';
+    }
+  }
+  if (
+    evidence.priorUndisputedPayments !== undefined &&
+    (!Array.isArray(evidence.priorUndisputedPayments) ||
+      !evidence.priorUndisputedPayments.every(
+        (p) =>
+          typeof p === 'object' &&
+          p !== null &&
+          typeof (p as { paymentGatewayId?: unknown }).paymentGatewayId === 'string',
+      ))
+  ) {
+    return '`priorUndisputedPayments` must be a list of `{ paymentGatewayId, … }`.';
+  }
+  if (
+    evidence.metadata !== undefined &&
+    (typeof evidence.metadata !== 'object' ||
+      evidence.metadata === null ||
+      Array.isArray(evidence.metadata))
+  ) {
+    return '`metadata` must be an object.';
+  }
+  if (Object.keys(evidence).length === 0) return '`evidence` is empty; there is nothing to submit.';
+  return evidence as DisputeEvidence;
+}
+
+/**
+ * `submitDisputeEvidence` — answer an OPEN dispute with evidence, through the gateway that holds it
+ * (a representment).
+ *
+ * Most gateways accept evidence ONCE, so this is never retried and never automatic: whether to
+ * fight or refund is the merchant's decision, made by whoever calls this. Body:
+ * `{ evidence: DisputeEvidence, note?, dryRun? }` — documents are ids of files ALREADY uploaded to
+ * the gateway. The local row moves when the gateway's dispute webhook lands.
+ */
+export async function submitDisputeEvidence(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
+  const gatewayId = req.params.gatewayId;
+  if (gatewayId === undefined || gatewayId === '') {
+    return badRequest('A dispute gateway id is required.');
+  }
+  const body = bodyOf(req.body);
+  const evidence = readEvidence(body.evidence);
+  if (typeof evidence === 'string') return badRequest(evidence);
+  const note = readNote(req.body);
+  if (note === INVALID_NOTE) return badRequest('`note` must be a string when given.');
+
+  const existing = await deps.store.findDisputeByGatewayId(gatewayId);
+  if (existing === null) return notFound(`No dispute "${gatewayId}" is recorded locally.`);
+  const dispute = readDisputeRow(existing);
+  if (!(OPEN_DISPUTE_STATUSES as readonly string[]).includes(dispute.status)) {
+    return conflict(
+      `Dispute "${gatewayId}" is "${dispute.status}"; evidence answers an open dispute only.`,
+    );
+  }
+
+  const submit = deps.actions?.submitEvidence;
+  if (submit === undefined) {
+    return unavailable(
+      'Submitting evidence needs the payments manager, which is not available in this deployment.',
+    );
+  }
+  const dryRun = isDryRun(req.body);
+  const outcome = await submit({
+    provider: dispute.provider,
+    disputeGatewayId: gatewayId,
+    evidence,
+    ...(dryRun ? { dryRun } : {}),
+  });
+  const fields = Object.keys(evidence).sort();
+  switch (outcome.kind) {
+    case 'dry-run':
+      return ok({
+        dryRun: true,
+        dispute: { gatewayId, provider: dispute.provider, status: dispute.status },
+        evidence: { fields },
+        note: 'Nothing was sent to the gateway. Most gateways accept evidence once.',
+      });
+    case 'ok': {
+      const audit = await deps.store.recordAuditEvent({
+        action: AUDIT_ACTIONS.disputeEvidenceSubmitted,
+        ...(deps.actor !== undefined ? { actor: deps.actor } : {}),
+        provider: dispute.provider,
+        subjectType: 'dispute',
+        subjectId: gatewayId,
+        ...(dispute.amount !== null ? { amount: dispute.amount } : {}),
+        ...(dispute.currency !== null ? { currency: dispute.currency } : {}),
+        message: note ?? null,
+        // Which fields went, never their contents: evidence carries customer data.
+        metadata: { fields, gatewayStatus: outcome.dispute.status },
+      });
+      return ok({
+        dispute: {
+          gatewayId,
+          provider: dispute.provider,
+          gatewayStatus: outcome.dispute.status,
+          canSubmitEvidence: outcome.dispute.canSubmitEvidence,
+        },
+        evidence: { fields },
+        audit: audit === null ? null : auditJson(audit),
+        note: 'The dispute row updates when the gateway’s dispute webhook arrives.',
+      });
+    }
+    case 'unavailable':
+      return unavailable(outcome.message);
+    case 'unsupported':
+      return conflict(outcome.message);
+    case 'gateway-error':
+      return upstreamFailed(outcome.message);
+  }
+}
+
 /**
  * Read the fields a resolution needs off whatever row the store returned.
  *
@@ -1040,7 +1237,9 @@ function readDisputeRow(row: unknown): {
  * `POST <api>/payments/:gatewayId/refund` — refund a payment through its own gateway.
  *
  * `POST`, never `GET`: a refund reachable by URL is a refund a crawler can trigger. Body is
- * `{ amount?: number }` in integer minor units; omit it for the full amount.
+ * `{ amount?: number, note?: string, dryRun?: boolean }`, `amount` in integer minor units; omit it
+ * for the full amount. `dryRun: true` runs every check (the payment, the amount, the gateway's
+ * refund support) and answers what would be refunded, sending nothing.
  *
  * The local row is deliberately NOT rewritten here. The gateway confirms a refund with a
  * `payment.refunded` webhook, and that is what moves the row to `refunded` — writing it optimistically
@@ -1075,6 +1274,9 @@ export async function refundPayment(deps: Deps, req: ApiRequest): Promise<ApiRes
     );
   }
 
+  const note = readNote(req.body);
+  if (note === INVALID_NOTE) return badRequest('`note` must be a string when given.');
+
   const refund = deps.actions?.refund;
   if (refund === undefined) {
     return unavailable(
@@ -1082,12 +1284,30 @@ export async function refundPayment(deps: Deps, req: ApiRequest): Promise<ApiRes
     );
   }
 
+  const dryRun = isDryRun(req.body);
   const outcome = await refund({
     provider: payment.provider,
     gatewayId,
     ...(amount !== undefined ? { amount } : {}),
+    ...(dryRun ? { dryRun } : {}),
   });
   switch (outcome.kind) {
+    case 'dry-run':
+      return ok({
+        dryRun: true,
+        refund: {
+          amount: amount ?? payment.amount,
+          currency: payment.currency,
+          partial: amount !== undefined,
+        },
+        payment: {
+          gatewayId,
+          provider: payment.provider,
+          amount: payment.amount,
+          currency: payment.currency,
+        },
+        note: 'Nothing was sent to the gateway.',
+      });
     case 'ok': {
       // WHO refunded WHAT. The only record of a console refund used to be a diagnostic carrying
       // a gateway id, a provider and an amount — and no actor at all, even though `enforce()`
@@ -1104,6 +1324,7 @@ export async function refundPayment(deps: Deps, req: ApiRequest): Promise<ApiRes
         // charge, and recording the figure rather than a null is what makes a partial legible.
         amount: amount ?? payment.amount,
         currency: payment.currency,
+        message: note ?? null,
         metadata: {
           partial: amount !== undefined,
           paymentAmount: payment.amount,
@@ -1145,7 +1366,8 @@ export async function refundPayment(deps: Deps, req: ApiRequest): Promise<ApiRes
  * re-claims a `failed` event (`recordWebhookEvent` returns it again) while refusing an in-flight or
  * already-processed one, so this can never double-apply a redelivery.
  *
- * `POST`, never `GET`, for the same reason the refund is.
+ * `POST`, never `GET`, for the same reason the refund is. `{ dryRun: true }` checks the row and
+ * answers what would be re-run, running nothing.
  */
 export async function retryWebhookEvent(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
   const gatewayEventId = req.params.gatewayEventId;
@@ -1168,6 +1390,18 @@ export async function retryWebhookEvent(deps: Deps, req: ApiRequest): Promise<Ap
     return unavailable(
       'Retrying an event needs the payments manager, which is not available in this deployment.',
     );
+  }
+
+  if (isDryRun(req.body)) {
+    return ok({
+      dryRun: true,
+      gatewayEventId,
+      provider: row.provider,
+      type: row.type,
+      status: row.status,
+      previousError: row.error,
+      note: "Nothing was run. Without dryRun the event goes through the app's handlers again.",
+    });
   }
 
   const outcome = await replay({
@@ -1212,6 +1446,295 @@ export async function retryWebhookEvent(deps: Deps, req: ApiRequest): Promise<Ap
     case 'failed':
       return upstreamFailed(outcome.message);
   }
+}
+
+/** Statuses of a subscription that is still running, and so can be canceled or re-priced. */
+const LIVE_SUBSCRIPTION_STATUSES: readonly string[] = [
+  'active',
+  'trialing',
+  'past_due',
+  'paused',
+  'incomplete',
+  'unpaid',
+];
+
+/** The subscription a write targets, checked: found, still running, and its port wired. */
+async function subscriptionTarget(
+  deps: Deps,
+  req: ApiRequest,
+): Promise<
+  | { ok: true; row: SubscriptionListItem; operations: SubscriptionOperations }
+  | { ok: false; error: ApiResponse }
+> {
+  const id = req.params.id;
+  if (id === undefined || id === '') {
+    return { ok: false, error: badRequest('A subscription id is required.') };
+  }
+  const row = await findSubscription(deps.store, id);
+  if (row === undefined) {
+    return { ok: false, error: notFound(`No subscription "${id}" is recorded locally.`) };
+  }
+  if (!LIVE_SUBSCRIPTION_STATUSES.includes(row.status)) {
+    return {
+      ok: false,
+      error: conflict(`Subscription "${id}" is "${row.status}"; it is no longer running.`),
+    };
+  }
+  const operations = deps.actions?.subscriptions;
+  if (operations === undefined) {
+    return {
+      ok: false,
+      error: unavailable(
+        'Subscription operations need the payments manager, which is not available in this deployment.',
+      ),
+    };
+  }
+  return { ok: true, row, operations };
+}
+
+/** A gateway-owned subscription the gateway cannot run `operation` on, as a `409`; else `null`. */
+function gatewayRefusal(
+  deps: Deps,
+  row: SubscriptionListItem,
+  operation: 'cancel' | 'update',
+): ApiResponse | null {
+  if (row.managed) return null;
+  if (row.gatewayId === null) {
+    return conflict(`Subscription "${row.id}" is gateway-owned but has no gateway id to act on.`);
+  }
+  const capability = operation === 'cancel' ? 'cancelSubscription' : 'updateSubscription';
+  if (deps.capabilities?.[row.provider]?.[capability] === false) {
+    return conflict(
+      `The "${row.provider}" gateway cannot ${operation === 'cancel' ? 'cancel' : 're-price'} a subscription it owns. Do it from the gateway's own dashboard.`,
+    );
+  }
+  return null;
+}
+
+/** A thrown subscription operation: the gateway's refusal (`502`), or the store's (`409`). */
+function operationFailed(row: SubscriptionListItem, error: unknown): ApiResponse {
+  const message = error instanceof Error && error.message !== '' ? error.message : String(error);
+  return row.managed ? conflict(message) : upstreamFailed(message);
+}
+
+/** The id `manager.subscriptions()` takes: this store's row in managed mode, the gateway's otherwise. */
+function operationId(row: SubscriptionListItem): string {
+  return row.managed ? row.id : (row.gatewayId ?? row.id);
+}
+
+/**
+ * `cancelSubscription` — cancel a running subscription, at the end of the paid period (default) or
+ * now, through `manager.subscriptions().cancel` (the gateway for a gateway-owned one, this store
+ * for a managed one).
+ *
+ * Body: `{ atPeriodEnd?: boolean = true, note?, dryRun? }`. A gateway-owned row is moved by the
+ * gateway's own webhook, not here.
+ */
+export async function cancelSubscription(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
+  const target = await subscriptionTarget(deps, req);
+  if (!target.ok) return target.error;
+  const { row, operations } = target;
+  const body = bodyOf(req.body);
+  if (body.atPeriodEnd !== undefined && typeof body.atPeriodEnd !== 'boolean') {
+    return badRequest('`atPeriodEnd` must be a boolean when given.');
+  }
+  const atPeriodEnd = body.atPeriodEnd !== false;
+  const note = readNote(req.body);
+  if (note === INVALID_NOTE) return badRequest('`note` must be a string when given.');
+  if (atPeriodEnd && row.cancelAtPeriodEnd) {
+    return conflict(`Subscription "${row.id}" is already set to cancel at the period end.`);
+  }
+  const refused = gatewayRefusal(deps, row, 'cancel');
+  if (refused !== null) return refused;
+
+  const cancel = { atPeriodEnd, mode: row.managed ? 'managed' : 'gateway' };
+  if (isDryRun(req.body)) {
+    return ok({
+      dryRun: true,
+      subscription: subscriptionJson(row),
+      cancel,
+      note: 'Nothing was canceled.',
+    });
+  }
+
+  try {
+    await operations.cancel(operationId(row), {
+      via: row.provider,
+      managed: row.managed,
+      atPeriodEnd,
+    });
+  } catch (error) {
+    return operationFailed(row, error);
+  }
+  const audit = await deps.store.recordAuditEvent({
+    action: AUDIT_ACTIONS.subscriptionCanceled,
+    ...(deps.actor !== undefined ? { actor: deps.actor } : {}),
+    provider: row.provider,
+    subjectType: 'subscription',
+    subjectId: row.gatewayId ?? row.id,
+    message: note ?? null,
+    metadata: { atPeriodEnd, managed: row.managed, previousStatus: row.status },
+  });
+  return ok({
+    subscription: { id: row.id, gatewayId: row.gatewayId, provider: row.provider },
+    cancel,
+    audit: audit === null ? null : auditJson(audit),
+    note: row.managed
+      ? 'Recorded on the managed subscription.'
+      : 'The subscription row updates when the gateway’s webhook arrives.',
+  });
+}
+
+/**
+ * `resumeSubscription` — undo a scheduled cancellation of a MANAGED subscription
+ * (`manager.subscriptions().resume`). A gateway-owned one has no portable un-cancel.
+ *
+ * Body: `{ note?, dryRun? }`.
+ */
+export async function resumeSubscription(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
+  const target = await subscriptionTarget(deps, req);
+  if (!target.ok) return target.error;
+  const { row, operations } = target;
+  const note = readNote(req.body);
+  if (note === INVALID_NOTE) return badRequest('`note` must be a string when given.');
+  if (!row.managed) {
+    return conflict(
+      `Subscription "${row.id}" is owned by the "${row.provider}" gateway; no gateway has a portable un-cancel. Create a new subscription instead.`,
+    );
+  }
+  if (row.status !== 'active' || !row.cancelAtPeriodEnd) {
+    return conflict(
+      `Subscription "${row.id}" has no scheduled cancellation to undo (it is "${row.status}"${row.cancelAtPeriodEnd ? '' : ', not set to cancel'}).`,
+    );
+  }
+  if (isDryRun(req.body)) {
+    return ok({ dryRun: true, subscription: subscriptionJson(row), note: 'Nothing was changed.' });
+  }
+
+  try {
+    await operations.resume(row.id, { via: row.provider, managed: true });
+  } catch (error) {
+    return operationFailed(row, error);
+  }
+  const audit = await deps.store.recordAuditEvent({
+    action: AUDIT_ACTIONS.subscriptionResumed,
+    ...(deps.actor !== undefined ? { actor: deps.actor } : {}),
+    provider: row.provider,
+    subjectType: 'subscription',
+    subjectId: row.id,
+    message: note ?? null,
+  });
+  return ok({
+    subscription: { id: row.id, gatewayId: row.gatewayId, provider: row.provider },
+    audit: audit === null ? null : auditJson(audit),
+  });
+}
+
+/**
+ * `repriceSubscription` — change what a running subscription charges per cycle
+ * (`manager.subscriptions().update`). A managed one takes the new price on its next cycle; a
+ * gateway-owned one is re-priced at the gateway, on the gateway's terms.
+ *
+ * Body: `{ amount, description?, cycle? (managed only), note?, dryRun? }`, `amount` in integer
+ * minor units of the subscription's own currency.
+ */
+export async function repriceSubscription(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
+  const target = await subscriptionTarget(deps, req);
+  if (!target.ok) return target.error;
+  const { row, operations } = target;
+  const body = bodyOf(req.body);
+  const amount = body.amount;
+  if (typeof amount !== 'number' || !Number.isInteger(amount) || amount <= 0) {
+    return badRequest('`amount` must be a positive integer in the currency’s minor units.');
+  }
+  if (body.description !== undefined && typeof body.description !== 'string') {
+    return badRequest('`description` must be a string when given.');
+  }
+  if (body.cycle !== undefined && typeof body.cycle !== 'string') {
+    return badRequest('`cycle` must be a string when given.');
+  }
+  if (body.cycle !== undefined && !row.managed) {
+    return badRequest(
+      'A gateway-owned subscription keeps the gateway’s cycle; `cycle` applies to managed subscriptions only.',
+    );
+  }
+  const note = readNote(req.body);
+  if (note === INVALID_NOTE) return badRequest('`note` must be a string when given.');
+  if (amount === row.amount && body.cycle === undefined && body.description === undefined) {
+    return conflict(`Subscription "${row.id}" already charges ${amount}.`);
+  }
+  const refused = gatewayRefusal(deps, row, 'update');
+  if (refused !== null) return refused;
+
+  const reprice = {
+    from: row.amount,
+    to: amount,
+    currency: row.currency,
+    ...(body.cycle !== undefined ? { cycle: body.cycle } : {}),
+    ...(body.description !== undefined ? { description: body.description } : {}),
+    mode: row.managed ? 'managed' : 'gateway',
+  };
+  if (isDryRun(req.body)) {
+    return ok({
+      dryRun: true,
+      subscription: subscriptionJson(row),
+      reprice,
+      note: 'Nothing was changed.',
+    });
+  }
+
+  try {
+    await operations.update(
+      operationId(row),
+      {
+        amount,
+        ...(body.description !== undefined ? { description: body.description as string } : {}),
+        ...(body.cycle !== undefined ? { cycle: body.cycle as string } : {}),
+      },
+      { via: row.provider, managed: row.managed },
+    );
+  } catch (error) {
+    return operationFailed(row, error);
+  }
+  const audit = await deps.store.recordAuditEvent({
+    action: AUDIT_ACTIONS.subscriptionRepriced,
+    ...(deps.actor !== undefined ? { actor: deps.actor } : {}),
+    provider: row.provider,
+    subjectType: 'subscription',
+    subjectId: row.gatewayId ?? row.id,
+    amount,
+    ...(row.currency !== null ? { currency: row.currency } : {}),
+    message: note ?? null,
+    metadata: { from: row.amount, to: amount, managed: row.managed, cycle: body.cycle ?? null },
+  });
+  return ok({
+    subscription: { id: row.id, gatewayId: row.gatewayId, provider: row.provider },
+    reprice,
+    audit: audit === null ? null : auditJson(audit),
+    note: row.managed
+      ? 'The new price applies from the next cycle.'
+      : 'The subscription row updates when the gateway’s webhook arrives.',
+  });
+}
+
+/** A JSON body as a record (anything else reads as empty). */
+function bodyOf(body: unknown): Record<string, unknown> {
+  return typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : {};
+}
+
+/** `{ dryRun: true }`: validate and answer what would happen, changing nothing. */
+function isDryRun(body: unknown): boolean {
+  return bodyOf(body).dryRun === true;
+}
+
+/** Sentinel for a `note` that was supplied and is not a string. */
+const INVALID_NOTE = Symbol('invalid-note');
+
+/** The audit note of a write (`undefined` when none was given). */
+function readNote(body: unknown): string | undefined | typeof INVALID_NOTE {
+  const note = bodyOf(body).note;
+  if (note === undefined || note === null || note === '') return undefined;
+  return typeof note === 'string' ? note : INVALID_NOTE;
 }
 
 /** Sentinel for an `amount` that was supplied and is not a usable one. Distinct from `undefined`,

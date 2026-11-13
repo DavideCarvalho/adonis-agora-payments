@@ -1,26 +1,14 @@
 import type { HttpContext } from '@adonisjs/core/http';
+import { CONSOLE_ROUTES } from './api_core.js';
 import {
   type ApiRequest,
   type ApiResponse,
-  auditEvents,
-  customers,
   type Deps,
   DISPUTE_RESOLUTION_STATUSES,
   DISPUTE_STATUSES,
-  disputes,
-  health,
-  overview,
   PAYMENT_STATUSES,
-  paymentDetail,
-  payments,
-  refundPayment,
-  resolveDispute,
-  retryWebhookEvent,
   SUBSCRIPTION_STATUSES,
-  subscriptionDetail,
-  subscriptions,
   WEBHOOK_EVENT_STATUSES,
-  webhookEvents,
 } from './handlers.js';
 import { PERIOD_PRESETS } from './period.js';
 
@@ -235,21 +223,7 @@ const PROVIDER_PROPERTY: DevToolInputProperty = {
   description: 'Gateway name, e.g. "stripe", "asaas".',
 };
 
-const ROUTES = {
-  overview: { handler: overview },
-  health: { handler: health, everyOrganization: true },
-  payments: { handler: payments, needsCapabilities: true },
-  paymentDetail: { handler: paymentDetail, needsCapabilities: true },
-  customers: { handler: customers },
-  audit: { handler: auditEvents, everyOrganization: true },
-  disputes: { handler: disputes },
-  subscriptions: { handler: subscriptions },
-  subscriptionDetail: { handler: subscriptionDetail, needsCapabilities: true },
-  webhookEvents: { handler: webhookEvents, everyOrganization: true },
-  refund: { handler: refundPayment, needsActions: true },
-  retry: { handler: retryWebhookEvent, needsActions: true, everyOrganization: true },
-  resolve: { handler: resolveDispute },
-} satisfies Record<string, PaymentsApiRoute>;
+const ROUTES = CONSOLE_ROUTES;
 
 /**
  * The payments console's developer tools: the same handlers, organization scope and audit trail

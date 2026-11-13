@@ -1,4 +1,5 @@
 import type { BillingStore } from '../billing/billing_store.js';
+import type { Dispute, DisputeEvidence } from '../types.js';
 
 /**
  * The dashboard's two WRITE actions, as framework-light ports.
@@ -46,13 +47,17 @@ export type RefundOutcome =
   | { kind: 'unsupported'; message: string }
   /** The gateway refused. `message` is ITS message, verbatim — a silent failure here is worse
    *  than no button. */
-  | { kind: 'gateway-error'; message: string };
+  | { kind: 'gateway-error'; message: string }
+  /** `dryRun`: the driver is configured and can refund. Nothing was sent to the gateway. */
+  | { kind: 'dry-run' };
 
 export type RefundAction = (input: {
   provider: string;
   gatewayId: string;
   /** Integer minor units. Omitted = refund the whole payment. */
   amount?: number;
+  /** Check that the refund could be sent (driver configured, refunds supported) and stop there. */
+  dryRun?: boolean;
 }) => Promise<RefundOutcome>;
 
 /**
@@ -65,7 +70,7 @@ export type RefundAction = (input: {
 export function createRefundAction(
   resolveDriver: (provider: string) => RefundCapableDriver | Promise<RefundCapableDriver>,
 ): RefundAction {
-  return async ({ provider, gatewayId, amount }) => {
+  return async ({ provider, gatewayId, amount, dryRun }) => {
     let driver: RefundCapableDriver;
     try {
       driver = await resolveDriver(provider);
@@ -80,6 +85,7 @@ export function createRefundAction(
         message: `The "${provider}" gateway has no refund API. Refund this payment from the gateway's own dashboard.`,
       };
     }
+    if (dryRun === true) return { kind: 'dry-run' };
     try {
       const refund = await driver.refund(gatewayId, amount);
       return {
@@ -93,6 +99,67 @@ export function createRefundAction(
       };
     } catch (error) {
       return { kind: 'gateway-error', message: messageOf(error, 'the gateway refused the refund') };
+    }
+  };
+}
+
+/** The slice of `PaymentsDriver` an evidence submission needs. */
+export interface EvidenceCapableDriver {
+  readonly provider: string;
+  readonly capabilities?: { disputes?: boolean };
+  submitDisputeEvidence?(disputeGatewayId: string, evidence: DisputeEvidence): Promise<Dispute>;
+}
+
+/** What the operator gets back from an evidence submission. */
+export type EvidenceOutcome =
+  | { kind: 'ok'; dispute: { status: string; canSubmitEvidence: boolean | null } }
+  | { kind: 'unavailable'; message: string }
+  | { kind: 'unsupported'; message: string }
+  | { kind: 'gateway-error'; message: string }
+  | { kind: 'dry-run' };
+
+export type EvidenceAction = (input: {
+  provider: string;
+  disputeGatewayId: string;
+  evidence: DisputeEvidence;
+  dryRun?: boolean;
+}) => Promise<EvidenceOutcome>;
+
+/**
+ * Build the evidence submission over a driver resolver. Most gateways accept evidence ONCE, so
+ * this never retries: one honest call, and the gateway's answer verbatim.
+ */
+export function createEvidenceAction(
+  resolveDriver: (provider: string) => EvidenceCapableDriver | Promise<EvidenceCapableDriver>,
+): EvidenceAction {
+  return async ({ provider, disputeGatewayId, evidence, dryRun }) => {
+    let driver: EvidenceCapableDriver;
+    try {
+      driver = await resolveDriver(provider);
+    } catch (error) {
+      return { kind: 'unavailable', message: messageOf(error, `provider "${provider}" not found`) };
+    }
+    if (
+      driver.capabilities?.disputes !== true ||
+      typeof driver.submitDisputeEvidence !== 'function'
+    ) {
+      return {
+        kind: 'unsupported',
+        message: `The "${provider}" gateway has no dispute evidence API. Answer this dispute from the gateway's own dashboard.`,
+      };
+    }
+    if (dryRun === true) return { kind: 'dry-run' };
+    try {
+      const dispute = await driver.submitDisputeEvidence(disputeGatewayId, evidence);
+      return {
+        kind: 'ok',
+        dispute: { status: dispute.status, canSubmitEvidence: dispute.canSubmitEvidence ?? null },
+      };
+    } catch (error) {
+      return {
+        kind: 'gateway-error',
+        message: messageOf(error, 'the gateway refused the evidence'),
+      };
     }
   };
 }

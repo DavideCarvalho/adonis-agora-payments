@@ -440,6 +440,14 @@ export const AUDIT_ACTIONS = {
   tenantForged: 'console.tenant_forged',
   /** A failed webhook event re-run from the console or its dev tools. `subjectId` is the gateway event id. */
   webhookRetried: 'webhook.retried',
+  /** A subscription an operator canceled (now or at the period end). `subjectId` is its gateway id, else its id. */
+  subscriptionCanceled: 'subscription.canceled',
+  /** A scheduled cancellation an operator undid (managed subscriptions). */
+  subscriptionResumed: 'subscription.resumed',
+  /** A subscription an operator re-priced. `amount` is the new price per cycle. */
+  subscriptionRepriced: 'subscription.repriced',
+  /** Evidence an operator submitted to the gateway for an open dispute. `metadata.fields` names what went. */
+  disputeEvidenceSubmitted: 'dispute.evidence_submitted',
 } as const;
 
 /** Filter + page for {@link BillingStore.listAuditEvents}. */

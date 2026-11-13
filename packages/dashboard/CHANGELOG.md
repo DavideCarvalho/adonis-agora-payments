@@ -1,5 +1,11 @@
 # @adonis-agora/payments-dashboard
 
+## 1.0.0-rc.5
+
+### Major Changes
+
+- [#237](https://github.com/DavideCarvalho/adonis-agora-payments/pull/237) [`66d22c9`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/66d22c97f1c287de431cd0ca01ae9c8904b667f4) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Console list endpoints use the `@adonis-agora/filter` wire format. `GET <path>/api/{payments,subscriptions,disputes,webhook-events,customers,audit}` take `filter[field]=value` (exact, one value), an optional `sort` limited to the list's one order, and `page`/`size`, and answer `{ data, meta: { total, perPage, currentPage, lastPage, firstPage } }` with a real total. Unknown filter fields, unsupported operators and other sorts answer `400`. The payments `reference` lookup is `filter[externalReference]`, the disputes work list is `filter[dueWithin]` with its total in `meta.total`. `BillingStore` count reads take the list filters (`PaymentCountQuery`, `SubscriptionCountQuery`, `DisputeCountQuery`, `WebhookEventCountQuery`) and a new `countCustomers` is required. The bundled console builds its requests with `@adonis-agora/filter-client` and pages with the real total.
+
 ## 1.0.0-rc.4
 
 ### Minor Changes

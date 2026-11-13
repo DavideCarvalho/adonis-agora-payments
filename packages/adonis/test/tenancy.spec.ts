@@ -627,7 +627,7 @@ describe('payments console under tenancy (routes)', () => {
       find('get', '/payments/api/payments')(fakeCtx(recorded)),
     );
     expect(recorded.status).toBe(200);
-    const rows = (recorded.body as { payments: Array<{ gatewayId: string }> }).payments;
+    const rows = (recorded.body as { data: Array<{ gatewayId: string }> }).data;
     expect(rows.map((r) => r.gatewayId)).toEqual(['pay_a']);
   });
 
@@ -656,7 +656,7 @@ describe('payments console under tenancy (routes)', () => {
     await context.as({}, () =>
       find('get', '/payments/api/payments')(fakeCtx(recorded, { tenant: 'b' })),
     );
-    expect((recorded.body as { payments: unknown[] }).payments).toEqual([]);
+    expect((recorded.body as { data: unknown[] }).data).toEqual([]);
     const audit = await store.listAuditEvents({ action: AUDIT_ACTIONS.tenantForged });
     expect(audit).toHaveLength(1);
     expect(audit[0]?.subjectId).toBe('b');
@@ -667,13 +667,13 @@ describe('payments console under tenancy (routes)', () => {
     const { find } = await boot(() => ({ allowed: true, tenants: '*' }));
     const all: Recorded = {};
     await context.as({}, () => find('get', '/payments/api/payments')(fakeCtx(all)));
-    expect((all.body as { payments: unknown[] }).payments).toHaveLength(2);
+    expect((all.body as { data: unknown[] }).data).toHaveLength(2);
     const one: Recorded = {};
     await context.as({}, () =>
       find('get', '/payments/api/payments')(fakeCtx(one, { tenant: 'b' })),
     );
     expect(
-      (one.body as { payments: Array<{ gatewayId: string }> }).payments.map((r) => r.gatewayId),
+      (one.body as { data: Array<{ gatewayId: string }> }).data.map((r) => r.gatewayId),
     ).toEqual(['pay_b']);
     const picker: Recorded = {};
     await context.as({}, () => find('get', '/payments/api/tenants')(fakeCtx(picker)));
@@ -713,7 +713,7 @@ describe('payments console under tenancy (routes)', () => {
     const { find } = await boot(() => true);
     const recorded: Recorded = {};
     await context.as({}, () => find('get', '/payments/api/payments')(fakeCtx(recorded)));
-    expect((recorded.body as { payments: unknown[] }).payments).toEqual([]);
+    expect((recorded.body as { data: unknown[] }).data).toEqual([]);
     const picker: Recorded = {};
     await context.as({}, () => find('get', '/payments/api/tenants')(fakeCtx(picker)));
     expect(picker.body).toMatchObject({ mode: 'none' });

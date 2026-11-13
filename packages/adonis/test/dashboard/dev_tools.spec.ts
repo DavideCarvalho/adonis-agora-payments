@@ -225,7 +225,8 @@ describe('payments dev tools catalogue', () => {
     const serve = vi.fn(async (_ctx: unknown, _route: unknown, req: { query: unknown }) => ({
       status: 200,
       body: {
-        customers: Array.from({ length: Number((req.query as { size: string }).size) }, () => ({})),
+        data: Array.from({ length: Number((req.query as { size: string }).size) }, () => ({})),
+        meta: { total: 250, perPage: 100, currentPage: 2, lastPage: 3, firstPage: 1 },
       },
     }));
     const tools = paymentsDevTools({ ...options, serve });
@@ -236,10 +237,11 @@ describe('payments dev tools catalogue', () => {
     };
     expect(serve.mock.calls[0]?.[2]).toEqual({
       params: {},
-      query: { page: '2', size: '100', ownerId: '42' },
+      query: { filter: { ownerId: '42' }, page: '2', size: '100' },
     });
     expect(out.items).toHaveLength(100);
     expect(out.next).toBe(3);
+    expect(out).toMatchObject({ total: 250 });
   });
 });
 
@@ -347,10 +349,10 @@ describe('PaymentsDashboardProvider registers its dev tools', () => {
 
   it('answers exactly what the console API answers', async () => {
     const { lib, tool, route } = await boot({});
-    const api = fakeCtx({ qs: { status: 'paid', page: '1', size: '20' } });
+    const api = fakeCtx({ qs: { filter: { status: 'paid' }, page: '1', size: '20' } });
     await route('get', '/payments/api/payments')?.(api.ctx);
-    const viaApi = api.recorded.body as { payments: unknown[] };
-    expect(viaApi.payments).toHaveLength(2);
+    const viaApi = api.recorded.body as { data: unknown[] };
+    expect(viaApi.data).toHaveLength(2);
 
     const mcp = fakeCtx();
     await lib?.authorize(mcp.ctx);
@@ -358,7 +360,7 @@ describe('PaymentsDashboardProvider registers its dev tools', () => {
       { status: 'paid' },
       call(mcp.ctx),
     )) as { items: unknown[]; next: unknown };
-    expect(viaTool.items).toEqual(viaApi.payments);
+    expect(viaTool.items).toEqual(viaApi.data);
     expect(viaTool.next).toBeNull();
   });
 

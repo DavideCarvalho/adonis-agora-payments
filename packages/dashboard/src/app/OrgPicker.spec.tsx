@@ -31,7 +31,7 @@ function stubApi(picker: TenantPicker | null): void {
         : url.includes('/overview')
           ? { period: { from: '', to: '', preset: '30d' }, currency: 'BRL', metrics: [] }
           : {
-              payments: [
+              data: [
                 {
                   id: '1',
                   gatewayId: 'pay_a',
@@ -49,7 +49,7 @@ function stubApi(picker: TenantPicker | null): void {
                   refundable: false,
                 },
               ],
-              meta: { page: 1, size: 50, count: 1, scanned: 1, truncated: false },
+              meta: { total: 1, perPage: 50, currentPage: 1, lastPage: 1, firstPage: 1 },
             };
     return { ok: true, status: 200, statusText: 'OK', json: async () => body } as Response;
   }) as typeof globalThis.fetch;

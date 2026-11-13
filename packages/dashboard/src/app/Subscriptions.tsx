@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { paymentsClient } from '../client/payments-client';
 import { formatCents, formatCount, formatDay, formatDaysUntil, formatWhen } from './money';
 import { SubscriptionDetail } from './SubscriptionDetail';
-import { Pager, Panel, QueryState, ScanNotice } from './shell';
+import { Pager, Panel, QueryState } from './shell';
 import {
   subscriptionIsBilling,
   subscriptionNeedsAttention,
@@ -74,7 +74,7 @@ export function Subscriptions({
       paymentsClient.subscriptions({ status, provider, customerId, size: PAGE_SIZE, page }),
   });
 
-  const rows = query.data?.subscriptions ?? [];
+  const rows = query.data?.data ?? [];
   const pastDue = query.data?.counts.past_due ?? 0;
   const refilter = (apply: () => void) => {
     apply();
@@ -204,13 +204,7 @@ export function Subscriptions({
             ))}
           </tbody>
         </table>
-        <ScanNotice meta={query.data?.meta} noun="subscriptions" />
-        <Pager
-          page={query.data?.meta.page ?? page}
-          size={query.data?.meta.size ?? PAGE_SIZE}
-          count={query.data?.meta.count ?? 0}
-          onPage={setPage}
-        />
+        <Pager meta={query.data?.meta} count={rows.length} onPage={setPage} />
       </QueryState>
       {opened !== null && (
         <SubscriptionDetail

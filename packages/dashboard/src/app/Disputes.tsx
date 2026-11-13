@@ -91,8 +91,8 @@ function ClosingWindows() {
     queryFn: () => paymentsClient.disputes({ dueWithin: hours, size: PAGE_SIZE, page }),
   });
 
-  const rows = query.data?.disputes ?? [];
-  const total = query.data?.dueWithin?.total;
+  const rows = query.data?.data ?? [];
+  const total = query.data?.meta.total;
 
   return (
     <Panel
@@ -164,12 +164,7 @@ function ClosingWindows() {
             })}
           </tbody>
         </table>
-        <Pager
-          page={query.data?.meta.page ?? page}
-          size={query.data?.meta.size ?? PAGE_SIZE}
-          count={query.data?.meta.count ?? 0}
-          onPage={setPage}
-        />
+        <Pager meta={query.data?.meta} count={rows.length} onPage={setPage} />
       </QueryState>
     </Panel>
   );
@@ -187,7 +182,7 @@ function DisputeLog({ initialStatus }: { initialStatus?: string | undefined }) {
     queryFn: () => paymentsClient.disputes({ status, provider, size: PAGE_SIZE, page }),
   });
 
-  const rows = query.data?.disputes ?? [];
+  const rows = query.data?.data ?? [];
   const [resolving, setResolving] = useState<DisputeRow | null>(null);
   const refilter = (apply: () => void) => {
     apply();
@@ -266,12 +261,7 @@ function DisputeLog({ initialStatus }: { initialStatus?: string | undefined }) {
             ))}
           </tbody>
         </table>
-        <Pager
-          page={query.data?.meta.page ?? page}
-          size={query.data?.meta.size ?? PAGE_SIZE}
-          count={query.data?.meta.count ?? 0}
-          onPage={setPage}
-        />
+        <Pager meta={query.data?.meta} count={rows.length} onPage={setPage} />
       </QueryState>
       {resolving !== null && (
         <ResolveDisputeDialog dispute={resolving} onClose={() => setResolving(null)} />

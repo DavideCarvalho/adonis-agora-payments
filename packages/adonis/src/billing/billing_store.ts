@@ -500,6 +500,23 @@ export interface BillingListQuery {
   size?: number;
 }
 
+/** {@link BillingStore.countPayments}: the count window plus every {@link PaymentListQuery} filter. */
+export type PaymentCountQuery = BillingCountQuery & Omit<PaymentListQuery, 'page' | 'size'>;
+
+/** {@link BillingStore.countSubscriptions}: the count window plus every {@link SubscriptionListQuery} filter. */
+export type SubscriptionCountQuery = BillingCountQuery &
+  Omit<SubscriptionListQuery, 'page' | 'size'>;
+
+/** {@link BillingStore.countDisputes}: the count window plus every {@link DisputeListQuery} filter. */
+export type DisputeCountQuery = BillingCountQuery & Omit<DisputeListQuery, 'page' | 'size'>;
+
+/** {@link BillingStore.countWebhookEvents}: the count window plus every {@link WebhookEventListQuery} filter. */
+export type WebhookEventCountQuery = BillingCountQuery &
+  Omit<WebhookEventListQuery, 'page' | 'size'>;
+
+/** {@link BillingStore.countCustomers}: every {@link CustomerListQuery} filter, without the page. */
+export type CustomerCountQuery = Omit<CustomerListQuery, 'page' | 'size'>;
+
 /**
  * The persistence SPI for the billing layer. The Lucid implementation writes through the
  * configured models; an in-memory implementation exists in `src/testing` so the billing
@@ -566,6 +583,9 @@ export interface BillingStore<
    * {@link CustomerListItem} so a reader never depends on Lucid.
    */
   listCustomers(query: CustomerListQuery): Promise<CustomerListItem[]>;
+
+  /** How many customers {@link listCustomers} matches across every page — the same filters. */
+  countCustomers(query: CustomerCountQuery): Promise<number>;
 
   /**
    * The customer mappings behind a set of gateway customer ids, in one read.
@@ -654,8 +674,11 @@ export interface BillingStore<
    */
   listSubscriptions(query: SubscriptionListQuery): Promise<SubscriptionListItem[]>;
 
-  /** How many subscriptions match a status and/or a creation window. */
-  countSubscriptions(query: BillingCountQuery & OwnerScoped): Promise<number>;
+  /**
+   * How many subscriptions match a status and/or a creation window — and, given the
+   * {@link listSubscriptions} filters, how many that list matches across every page.
+   */
+  countSubscriptions(query: SubscriptionCountQuery): Promise<number>;
 
   /**
    * Sum of `amount` grouped by billing cycle, for computing recurring revenue.
@@ -736,8 +759,10 @@ export interface BillingStore<
    * The check this exists for: charges that were created and never confirmed
    * (`{ status: 'pending', createdBefore: twoHoursAgo }`). A webhook endpoint that stops
    * being reachable produces exactly that and nothing else in the system errors.
+   *
+   * Takes every {@link listPayments} filter too, so a page can report its real total.
    */
-  countPayments(query: BillingCountQuery & OwnerScoped): Promise<number>;
+  countPayments(query: PaymentCountQuery): Promise<number>;
 
   // ── Disputes ─────────────────────────────────────────────────────────────────────
 
@@ -794,8 +819,8 @@ export interface BillingStore<
    */
   listDisputes(query: DisputeListQuery): Promise<DisputeListItem[]>;
 
-  /** How many disputes match a status and/or a creation window. */
-  countDisputes(query: BillingCountQuery & OwnerScoped): Promise<number>;
+  /** How many disputes match a status and/or a creation window, plus the {@link listDisputes} filters. */
+  countDisputes(query: DisputeCountQuery): Promise<number>;
 
   /**
    * The open disputes whose response window closes within `withinHours` — ordered by the
@@ -920,8 +945,10 @@ export interface BillingStore<
    * `{ status: 'received', createdBefore: fifteenMinutesAgo }` is the one to alert on: an
    * event was claimed and nothing ever finished it, which usually means the worker the
    * dispatcher depends on is not running.
+   *
+   * Takes the {@link listWebhookEvents} filters (`provider`, `type`) too.
    */
-  countWebhookEvents(query: BillingCountQuery): Promise<number>;
+  countWebhookEvents(query: WebhookEventCountQuery): Promise<number>;
 
   /**
    * The same count, grouped by provider and event type — "what is failing", not just

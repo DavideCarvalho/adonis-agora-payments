@@ -162,6 +162,9 @@
     "test:integration": "vitest run -c vitest.integration.config.ts",
     "check:agora-doctor": "node ../../scripts/check-agora-doctor.mjs ."
   },
+  "dependencies": {
+    "@adonis-agora/filter": ">=1.0.0-rc.5 <2.0.0"
+  },
   "peerDependencies": {
     "@adonis-agora/durable": ">=0.1.0 <2.0.0 || >=1.0.0-rc.0 <2.0.0",
     "@adonisjs/core": "^7.3.0",

@@ -178,7 +178,7 @@ the merits**. So the screen is two panels over the same table, in this order:
    soonest first, with the deadline as the leading column and a countdown in hours beside it
    (`in 5 hours`, not "today" — the difference is a morning). The horizon picker offers 24h, 3
    days, 7 days and 30 days, and opens on **3 days**, the same horizon `payments:health` alerts
-   on. The count above the table is the server's `dueWithin.total`, unbounded by the page.
+   on. The count above the table is the list's `meta.total`, unbounded by the page.
 2. **All disputes** — the log. Every dispute newest first, filterable by status (`warning`,
    `open`, `under_review`, then the resolutions) and by gateway.
 
@@ -532,15 +532,15 @@ The SPA is a client of a plain API, and so can you be — the same guard covers 
 | --- | --- | --- |
 | `GET <path>/api/health` | — | the `billingHealth` checks plus the failure breakdown |
 | `GET <path>/api/overview` | `period`, `from`, `to` | `billingOverview` metrics for the period |
-| `GET <path>/api/payments` | `status`, `provider`, `reference`, `gatewayId`, `customerId`, `page`, `size` | a page of payments, newest first, each with `externalReference`, `refundedAmount` and an `owner` |
+| `GET <path>/api/payments` | `filter[status\|provider\|externalReference\|gatewayId\|customerId]`, `page`, `size` | a page of payments, newest first, each with `externalReference`, `refundedAmount` and an `owner` |
 | `GET <path>/api/payments/:gatewayId` | — | one payment: current state, owner, disputes, ledger rows naming it (with `events.matchedBy`), and its audit rows |
-| `GET <path>/api/customers` | `provider`, `ownerType`, `ownerId`, `gatewayId`, `page`, `size` | a page of the owner mapping, newest first |
-| `GET <path>/api/disputes` | `status`, `provider`, `page`, `size` | a page of disputes, newest first |
-| `GET <path>/api/disputes` | `dueWithin` (hours), `provider`, `page`, `size` | only the OPEN windows closing inside the horizon, soonest first, plus the full `dueWithin.total` |
-| `GET <path>/api/subscriptions` | `status`, `provider`, `customerId`, `page`, `size` | a page of subscriptions, plus the whole-table `past_due` count |
+| `GET <path>/api/customers` | `filter[provider\|ownerType\|ownerId\|gatewayId]`, `page`, `size` | a page of the owner mapping, newest first |
+| `GET <path>/api/disputes` | `filter[status\|provider]`, `page`, `size` | a page of disputes, newest first |
+| `GET <path>/api/disputes` | `filter[dueWithin]` (hours), `filter[provider]`, `page`, `size` | only the OPEN windows closing inside the horizon, soonest first |
+| `GET <path>/api/subscriptions` | `filter[status\|provider\|customerId]`, `page`, `size` | a page of subscriptions, plus the whole-table `past_due` and `failing_renewals` counts |
 | `GET <path>/api/subscriptions/:id` | — | one subscription, by its id or gateway id: current state, customer, the payments charged for it, the ledger rows naming them, and its audit rows |
-| `GET <path>/api/webhook-events` | `status`, `provider`, `type`, `page`, `size` | a page of the ledger, newest first |
-| `GET <path>/api/audit` | `action`, `actor`, `provider`, `subjectType`, `subjectId`, `page`, `size` | the audit trail, newest first, plus the action filter list |
+| `GET <path>/api/webhook-events` | `filter[status\|provider\|type]`, `page`, `size` | a page of the ledger, newest first |
+| `GET <path>/api/audit` | `filter[action\|actor\|provider\|subjectType\|subjectId]`, `page`, `size` | the audit trail, newest first, plus the action filter list |
 | `GET <path>/api/providers` | — | the gateways **and the event types** present in your data |
 | `POST <path>/api/payments/:gatewayId/refund` | `{ amount? }` | the gateway's refund; `amount` is integer minor units |
 | `POST <path>/api/disputes/:gatewayId/resolve` | `{ status, outcome?, note? }` | the closed dispute plus the audit row; sends nothing to a gateway |
@@ -548,25 +548,46 @@ The SPA is a client of a plain API, and so can you be — the same guard covers 
 | `GET <path>/api/consoles` | — | the other Agora consoles this viewer may open ([switcher](#switching-between-consoles)) |
 | `GET <path>/api/consoles/search` | `q` | search across those consoles and this one |
 
-`?reference=` also accepts `?externalReference=`, so a link built from either keeps working. All
-three payment lookups are exact matches. The response echoes them back under `filters`, so the SPA
-can say "no payment carries reference X" rather than "no payments".
+The lists speak the [`@adonis-agora/filter`](/docs/filter) wire format:
 
-Paging is `?page=1&size=25` — `page` is **1-based**, `size` is the page size — the same shape
-`@adonis-agora/filter` takes, so every Agora console reads the same query string. Each list echoes
-it back under `meta` (`{ page, size, count, … }`) — Lucid's own spelling, since `.paginate()`
-answers `{ meta, data }`, and the key every Agora console reads. `count === size` is the only
-"there might be more" signal, because nothing here counts the full match set. `size` is clamped
-(50 by default, 200 maximum), so an unbounded page size from a query string cannot select the
-whole table. Every filter, `provider` included, is a column the store applies, so no page is a
-bounded scan: the payments, subscriptions and webhook-event pages still carry `scanned` (the rows
-returned) and `truncated` (always `false`) for clients that read them.
+```
+GET /payments/api/payments?filter[status]=failed&filter[provider]=asaas&page=2&size=25
+```
 
-`?dueWithin` with no value uses the same 72-hour horizon `payments:health` alerts on, so the console
-and the cron agree about "soon". A value that is present and unreadable answers `400` rather than
-quietly falling back to the default — you would have no way to tell which question you asked. The
-`dueWithin.total` beside the page is a separate count, unbounded by `size`: a full page says
-nothing about how many more windows are closing, and that number is the one you plan the day around.
+```json
+{
+  "data": [{ "gatewayId": "pay_123", "status": "failed", "amount": 19900, "...": "..." }],
+  "meta": { "total": 120, "perPage": 25, "currentPage": 2, "lastPage": 5, "firstPage": 1 },
+  "statuses": ["paid", "authorized", "pending", "failed", "refunded", "disputed", "canceled"],
+  "currency": "BRL",
+  "filters": { "externalReference": null, "gatewayId": null, "customerId": null }
+}
+```
+
+- **Filters** are `filter[field]=value` (or `filter[field][equals]=value`), one exact value per
+  field. A field the list does not have, another operator, or several values answer `400`.
+- **Sort**: each list has one order — newest first (`sort=-createdAt`), or soonest deadline first
+  (`sort=evidenceDueBy`) for the dispute work list. `sort` is optional; any other value answers `400`.
+- **Paging**: `page` is 1-based, `size` defaults to 50 and is capped at 200. `meta.total` counts
+  every matching row, not just the page.
+- Endpoint-wide data sits beside `data`/`meta`: `statuses`, `currency`, `counts`, `actions`, and
+  `filters` (the payment lookups echoed back, so the SPA can say "no payment carries reference X"
+  rather than "no payments").
+
+With the [filter client](/docs/filter):
+
+```ts
+import { filterQuery } from '@adonis-agora/filter-client'
+
+const qs = filterQuery().where('status', 'failed').page(2, 25).toQueryString()
+const res = await fetch(`/payments/api/payments?${qs}`)
+const { data, meta } = await res.json()
+```
+
+`filter[dueWithin]` with no value uses the same 72-hour horizon `payments:health` alerts on, so the
+console and the cron agree about "soon". A value that is not a whole, non-negative number of hours
+answers `400`, and so does a `filter[status]` beside it — the work list is open disputes only.
+`meta.total` is every closing window, so a full page still tells you how many more there are.
 
 The action responses distinguish their failures rather than collapsing them into `500`: `404` for a
 row that is not there, `409` for a row in the wrong state (a payment that is not `paid`, an event
@@ -640,7 +661,7 @@ claude mcp add --transport http agora http://localhost:3333/mcp/agora \
 ```
 
 Reads are listed by default. They return what the console's JSON API returns, never a gateway
-payload. Lists take `page` and `limit` (20 by default, at most 100) and answer `{ items, next }`.
+payload. Lists take `page` and `limit` (20 by default, at most 100) and answer `{ items, next, total }`.
 
 | Tool | What it returns |
 | --- | --- |

@@ -146,9 +146,9 @@ describe('subscriptionDetail (handler)', () => {
     await seed(store);
     const res = await subscriptions(
       { store, currency: 'BRL' },
-      { params: {}, query: { customerId: 'cus_b' } },
+      { params: {}, query: { filter: { customerId: 'cus_b' } } },
     );
-    const rows = (res.body as { subscriptions: Array<{ gatewayId: string }> }).subscriptions;
+    const rows = (res.body as { data: Array<{ gatewayId: string }> }).data;
     expect(rows.map((r) => r.gatewayId)).toEqual(['sub_b']);
   });
 });

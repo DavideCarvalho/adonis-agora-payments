@@ -1,5 +1,6 @@
 import type { UseQueryResult } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
+import type { ListMeta } from '../client/payments-client';
 import { cn } from './ui/cn';
 
 /** A bordered surface with a heading — the one container every screen uses. */
@@ -74,56 +75,28 @@ export function QueryState<T>({
 }
 
 /**
- * The one line a provider-filtered page owes the operator.
- *
- * `provider` is filtered server-side over pages read from the store (`BillingListQuery` has no
- * provider column), which is bounded work — and a bounded scan that came up empty means "none in
- * the rows I looked at", not "none". Saying nothing there would let "no Asaas failures" read as
- * good news when it is really an unfinished search.
- */
-export function ScanNotice({
-  meta,
-  noun,
-}: {
-  meta: { scanned: number; truncated: boolean } | undefined;
-  noun: string;
-}) {
-  if (meta === undefined || !meta.truncated) return null;
-  return (
-    <p className="border-t border-warn/30 bg-warn/[0.06] px-4 py-2 text-[11px] text-amber-300">
-      Searched the {meta.scanned} most recent {noun} for this gateway and stopped there. Narrow the
-      status filter to look further back.
-    </p>
-  );
-}
-
-/**
- * Page paging.
- *
- * `page` is 1-BASED and `size` is the page size — the same `{ page, size }` pair the API takes and
- * echoes, which every `@adonis-agora` library now speaks (see `@adonis-agora/filter`). The row
- * range shown is derived here; no 0-based offset crosses the wire.
- *
- * `count === size` is the ONLY signal that another page might exist — the server never counts the
- * full match set — so "Next" is enabled on exactly that and the control never claims a total it
- * does not have.
+ * Page paging over a list's `meta` (`@adonis-agora/filter`'s offset envelope): 1-based
+ * `currentPage`, `perPage` rows, the real `total` and `lastPage`. `count` is the rows on this page.
  */
 export function Pager({
-  page,
-  size,
+  meta,
   count,
   onPage,
 }: {
-  page: number;
-  size: number;
+  meta: ListMeta | undefined;
   count: number;
   onPage: (page: number) => void;
 }) {
-  const maybeMore = count === size;
+  const page = meta?.currentPage ?? 1;
+  const size = meta?.perPage ?? count;
+  const total = meta?.total ?? count;
+  const maybeMore = page < (meta?.lastPage ?? page);
   const first = (page - 1) * size;
   return (
     <div className="flex items-center justify-between border-t border-line px-4 py-2 text-xs text-zinc-500">
-      <span className="mono tnum">{count === 0 ? '0' : `${first + 1}–${first + count}`}</span>
+      <span className="mono tnum">
+        {count === 0 ? `0 of ${total}` : `${first + 1}–${first + count} of ${total}`}
+      </span>
       <span className="flex gap-1">
         <button
           type="button"

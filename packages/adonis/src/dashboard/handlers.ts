@@ -1,3 +1,4 @@
+import { InvalidColumnFilterError, type OffsetPage, offsetPage } from '@adonis-agora/filter';
 import { billingHealth } from '../billing/billing_health.js';
 import { billingOverview } from '../billing/billing_overview.js';
 import {
@@ -10,8 +11,20 @@ import {
   type PaymentListItem,
   type SubscriptionListItem,
 } from '../billing/billing_store.js';
-import { BILLING_LIST_DEFAULT_SIZE, clampPage, clampSize } from '../billing/list_query.js';
+import { BILLING_LIST_DEFAULT_SIZE } from '../billing/list_query.js';
 import type { RefundAction, ReplayAction } from './actions.js';
+import {
+  AuditFilter,
+  assertSort,
+  CustomerFilter,
+  DISPUTE_DEFAULT_DUE_WITHIN_HOURS,
+  DisputeFilter,
+  PaymentFilter,
+  readFilters,
+  readPage,
+  SubscriptionFilter,
+  WebhookEventFilter,
+} from './list_filters.js';
 import { resolvePeriod } from './period.js';
 
 /**
@@ -88,8 +101,8 @@ export interface DashboardActions {
 export interface ApiRequest {
   /** Route params, e.g. `{ gatewayId: 'pi_123' }`. */
   params: Record<string, string | undefined>;
-  /** Parsed query string, e.g. `{ status: 'failed', page: '2', size: '20' }`. */
-  query: Record<string, string | string[] | undefined>;
+  /** Parsed (nested) query string, e.g. `{ filter: { status: 'failed' }, page: '2', size: '20' }`. */
+  query: Record<string, unknown>;
   /** Parsed JSON body (for the POST actions). */
   body?: unknown;
 }
@@ -143,9 +156,9 @@ export const DISPUTE_STATUSES = [
   'won',
 ] as const;
 
-/** How far ahead `?dueWithin=` looks when the caller asks for closing windows but names no
- *  horizon. Matches `billingHealth`'s default, so the panel and the cron agree about "soon". */
-export const DISPUTE_DEFAULT_DUE_WITHIN_HOURS = 72;
+/** How far ahead `filter[dueWithin]` looks when it names no horizon. Matches `billingHealth`'s
+ *  default, so the panel and the cron agree about "soon". */
+export { DISPUTE_DEFAULT_DUE_WITHIN_HOURS };
 
 /** The ledger's three statuses. `failed` is the one that means "a handler threw and the dispatcher
  *  gave up" — i.e. the event's effect never happened. */
@@ -174,47 +187,9 @@ const REFUNDABLE_STATUS = 'paid';
 /** How far back `GET /providers` looks to learn which gateways this install actually uses. */
 const PROVIDER_DISCOVERY_SCAN = 600;
 
-function firstQuery(value: string | string[] | undefined): string | undefined {
-  if (Array.isArray(value)) return value[0];
-  return value;
-}
-
-/** A non-empty query param, or `undefined` — `?status=` must read as "no filter", not as `''`. */
-function filterQuery(value: string | string[] | undefined): string | undefined {
-  const raw = firstQuery(value);
-  return raw === undefined || raw === '' ? undefined : raw;
-}
-
-/** Parse an integer query param, leaving the clamping to `list_query.ts` so every caller of the
- *  store agrees on the bounds. */
-function intQuery(value: string | string[] | undefined): number | undefined {
-  const raw = firstQuery(value);
-  if (raw === undefined || raw === '') return undefined;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) ? n : undefined;
-}
-
-/**
- * The paging the request asked for, already clamped.
- *
- * `?page=` is 1-BASED and `?size=` is the page size, mirroring `@adonis-agora/filter`'s
- * `FilterInput.page`/`.size` so every console in the ecosystem takes the same query string.
- * The 0-based SQL offset lives in `list_query.ts` and never crosses this boundary.
- *
- * Echoed back so the client can tell whether another page might exist (`count === size` is the
- * only "there might be more" signal; nothing here counts the full match set).
- */
-function pageOf(req: ApiRequest): Paging {
-  return {
-    page: clampPage(intQuery(req.query.page)),
-    size: clampSize(intQuery(req.query.size)),
-  };
-}
-
-/** One clamped page request: 1-based `page`, `size` rows. */
-interface Paging {
-  page: number;
-  size: number;
+function firstQuery(value: unknown): string | undefined {
+  const first = Array.isArray(value) ? value[0] : value;
+  return typeof first === 'string' ? first : undefined;
 }
 
 /** `Date | null` -> ISO string | null, so every timestamp crosses the wire the same way. */
@@ -222,36 +197,44 @@ function iso(value: Date | null): string | null {
   return value === null ? null : value.toISOString();
 }
 
-/** One page of rows plus the honesty flags the list envelope carries. */
-interface FilteredPage<T> {
-  rows: T[];
-  scanned: number;
-  truncated: boolean;
-}
+/** The newest-first order every listing here has (`?sort=-createdAt`, or no `sort`). */
+const NEWEST_FIRST = '-createdAt';
 
 /**
- * Read one page. Every filter, `provider` included, is a column the store applies, so the page
- * is complete by construction: `scanned` is the rows returned and `truncated` is always `false`.
+ * Read a listing request: the `filter[...]` fields through `Filter`, the one accepted `sort`, and
+ * `page`/`size`. A refused filter or sort becomes a `400`.
  */
-async function pageBy<T>(
-  fetch: (size: number, page: number) => Promise<T[]>,
-  paging: Paging,
-): Promise<FilteredPage<T>> {
-  const rows = await fetch(paging.size, paging.page);
-  return { rows, scanned: rows.length, truncated: false };
+async function readList<Q extends object>(
+  req: ApiRequest,
+  Filter: Parameters<typeof readFilters<Q>>[1],
+  order: string | ((filters: Partial<Q>) => string) = NEWEST_FIRST,
+): Promise<
+  { ok: true; filters: Partial<Q>; page: number; size: number } | { ok: false; error: ApiResponse }
+> {
+  try {
+    const filters = await readFilters(req.query, Filter);
+    assertSort(req.query.sort, typeof order === 'function' ? order(filters) : order);
+    return { ok: true, filters, ...readPage(req.query) };
+  } catch (error) {
+    if (error instanceof InvalidColumnFilterError) {
+      return { ok: false, error: badRequest(error.message) };
+    }
+    throw error;
+  }
 }
 
-/** The `meta` envelope every list endpoint echoes back, in the same `{ page, size }` terms the
- *  request used. `meta` is Lucid's own spelling for it (`.paginate()` answers `{ meta, data }`),
- *  and the key every `@adonis-agora` console reads. */
-function listMeta<T>(paging: Paging, filtered: FilteredPage<T>) {
-  return {
-    page: paging.page,
-    size: paging.size,
-    count: filtered.rows.length,
-    scanned: filtered.scanned,
-    truncated: filtered.truncated,
+/** A list response: the offset envelope plus any endpoint-wide side data. */
+function listPage<T>(
+  rows: T[],
+  total: number,
+  paging: { page: number; size: number },
+  extra: Record<string, unknown> = {},
+): ApiResponse {
+  const body: OffsetPage<T> & Record<string, unknown> = {
+    ...offsetPage(rows, { total, ...paging }),
+    ...extra,
   };
+  return ok(body);
 }
 
 /**
@@ -338,11 +321,12 @@ function disputeJson(row: DisputeListItem) {
  *
  * Two modes, because a dispute list has two questions:
  *
- * - default: newest first, `status`/`provider` filters — the log.
- * - `?dueWithin=<hours>`: only OPEN disputes carrying a deadline, soonest window first — the
- *   work. Rows already past their deadline stay in it: they are still open and still
- *   unanswered, and dropping them the moment they expire would make the panel go quiet at
- *   exactly the moment it became urgent.
+ * - default: newest first, `filter[status]`/`filter[provider]` — the log.
+ * - `filter[dueWithin]=<hours>`: only OPEN disputes carrying a deadline, soonest window first
+ *   (`sort=evidenceDueBy`) — the work. Rows already past their deadline stay in it: they are still
+ *   open and still unanswered, and dropping them the moment they expire would make the panel go
+ *   quiet at exactly the moment it became urgent. `meta.total` is every closing window, not the
+ *   page.
  *
  * There is still no "accept" and no "fight" button: whether to submit evidence or refund is a
  * business rule (it turns on the fee, the evidence you actually have, and the chargeback ratio
@@ -352,60 +336,38 @@ function disputeJson(row: DisputeListItem) {
  * thing.
  */
 export async function disputes(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
-  const status = filterQuery(req.query.status);
-  const provider = filterQuery(req.query.provider);
-  const paging = pageOf(req);
-  // `firstQuery`, not `filterQuery`: a bare `?dueWithin` (no value) is a request for the work
-  // list at the DEFAULT horizon, not an absent filter. A value that is present and unreadable
-  // is a `400` — silently falling back to the default would answer a different question than
-  // the one asked, and the caller could not tell.
-  const dueWithinRaw = firstQuery(req.query.dueWithin);
+  const list = await readList(req, DisputeFilter, (filters) =>
+    filters.dueWithin !== undefined ? 'evidenceDueBy' : NEWEST_FIRST,
+  );
+  if (!list.ok) return list.error;
+  const { dueWithin, ...filters } = list.filters;
+  const paging = { page: list.page, size: list.size };
 
-  if (dueWithinRaw !== undefined) {
-    const parsed =
-      dueWithinRaw === '' ? DISPUTE_DEFAULT_DUE_WITHIN_HOURS : Number.parseInt(dueWithinRaw, 10);
-    if (!Number.isFinite(parsed) || parsed < 0) {
-      return badRequest('dueWithin must be a number of hours, and not negative');
+  if (dueWithin !== undefined) {
+    if (filters.status !== undefined) {
+      return badRequest('dueWithin lists open disputes only; drop the status filter.');
     }
-    const withinHours = parsed;
     const now = deps.now?.();
-    // The page and the total are independent reads, so they go out together rather than as two
-    // sequential round trips.
+    const deadline = {
+      withinHours: dueWithin,
+      ...(now !== undefined ? { now } : {}),
+      ...(filters.provider !== undefined ? { provider: filters.provider } : {}),
+    };
     const [rows, total] = await Promise.all([
-      deps.store.listDisputesDueWithin({
-        withinHours,
-        ...(now !== undefined ? { now } : {}),
-        ...(provider !== undefined ? { provider } : {}),
-        page: paging.page,
-        size: paging.size,
-      }),
-      // The full count, not `rows.length`: a page that fills says nothing about how many more
-      // windows are closing, and that number is the one an operator plans their day around.
-      deps.store.countDisputesDueWithin({
-        withinHours,
-        ...(now !== undefined ? { now } : {}),
-        ...(provider !== undefined ? { provider } : {}),
-      }),
+      deps.store.listDisputesDueWithin({ ...deadline, ...paging }),
+      deps.store.countDisputesDueWithin(deadline),
     ]);
-    return ok({
-      disputes: rows.map(disputeJson),
-      dueWithin: { hours: withinHours, total },
-      meta: { page: paging.page, size: paging.size, count: rows.length },
+    return listPage(rows.map(disputeJson), total, paging, {
+      dueWithin: { hours: dueWithin },
       statuses: DISPUTE_STATUSES,
     });
   }
 
-  const rows = await deps.store.listDisputes({
-    ...(status !== undefined ? { status } : {}),
-    ...(provider !== undefined ? { provider } : {}),
-    page: paging.page,
-    size: paging.size,
-  });
-  return ok({
-    disputes: rows.map(disputeJson),
-    meta: { page: paging.page, size: paging.size, count: rows.length },
-    statuses: DISPUTE_STATUSES,
-  });
+  const [rows, total] = await Promise.all([
+    deps.store.listDisputes({ ...filters, ...paging }),
+    deps.store.countDisputes(filters),
+  ]);
+  return listPage(rows.map(disputeJson), total, paging, { statuses: DISPUTE_STATUSES });
 }
 
 /** The app-side owner of a payment, resolved through `billing_customers`. */
@@ -495,47 +457,37 @@ async function ownersFor(
  * `GET <api>/payments` — a page of `billing_payments`, newest first.
  *
  * Filters: `status`, `provider`, and the three that answer "did this one land?" —
- * `reference` (the app's own `externalReference`), `gatewayId`, and `customerId`. All three are
+ * `externalReference` (the app's own reference), `gatewayId`, and `customerId`. All three are
  * EXACT: they are join keys, and a prefix match on `order-4` returning `order-42` is a wrong
  * answer to a question about money.
  */
 export async function payments(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
-  const status = filterQuery(req.query.status);
-  const provider = filterQuery(req.query.provider);
-  // `reference` in the query string, `externalReference` in the store — the short name is what
-  // an operator types, and both are accepted so a link built from either keeps working.
-  const reference = filterQuery(req.query.reference) ?? filterQuery(req.query.externalReference);
-  const gatewayId = filterQuery(req.query.gatewayId);
-  const customerId = filterQuery(req.query.customerId);
-  const paging = pageOf(req);
-  const filtered = await pageBy(
-    (size, page) =>
-      deps.store.listPayments({
-        ...(status !== undefined ? { status } : {}),
-        ...(provider !== undefined ? { provider } : {}),
-        ...(reference !== undefined ? { externalReference: reference } : {}),
-        ...(gatewayId !== undefined ? { gatewayId } : {}),
-        ...(customerId !== undefined ? { customerId } : {}),
-        size,
-        page,
-      }),
-    paging,
-  );
-  const owners = await ownersFor(deps.store, filtered.rows);
-  return ok({
-    payments: filtered.rows.map((row) =>
+  const list = await readList(req, PaymentFilter);
+  if (!list.ok) return list.error;
+  const { filters } = list;
+  const paging = { page: list.page, size: list.size };
+  const [rows, total] = await Promise.all([
+    deps.store.listPayments({ ...filters, ...paging }),
+    deps.store.countPayments(filters),
+  ]);
+  const owners = await ownersFor(deps.store, rows);
+  return listPage(
+    rows.map((row) =>
       paymentJson(row, (row.customerId && owners.get(row.customerId)) || null, deps.capabilities),
     ),
-    meta: listMeta(paging, filtered),
-    statuses: PAYMENT_STATUSES,
-    currency: deps.currency,
-    /** Echoed so the SPA can render "no payment carries reference X" rather than "no payments". */
-    filters: {
-      reference: reference ?? null,
-      gatewayId: gatewayId ?? null,
-      customerId: customerId ?? null,
+    total,
+    paging,
+    {
+      statuses: PAYMENT_STATUSES,
+      currency: deps.currency,
+      /** Echoed so the SPA can render "no payment carries reference X" rather than "no payments". */
+      filters: {
+        externalReference: filters.externalReference ?? null,
+        gatewayId: filters.gatewayId ?? null,
+        customerId: filters.customerId ?? null,
+      },
     },
-  });
+  );
 }
 
 /**
@@ -616,40 +568,26 @@ const PAYMENT_TIMELINE_LIMIT = 50;
  * cannot name a customer to email.
  */
 export async function subscriptions(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
-  const status = filterQuery(req.query.status);
-  const provider = filterQuery(req.query.provider);
-  /** The gateway customer id: every subscription of one customer. */
-  const customerId = filterQuery(req.query.customerId);
-  const paging = pageOf(req);
-  // The page and both totals are independent reads, so they go out together instead of as three
-  // sequential round trips.
-  const [filtered, pastDue, failingRenewals] = await Promise.all([
-    pageBy(
-      (size, page) =>
-        deps.store.listSubscriptions({
-          ...(status !== undefined ? { status } : {}),
-          ...(provider !== undefined ? { provider } : {}),
-          ...(customerId !== undefined ? { customerId } : {}),
-          size,
-          page,
-        }),
-      paging,
-    ),
+  const list = await readList(req, SubscriptionFilter);
+  if (!list.ok) return list.error;
+  const { filters } = list;
+  const paging = { page: list.page, size: list.size };
+  // The page, its total and the two whole-table counts are independent reads, so they go out
+  // together instead of as four sequential round trips.
+  const [rows, total, pastDue, failingRenewals] = await Promise.all([
+    deps.store.listSubscriptions({ ...filters, ...paging }),
+    deps.store.countSubscriptions(filters),
     // The one number that makes the filter tabs worth reading: how many are past due IN TOTAL,
-    // not just on this page. Cheap — a single count — and it is the figure that decides the
-    // operator's morning.
+    // whatever the filter. It is the figure that decides the operator's morning.
     deps.store.countSubscriptions({ status: SUBSCRIPTION_DEFAULT_STATUS }),
-    // Quantas estão falhando a renovação AGORA, no total e não na página. O mesmo motivo do
-    // `past_due`: é o número que decide a manhã de quem opera.
+    // How many are failing renewal right now, in total — same reason as `past_due`.
     deps.store.countSubscriptions({
       status: 'active',
       managed: true,
       minRenewalFailures: 1,
     }),
   ]);
-  return ok({
-    subscriptions: filtered.rows.map(subscriptionJson),
-    meta: listMeta(paging, filtered),
+  return listPage(rows.map(subscriptionJson), total, paging, {
     statuses: SUBSCRIPTION_STATUSES,
     counts: {
       past_due: pastDue,
@@ -795,27 +733,17 @@ function uniqueBy<T>(rows: readonly T[], key: (row: T) => string): T[] {
  * returned — that is a debugging question, and telescope is where it belongs.
  */
 export async function webhookEvents(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
-  const status = filterQuery(req.query.status);
-  const provider = filterQuery(req.query.provider);
-  // The filter the ledger was missing. `status` + `provider` answers "what is failing on Asaas";
-  // it could not answer "did a refund event arrive at all", which is the question the ledger gets
-  // read for the moment one specific charge is in doubt.
-  const type = filterQuery(req.query.type);
-  const paging = pageOf(req);
-  const filtered = await pageBy(
-    (size, page) =>
-      deps.store.listWebhookEvents({
-        ...(status !== undefined ? { status } : {}),
-        ...(provider !== undefined ? { provider } : {}),
-        ...(type !== undefined ? { type } : {}),
-        size,
-        page,
-      }),
-    paging,
-  );
-  return ok({
-    events: filtered.rows.map(webhookEventJson),
-    meta: listMeta(paging, filtered),
+  // `type` is the filter that answers "did a refund event arrive at all" — the question the
+  // ledger gets read for the moment one specific charge is in doubt.
+  const list = await readList(req, WebhookEventFilter);
+  if (!list.ok) return list.error;
+  const { filters } = list;
+  const paging = { page: list.page, size: list.size };
+  const [rows, total] = await Promise.all([
+    deps.store.listWebhookEvents({ ...filters, ...paging }),
+    deps.store.countWebhookEvents(filters),
+  ]);
+  return listPage(rows.map(webhookEventJson), total, paging, {
     statuses: WEBHOOK_EVENT_STATUSES,
   });
 }
@@ -891,26 +819,15 @@ function customerJson(row: CustomerListItem) {
  * alone is not a key.
  */
 export async function customers(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
-  const provider = filterQuery(req.query.provider);
-  const ownerType = filterQuery(req.query.ownerType);
-  const ownerId = filterQuery(req.query.ownerId);
-  const gatewayId = filterQuery(req.query.gatewayId);
-  const paging = pageOf(req);
-  const rows = await deps.store.listCustomers({
-    ...(provider !== undefined ? { provider } : {}),
-    ...(ownerType !== undefined ? { ownerType } : {}),
-    ...(ownerId !== undefined ? { ownerId } : {}),
-    ...(gatewayId !== undefined ? { gatewayId } : {}),
-    page: paging.page,
-    size: paging.size,
-  });
-  return ok({
-    customers: rows.map(customerJson),
-    // No `scanned`/`truncated`: every filter here is a column the store applies, so there is no
-    // bounded scan behind this list and claiming the caveat would be claiming one that does not
-    // apply. Same reason the disputes page reports a narrower envelope.
-    meta: { page: paging.page, size: paging.size, count: rows.length },
-  });
+  const list = await readList(req, CustomerFilter);
+  if (!list.ok) return list.error;
+  const { filters } = list;
+  const paging = { page: list.page, size: list.size };
+  const [rows, total] = await Promise.all([
+    deps.store.listCustomers({ ...filters, ...paging }),
+    deps.store.countCustomers(filters),
+  ]);
+  return listPage(rows.map(customerJson), total, paging);
 }
 
 /** The audit actions the filter offers. A free string in the column, so this is a UI convenience
@@ -938,27 +855,15 @@ export const AUDIT_ACTION_FILTERS = [
  * Filters: `action`, `actor`, `provider`, `subjectType`, `subjectId` — all exact.
  */
 export async function auditEvents(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
-  const action = filterQuery(req.query.action);
-  const actor = filterQuery(req.query.actor);
-  const provider = filterQuery(req.query.provider);
-  const subjectType = filterQuery(req.query.subjectType);
-  const subjectId = filterQuery(req.query.subjectId);
-  const paging = pageOf(req);
-  const rows = await deps.store.listAuditEvents({
-    ...(action !== undefined ? { action } : {}),
-    ...(actor !== undefined ? { actor } : {}),
-    ...(provider !== undefined ? { provider } : {}),
-    ...(subjectType !== undefined ? { subjectType } : {}),
-    ...(subjectId !== undefined ? { subjectId } : {}),
-    page: paging.page,
-    size: paging.size,
-  });
-  return ok({
-    audit: rows.map(auditJson),
-    // Column filters throughout, so no bounded scan and no `truncated` caveat to claim.
-    meta: { page: paging.page, size: paging.size, count: rows.length },
-    actions: AUDIT_ACTION_FILTERS,
-  });
+  const list = await readList(req, AuditFilter);
+  if (!list.ok) return list.error;
+  const { filters } = list;
+  const paging = { page: list.page, size: list.size };
+  const [rows, total] = await Promise.all([
+    deps.store.listAuditEvents({ ...filters, ...paging }),
+    deps.store.countAuditEvents(filters),
+  ]);
+  return listPage(rows.map(auditJson), total, paging, { actions: AUDIT_ACTION_FILTERS });
 }
 
 /**

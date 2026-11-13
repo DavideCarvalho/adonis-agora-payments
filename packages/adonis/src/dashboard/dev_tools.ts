@@ -167,19 +167,23 @@ function paging(input: Record<string, unknown>, call: DevToolCall): { page: numb
   return { page: Math.max(1, page), size: Math.min(Math.max(limit, 1), cap) };
 }
 
-/** The query a console list route reads: the filters given plus `page`/`size`. */
+/**
+ * The query a console list route reads: `filter[field]` for each tool input given, plus
+ * `page`/`size`. `filters` maps a tool input to the route's filter field when they differ.
+ */
 function listQuery(
   input: Record<string, unknown>,
   call: DevToolCall,
-  filters: readonly string[],
-): { query: Record<string, string>; page: number; size: number } {
+  filters: readonly (string | readonly [input: string, field: string])[],
+): { query: Record<string, unknown>; page: number; size: number } {
   const { page, size } = paging(input, call);
-  const query: Record<string, string> = { page: String(page), size: String(size) };
-  for (const key of filters) {
+  const filter: Record<string, string> = {};
+  for (const entry of filters) {
+    const [key, field] = typeof entry === 'string' ? [entry, entry] : entry;
     const value = str(input, key);
-    if (value !== undefined) query[key] = value;
+    if (value !== undefined) filter[field] = value;
   }
-  return { query, page, size };
+  return { query: { filter, page: String(page), size: String(size) }, page, size };
 }
 
 /** The console's answer, or the tool error carrying its message (`404: No payment "x"…`). */
@@ -193,17 +197,18 @@ function body(response: ApiResponse): Record<string, unknown> {
   );
 }
 
-/** `{ items, next }` over one console list page: `next` is the next page while this one is full. */
+/** `{ items, next, total }` over one console list page: `next` is the next page, if there is one. */
 function page(
   out: Record<string, unknown>,
-  key: string,
-  at: { page: number; size: number },
   extra: readonly string[] = [],
 ): Record<string, unknown> {
-  const items = Array.isArray(out[key]) ? (out[key] as unknown[]) : [];
+  const items = Array.isArray(out.data) ? (out.data as unknown[]) : [];
+  const meta = (out.meta ?? {}) as { total?: number; currentPage?: number; lastPage?: number };
+  const current = meta.currentPage ?? 1;
   const result: Record<string, unknown> = {
     items,
-    next: items.length >= at.size ? at.page + 1 : null,
+    next: current < (meta.lastPage ?? current) ? current + 1 : null,
+    total: meta.total ?? items.length,
   };
   for (const name of extra) if (out[name] !== undefined) result[name] = out[name];
   return result;
@@ -313,7 +318,7 @@ export function paymentsDevTools(options: PaymentsDevToolsOptions): DevTool[] {
       name: 'payments_list_payments',
       kind: 'read',
       description:
-        'Payments, newest first: gateway id, provider, status, amount (integer minor units), currency, customer, app reference, refunded amount and owner. Lookups by reference, gatewayId and customerId are exact. Returns { items, next, currency }.',
+        'Payments, newest first: gateway id, provider, status, amount (integer minor units), currency, customer, app reference, refunded amount and owner. Lookups by reference, gatewayId and customerId are exact. Returns { items, next, total, currency }.',
       input: {
         type: 'object',
         properties: {
@@ -331,12 +336,12 @@ export function paymentsDevTools(options: PaymentsDevToolsOptions): DevTool[] {
         const list = listQuery(input, call, [
           'status',
           'provider',
-          'reference',
+          ['reference', 'externalReference'],
           'gatewayId',
           'customerId',
         ]);
         const out = await serve(call, ROUTES.payments, { query: list.query }, input);
-        return page(out, 'payments', list, ['currency']);
+        return page(out, ['currency']);
       },
     },
     {
@@ -364,7 +369,7 @@ export function paymentsDevTools(options: PaymentsDevToolsOptions): DevTool[] {
       name: 'payments_list_subscriptions',
       kind: 'read',
       description:
-        'Subscriptions, newest first: status, plan, customer, amount and cycle, next charge, renewal failures. Returns { items, next, counts } where counts has the whole-table past_due and failing_renewals totals.',
+        'Subscriptions, newest first: status, plan, customer, amount and cycle, next charge, renewal failures. Returns { items, next, total, counts } where counts has the whole-table past_due and failing_renewals totals.',
       input: {
         type: 'object',
         properties: {
@@ -383,7 +388,7 @@ export function paymentsDevTools(options: PaymentsDevToolsOptions): DevTool[] {
       run: async (input, call) => {
         const list = listQuery(input, call, ['status', 'provider', 'customerId']);
         const out = await serve(call, ROUTES.subscriptions, { query: list.query }, input);
-        return page(out, 'subscriptions', list, ['counts']);
+        return page(out, ['counts']);
       },
     },
     {
@@ -406,7 +411,7 @@ export function paymentsDevTools(options: PaymentsDevToolsOptions): DevTool[] {
       name: 'payments_list_disputes',
       kind: 'read',
       description:
-        'Disputes (chargebacks), newest first. With dueWithin (hours): only OPEN disputes whose evidence window closes inside it, soonest first, plus the full total. Returns { items, next, dueWithin? }.',
+        'Disputes (chargebacks), newest first. With dueWithin (hours): only OPEN disputes whose evidence window closes inside it, soonest first (status is ignored); total counts every closing window. Returns { items, next, total, dueWithin? }.',
       input: {
         type: 'object',
         properties: {
@@ -423,16 +428,22 @@ export function paymentsDevTools(options: PaymentsDevToolsOptions): DevTool[] {
         },
       },
       run: async (input, call) => {
-        const list = listQuery(input, call, ['status', 'provider', 'dueWithin']);
+        // The work list is open disputes only, so a status beside `dueWithin` is dropped.
+        const workList = str(input, 'dueWithin') !== undefined;
+        const list = listQuery(
+          input,
+          call,
+          workList ? ['provider', 'dueWithin'] : ['status', 'provider'],
+        );
         const out = await serve(call, ROUTES.disputes, { query: list.query }, input);
-        return page(out, 'disputes', list, ['dueWithin']);
+        return page(out, ['dueWithin']);
       },
     },
     {
       name: 'payments_list_webhook_events',
       kind: 'read',
       description:
-        'The webhook ledger, newest first: gateway event id, provider, type, status and the error a failed handler threw. Never the payload. Spans every organization, so it is refused to a viewer scoped to some. Returns { items, next }.',
+        'The webhook ledger, newest first: gateway event id, provider, type, status and the error a failed handler threw. Never the payload. Spans every organization, so it is refused to a viewer scoped to some. Returns { items, next, total }.',
       input: {
         type: 'object',
         properties: {
@@ -445,18 +456,14 @@ export function paymentsDevTools(options: PaymentsDevToolsOptions): DevTool[] {
       },
       run: async (input, call) => {
         const list = listQuery(input, call, ['status', 'provider', 'type']);
-        return page(
-          await serve(call, ROUTES.webhookEvents, { query: list.query }, input),
-          'events',
-          list,
-        );
+        return page(await serve(call, ROUTES.webhookEvents, { query: list.query }, input));
       },
     },
     {
       name: 'payments_list_customers',
       kind: 'read',
       description:
-        'Billing customers, newest first: the mapping from a gateway customer id to the app owner (ownerType, ownerId), with email and name. Filters are exact. Returns { items, next }.',
+        'Billing customers, newest first: the mapping from a gateway customer id to the app owner (ownerType, ownerId), with email and name. Filters are exact. Returns { items, next, total }.',
       input: {
         type: 'object',
         properties: {
@@ -472,14 +479,14 @@ export function paymentsDevTools(options: PaymentsDevToolsOptions): DevTool[] {
       run: async (input, call) => {
         const list = listQuery(input, call, ['provider', 'ownerType', 'ownerId', 'gatewayId']);
         const out = await serve(call, ROUTES.customers, { query: list.query }, input);
-        return page(out, 'customers', list);
+        return page(out);
       },
     },
     {
       name: 'payments_list_audit',
       kind: 'read',
       description:
-        'The billing audit trail, newest first: refunds and dispute resolutions (and who did them), webhook deliveries the endpoint refused, organization switches. Spans every organization, so it is refused to a viewer scoped to some. Returns { items, next }.',
+        'The billing audit trail, newest first: refunds and dispute resolutions (and who did them), webhook deliveries the endpoint refused, organization switches. Spans every organization, so it is refused to a viewer scoped to some. Returns { items, next, total }.',
       input: {
         type: 'object',
         properties: {
@@ -500,7 +507,7 @@ export function paymentsDevTools(options: PaymentsDevToolsOptions): DevTool[] {
           'subjectType',
           'subjectId',
         ]);
-        return page(await serve(call, ROUTES.audit, { query: list.query }, input), 'audit', list);
+        return page(await serve(call, ROUTES.audit, { query: list.query }, input));
       },
     },
     {

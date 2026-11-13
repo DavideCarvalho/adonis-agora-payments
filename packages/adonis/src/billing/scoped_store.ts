@@ -71,6 +71,10 @@ export function scopedBillingStore<S extends AnyStore>(
       guard();
       return store.listCustomers({ ...query, owners: scope });
     },
+    countCustomers: async (query) => {
+      guard();
+      return store.countCustomers({ ...query, owners: scope });
+    },
     listPayments: async (query) => {
       guard();
       return store.listPayments({ ...query, owners: scope });

@@ -156,13 +156,13 @@ describe('paymentsClient request shapes', () => {
   it('passes the payments status filter and paging through', async () => {
     const { calls } = stubFetch({ json: async () => ({ payments: [] }) });
     await paymentsClient.payments({ status: 'failed', page: 3, size: 25 });
-    expect(calls).toEqual(['/pd/api/payments?status=failed&page=3&size=25']);
+    expect(calls).toEqual(['/pd/api/payments?filter%5Bstatus%5D=failed&page=3&size=25']);
   });
 
   it('hits the hyphenated webhook-events route', async () => {
     const { calls } = stubFetch({ json: async () => ({ events: [] }) });
     await paymentsClient.webhookEvents({ status: 'failed' });
-    expect(calls).toEqual(['/pd/api/webhook-events?status=failed']);
+    expect(calls).toEqual(['/pd/api/webhook-events?filter%5Bstatus%5D=failed']);
   });
 
   it('passes the provider filter through on every list endpoint', async () => {
@@ -171,30 +171,31 @@ describe('paymentsClient request shapes', () => {
     await paymentsClient.subscriptions({ provider: 'asaas', status: 'past_due' });
     await paymentsClient.webhookEvents({ provider: 'asaas' });
     expect(calls).toEqual([
-      '/pd/api/payments?provider=asaas',
-      '/pd/api/subscriptions?status=past_due&provider=asaas',
-      '/pd/api/webhook-events?provider=asaas',
+      '/pd/api/payments?filter%5Bprovider%5D=asaas',
+      '/pd/api/subscriptions?filter%5Bstatus%5D=past_due&filter%5Bprovider%5D=asaas',
+      '/pd/api/webhook-events?filter%5Bprovider%5D=asaas',
     ]);
   });
 
   it('asks for the dispute LOG when no horizon is given', async () => {
     const { calls } = stubFetch({ json: async () => ({ disputes: [] }) });
     await paymentsClient.disputes({ status: 'lost', provider: 'stripe', page: 1, size: 50 });
-    expect(calls).toEqual(['/pd/api/disputes?status=lost&provider=stripe&page=1&size=50']);
+    expect(calls).toEqual([
+      '/pd/api/disputes?filter%5Bstatus%5D=lost&filter%5Bprovider%5D=stripe&page=1&size=50',
+    ]);
   });
 
   it('asks for the WORK LIST with an explicit horizon in hours', async () => {
     const { calls } = stubFetch({ json: async () => ({ disputes: [] }) });
     await paymentsClient.disputes({ dueWithin: 72, page: 1, size: 50 });
-    expect(calls).toEqual(['/pd/api/disputes?dueWithin=72&page=1&size=50']);
+    expect(calls).toEqual(['/pd/api/disputes?filter%5BdueWithin%5D=72&page=1&size=50']);
   });
 
-  it('drops a status sent alongside a horizon instead of passing one the server ignores', async () => {
-    // The work list is already scoped to the open statuses that carry a deadline. A filter that
-    // appears to apply and silently does not is worse than no filter at all.
+  it('drops a status sent alongside a horizon — the server refuses the pair', async () => {
+    // The work list is already scoped to the open statuses that carry a deadline.
     const { calls } = stubFetch({ json: async () => ({ disputes: [] }) });
     await paymentsClient.disputes({ dueWithin: 24, status: 'lost', provider: 'asaas' });
-    expect(calls).toEqual(['/pd/api/disputes?provider=asaas&dueWithin=24']);
+    expect(calls).toEqual(['/pd/api/disputes?filter%5Bprovider%5D=asaas&filter%5BdueWithin%5D=24']);
   });
 
   it('sends a zero-hour horizon rather than dropping it as empty', async () => {
@@ -202,7 +203,7 @@ describe('paymentsClient request shapes', () => {
     // the log's question instead, and the caller could not tell.
     const { calls } = stubFetch({ json: async () => ({ disputes: [] }) });
     await paymentsClient.disputes({ dueWithin: 0 });
-    expect(calls).toEqual(['/pd/api/disputes?dueWithin=0']);
+    expect(calls).toEqual(['/pd/api/disputes?filter%5BdueWithin%5D=0']);
   });
 
   it('requests health and providers with no query at all', async () => {

@@ -13,6 +13,8 @@
  * the divisor is not always 100 either (`src/app/money.ts` knows the rule and formats at render).
  */
 
+import { filterQuery, type OffsetPage, type OffsetPageMeta } from '@adonis-agora/filter-client';
+
 // ── Wire types (every `Date` is already an ISO string by the time it reaches this client — see
 // `packages/adonis/src/dashboard/handlers.ts`). ─────────────────────────────────────────────────
 
@@ -215,39 +217,18 @@ export interface Health {
 }
 
 /**
- * Echoed paging. `count === size` is the ONLY "there might be more" signal: the server never
- * counts the full match set, so there is no total to compare against.
- *
- * `{ page, size }` — 1-based page, `size` rows per page — intentionally mirrors
- * `@adonis-agora/filter`'s pagination shape, which every `@adonis-agora` library now speaks.
- * Structural match only; this package depends on no filter package.
- *
- * It travels under the `meta` key, which is Lucid's own spelling (`.paginate()` answers
- * `{ meta, data }`) and the one every `@adonis-agora` console reads.
+ * The `meta` of every list: the real `total` across pages, `perPage`, the 1-based `currentPage`,
+ * `lastPage` and `firstPage` — `@adonis-agora/filter`'s offset envelope.
  */
-export interface ListMeta {
-  /** 1-based page number the server served. */
-  page: number;
-  /** Rows per page the server clamped the request to. */
-  size: number;
-  count: number;
-  /** How many rows the server read to build this page. Equal to `count` unless a provider filter
-   *  made it scan past non-matching rows. */
-  scanned: number;
-  /** `true` when the provider scan stopped at its cap before filling the page — "none found" here
-   *  means "none in the rows scanned", which is a different answer and has to look like one. */
-  truncated: boolean;
-}
+export type ListMeta = OffsetPageMeta;
 
-export interface PaymentsPage {
-  payments: PaymentRow[];
-  meta: ListMeta;
+export interface PaymentsPage extends OffsetPage<PaymentRow> {
   statuses: readonly string[];
   currency: string;
   /** The lookup filters the server applied, echoed back so an empty page can say "no payment
    *  carries reference X" instead of the much less useful "no payments". */
   filters: {
-    reference: string | null;
+    externalReference: string | null;
     gatewayId: string | null;
     customerId: string | null;
   };
@@ -287,50 +268,31 @@ export interface SubscriptionDetail {
   currency: string;
 }
 
-export interface AuditPage {
-  audit: AuditRow[];
-  meta: { page: number; size: number; count: number };
+export interface AuditPage extends OffsetPage<AuditRow> {
   /** The actions the filter offers. A UI list, not a whitelist — an app may record its own. */
   actions: readonly string[];
 }
 
-export interface CustomersPage {
-  customers: CustomerRow[];
-  /** Narrower than {@link ListMeta}: every filter here is a column the store applies, so there
-   *  is no bounded scan and therefore no `scanned`/`truncated` caveat to report. */
-  meta: { page: number; size: number; count: number };
-}
+export type CustomersPage = OffsetPage<CustomerRow>;
 
-export interface WebhookEventsPage {
-  events: WebhookEventRow[];
-  meta: ListMeta;
+export interface WebhookEventsPage extends OffsetPage<WebhookEventRow> {
   statuses: readonly string[];
 }
 
-export interface SubscriptionsPage {
-  subscriptions: SubscriptionRow[];
-  meta: ListMeta;
+export interface SubscriptionsPage extends OffsetPage<SubscriptionRow> {
   statuses: readonly string[];
   /** Whole-table counts, not page counts — `past_due` is the figure that decides the morning. */
   counts: { past_due: number; failing_renewals: number };
 }
 
 /**
- * A page of disputes.
- *
- * `meta` is NARROWER than {@link ListMeta} on purpose: the store filters disputes by provider on a
- * column, so there is no bounded scan behind this list and therefore no `scanned`/`truncated` to
- * report. Claiming those here would be claiming a caveat that does not apply.
- *
- * `dueWithin` is present only in work-list mode (`?dueWithin=<hours>`). Its `total` is a SEPARATE,
- * unbounded count: a full page says nothing about how many more windows are closing, and that is
- * the number an operator plans the day around.
+ * A page of disputes. `dueWithin` is present only in work-list mode (`filter[dueWithin]=<hours>`);
+ * `meta.total` is then every closing window, not just this page — the number an operator plans the
+ * day around.
  */
-export interface DisputesPage {
-  disputes: DisputeRow[];
-  meta: { page: number; size: number; count: number };
+export interface DisputesPage extends OffsetPage<DisputeRow> {
   statuses: readonly string[];
-  dueWithin?: { hours: number; total: number };
+  dueWithin?: { hours: number };
 }
 
 /** The gateways this install actually has data for — the provider filter is built from this, never
@@ -561,7 +523,30 @@ async function readError(res: Response, fallback: string): Promise<string> {
   return fallback;
 }
 
-/** Build a query string, skipping empty/absent values so `?status=` never reaches the server. */
+/** The server's page size when a request names none. */
+const DEFAULT_PAGE_SIZE = 50;
+
+/**
+ * A list request's query string: each given filter as `filter[field]=value` (empty/absent ones
+ * skipped, so a cleared filter box never reaches the server) plus `page`/`size`.
+ */
+export function listQuery(
+  filters: Record<string, string | number | undefined>,
+  paging: { page?: number | undefined; size?: number | undefined } = {},
+): string {
+  const query = filterQuery();
+  for (const [field, value] of Object.entries(filters)) {
+    if (value === undefined || value === '') continue;
+    query.where(field, 'equals', value);
+  }
+  if (paging.page !== undefined || paging.size !== undefined) {
+    query.page(paging.page ?? 1, paging.size ?? DEFAULT_PAGE_SIZE);
+  }
+  const qs = query.toQueryString();
+  return qs === '' ? '' : `?${qs}`;
+}
+
+/** Build a query string, skipping empty/absent values so `?period=` never reaches the server. */
 export function buildQuery(params: Record<string, string | number | undefined>): string {
   const q = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -585,7 +570,7 @@ export interface ListOptions {
 /** {@link ListOptions} plus the three EXACT lookups only payments have. */
 export interface PaymentListOptions extends ListOptions {
   /** The APP's own reference for the charge — an order number, an enrolment id. Exact match. */
-  reference?: string | undefined;
+  externalReference?: string | undefined;
   /** The gateway's payment id. Exact match. */
   gatewayId?: string | undefined;
   /** The gateway's customer id — every payment recorded for one customer. Exact match. */
@@ -663,15 +648,16 @@ export const paymentsClient = {
   },
   payments(opts: PaymentListOptions = {}): Promise<PaymentsPage> {
     return http<PaymentsPage>(
-      `/payments${buildQuery({
-        status: opts.status,
-        provider: opts.provider,
-        reference: opts.reference,
-        gatewayId: opts.gatewayId,
-        customerId: opts.customerId,
-        page: opts.page,
-        size: opts.size,
-      })}`,
+      `/payments${listQuery(
+        {
+          status: opts.status,
+          provider: opts.provider,
+          externalReference: opts.externalReference,
+          gatewayId: opts.gatewayId,
+          customerId: opts.customerId,
+        },
+        opts,
+      )}`,
     );
   },
   /** Everything knowable about ONE payment — see {@link PaymentDetail}. */
@@ -680,14 +666,15 @@ export const paymentsClient = {
   },
   customers(opts: CustomerListOptions = {}): Promise<CustomersPage> {
     return http<CustomersPage>(
-      `/customers${buildQuery({
-        provider: opts.provider,
-        ownerType: opts.ownerType,
-        ownerId: opts.ownerId,
-        gatewayId: opts.gatewayId,
-        page: opts.page,
-        size: opts.size,
-      })}`,
+      `/customers${listQuery(
+        {
+          provider: opts.provider,
+          ownerType: opts.ownerType,
+          ownerId: opts.ownerId,
+          gatewayId: opts.gatewayId,
+        },
+        opts,
+      )}`,
     );
   },
   /**
@@ -697,26 +684,24 @@ export const paymentsClient = {
    */
   audit(opts: AuditListOptions = {}): Promise<AuditPage> {
     return http<AuditPage>(
-      `/audit${buildQuery({
-        action: opts.action,
-        actor: opts.actor,
-        provider: opts.provider,
-        subjectType: opts.subjectType,
-        subjectId: opts.subjectId,
-        page: opts.page,
-        size: opts.size,
-      })}`,
+      `/audit${listQuery(
+        {
+          action: opts.action,
+          actor: opts.actor,
+          provider: opts.provider,
+          subjectType: opts.subjectType,
+          subjectId: opts.subjectId,
+        },
+        opts,
+      )}`,
     );
   },
   subscriptions(opts: SubscriptionListOptions = {}): Promise<SubscriptionsPage> {
     return http<SubscriptionsPage>(
-      `/subscriptions${buildQuery({
-        status: opts.status,
-        provider: opts.provider,
-        customerId: opts.customerId,
-        page: opts.page,
-        size: opts.size,
-      })}`,
+      `/subscriptions${listQuery(
+        { status: opts.status, provider: opts.provider, customerId: opts.customerId },
+        opts,
+      )}`,
     );
   },
   /** Everything knowable about ONE subscription (its id or gateway id) — see {@link SubscriptionDetail}. */
@@ -725,33 +710,29 @@ export const paymentsClient = {
   },
   webhookEvents(opts: WebhookEventListOptions = {}): Promise<WebhookEventsPage> {
     return http<WebhookEventsPage>(
-      `/webhook-events${buildQuery({
-        status: opts.status,
-        provider: opts.provider,
-        type: opts.type,
-        page: opts.page,
-        size: opts.size,
-      })}`,
+      `/webhook-events${listQuery(
+        { status: opts.status, provider: opts.provider, type: opts.type },
+        opts,
+      )}`,
     );
   },
   /**
    * A page of disputes — the LOG by default, the work list when `dueWithin` (in hours) is given.
    *
-   * `status` is dropped in work-list mode rather than passed along. The server's work list is
-   * already scoped to the open statuses that carry a deadline, so a status sent alongside
-   * `dueWithin` is silently ignored — and a filter that appears to apply and does not is worse
-   * than no filter at all.
+   * `status` is dropped in work-list mode: the work list is already the open statuses that carry
+   * a deadline, and the server refuses a status beside `dueWithin`.
    */
   disputes(opts: DisputeListOptions = {}): Promise<DisputesPage> {
     const workList = opts.dueWithin !== undefined;
     return http<DisputesPage>(
-      `/disputes${buildQuery({
-        status: workList ? undefined : opts.status,
-        provider: opts.provider,
-        dueWithin: opts.dueWithin,
-        page: opts.page,
-        size: opts.size,
-      })}`,
+      `/disputes${listQuery(
+        {
+          status: workList ? undefined : opts.status,
+          provider: opts.provider,
+          dueWithin: opts.dueWithin,
+        },
+        opts,
+      )}`,
     );
   },
 

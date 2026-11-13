@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -5,8 +6,8 @@ import { clearConfig, injectConfig } from '../client/test-config.test-helper';
 import { App } from './App';
 
 /**
- * The shell, rendered: the URL hash picks the screen and the tabs write it. Sign-in and sign-out
- * belong to the host app, so the console shows no session control.
+ * The shell, rendered: the URL hash picks the screen and the sidebar writes it. Sign-out is offered
+ * only when the provider put one in the data block (the host's option, or authkit's).
  *
  * Every screen used to live in React state alone, so a reload always landed on the overview and
  * the back button left the console.
@@ -90,23 +91,23 @@ afterEach(() => {
 describe('the hash route', () => {
   it('opens on the overview with no hash', async () => {
     renderApp();
-    expect(screen.getByRole('tab', { name: 'Overview' }).getAttribute('aria-selected')).toBe(
-      'true',
+    expect(screen.getByRole('link', { name: 'Overview' }).getAttribute('aria-current')).toBe(
+      'page',
     );
   });
 
   it('opens the screen the hash names, so a reload comes back to it', async () => {
     window.location.hash = '#/subscriptions';
     renderApp();
-    expect(screen.getByRole('tab', { name: 'Subscriptions' }).getAttribute('aria-selected')).toBe(
-      'true',
+    expect(screen.getByRole('link', { name: 'Subscriptions' }).getAttribute('aria-current')).toBe(
+      'page',
     );
     expect(await screen.findByRole('heading', { name: 'Subscriptions' })).toBeTruthy();
   });
 
-  it('writes the hash when a tab is pressed', async () => {
+  it('writes the hash when a sidebar entry is pressed', async () => {
     renderApp();
-    fireEvent.click(screen.getByRole('tab', { name: 'Webhook events' }));
+    fireEvent.click(screen.getByRole('link', { name: 'Webhook events' }));
     expect(window.location.hash).toBe('#/webhooks');
   });
 
@@ -134,9 +135,30 @@ describe('the hash route', () => {
 });
 
 describe('session control', () => {
-  it('is not offered: sign-out belongs to the host app', () => {
+  it('is not offered when the data block carries no sign-out', () => {
     injectConfig({ base: '/pd' });
     renderApp();
-    expect(screen.queryByRole('link', { name: 'Sign out' })).toBeNull();
+    expect(screen.queryByLabelText('Sign out')).toBeNull();
+  });
+
+  it('shows the viewer and a sign-out link the data block names', async () => {
+    injectConfig({
+      base: '/pd',
+      viewer: { label: 'Ann Lee', role: 'admin' },
+      signOut: { href: '/logout' },
+    });
+    renderApp();
+    expect(await screen.findByText('Ann Lee')).toBeTruthy();
+    expect(screen.getByLabelText('Sign out').getAttribute('href')).toBe('/logout');
+  });
+});
+
+describe('the sidebar', () => {
+  it('groups the screens under MONITOR, BILLING and INTEGRATIONS', () => {
+    renderApp();
+    const nav = screen.getByRole('navigation', { name: 'Console' });
+    expect(nav.textContent).toMatch(
+      /Monitor.*Overview.*Activity.*Billing.*Payments.*Subscriptions.*Customers.*Disputes.*Integrations.*Webhook events/,
+    );
   });
 });

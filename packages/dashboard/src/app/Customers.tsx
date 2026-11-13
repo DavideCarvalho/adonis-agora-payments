@@ -1,9 +1,15 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { paymentsClient } from '../client/payments-client';
-import { formatWhen } from './money';
-import { Pager, Panel, QueryState } from './shell';
+import type { Column } from '../agora-kit/blocks/data-table';
+import { PageHeader, Toolbar } from '../agora-kit/blocks/page-header';
+import { UsersIcon } from '../agora-kit/icons';
+import { PageBody } from '../agora-kit/shell/app-shell';
+import { Button } from '../agora-kit/ui/button';
+import { type CustomerRow, paymentsClient } from '../client/payments-client';
+import { formatCount, formatWhen } from './money';
+import { ListPanel, Mono } from './shell';
 import { Badge } from './ui/badge';
+import { CONTROL_CLASS, FieldLabel } from './ui/field';
 import { ProviderFilter } from './ui/provider-filter';
 
 const PAGE_SIZE = 50;
@@ -38,103 +44,121 @@ export function Customers({
     queryFn: () => paymentsClient.customers({ provider, ownerId, size: PAGE_SIZE, page }),
   });
 
-  const rows = query.data?.data ?? [];
-
   return (
-    <Panel
-      title="Customers"
-      subtitle="The gateway customer ↔ app owner mapping written by ensureCustomer. Without a row here, a payment names nobody."
-      actions={
-        <div className="flex flex-wrap items-center gap-3">
-          <ProviderFilter
-            value={provider}
-            onChange={(v) => {
-              setProvider(v);
+    <PageBody>
+      <PageHeader
+        title="Customers"
+        description="The gateway customer ↔ app owner mapping written by ensureCustomer. Without a row here, a payment names nobody."
+      />
+      <Toolbar label="Customer filters" className="gap-3">
+        <ProviderFilter
+          value={provider}
+          onChange={(v) => {
+            setProvider(v);
+            setPage(1);
+          }}
+        />
+        <FieldLabel label="Owner id">
+          <input
+            type="search"
+            value={owner}
+            onChange={(event) => {
+              setOwner(event.target.value);
               setPage(1);
             }}
+            placeholder="4102"
+            className={`mono w-32 ${CONTROL_CLASS}`}
           />
-          <label className="flex items-center gap-2 text-[11px] text-zinc-500">
-            Owner id
-            <input
-              type="search"
-              value={owner}
-              onChange={(event) => {
-                setOwner(event.target.value);
-                setPage(1);
-              }}
-              placeholder="4102"
-              className="mono w-32 rounded-sm border border-line bg-panel px-2 py-1 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-brand focus:outline-hidden"
-            />
-          </label>
-        </div>
-      }
-    >
-      <QueryState
+        </FieldLabel>
+      </Toolbar>
+      <ListPanel
+        title="Customer mappings"
+        description={
+          query.data !== undefined ? `${formatCount(query.data.meta.total)} total` : undefined
+        }
         query={query}
-        empty={rows.length === 0}
-        emptyMessage={
+        rowKey={(row) => row.id}
+        onPage={setPage}
+        emptyIcon={<UsersIcon />}
+        emptyTitle={ownerId === undefined ? 'No customer mapping recorded' : 'No match'}
+        emptyDescription={
           ownerId === undefined
-            ? 'No customer mapping recorded. If charges are landing anyway, the app is not calling ensureCustomer — nothing here can tie them to a user.'
+            ? 'If charges are landing anyway, the app is not calling ensureCustomer — nothing here can tie them to a user.'
             : `No customer mapped to owner “${ownerId}”.`
         }
-      >
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-line text-left text-[10px] uppercase tracking-wider text-zinc-500">
-              <th className="px-4 py-2 font-normal">Owner</th>
-              <th className="px-4 py-2 font-normal">Name</th>
-              <th className="px-4 py-2 font-normal">Email</th>
-              <th className="px-4 py-2 font-normal">Gateway customer</th>
-              <th className="px-4 py-2 font-normal">Provider</th>
-              <th className="px-4 py-2 font-normal">Recorded</th>
-              <th className="px-4 py-2 text-right font-normal">Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.id} className="border-b border-line-soft last:border-0">
-                <td className="mono px-4 py-2 text-zinc-200">
-                  {row.ownerId === null ? (
-                    // Not a blank: this is a gateway customer nobody mapped, and every payment
-                    // it takes is a payment this console can never attribute.
-                    <span className="text-amber-300">unmapped</span>
-                  ) : (
-                    `${row.ownerType ?? '?'} · ${row.ownerId}`
-                  )}
-                </td>
-                <td className="px-4 py-2 text-zinc-300">{row.name ?? '—'}</td>
-                <td className="px-4 py-2 text-zinc-400">{row.email ?? '—'}</td>
-                <td className="mono px-4 py-2 text-zinc-400">{row.gatewayId}</td>
-                <td className="px-4 py-2">
-                  <Badge variant="provider">{row.provider}</Badge>
-                </td>
-                <td className="mono px-4 py-2 text-zinc-500">{formatWhen(row.createdAt)}</td>
-                <td className="space-x-2 whitespace-nowrap px-4 py-2 text-right">
-                  {onOpenSubscriptions !== undefined && (
-                    <button
-                      type="button"
-                      onClick={() => onOpenSubscriptions(row.gatewayId)}
-                      className="rounded-sm border border-line px-2 py-1 text-xs text-zinc-300 hover:bg-panel-2 hover:text-zinc-100"
-                    >
-                      Subscriptions
-                    </button>
-                  )}
-                  {onOpenPayments !== undefined && (
-                    <button
-                      type="button"
-                      onClick={() => onOpenPayments(row.gatewayId)}
-                      className="rounded-sm border border-line px-2 py-1 text-xs text-zinc-300 hover:bg-panel-2 hover:text-zinc-100"
-                    >
-                      Payments
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <Pager meta={query.data?.meta} count={rows.length} onPage={setPage} />
-      </QueryState>
-    </Panel>
+        columns={customerColumns({
+          ...(onOpenPayments ? { onOpenPayments } : {}),
+          ...(onOpenSubscriptions ? { onOpenSubscriptions } : {}),
+        })}
+      />
+    </PageBody>
   );
+}
+
+/** The customers table's columns (presentational). */
+function customerColumns({
+  onOpenPayments,
+  onOpenSubscriptions,
+}: {
+  onOpenPayments?: (customerId: string) => void;
+  onOpenSubscriptions?: (customerId: string) => void;
+}): Column<CustomerRow>[] {
+  return [
+    {
+      id: 'owner',
+      header: 'Owner',
+      cell: (row) =>
+        row.ownerId === null ? (
+          // Not a blank: this is a gateway customer nobody mapped, and every payment it takes is a
+          // payment this console can never attribute.
+          <span className="mono text-[12px] text-warn">unmapped</span>
+        ) : (
+          <Mono className="text-fg">{`${row.ownerType ?? '?'} · ${row.ownerId}`}</Mono>
+        ),
+    },
+    {
+      id: 'name',
+      header: 'Name',
+      hideBelow: 'md',
+      cell: (row) => <span className="text-fg-2">{row.name ?? '—'}</span>,
+    },
+    { id: 'email', header: 'Email', hideBelow: 'md', cell: (row) => row.email ?? '—' },
+    {
+      id: 'gateway',
+      header: 'Gateway customer',
+      hideBelow: 'sm',
+      cell: (row) => <Mono>{row.gatewayId}</Mono>,
+    },
+    {
+      id: 'provider',
+      header: 'Provider',
+      hideBelow: 'lg',
+      cell: (row) => <Badge variant="provider">{row.provider}</Badge>,
+    },
+    {
+      id: 'recorded',
+      header: 'Recorded',
+      hideBelow: 'lg',
+      cell: (row) => <Mono className="text-faint">{formatWhen(row.createdAt)}</Mono>,
+    },
+    {
+      id: 'action',
+      header: <span className="sr-only">Action</span>,
+      align: 'right',
+      cell: (row) => (
+        <span className="inline-flex justify-end gap-1">
+          {onOpenSubscriptions !== undefined && (
+            <Button variant="outline" size="sm" onClick={() => onOpenSubscriptions(row.gatewayId)}>
+              Subscriptions
+            </Button>
+          )}
+          {onOpenPayments !== undefined && (
+            <Button variant="outline" size="sm" onClick={() => onOpenPayments(row.gatewayId)}>
+              Payments
+            </Button>
+          )}
+        </span>
+      ),
+    },
+  ];
 }

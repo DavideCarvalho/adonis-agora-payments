@@ -1,8 +1,18 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
+import { Button } from '../agora-kit/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../agora-kit/ui/dialog';
 import type { PaymentRow } from '../client/payments-client';
 import { paymentsClient } from '../client/payments-client';
 import { formatCents, parseMajorToMinor } from './money';
+import { CONTROL_CLASS } from './ui/field';
 
 /**
  * The refund confirmation.
@@ -39,35 +49,38 @@ export function RefundDialog({ payment, onClose }: { payment: PaymentRow; onClos
   const blocked = amountInvalid || amountTooLarge || mutation.isPending;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-      {/* The native element, not a div with `role="dialog"`: it comes with the semantics for free
-          and browsers keep improving them. Its UA styles (absolute, auto margins, 1em padding,
-          `canvas` background) are all overridden below. */}
-      <dialog
-        open
-        aria-modal="true"
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        // Never mid-request: closing would hide whether the refund went through.
+        if (!open && !mutation.isPending) onClose();
+      }}
+    >
+      <DialogContent
+        showCloseButton={false}
         aria-label="Confirm refund"
-        className="relative m-0 w-full max-w-md rounded-sm border border-line bg-panel-2 p-0 text-inherit shadow-xl"
+        className="gap-0 p-0 sm:max-w-md"
       >
-        <header className="border-b border-line px-4 py-3">
-          <h2 className="text-sm text-zinc-100">Refund this payment?</h2>
-        </header>
+        <DialogHeader className="border-b border-border px-5 py-4">
+          <DialogTitle className="text-[15px] font-semibold">Refund this payment?</DialogTitle>
+          <DialogDescription className="text-[11.5px]">
+            This calls {payment.provider}. A refund is not idempotent at most gateways.
+          </DialogDescription>
+        </DialogHeader>
 
-        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 px-4 py-3 text-sm">
-          <dt className="text-[11px] uppercase tracking-wider text-zinc-500">Amount</dt>
-          <dd className="mono tnum text-zinc-100">
-            {formatCents(payment.amount, payment.currency)}
-          </dd>
-          <dt className="text-[11px] uppercase tracking-wider text-zinc-500">Customer</dt>
-          <dd className="mono text-zinc-300">{payment.customerId ?? '— (no customer recorded)'}</dd>
-          <dt className="text-[11px] uppercase tracking-wider text-zinc-500">Payment</dt>
-          <dd className="mono break-all text-zinc-400">{payment.gatewayId}</dd>
-          <dt className="text-[11px] uppercase tracking-wider text-zinc-500">Gateway</dt>
-          <dd className="mono text-zinc-400">{payment.provider}</dd>
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 px-5 py-4 text-sm">
+          <dt className={LABEL}>Amount</dt>
+          <dd className="mono tnum text-fg">{formatCents(payment.amount, payment.currency)}</dd>
+          <dt className={LABEL}>Customer</dt>
+          <dd className="mono text-fg-2">{payment.customerId ?? '— (no customer recorded)'}</dd>
+          <dt className={LABEL}>Payment</dt>
+          <dd className="mono break-all text-dim">{payment.gatewayId}</dd>
+          <dt className={LABEL}>Gateway</dt>
+          <dd className="mono text-dim">{payment.provider}</dd>
         </dl>
 
-        <div className="border-t border-line px-4 py-3">
-          <label className="block text-[11px] uppercase tracking-wider text-zinc-500">
+        <div className="border-t border-border px-5 py-4">
+          <label className={`block ${LABEL}`}>
             Partial amount (optional)
             <input
               type="text"
@@ -76,21 +89,21 @@ export function RefundDialog({ payment, onClose }: { payment: PaymentRow; onClos
               disabled={mutation.isPending}
               onChange={(event) => setPartial(event.target.value)}
               placeholder={`Leave empty to refund ${formatCents(payment.amount, payment.currency)}`}
-              className="mono mt-1 w-full rounded-sm border border-line bg-panel px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-brand focus:outline-hidden disabled:opacity-50"
+              className={`mono mt-1.5 block h-8 w-full normal-case tracking-normal ${CONTROL_CLASS}`}
             />
           </label>
           {amountInvalid && (
-            <p className="mt-1 text-[11px] text-rose-300">
+            <p className="mt-1.5 text-[11px] text-bad">
               Not an amount in {payment.currency}. Use up to the currency’s own number of decimals.
             </p>
           )}
           {amountTooLarge && (
-            <p className="mt-1 text-[11px] text-rose-300">
+            <p className="mt-1.5 text-[11px] text-bad">
               Larger than the payment itself ({formatCents(payment.amount, payment.currency)}).
             </p>
           )}
           {parsed != null && !amountTooLarge && (
-            <p className="mt-1 text-[11px] text-zinc-500">
+            <p className="mt-1.5 text-[11px] text-dim">
               Refunding {formatCents(parsed, payment.currency)} of{' '}
               {formatCents(payment.amount, payment.currency)}.
             </p>
@@ -98,16 +111,16 @@ export function RefundDialog({ payment, onClose }: { payment: PaymentRow; onClos
         </div>
 
         {mutation.isError && (
-          <div className="mx-4 mb-3 rounded-sm border border-bad/40 bg-bad/10 p-2">
-            <p className="mono whitespace-pre-wrap wrap-break-word text-[11px] text-rose-300">
+          <div className="mx-5 mb-4 rounded-md border border-bad/25 bg-bad/[0.06] p-2.5">
+            <p className="mono whitespace-pre-wrap wrap-break-word text-[11px] text-bad">
               {mutation.error instanceof Error ? mutation.error.message : 'The refund failed.'}
             </p>
           </div>
         )}
 
         {mutation.isSuccess && (
-          <div className="mx-4 mb-3 rounded-sm border border-good/40 bg-good/10 p-2">
-            <p className="text-[11px] text-emerald-300">
+          <div className="mx-5 mb-4 rounded-md border border-good/25 bg-good/[0.08] p-2.5">
+            <p className="text-[11px] text-good">
               Refund accepted by {payment.provider} (
               {formatCents(mutation.data.refund.amount, mutation.data.refund.currency)},{' '}
               {mutation.data.refund.status}). {mutation.data.note}
@@ -115,29 +128,21 @@ export function RefundDialog({ payment, onClose }: { payment: PaymentRow; onClos
           </div>
         )}
 
-        <footer className="flex justify-end gap-2 border-t border-line px-4 py-3">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={mutation.isPending}
-            className="rounded-sm border border-line px-3 py-1.5 text-xs text-zinc-300 enabled:hover:bg-panel disabled:opacity-40"
-          >
+        <DialogFooter className="m-0 rounded-b-xl border-t border-border bg-transparent px-5 py-3">
+          <Button variant="outline" onClick={onClose} disabled={mutation.isPending}>
             {mutation.isSuccess ? 'Close' : 'Cancel'}
-          </button>
+          </Button>
           {!mutation.isSuccess && (
-            <button
-              type="button"
-              onClick={() => mutation.mutate()}
-              disabled={blocked}
-              className="rounded-sm border border-bad/50 bg-bad/15 px-3 py-1.5 text-xs text-rose-200 enabled:hover:bg-bad/25 disabled:opacity-40"
-            >
+            <Button variant="destructive" onClick={() => mutation.mutate()} disabled={blocked}>
               {mutation.isPending
                 ? 'Refunding…'
                 : `Refund ${formatCents(amount ?? payment.amount, payment.currency)}`}
-            </button>
+            </Button>
           )}
-        </footer>
-      </dialog>
-    </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
+
+const LABEL = 'text-[10px] font-semibold uppercase tracking-[0.1em] text-faint';

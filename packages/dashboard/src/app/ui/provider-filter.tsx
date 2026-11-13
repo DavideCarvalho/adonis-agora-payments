@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { paymentsClient } from '../../client/payments-client';
-import { cn } from './cn';
+import { CONTROL_CLASS, FieldLabel } from './field';
 
 /**
  * "Which gateway?" — as a native select, driven by the DATA.
@@ -36,13 +36,12 @@ export function ProviderFilter({
   if (providers.length < 2 && value === undefined) return null;
 
   return (
-    <label className={cn('flex items-center gap-2 text-[11px] text-zinc-500', className)}>
-      Gateway
+    <FieldLabel label="Gateway" {...(className !== undefined ? { className } : {})}>
       <select
         aria-label="Gateway"
         value={value ?? ''}
         onChange={(event) => onChange(event.target.value === '' ? undefined : event.target.value)}
-        className="rounded-sm border border-line bg-panel px-2 py-1 text-xs text-zinc-300 focus:border-brand focus:outline-hidden"
+        className={CONTROL_CLASS}
       >
         <option value="">All</option>
         {providers.map((provider) => (
@@ -51,6 +50,6 @@ export function ProviderFilter({
           </option>
         ))}
       </select>
-    </label>
+    </FieldLabel>
   );
 }

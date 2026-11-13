@@ -1,9 +1,13 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
+import type { Column } from '../agora-kit/blocks/data-table';
+import { PageHeader, Toolbar } from '../agora-kit/blocks/page-header';
+import { PageBody } from '../agora-kit/shell/app-shell';
 import type { AuditRow } from '../client/payments-client';
 import { paymentsClient } from '../client/payments-client';
-import { formatCents, formatWhen } from './money';
-import { Pager, Panel, QueryState } from './shell';
+import { LogIcon } from './icons';
+import { formatCents, formatCount, formatWhen } from './money';
+import { ListPanel, Mono } from './shell';
 import { Badge } from './ui/badge';
 import { Segmented } from './ui/segmented';
 
@@ -48,13 +52,13 @@ export function Activity({ initialAction }: { initialAction?: string | undefined
     queryFn: () => paymentsClient.audit({ action, size: PAGE_SIZE, page }),
   });
 
-  const rows = query.data?.data ?? [];
-
   return (
-    <Panel
-      title="Activity"
-      subtitle="Refunds issued here, dispute outcomes recorded here, and the gateway deliveries this endpoint refused."
-      actions={
+    <PageBody>
+      <PageHeader
+        title="Activity"
+        description="Refunds issued here, dispute outcomes recorded here, and the gateway deliveries this endpoint refused."
+      />
+      <Toolbar label="Activity filters">
         <Segmented
           aria-label="Action"
           options={ACTION_OPTIONS}
@@ -64,51 +68,75 @@ export function Activity({ initialAction }: { initialAction?: string | undefined
             setPage(1);
           }}
         />
-      }
-    >
-      <QueryState query={query} empty={rows.length === 0} emptyMessage={emptyMessage(action)}>
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-line text-left text-[10px] uppercase tracking-wider text-zinc-500">
-              <th className="px-4 py-2 font-normal">When</th>
-              <th className="px-4 py-2 font-normal">Action</th>
-              <th className="px-4 py-2 font-normal">Who</th>
-              <th className="px-4 py-2 font-normal">Subject</th>
-              <th className="px-4 py-2 text-right font-normal">Amount</th>
-              <th className="px-4 py-2 font-normal">Detail</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.id} className="border-b border-line-soft last:border-0">
-                <td className="mono px-4 py-2 text-zinc-500">{formatWhen(row.createdAt)}</td>
-                <td className="px-4 py-2">
-                  <Badge variant={row.action === 'webhook.rejected' ? 'danger' : 'type'}>
-                    {ACTION_LABEL[row.action] ?? row.action}
-                  </Badge>
-                </td>
-                <td className="px-4 py-2 text-zinc-300">{actorLabel(row)}</td>
-                <td className="mono px-4 py-2 text-zinc-400">
-                  {row.subjectId ?? '—'}
-                  {row.provider !== null && (
-                    <span className="ml-1.5">
-                      <Badge variant="provider">{row.provider}</Badge>
-                    </span>
-                  )}
-                </td>
-                <td className="mono tnum px-4 py-2 text-right text-zinc-200">
-                  {row.amount === null ? '—' : formatCents(row.amount, row.currency ?? 'BRL')}
-                </td>
-                <td className="px-4 py-2 text-[11px] text-zinc-500">{detailLabel(row)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <Pager meta={query.data?.meta} count={rows.length} onPage={setPage} />
-      </QueryState>
-    </Panel>
+      </Toolbar>
+      <ListPanel
+        title="Audit log"
+        description={
+          query.data !== undefined ? `${formatCount(query.data.meta.total)} entries` : undefined
+        }
+        query={query}
+        rowKey={(row) => row.id}
+        onPage={setPage}
+        emptyIcon={<LogIcon />}
+        emptyTitle="Nothing here"
+        emptyDescription={emptyMessage(action)}
+        columns={ACTIVITY_COLUMNS}
+      />
+    </PageBody>
   );
 }
+
+/** The audit table's columns (presentational). */
+const ACTIVITY_COLUMNS: Column<AuditRow>[] = [
+  {
+    id: 'when',
+    header: 'When',
+    cell: (row) => <Mono className="text-faint">{formatWhen(row.createdAt)}</Mono>,
+  },
+  {
+    id: 'action',
+    header: 'Action',
+    cell: (row) => (
+      <Badge variant={row.action === 'webhook.rejected' ? 'danger' : 'type'}>
+        {ACTION_LABEL[row.action] ?? row.action}
+      </Badge>
+    ),
+  },
+  {
+    id: 'who',
+    header: 'Who',
+    hideBelow: 'sm',
+    cell: (row) => <span className="text-fg-2">{actorLabel(row)}</span>,
+  },
+  {
+    id: 'subject',
+    header: 'Subject',
+    hideBelow: 'md',
+    cell: (row) => (
+      <span className="inline-flex items-center gap-1.5">
+        <Mono>{row.subjectId ?? '—'}</Mono>
+        {row.provider !== null && <Badge variant="provider">{row.provider}</Badge>}
+      </span>
+    ),
+  },
+  {
+    id: 'amount',
+    header: 'Amount',
+    align: 'right',
+    cell: (row) => (
+      <span className="mono tnum text-[12.5px] text-fg">
+        {row.amount === null ? '—' : formatCents(row.amount, row.currency ?? 'BRL')}
+      </span>
+    ),
+  },
+  {
+    id: 'detail',
+    header: 'Detail',
+    hideBelow: 'lg',
+    className: 'whitespace-normal',
+    cell: (row) => <span className="text-[11px] text-faint">{detailLabel(row)}</span>,
+  },
+];
 
 /**
  * WHO — and `null` renders as "unattributed", never as "system".

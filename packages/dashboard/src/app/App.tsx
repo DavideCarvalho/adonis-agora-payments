@@ -1,20 +1,34 @@
-import { useCallback, useEffect, useState } from 'react';
-import { readSwitcherConfig } from '../client/console-switcher';
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { EmptyState } from '../agora-kit/blocks/empty-state';
+import { ErrorBoundary } from '../agora-kit/blocks/error-boundary';
+import { UsersIcon } from '../agora-kit/icons';
+import { AppShell, type NavSection, PageBody } from '../agora-kit/shell/app-shell';
+import { readShellConfig } from '../agora-kit/shell-config';
 import { CONFIG_ELEMENT_ID, isScopedView } from '../client/payments-client';
 import { Activity } from './Activity';
-import { ConsoleSwitcher } from './ConsoleSwitcher';
 import { Customers } from './Customers';
 import { Disputes } from './Disputes';
+import {
+  BuildingIcon,
+  CardIcon,
+  GaugeIcon,
+  LogIcon,
+  PaymentsMark,
+  PlugIcon,
+  RepeatIcon,
+  ShieldIcon,
+} from './icons';
 import { OrgPicker, useTenantPicker } from './OrgPicker';
 import { Overview } from './Overview';
 import { PaymentsList } from './PaymentsList';
-import { formatRoute, parseRoute, type Route, SCREENS, screenKey } from './routes';
+import { formatRoute, parseRoute, type Route, SCREENS, type Screen, screenKey } from './routes';
 import { Subscriptions } from './Subscriptions';
-import { Segmented } from './ui/segmented';
 import { WebhookEvents } from './WebhookEvents';
 
 /**
- * The console shell: a header and one of seven screens, chosen by the URL hash.
+ * The console: the Agora shell (kit) around seven screens — MONITOR (Overview, Activity), BILLING
+ * (Payments, Subscriptions, Customers, Disputes), INTEGRATIONS (Webhook events) — chosen by the
+ * URL hash. Every screen renders inside its own error boundary.
  *
  * The route lives in `window.location.hash` (see `routes.ts` for the grammar) rather than in
  * React state alone, so the back button works, a reload comes back to the same screen, and
@@ -50,30 +64,71 @@ function useHashRoute(): [Route, (next: Route) => void] {
   return [route, navigate];
 }
 
-/** The console switcher config the provider put in the page (absent when this console is alone). */
-const switcherConfig = readSwitcherConfig(CONFIG_ELEMENT_ID);
+/** Payments' accent (cyan): passed to the kit's ThemeProvider in `main.tsx`. Cyan-teal sits far from
+ *  `--agora-good` green so a MONEY figure never reads as a health signal, and — unlike a green or
+ *  gold accent — it does not quietly imply "paid" next to a FAILED row. */
+export const PAYMENTS_ACCENT = '#22d3ee';
 
 /** Screens that read across every organization: not offered when the view is one organization. */
 const EVERY_ORGANIZATION_SCREENS = new Set<Route['screen']>(['webhooks', 'activity']);
 
+const TITLES: Record<Screen, string> = Object.fromEntries(
+  SCREENS.map((screen) => [screen.value, screen.label]),
+) as Record<Screen, string>;
+
+/** Sidebar sections (CONSOLE-SHELL-SPEC): MONITOR · BILLING · INTEGRATIONS. */
+const NAV: ReadonlyArray<{ section: string; items: ReadonlyArray<[Screen, ReactNode]> }> = [
+  {
+    section: 'Monitor',
+    items: [
+      ['overview', <GaugeIcon key="i" />],
+      ['activity', <LogIcon key="i" />],
+    ],
+  },
+  {
+    section: 'Billing',
+    items: [
+      ['payments', <CardIcon key="i" />],
+      ['subscriptions', <RepeatIcon key="i" />],
+      ['customers', <UsersIcon key="i" />],
+      ['disputes', <ShieldIcon key="i" />],
+    ],
+  },
+  { section: 'Integrations', items: [['webhooks', <PlugIcon key="i" />]] },
+];
+
 export function App() {
+  // What the provider put in the page: switcher, ⌘K search, viewer, sign-out (all optional).
+  const shell = useMemo(() => readShellConfig(CONFIG_ELEMENT_ID), []);
   const [route, navigate] = useHashRoute();
   const key = screenKey(route);
   const picker = useTenantPicker();
   // Re-read on a switch of organization (the pick lives in the page URL, not in state).
   const [, setPickVersion] = useState(0);
   const scoped = isScopedView(picker);
-  const screens = scoped
-    ? SCREENS.filter((screen) => !EVERY_ORGANIZATION_SCREENS.has(screen.value))
-    : SCREENS;
   const noOrganization = picker?.mode === 'none';
 
   useEffect(() => {
     if (scoped && EVERY_ORGANIZATION_SCREENS.has(route.screen)) navigate({ screen: 'overview' });
   }, [scoped, route.screen, navigate]);
 
-  /** Switching tabs by hand: no seed — each screen opens on its own sensible default. */
-  const openScreen = (screen: Route['screen']) => navigate({ screen });
+  const nav = useMemo<NavSection[]>(
+    () =>
+      NAV.map(({ section, items }) => ({
+        section,
+        items: items
+          .filter(([screen]) => !(scoped && EVERY_ORGANIZATION_SCREENS.has(screen)))
+          .map(([screen, icon]) => ({
+            id: screen,
+            label: TITLES[screen],
+            icon,
+            href: formatRoute({ screen }),
+            // Switching screens by hand: no seed — each screen opens on its own default.
+            onSelect: () => navigate({ screen }),
+          })),
+      })),
+    [scoped, navigate],
+  );
 
   /**
    * Following a health check: seed the filter that isolates exactly the rows it counted.
@@ -105,56 +160,43 @@ export function App() {
     navigate({ ...route, screen: 'payments', paymentId: paymentId ?? undefined });
 
   return (
-    <div className="relative min-h-full">
-      <div className="app-bg" />
-      <div className="relative z-10 mx-auto max-w-6xl px-3 py-4 sm:px-4 sm:py-6">
-        <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <ConsoleSwitcher
-              config={switcherConfig}
-              current={{ title: 'Payments', package: '@adonis-agora/payments' }}
-              brandClassName="text-lg text-zinc-100"
-              brand={
-                <>
-                  payments <span className="text-brand">·</span> billing console
-                </>
-              }
-            />
-            <p className="mt-0.5 text-[11px] text-zinc-500">
-              Reads the billing store directly. Refunds and retries are the only calls that leave
-              this app.
-            </p>
-          </div>
-          <OrgPicker onChange={() => setPickVersion((version) => version + 1)} />
-        </header>
-
+    <AppShell
+      brand={{
+        name: 'payments',
+        subtitle: 'billing console',
+        mark: <PaymentsMark />,
+        current: { title: 'Payments', package: '@adonis-agora/payments', icon: 'payments' },
+      }}
+      nav={nav}
+      activeId={route.screen}
+      shell={shell}
+      title={TITLES[route.screen]}
+      searchPlaceholder="Search payments, subscriptions, customers…"
+      actions={<OrgPicker onChange={() => setPickVersion((version) => version + 1)} />}
+    >
+      <ErrorBoundary label={TITLES[route.screen]} resetKeys={[key]}>
         {noOrganization ? (
-          <p
-            className="rounded-sm border border-line bg-panel p-4 text-sm text-zinc-400"
-            data-org-empty
-          >
-            Choose an organization to see its data.
-          </p>
+          <PageBody>
+            <EmptyState
+              icon={<BuildingIcon />}
+              title="No organization selected"
+              description={<span data-org-empty>Choose an organization to see its data.</span>}
+              className="agora-surface rounded-lg border border-border"
+            />
+          </PageBody>
         ) : (
-          renderScreens()
+          renderScreen()
         )}
-      </div>
-    </div>
+      </ErrorBoundary>
+    </AppShell>
   );
 
-  function renderScreens() {
-    return (
-      <>
-        <Segmented
-          aria-label="Screen"
-          className="mb-4"
-          options={screens}
-          value={route.screen}
-          onChange={openScreen}
-        />
-
-        {route.screen === 'overview' && <Overview onNavigate={focusRows} showHealth={!scoped} />}
-        {route.screen === 'payments' && (
+  function renderScreen() {
+    switch (route.screen) {
+      case 'overview':
+        return <Overview onNavigate={focusRows} showHealth={!scoped} />;
+      case 'payments':
+        return (
           <PaymentsList
             key={key}
             initialStatus={route.status}
@@ -165,15 +207,17 @@ export function App() {
               picker !== undefined && picker.mode !== 'off' && !scoped ? picker : undefined
             }
           />
-        )}
-        {route.screen === 'customers' && (
+        );
+      case 'customers':
+        return (
           <Customers
             key={key}
             onOpenPayments={openCustomerPayments}
             onOpenSubscriptions={openCustomerSubscriptions}
           />
-        )}
-        {route.screen === 'subscriptions' && (
+        );
+      case 'subscriptions':
+        return (
           <Subscriptions
             key={key}
             initialStatus={route.status}
@@ -183,11 +227,13 @@ export function App() {
             onOpenPayment={openPaymentDetail}
             onOpenCustomer={openCustomerPayments}
           />
-        )}
-        {route.screen === 'disputes' && <Disputes key={key} initialStatus={route.status} />}
-        {route.screen === 'webhooks' && <WebhookEvents key={key} initialStatus={route.status} />}
-        {route.screen === 'activity' && <Activity key={key} initialAction={route.status} />}
-      </>
-    );
+        );
+      case 'disputes':
+        return <Disputes key={key} initialStatus={route.status} />;
+      case 'webhooks':
+        return <WebhookEvents key={key} initialStatus={route.status} />;
+      case 'activity':
+        return <Activity key={key} initialAction={route.status} />;
+    }
   }
 }

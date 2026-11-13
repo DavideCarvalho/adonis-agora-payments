@@ -1,13 +1,19 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
+import type { Column } from '../agora-kit/blocks/data-table';
+import { PageHeader, Toolbar } from '../agora-kit/blocks/page-header';
+import { PageBody } from '../agora-kit/shell/app-shell';
+import { Button } from '../agora-kit/ui/button';
 import type { PaymentRow, TenantPicker } from '../client/payments-client';
 import { paymentsClient } from '../client/payments-client';
-import { formatCents, formatWhen } from './money';
+import { CardIcon } from './icons';
+import { formatCents, formatCount, formatWhen } from './money';
 import { PaymentDetail } from './PaymentDetail';
 import { RefundDialog } from './RefundDialog';
-import { Pager, Panel, QueryState } from './shell';
+import { ListPanel, Mono } from './shell';
 import { paymentStatusClass } from './status';
-import { Badge } from './ui/badge';
+import { Badge, StatusBadge } from './ui/badge';
+import { CONTROL_CLASS, FieldLabel } from './ui/field';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';
 
@@ -91,7 +97,6 @@ export function PaymentsList({
     },
   });
 
-  const rows = query.data?.data ?? [];
   // A filter change makes the current page meaningless — page 3 of "all" is not page 3 of
   // "failed", nor page 3 of "asaas".
   const refilter = (apply: () => void) => {
@@ -100,147 +105,189 @@ export function PaymentsList({
   };
 
   return (
-    <Panel
-      title="Payments"
-      subtitle="Every payment recorded locally by webhook processing, newest first."
-      actions={
-        <div className="flex flex-wrap items-center gap-3">
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              refilter(() => setSubmitted(lookup));
-            }}
-          >
-            <label className="flex items-center gap-2 text-[11px] text-zinc-500">
-              Find
-              <input
-                type="search"
-                value={lookup}
-                onChange={(event) => {
-                  setLookup(event.target.value);
-                  // Clearing the box clears the search, without needing a second keystroke.
-                  if (event.target.value === '') refilter(() => setSubmitted(''));
-                }}
-                placeholder="order-4102 or pay_8f2…"
-                aria-label="Reference or gateway id"
-                className="mono w-48 rounded-sm border border-line bg-panel px-2 py-1 text-xs text-zinc-200 placeholder:text-zinc-600 focus:border-brand focus:outline-hidden"
-              />
-            </label>
-          </form>
-          <ProviderFilter value={provider} onChange={(v) => refilter(() => setProvider(v))} />
-          <Segmented
-            aria-label="Payment status"
-            options={STATUS_OPTIONS}
-            value={status}
-            onChange={(value) => refilter(() => setStatus(value))}
-          />
-        </div>
-      }
-    >
-      <QueryState
-        query={query}
-        empty={rows.length === 0}
-        emptyMessage={emptyMessage(status, provider, term)}
-      >
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-line text-left text-[10px] uppercase tracking-wider text-zinc-500">
-              <th className="px-4 py-2 font-normal">Status</th>
-              <th className="px-4 py-2 text-right font-normal">Amount</th>
-              {/* The APP's own id leads the two identity columns: it is the one an operator
-                  arrives holding, and the one this table used to hide entirely. */}
-              <th className="px-4 py-2 font-normal">Reference</th>
-              {organizations !== undefined && (
-                <th className="px-4 py-2 font-normal">Organization</th>
-              )}
-              <th className="px-4 py-2 font-normal">Owner</th>
-              <th className="px-4 py-2 font-normal">Gateway id</th>
-              <th className="px-4 py-2 font-normal">Provider</th>
-              <th className="px-4 py-2 font-normal">Paid at</th>
-              <th className="px-4 py-2 font-normal">Created</th>
-              <th className="px-4 py-2 text-right font-normal">Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.id} className="border-b border-line-soft last:border-0">
-                <td className="px-4 py-2">
-                  <span className={paymentStatusClass(row.status)}>
-                    <Badge variant="status">{row.status}</Badge>
-                  </span>
-                </td>
-                <td className="mono tnum px-4 py-2 text-right text-zinc-100">
-                  {/* Integer minor units came over the wire; this is the only shift. */}
-                  {formatCents(row.amount, row.currency)}
-                  {row.refundedAmount !== null && row.refundedAmount > 0 && (
-                    <div className="text-[10px] text-amber-300">
-                      −{formatCents(row.refundedAmount, row.currency)} back
-                    </div>
-                  )}
-                </td>
-                <td className="mono px-4 py-2 text-zinc-200">{row.externalReference ?? '—'}</td>
-                {/* The app-side owner, not the gateway's `cus_…`: the gateway id names nobody,
-                    and it is what this column used to show. The raw id stays in the tooltip. */}
-                {organizations !== undefined && (
-                  <td className="px-4 py-2 text-zinc-300" data-column="organization">
-                    {organizationOf(row, organizations)}
-                  </td>
-                )}
-                <td className="px-4 py-2 text-zinc-400" title={row.customerId ?? ''}>
-                  {ownerCell(row)}
-                </td>
-                <td className="mono px-4 py-2 text-zinc-400">
-                  {/* A link, not just a button: the detail has a URL now, and a URL is what an
-                      operator drags into a ticket. */}
-                  <a
-                    href={`#/payments/${encodeURIComponent(row.gatewayId)}`}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      setOpened(row.gatewayId);
-                    }}
-                    className="hover:text-zinc-100 hover:underline"
-                  >
-                    {row.gatewayId}
-                  </a>
-                </td>
-                <td className="px-4 py-2">
-                  <Badge variant="provider">{row.provider}</Badge>
-                </td>
-                <td className="mono px-4 py-2 text-zinc-500">{formatWhen(row.paidAt)}</td>
-                <td className="mono px-4 py-2 text-zinc-500">{formatWhen(row.createdAt)}</td>
-                <td className="flex justify-end gap-1 px-4 py-2 text-right">
-                  <button
-                    type="button"
-                    onClick={() => setOpened(row.gatewayId)}
-                    className="rounded-sm border border-line px-2 py-1 text-xs text-zinc-400 hover:bg-panel-2 hover:text-zinc-100"
-                  >
-                    Detail
-                  </button>
-                  {/* `refundable` is the SERVER's rule, not a re-derivation of it: a button that
-                      offers what the endpoint will refuse is a button that only ever errors. */}
-                  {row.refundable && (
-                    <button
-                      type="button"
-                      onClick={() => setRefunding(row)}
-                      className="rounded-sm border border-line px-2 py-1 text-xs text-zinc-300 hover:bg-panel-2 hover:text-zinc-100"
-                    >
-                      Refund
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <Pager meta={query.data?.meta} count={rows.length} onPage={setPage} />
-      </QueryState>
+    <PageBody>
+      <PageHeader
+        title="Payments"
+        description="Every payment recorded locally by webhook processing, newest first."
+      />
+      <Toolbar label="Payment filters" className="gap-3">
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            refilter(() => setSubmitted(lookup));
+          }}
+        >
+          <FieldLabel label="Find">
+            <input
+              type="search"
+              value={lookup}
+              onChange={(event) => {
+                setLookup(event.target.value);
+                // Clearing the box clears the search, without needing a second keystroke.
+                if (event.target.value === '') refilter(() => setSubmitted(''));
+              }}
+              placeholder="order-4102 or pay_8f2…"
+              aria-label="Reference or gateway id"
+              className={`mono w-48 ${CONTROL_CLASS}`}
+            />
+          </FieldLabel>
+        </form>
+        <ProviderFilter value={provider} onChange={(v) => refilter(() => setProvider(v))} />
+        <Segmented
+          aria-label="Payment status"
+          options={STATUS_OPTIONS}
+          value={status}
+          onChange={(value) => refilter(() => setStatus(value))}
+        />
+      </Toolbar>
 
-      {refunding !== null && (
-        <RefundDialog payment={refunding} onClose={() => setRefunding(null)} />
-      )}
-      {opened !== null && <PaymentDetail gatewayId={opened} onClose={() => setOpened(null)} />}
-    </Panel>
+      <ListPanel
+        title="Recorded payments"
+        description={
+          query.data !== undefined ? `${formatCount(query.data.meta.total)} total` : undefined
+        }
+        query={query}
+        rowKey={(row) => row.id}
+        onPage={setPage}
+        emptyIcon={<CardIcon />}
+        emptyTitle={term !== undefined ? 'No match' : 'No payments'}
+        emptyDescription={emptyMessage(status, provider, term)}
+        columns={paymentColumns({
+          organizations,
+          onOpen: (row) => setOpened(row.gatewayId),
+          onRefund: setRefunding,
+        })}
+      >
+        {refunding !== null && (
+          <RefundDialog payment={refunding} onClose={() => setRefunding(null)} />
+        )}
+        {opened !== null && <PaymentDetail gatewayId={opened} onClose={() => setOpened(null)} />}
+      </ListPanel>
+    </PageBody>
   );
+}
+
+/** The payments table's columns (presentational: rows in, cells out). */
+function paymentColumns({
+  organizations,
+  onOpen,
+  onRefund,
+}: {
+  organizations: TenantPicker | undefined;
+  onOpen: (row: PaymentRow) => void;
+  onRefund: (row: PaymentRow) => void;
+}): Column<PaymentRow>[] {
+  const columns: Column<PaymentRow>[] = [
+    {
+      id: 'status',
+      header: 'Status',
+      cell: (row) => (
+        <StatusBadge statusClass={paymentStatusClass(row.status)}>{row.status}</StatusBadge>
+      ),
+    },
+    {
+      id: 'amount',
+      header: 'Amount',
+      align: 'right',
+      cell: (row) => (
+        <span className="mono tnum text-[12.5px] text-fg">
+          {/* Integer minor units came over the wire; this is the only shift. */}
+          {formatCents(row.amount, row.currency)}
+          {row.refundedAmount !== null && row.refundedAmount > 0 && (
+            <span className="block text-[10px] text-warn">
+              −{formatCents(row.refundedAmount, row.currency)} back
+            </span>
+          )}
+        </span>
+      ),
+    },
+    // The APP's own id leads the two identity columns: it is the one an operator arrives
+    // holding, and the one this table used to hide entirely.
+    {
+      id: 'reference',
+      header: 'Reference',
+      cell: (row) => <Mono className="text-fg-2">{row.externalReference ?? '—'}</Mono>,
+    },
+  ];
+  if (organizations !== undefined) {
+    columns.push({
+      id: 'organization',
+      header: 'Organization',
+      hideBelow: 'md',
+      cell: (row) => (
+        <span className="text-fg-2" data-column="organization">
+          {organizationOf(row, organizations)}
+        </span>
+      ),
+    });
+  }
+  columns.push(
+    {
+      // The app-side owner, not the gateway's `cus_…`: the gateway id names nobody, and it is what
+      // this column used to show. The raw id stays in the tooltip.
+      id: 'owner',
+      header: 'Owner',
+      hideBelow: 'md',
+      cell: (row) => <span title={row.customerId ?? ''}>{ownerCell(row)}</span>,
+    },
+    {
+      id: 'gateway',
+      header: 'Gateway id',
+      hideBelow: 'sm',
+      cell: (row) => (
+        // A link, not just a button: the detail has a URL, and a URL is what an operator drags
+        // into a ticket.
+        <a
+          href={`#/payments/${encodeURIComponent(row.gatewayId)}`}
+          onClick={(event) => {
+            event.preventDefault();
+            onOpen(row);
+          }}
+          className="mono text-[12px] text-dim underline decoration-line-strong decoration-dotted underline-offset-4 hover:text-brand"
+        >
+          {row.gatewayId}
+        </a>
+      ),
+    },
+    {
+      id: 'provider',
+      header: 'Provider',
+      hideBelow: 'lg',
+      cell: (row) => <Badge variant="provider">{row.provider}</Badge>,
+    },
+    {
+      // One column for both dates: a paid row shows when it settled, any other when it was created.
+      id: 'when',
+      header: 'Paid / created',
+      hideBelow: 'lg',
+      cell: (row) => (
+        <span className="flex flex-col">
+          <Mono className="text-fg-2">{formatWhen(row.paidAt ?? row.createdAt)}</Mono>
+          <span className="text-[10px] text-faint">{row.paidAt !== null ? 'paid' : 'created'}</span>
+        </span>
+      ),
+    },
+    {
+      id: 'action',
+      header: <span className="sr-only">Action</span>,
+      align: 'right',
+      cell: (row) => (
+        <span className="inline-flex justify-end gap-1">
+          <Button variant="outline" size="sm" onClick={() => onOpen(row)}>
+            Detail
+          </Button>
+          {/* `refundable` is the SERVER's rule, not a re-derivation of it: a button that offers
+              what the endpoint will refuse is a button that only ever errors. */}
+          {row.refundable && (
+            <Button variant="outline" size="sm" onClick={() => onRefund(row)}>
+              Refund
+            </Button>
+          )}
+        </span>
+      ),
+    },
+  );
+  return columns;
 }
 
 /**
@@ -261,9 +308,13 @@ function organizationOf(row: PaymentRow, picker: TenantPicker): string {
 function ownerCell(row: PaymentRow) {
   const owner = row.owner;
   if (owner === null || owner.id === null) {
-    return <span className="text-zinc-600">unmapped</span>;
+    return <span className="text-faint">unmapped</span>;
   }
-  return <span className="mono">{owner.name ?? `${owner.type ?? '?'} · ${owner.id}`}</span>;
+  return (
+    <span className="mono text-[12px] text-fg-2">
+      {owner.name ?? `${owner.type ?? '?'} · ${owner.id}`}
+    </span>
+  );
 }
 
 function emptyMessage(

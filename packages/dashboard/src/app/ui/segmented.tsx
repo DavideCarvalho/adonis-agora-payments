@@ -1,17 +1,17 @@
-import { cn } from './cn';
+import { cn } from '../../agora-kit/lib/utils';
 
 /**
- * A one-of-N pill selector — the tab bar, the period picker, the status filter.
+ * A one-of-N pill selector — the period picker and the status filters (authkit's segmented
+ * control on the kit tokens).
  *
- * This console's whole interaction surface is "pick one of a few things", so it gets ONE control
- * instead of three near-identical ones. `value` may be `undefined` for an "all" option, which is
- * why options carry `value?: string` rather than a bare string.
+ * `value` may be `undefined` for an "all" option, which is why options carry `value?: string`
+ * rather than a bare string.
  *
- * It scrolls sideways rather than wrapping or overflowing: seven tabs (or eight payment statuses)
- * do not fit a phone, and a flex item's default `min-width: auto` let this row push the WHOLE
- * page wider than the viewport. Scrolling keeps it one line, keeps the selected pill findable by
- * swiping, and — because `overflow` other than `visible` zeroes that min-width — stops it
- * dictating the page width. The pills themselves must not shrink or wrap, or the labels do.
+ * It scrolls sideways rather than wrapping or overflowing: eight payment statuses do not fit a
+ * phone, and a flex item's default `min-width: auto` would let this row push the WHOLE page wider
+ * than the viewport. Scrolling keeps it one line, keeps the selected pill findable by swiping, and
+ * — because `overflow` other than `visible` zeroes that min-width — stops it dictating the page
+ * width. The pills themselves must not shrink or wrap, or the labels do.
  */
 export interface SegmentedOption<T extends string | undefined> {
   value: T;
@@ -40,7 +40,7 @@ export function Segmented<T extends string | undefined>({
       role="tablist"
       aria-label={ariaLabel}
       className={cn(
-        'scroll-x inline-flex max-w-full items-center gap-1 overflow-x-auto rounded-sm border border-line bg-panel p-1 align-top',
+        'scroll-x inline-flex max-w-full items-center gap-0.5 overflow-x-auto rounded-md border border-border bg-panel-2 p-0.5 align-top',
         className,
       )}
     >
@@ -54,15 +54,15 @@ export function Segmented<T extends string | undefined>({
             aria-selected={selected}
             onClick={() => onChange(option.value)}
             className={cn(
-              'shrink-0 whitespace-nowrap rounded-sm px-2.5 py-1 text-xs transition-colors',
+              'h-6 shrink-0 whitespace-nowrap rounded-[5px] border border-transparent px-2.5 text-[11.5px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
               selected
-                ? 'bg-brand/15 text-brand'
-                : 'text-zinc-400 hover:bg-panel-2 hover:text-zinc-200',
+                ? 'border-brand-border bg-brand-soft text-fg'
+                : 'text-dim hover:bg-hover hover:text-fg',
             )}
           >
             {option.label}
             {option.hint !== undefined && (
-              <span className="ml-1.5 text-[10px] text-zinc-500">{option.hint}</span>
+              <span className="mono tnum ml-1.5 text-[10px] text-bad">{option.hint}</span>
             )}
           </button>
         );

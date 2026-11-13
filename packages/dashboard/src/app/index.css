@@ -1,231 +1,123 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+/* The Agora console kit: tokens (dark + light), shadcn variable mapping, Tailwind theme. */
+@import "../agora-kit/tokens.css";
 
-/* ── Tailwind theme ─────────────────────────────────────────────────────────────────────────────
-   Aviary token → Tailwind colour. Tailwind 4 is CSS-first: this block replaces the
-   `tailwind.config.ts` the console shipped under Tailwind 3 (same mapping, same names — the
-   config was copied verbatim from `@adonis-agora/durable-dashboard`, so keep this block in step
-   with it). `inline` makes a utility resolve straight to the token (`bg-brand` → `var(--accent)`),
-   and Tailwind 4 applies opacity modifiers to any colour through `color-mix`, so `bg-brand/10`
-   behaves exactly like `bg-zinc-900/10` — the `token()` colour-function trick Tailwind 3 needed
-   for that is no longer necessary.
+/* Tailwind 4 scans the package directory by default; pin the sources explicitly. */
+@source "../../index.html";
+@source "../../preview.html";
+@source "./";
+@source "../agora-kit";
 
-   shadcn's semantic names map onto Aviary tokens, so a vendored `bg-background` /
-   `text-muted-foreground` primitive lands on this console's own neutrals with no edit. Three are
-   traps, because the two systems use the same word for different things:
-     · shadcn `accent` is a subtle HOVER SURFACE, not a brand hue → `--panel-2`
-     · shadcn `muted` is a SURFACE → `--panel-2`
-     · Aviary `--muted` is dim TEXT → `muted-foreground`
-   ──────────────────────────────────────────────────────────────────────────────────────────────── */
-@theme inline {
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+/* ── Payments-only styles. Everything shared lives in `agora-kit/tokens.css`. ─────────────────── */
 
-  --color-background: var(--bg);
-  --color-foreground: var(--text);
-  --color-card: var(--panel);
-  --color-card-foreground: var(--text);
-  --color-popover: var(--panel-2);
-  --color-popover-foreground: var(--text);
-  --color-primary: var(--accent);
-  --color-primary-foreground: var(--bg);
-  --color-secondary: var(--panel-2);
-  --color-secondary-foreground: var(--text);
-  --color-muted: var(--panel-2);
-  --color-muted-foreground: var(--muted);
-  --color-accent: var(--panel-2);
-  --color-accent-foreground: var(--text);
-  --color-destructive: var(--bad);
-  --color-destructive-foreground: var(--bg);
-  --color-border: var(--line);
-  --color-input: var(--line);
-  --color-ring: var(--accent);
-
-  /* Aviary's own names, for this console's hand-written classes. */
-  --color-brand: var(--accent);
-  --color-panel: var(--panel);
-  --color-panel-2: var(--panel-2);
-  --color-line: var(--line);
-  --color-line-soft: var(--line-soft);
-  --color-good: var(--good);
-  --color-warn: var(--warn);
-  --color-bad: var(--bad);
-  --color-live: var(--live);
-}
-
-/* Tailwind 4's preflight resets buttons to `cursor: default`; keep the Tailwind 3 behaviour. */
-@layer base {
-  button:not(:disabled),
-  [role="button"]:not(:disabled) {
-    cursor: pointer;
-  }
-}
-
-/* ── Aviary console tokens ──────────────────────────────────────────────────────────────────────
-   Copied from `@adonis-agora/durable-dashboard`'s `src/app/index.css`. The neutrals, the status hues
-   and the spacing are IDENTICAL across every Agora console; `--accent` is the single per-console
-   variable. If you change anything here, change it in every other console in the same session — a
-   token that lands in one console only is invisible until someone puts two screenshots side by side.
-   ──────────────────────────────────────────────────────────────────────────────────────────────── */
+/* Status hues the kit has no token for. Dark values first, light overrides below (AA on white). */
 :root {
-  /* Shared. Identical in every console. Do not tune per console. */
-  --bg: #09090b;
-  --panel: #0c0c0f;
-  --panel-2: #101017; /* elevated surface: modal/dialog, drawer, popover, menu */
-  --line: #1c1c22;
-  --line-soft: #16161a;
-  --text: #e7e7ea;
-  --muted: #76767f;
-
-  /* Status. Semantic, never decorative — the `.s-*` hues below are built from these. */
-  --good: #34d399;
-  --warn: #fbbf24;
-  --bad: #f87171;
-  --live: #60a5fa;
-
-  /* Per console. This is the ONLY line that differs between them.
-     Payments takes cyan-teal (187): far from `--good` emerald (160) so a MONEY figure never reads
-     as a health signal, far from durable's lime (82) and telescope's magenta (300), and — unlike a
-     green or gold accent — it does not quietly imply "paid" next to a FAILED row. */
-  --accent: #22d3ee;
+  --payments-pending: #94a3b8;
+  --payments-refunded: #a78bfa;
+  --payments-ended: #8a8aa0;
+  --payments-chargeback: #fb7185;
 }
-
-* {
-  box-sizing: border-box;
-}
-
-html,
-body,
-#root {
-  height: 100%;
-}
-
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
-  -webkit-font-smoothing: antialiased;
-}
-
-/* Faint blueprint grid + top glow — atmosphere, not noise. */
-.app-bg {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background-image:
-    radial-gradient(
-      900px 400px at 78% -8%,
-      color-mix(in srgb, var(--accent) 8%, transparent),
-      transparent 70%
-    ),
-    linear-gradient(to right, var(--line-soft) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--line-soft) 1px, transparent 1px);
-  background-size:
-    100% 100%,
-    44px 44px,
-    44px 44px;
-  mask-image: linear-gradient(to bottom, black, black 60%, transparent);
-  opacity: 0.5;
-}
-
-.mono {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
-}
-
-.tnum {
-  font-variant-numeric: tabular-nums;
+html.light,
+[data-theme="light"] {
+  --payments-pending: #5b6b80;
+  --payments-refunded: #6d28d9;
+  --payments-ended: #6b6b80;
+  --payments-chargeback: #be123c;
 }
 
 /* ── Status hues ────────────────────────────────────────────────────────────────────────────────
    Payment statuses. `paid` is the only green: money that arrived. */
 .s-paid {
-  color: var(--good);
+  color: var(--agora-good);
 }
 .s-pending {
   /* Awaiting the gateway — calm slate, not an alarm. */
-  color: #94a3b8;
+  color: var(--payments-pending);
 }
 .s-failed {
-  color: var(--bad);
+  color: var(--agora-bad);
 }
 .s-refunded {
-  color: #a78bfa;
+  color: var(--payments-refunded);
 }
 .s-canceled {
-  color: #71717a;
+  color: var(--payments-ended);
 }
 .s-authorized {
   /* Funds HELD on the card and nothing moved. Amber: it is not money yet. */
-  color: var(--warn);
+  color: var(--agora-warn);
 }
 .s-disputed {
   /* A chargeback — money already pulled back. Distinct from `failed`: this one was paid once. */
-  color: #fb7185;
+  color: var(--payments-chargeback);
 }
 
 /* Subscription statuses. `paused` gets its OWN hue and never green: a paused subscriber is not
    paying, and rendering it like `active` is how a non-paying subscriber keeps their access. */
 .s-active {
-  color: var(--good);
+  color: var(--agora-good);
 }
 .s-trialing {
-  color: var(--live);
+  color: var(--agora-live);
 }
 .s-past_due {
-  color: var(--bad);
+  color: var(--agora-bad);
 }
 .s-paused {
-  color: var(--warn);
+  color: var(--agora-warn);
 }
 .s-incomplete {
-  color: var(--warn);
+  color: var(--agora-warn);
 }
 .s-ended {
-  color: #71717a;
+  color: var(--payments-ended);
 }
 
 /* Dispute statuses. `warning` is the load-bearing one: a pre-chargeback alert where NOTHING has
    been pulled back yet and a refund still prevents the debit. It takes amber — the same hue as
    `authorized`, and for the same reason: this is not money that moved. */
 .s-warning {
-  color: var(--warn);
+  color: var(--agora-warn);
 }
 .s-open {
   /* Filed, funds withdrawn, evidence clock running. */
-  color: var(--bad);
+  color: var(--agora-bad);
 }
 .s-under_review {
   /* Answered; waiting on the network. In flight, like a claimed webhook event. */
-  color: var(--live);
+  color: var(--agora-live);
 }
 .s-won {
-  color: var(--good);
+  color: var(--agora-good);
 }
 .s-lost {
-  color: #fb7185;
+  color: var(--payments-chargeback);
 }
 /* `expired` shares the `lost` hue deliberately: the window shut, so the money is gone by default
    rather than on the merits. The two differ in HOW, not in what is left to do — nothing. */
 .s-expired {
-  color: #fb7185;
+  color: var(--payments-chargeback);
 }
 
 /* Webhook-ledger statuses. */
 .s-received {
   /* Claimed, handler not finished — in flight. */
-  color: var(--live);
+  color: var(--agora-live);
 }
 .s-processed {
-  color: var(--good);
+  color: var(--agora-good);
 }
 /* `failed` reuses the payment hue above deliberately: in BOTH ledgers red means "this did not
    happen and nobody is retrying it". */
 
 .s-unknown {
-  color: var(--muted);
+  color: var(--agora-muted);
 }
 
 .dot {
+  display: inline-block;
+  flex-shrink: 0;
   width: 7px;
   height: 7px;
   border-radius: 999px;
@@ -233,26 +125,12 @@ body {
   box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent);
 }
 
-@keyframes rise {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-.rise {
-  animation: rise 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both;
-}
-
-/* A row that scrolls sideways instead of overflowing the page (the tab bar, the status pills).
-   A thin bar rather than none: on a narrow desktop window there is no swipe, and an invisible
-   scrollbar hides that there IS more. */
+/* A row that scrolls sideways instead of overflowing the page (the status pills). A thin bar
+   rather than none: on a narrow desktop window there is no swipe, and an invisible scrollbar
+   hides that there IS more. */
 .scroll-x {
   scrollbar-width: thin;
-  scrollbar-color: #26262c transparent;
+  scrollbar-color: var(--agora-line-strong) transparent;
   -webkit-overflow-scrolling: touch;
 }
 .scroll-x::-webkit-scrollbar {
@@ -260,14 +138,4 @@ body {
 }
 .scroll-x::-webkit-scrollbar-thumb {
   border: 0;
-}
-
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-::-webkit-scrollbar-thumb {
-  background: #26262c;
-  border: 3px solid var(--bg);
-  border-radius: 999px;
 }

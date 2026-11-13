@@ -39,6 +39,12 @@ a wildcard, for that reason.
 
 ## What it shows
 
+The sidebar groups the screens: **Monitor** (Overview, Activity), **Billing** (Payments,
+Subscriptions, Customers, Disputes) and **Integrations** (Webhook events). On a phone it becomes a
+drawer behind the menu button. The topbar carries the page title, the organization picker (with
+[organizations](#organizations) on) and the <kbd>⌘K</kbd> search. The footer shows who is signed
+in, a light/dark toggle and a sign-out button. The theme is remembered per browser.
+
 | Screen | Reads | What it answers |
 | --- | --- | --- |
 | **Overview** | `billingHealth` + `billingOverview` | What needs attention today, then revenue — gross **and** net of refunds — and active subscriptions for a period, plus usage per meter. |
@@ -326,6 +332,8 @@ export default defineConfig({
 | `currency` | `'BRL'` | ISO 4217 code the money columns render in. Does not change what is stored. |
 | `authorize` | open outside production, `403` in production | Who may open the console: an inline function, an authorizer class, or a lazy import of one. See [Authorization](#authorization). |
 | `accessDenied` | the built-in page | What a browser sees when `authorize` refuses a page navigation. See [The access-denied page](#the-access-denied-page). |
+| `viewer` | `ctx.auth.user` | `(ctx) => ({ label, email?, role? }) \| null`: who the sidebar footer shows as signed in. See [Signed-in user and sign-out](#signed-in-user-and-sign-out). |
+| `signOut` | announced by authkit | The footer's sign-out: a POST action path, `{ href }` for a link, or `false` for none. |
 
 ### Authorization
 
@@ -510,19 +518,42 @@ export default defineConfig({
 An `authorize` hook that already wrote a redirect still wins — the provider never overwrites a
 `location` header, with or without `accessDenied`.
 
+### Signed-in user and sign-out
+
+The sidebar footer shows who is signed in, a light/dark toggle, and a sign-out button.
+
+Without `viewer`, the console reads `ctx.auth.user` when the request is already authenticated: the
+label is `fullName`, `name` or `email`, and the role is the first of `role` or `roles`. Pass
+`viewer` to show something else, or return `null` to hide the user row:
+
+```ts title="config/payments_dashboard.ts"
+export default defineConfig({
+  authorize: (ctx) => ctx.auth.user?.isAdmin === true,
+  viewer: (ctx) => {
+    const user = ctx.auth.user
+    return user ? { label: user.fullName, email: user.email, role: 'billing' } : null
+  },
+  signOut: '/logout',
+})
+```
+
+A string `signOut` is a path the button POSTs to, with the request's CSRF token as `_csrf` when
+shield is installed. `{ href: '/bye' }` renders a link instead. Without `signOut`, the console uses
+the sign-out that authkit's account console registers. `false` removes the button. Only
+same-origin paths are accepted.
+
 ### Content Security Policy
 
 The console works under a strict CSP. Everything it needs is same-origin: the bundle and the
 stylesheet are served from `<path>/assets/`, the API is `<path>/api`, and the deployment config
-(mount path, API base, currency, auth surface) reaches the page as a `<script type="application/json">`
+(mount path, API base, currency, signed-in user, sign-out) reaches the page as a `<script type="application/json">`
 **data block**, which is never executed and so cannot be refused. `script-src 'self'` is enough —
 including [`@adonisjs/shield`](https://docs.adonisjs.com/guides/security/securing-ssr-applications)'s
 `scriptSrc: ["'self'", '@nonce']`, the recommended setup.
 
-Two things stay optional. The page links the JetBrains Mono / Space Grotesk web fonts from Google;
-a `style-src`/`font-src` that does not allow `fonts.googleapis.com` / `fonts.gstatic.com` just
-falls back to the system monospace and sans — nothing breaks. And `img-src` is never needed: the
-favicon is an inline `data:` SVG, which `img-src 'self' data:` covers.
+The fonts (Sora and JetBrains Mono) ship inside the bundle and are served from `<path>/assets/`
+too, so `font-src 'self'` covers them. `img-src` is never needed: the favicon is an inline `data:`
+SVG, which `img-src 'self' data:` covers.
 
 ## The JSON API
 
@@ -600,9 +631,9 @@ When the billing layer is disabled (`billing.enabled: false`) the API answers `5
 ## Switching between consoles
 
 When the app has other Agora consoles (durable, telescope, media, the agent console, the authkit
-admin), the console heading at the top left becomes a menu that links to them. It lists only the
+admin), the brand block at the top of the sidebar becomes a menu that links to them. It lists only the
 consoles the current viewer may open: each one is asked through its own `authorize`. With no other
-console, or none this viewer may open, the heading stays as it is. There is nothing to configure.
+console, or none this viewer may open, the brand block stays as it is. There is nothing to configure.
 
 <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>K</kbd> opens a search across those consoles. Here, a payment's
 gateway id or your app's reference opens the payment, a customer's gateway id or owner id opens

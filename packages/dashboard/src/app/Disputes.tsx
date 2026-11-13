@@ -1,5 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
+import type { Column } from '../agora-kit/blocks/data-table';
+import { PageHeader } from '../agora-kit/blocks/page-header';
+import { PageBody } from '../agora-kit/shell/app-shell';
+import { Button } from '../agora-kit/ui/button';
 import type { DisputeRow } from '../client/payments-client';
 import { displayCurrency, paymentsClient } from '../client/payments-client';
 import {
@@ -14,11 +18,12 @@ import {
   workListEmptyMessage,
   workListSubtitle,
 } from './disputes';
+import { ShieldIcon } from './icons';
 import { formatDay, formatWhen } from './money';
 import { ResolveDisputeDialog } from './ResolveDisputeDialog';
-import { Pager, Panel, QueryState } from './shell';
+import { ListPanel, Mono } from './shell';
 import { disputeIsChargeback, disputeIsOpen, disputeStatusClass } from './status';
-import { Badge } from './ui/badge';
+import { Badge, Qualifier, StatusBadge } from './ui/badge';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';
 
@@ -38,11 +43,11 @@ const STATUS_OPTIONS: ReadonlyArray<{ value: string | undefined; label: string }
 
 /** Deadline hues. `unknown` is grey, never a shade of "fine": nobody told us anything. */
 const TONE_CLASS: Record<DeadlineTone, string> = {
-  past: 'text-rose-300',
-  urgent: 'text-amber-300',
-  soon: 'text-zinc-200',
-  later: 'text-zinc-400',
-  unknown: 'text-zinc-500',
+  past: 'text-bad',
+  urgent: 'text-warn',
+  soon: 'text-fg',
+  later: 'text-dim',
+  unknown: 'text-faint',
 };
 
 /**
@@ -67,10 +72,14 @@ const TONE_CLASS: Record<DeadlineTone, string> = {
  */
 export function Disputes({ initialStatus }: { initialStatus?: string | undefined } = {}) {
   return (
-    <div className="flex flex-col gap-4">
+    <PageBody>
+      <PageHeader
+        title="Disputes"
+        description="Chargebacks and the alerts that precede them. The open windows closing soonest come first."
+      />
       <ClosingWindows />
       <DisputeLog initialStatus={initialStatus} />
-    </div>
+    </PageBody>
   );
 }
 
@@ -91,14 +100,13 @@ function ClosingWindows() {
     queryFn: () => paymentsClient.disputes({ dueWithin: hours, size: PAGE_SIZE, page }),
   });
 
-  const rows = query.data?.data ?? [];
   const total = query.data?.meta.total;
 
   return (
-    <Panel
+    <ListPanel
       title="Evidence windows closing"
-      subtitle={workListSubtitle(total, hours)}
-      actions={
+      description={workListSubtitle(total, hours)}
+      action={
         <Segmented
           aria-label="Deadline horizon"
           options={HORIZONS.map((horizon) => ({
@@ -113,62 +121,55 @@ function ClosingWindows() {
           }}
         />
       }
-    >
-      <QueryState
-        query={query}
-        empty={rows.length === 0}
-        emptyMessage={workListEmptyMessage(hours)}
-      >
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-line text-left text-[10px] uppercase tracking-wider text-zinc-500">
-              {/* The deadline leads. Everything else on this table is context for it. */}
-              <th className="px-4 py-2 font-normal">Evidence due</th>
-              <th className="px-4 py-2 font-normal">Status</th>
-              <th className="px-4 py-2 text-right font-normal">Amount</th>
-              <th className="px-4 py-2 font-normal">Reason</th>
-              <th className="px-4 py-2 font-normal">Dispute id</th>
-              <th className="px-4 py-2 font-normal">Payment</th>
-              <th className="px-4 py-2 font-normal">Provider</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => {
-              const tone = deadlineTone(row.evidenceDueBy);
-              return (
-                <tr
-                  key={row.id}
-                  className={
-                    tone === 'past'
-                      ? 'border-b border-line-soft bg-bad/[0.06]'
-                      : 'border-b border-line-soft'
-                  }
-                >
-                  <td className="px-4 py-2">
-                    <DeadlineCell iso={row.evidenceDueBy} />
-                  </td>
-                  <td className="px-4 py-2">
-                    <StatusCell row={row} />
-                  </td>
-                  <td className="mono tnum px-4 py-2 text-right text-zinc-100">
-                    <AmountCell row={row} />
-                  </td>
-                  <td className="mono px-4 py-2 text-zinc-400">{row.reason ?? '—'}</td>
-                  <td className="mono px-4 py-2 text-zinc-400">{row.gatewayId}</td>
-                  <td className="mono px-4 py-2 text-zinc-500">{row.paymentGatewayId}</td>
-                  <td className="px-4 py-2">
-                    <Badge variant="provider">{row.provider}</Badge>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        <Pager meta={query.data?.meta} count={rows.length} onPage={setPage} />
-      </QueryState>
-    </Panel>
+      query={query}
+      rowKey={(row) => row.id}
+      onPage={setPage}
+      emptyIcon={<ShieldIcon />}
+      emptyTitle="No window closing"
+      emptyDescription={workListEmptyMessage(hours)}
+      rowClassName={(row) =>
+        deadlineTone(row.evidenceDueBy) === 'past' ? 'bg-bad/[0.06]' : undefined
+      }
+      columns={WORK_LIST_COLUMNS}
+    />
   );
 }
+
+/** The work list's columns. The deadline leads: everything else on this table is context for it. */
+const WORK_LIST_COLUMNS: Column<DisputeRow>[] = [
+  { id: 'due', header: 'Evidence due', cell: (row) => <DeadlineCell iso={row.evidenceDueBy} /> },
+  { id: 'status', header: 'Status', hideBelow: 'sm', cell: (row) => <StatusCell row={row} /> },
+  {
+    id: 'amount',
+    header: 'Amount',
+    align: 'right',
+    cell: (row) => <AmountCell row={row} />,
+  },
+  {
+    id: 'reason',
+    header: 'Reason',
+    hideBelow: 'lg',
+    cell: (row) => <Mono>{row.reason ?? '—'}</Mono>,
+  },
+  {
+    id: 'dispute',
+    header: 'Dispute id',
+    hideBelow: 'md',
+    cell: (row) => <Mono>{row.gatewayId}</Mono>,
+  },
+  {
+    id: 'payment',
+    header: 'Payment',
+    hideBelow: 'lg',
+    cell: (row) => <Mono className="text-faint">{row.paymentGatewayId}</Mono>,
+  },
+  {
+    id: 'provider',
+    header: 'Provider',
+    hideBelow: 'lg',
+    cell: (row) => <Badge variant="provider">{row.provider}</Badge>,
+  },
+];
 
 /** The log: every dispute, newest first, filterable — including the ones with no deadline at all,
  *  which the work list cannot show because there is nothing to be late for. */
@@ -182,19 +183,73 @@ function DisputeLog({ initialStatus }: { initialStatus?: string | undefined }) {
     queryFn: () => paymentsClient.disputes({ status, provider, size: PAGE_SIZE, page }),
   });
 
-  const rows = query.data?.data ?? [];
   const [resolving, setResolving] = useState<DisputeRow | null>(null);
   const refilter = (apply: () => void) => {
     apply();
     setPage(1);
   };
 
+  const columns: Column<DisputeRow>[] = [
+    { id: 'status', header: 'Status', cell: (row) => <StatusCell row={row} /> },
+    { id: 'amount', header: 'Amount', align: 'right', cell: (row) => <AmountCell row={row} /> },
+    {
+      id: 'reason',
+      header: 'Reason',
+      hideBelow: 'lg',
+      cell: (row) => <Mono>{row.reason ?? '—'}</Mono>,
+    },
+    {
+      id: 'due',
+      header: 'Evidence due',
+      hideBelow: 'md',
+      cell: (row) => <DeadlineCell iso={row.evidenceDueBy} />,
+    },
+    {
+      id: 'payment',
+      header: 'Payment',
+      hideBelow: 'sm',
+      cell: (row) => <Mono className="text-faint">{row.paymentGatewayId}</Mono>,
+    },
+    {
+      id: 'provider',
+      header: 'Provider',
+      hideBelow: 'lg',
+      cell: (row) => <Badge variant="provider">{row.provider}</Badge>,
+    },
+    {
+      id: 'opened',
+      header: 'Opened',
+      hideBelow: 'lg',
+      cell: (row) => <Mono className="text-faint">{formatWhen(row.openedAt)}</Mono>,
+    },
+    {
+      id: 'closed',
+      header: 'Closed',
+      hideBelow: 'lg',
+      cell: (row) => <Mono className="text-faint">{formatWhen(row.closedAt)}</Mono>,
+    },
+    {
+      id: 'action',
+      header: <span className="sr-only">Action</span>,
+      align: 'right',
+      // Offered only while the dispute is still open — the same set the health check counts.
+      // "Resolve" on a row that is already `lost` would be an edit box over a money table, not a
+      // resolution.
+      cell: (row) =>
+        disputeIsOpen(row.status) ? (
+          <Button variant="outline" size="sm" onClick={() => setResolving(row)}>
+            Record outcome
+          </Button>
+        ) : null,
+    },
+  ];
+
   return (
-    <Panel
+    <ListPanel
       title="All disputes"
-      subtitle="Every chargeback and pre-chargeback alert recorded locally, newest first."
-      actions={
-        <div className="flex flex-wrap items-center gap-3">
+      description="every chargeback and alert, newest first"
+      action={
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
           <ProviderFilter value={provider} onChange={(v) => refilter(() => setProvider(v))} />
           <Segmented
             aria-label="Dispute status"
@@ -204,69 +259,18 @@ function DisputeLog({ initialStatus }: { initialStatus?: string | undefined }) {
           />
         </div>
       }
+      query={query}
+      rowKey={(row) => row.id}
+      onPage={setPage}
+      emptyIcon={<ShieldIcon />}
+      emptyTitle="No disputes"
+      emptyDescription={logEmptyMessage(status, provider)}
+      columns={columns}
     >
-      <QueryState
-        query={query}
-        empty={rows.length === 0}
-        emptyMessage={logEmptyMessage(status, provider)}
-      >
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-line text-left text-[10px] uppercase tracking-wider text-zinc-500">
-              <th className="px-4 py-2 font-normal">Status</th>
-              <th className="px-4 py-2 text-right font-normal">Amount</th>
-              <th className="px-4 py-2 font-normal">Reason</th>
-              <th className="px-4 py-2 font-normal">Evidence due</th>
-              <th className="px-4 py-2 font-normal">Payment</th>
-              <th className="px-4 py-2 font-normal">Provider</th>
-              <th className="px-4 py-2 font-normal">Opened</th>
-              <th className="px-4 py-2 font-normal">Closed</th>
-              <th className="px-4 py-2 text-right font-normal">Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.id} className="border-b border-line-soft last:border-0">
-                <td className="px-4 py-2">
-                  <StatusCell row={row} />
-                </td>
-                <td className="mono tnum px-4 py-2 text-right text-zinc-100">
-                  <AmountCell row={row} />
-                </td>
-                <td className="mono px-4 py-2 text-zinc-400">{row.reason ?? '—'}</td>
-                <td className="px-4 py-2">
-                  <DeadlineCell iso={row.evidenceDueBy} />
-                </td>
-                <td className="mono px-4 py-2 text-zinc-500">{row.paymentGatewayId}</td>
-                <td className="px-4 py-2">
-                  <Badge variant="provider">{row.provider}</Badge>
-                </td>
-                <td className="mono px-4 py-2 text-zinc-500">{formatWhen(row.openedAt)}</td>
-                <td className="mono px-4 py-2 text-zinc-500">{formatWhen(row.closedAt)}</td>
-                <td className="px-4 py-2 text-right">
-                  {/* Offered only while the dispute is still open — the same set the health
-                      check counts. "Resolve" on a row that is already `lost` would be an edit
-                      box over a money table, not a resolution. */}
-                  {disputeIsOpen(row.status) && (
-                    <button
-                      type="button"
-                      onClick={() => setResolving(row)}
-                      className="rounded-sm border border-line px-2 py-1 text-xs text-zinc-300 hover:bg-panel-2 hover:text-zinc-100"
-                    >
-                      Record outcome
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <Pager meta={query.data?.meta} count={rows.length} onPage={setPage} />
-      </QueryState>
       {resolving !== null && (
         <ResolveDisputeDialog dispute={resolving} onClose={() => setResolving(null)} />
       )}
-    </Panel>
+    </ListPanel>
   );
 }
 
@@ -284,10 +288,10 @@ function DisputeLog({ initialStatus }: { initialStatus?: string | undefined }) {
 function DeadlineCell({ iso }: { iso: string | null }) {
   const tone = deadlineTone(iso);
   if (tone === 'unknown') {
-    return <span className="text-[11px] text-zinc-500">{NO_DEADLINE}</span>;
+    return <span className="text-[11px] text-faint">{NO_DEADLINE}</span>;
   }
   return (
-    <span className={`mono ${TONE_CLASS[tone]}`}>
+    <span className={`mono text-[12px] ${TONE_CLASS[tone]}`}>
       {tone === 'past' && (
         <span className="mr-1.5 text-[10px] uppercase tracking-wider">past due</span>
       )}
@@ -300,21 +304,15 @@ function DeadlineCell({ iso }: { iso: string | null }) {
 /** The status, plus the one thing colour alone must not be trusted to carry. */
 function StatusCell({ row }: { row: DisputeRow }) {
   return (
-    <>
-      <span className={disputeStatusClass(row.status)}>
-        <Badge variant="status">{row.status}</Badge>
-      </span>
+    <span className="inline-flex flex-wrap items-center gap-2">
+      <StatusBadge statusClass={disputeStatusClass(row.status)}>{row.status}</StatusBadge>
       {/* Spelled out, like the subscriptions screen's "not billing": a `warning` is an alert, not
           a debit — the money is still yours and a refund now stops the chargeback being filed. */}
-      {!disputeIsChargeback(row.status) && (
-        <span className="ml-2 text-[10px] uppercase tracking-wider text-zinc-600">
-          no money moved
-        </span>
-      )}
+      {!disputeIsChargeback(row.status) && <Qualifier>no money moved</Qualifier>}
       {row.outcome !== null && row.outcome !== '' && (
-        <span className="mono ml-2 text-[10px] text-zinc-600">{row.outcome}</span>
+        <span className="mono text-[10px] text-faint">{row.outcome}</span>
       )}
-    </>
+    </span>
   );
 }
 
@@ -327,7 +325,7 @@ function StatusCell({ row }: { row: DisputeRow }) {
 function AmountCell({ row }: { row: DisputeRow }) {
   const label = disputeAmountLabel(row.amount, row.currency, displayCurrency());
   if (row.amount === null) {
-    return <span className="text-[11px] text-zinc-500">{label}</span>;
+    return <span className="text-[11px] text-faint">{label}</span>;
   }
-  return <>{label}</>;
+  return <span className="mono tnum text-[12.5px] text-fg">{label}</span>;
 }

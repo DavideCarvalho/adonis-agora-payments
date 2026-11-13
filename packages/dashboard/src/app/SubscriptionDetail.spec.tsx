@@ -1,5 +1,6 @@
+// @vitest-environment happy-dom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SubscriptionRow } from '../client/payments-client';
@@ -97,6 +98,8 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = originalFetch;
   clearConfig();
+  // Unmount first: the detail is a portalled sheet, and React must remove it before the body goes.
+  cleanup();
   document.body.innerHTML = '';
 });
 

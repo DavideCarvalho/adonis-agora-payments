@@ -5,6 +5,8 @@
  * "serve a Vite SPA from an AdonisJS provider" story stays ONE pattern across the Agora ecosystem.
  */
 
+import type { ConsoleSignOut, ConsoleViewer } from './console_shell.js';
+
 /** Placeholder base Vite bakes into asset URLs (`packages/dashboard/vite.config.ts`); rewritten to the
  *  configured dashboard `path` at serve time — the SAME built bundle mounts at any path with no rebuild. */
 export const BASE_PLACEHOLDER = '/__PAYMENTS_DASHBOARD__/';
@@ -44,6 +46,20 @@ export interface InjectedConfig {
   currency: string;
   /** The console switcher, present only when other Agora consoles are registered in the app. */
   switcher?: SwitcherConfig;
+  /** ⌘K search across the consoles (`GET <endpoint>?q=`), present when a registry exists. */
+  search?: { endpoint: string };
+  /** Who is signed in (sidebar footer). Absent → no user row. */
+  viewer?: ConsoleViewer;
+  /** How the footer signs out. Absent → no sign-out control. */
+  signOut?: ConsoleSignOut;
+}
+
+/** The console-shell fields of the data block, all optional. */
+export interface ShellFields {
+  switcher?: SwitcherConfig;
+  search?: { endpoint: string };
+  viewer?: ConsoleViewer;
+  signOut?: ConsoleSignOut;
 }
 
 /** Where the SPA asks which other consoles the viewer may open, and how many are registered. */
@@ -68,6 +84,9 @@ export interface SwitcherConfig {
  * answered 404. The module script Vite emits is a same-origin file, which is why the page itself
  * kept loading and made the failure look like a routing bug rather than a policy one.
  *
+ * `shell` carries the Agora console-shell fields (CONSOLE-SHELL-SPEC): the switcher, ⌘K search, the
+ * signed-in viewer and the sign-out. Each is optional; an absent field hides that piece of the shell.
+ *
  * The currency is the one addition over durable's version: money is integer cents on the wire
  * and formatted only at render, so the renderer has to be told which currency to render in — and
  * the config file, not the bundle, is where that belongs.
@@ -77,15 +96,21 @@ export function renderIndexHtml(
   basePath: string,
   apiBasePath: string,
   currency: string,
-  switcher?: SwitcherConfig,
+  shell: ShellFields | SwitcherConfig = {},
 ): string {
   const based = html.split(BASE_PLACEHOLDER).join(`${basePath}/`);
+  // A bare `SwitcherConfig` (the pre-shell signature) still works.
+  const extra: ShellFields = 'endpoint' in shell ? { switcher: shell } : shell;
+  const switcher = extra.switcher;
   const config: InjectedConfig = {
     base: basePath,
     api: apiBasePath,
     currency,
     // Only when there is another console to switch to: otherwise the SPA makes no request.
     ...(switcher !== undefined && switcher.others > 0 ? { switcher } : {}),
+    ...(extra.search ? { search: extra.search } : {}),
+    ...(extra.viewer ? { viewer: extra.viewer } : {}),
+    ...(extra.signOut ? { signOut: extra.signOut } : {}),
   };
   // `<` escaped as `\u003c` inside the JSON: a data block ends at the first `</script`, and a
   // config value must not be able to close it early. Valid JSON either way.

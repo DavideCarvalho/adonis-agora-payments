@@ -4,6 +4,7 @@ import type {
   AccessDeniedRenderer as GenericAccessDeniedRenderer,
 } from './access_denied_page.js';
 import type { ConsoleAuthorize, ConsoleAuthorizeResult } from './console_authorize.js';
+import type { ConsoleViewer, SignOutOption, ViewerHook } from './console_shell.js';
 
 export type { AuthorizeDecision, AuthorizeResult } from './authorize_decision.js';
 export type {
@@ -90,7 +91,21 @@ export interface PaymentsDashboardConfig {
    * still wins: the provider never overwrites a `location` header.
    */
   accessDenied?: AccessDeniedOption;
+  /**
+   * Who the console's sidebar footer shows as signed in. Omit it to read `ctx.auth.user`
+   * structurally (`fullName`/`name`/`email`, first of `role`/`roles`) when the request is already
+   * authenticated; return `null` for no user row. A throw is treated as `null`.
+   */
+  viewer?: ViewerHook;
+  /**
+   * The footer's "Sign out": a POST action path (`'/logout'`, sent with the CSRF token), `{ href }`
+   * for a plain link, or `false` for none. Omit it to use the sign-out an account console (authkit)
+   * announces on the `agora.consoles` registry, when there is one. Same-origin paths only.
+   */
+  signOut?: SignOutOption;
 }
+
+export type { ConsoleViewer, SignOutOption, ViewerHook };
 
 /** A fully-resolved config — every field present (defaults applied). */
 export interface ResolvedPaymentsDashboardConfig {
@@ -101,6 +116,10 @@ export interface ResolvedPaymentsDashboardConfig {
   authorize: ConsoleAuthorize | null;
   /** The host's `accessDenied` option as given, or `null` for the built-in page with defaults. */
   accessDenied: AccessDeniedOption | null;
+  /** The host's `viewer` hook, or `null` for the structural `ctx.auth.user` read. */
+  viewer: ViewerHook | null;
+  /** The host's `signOut` option, or `null` for the registry's announced one. */
+  signOut: SignOutOption | null;
 }
 
 /** Apply defaults to a partial config, producing a fully-resolved one. */
@@ -116,6 +135,8 @@ export function resolveConfig(
     currency: config.currency ?? 'BRL',
     authorize: config.authorize ?? null,
     accessDenied: config.accessDenied ?? null,
+    viewer: config.viewer ?? null,
+    signOut: config.signOut ?? null,
   };
 }
 

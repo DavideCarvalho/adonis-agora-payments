@@ -46,6 +46,14 @@ export {
   normalizeConsoleAuthorizeResult,
   resolveConsoleAuthorize,
 } from './console_authorize.js';
+// The console shell's data-block fields: who is signed in, and how to sign out.
+export type {
+  ConsoleSignOut,
+  ConsoleViewer,
+  SignOutOption,
+  ViewerHook,
+} from './console_shell.js';
+export { resolveSignOut, resolveViewer, viewerFromUser } from './console_shell.js';
 export type {
   AgoraConsoleEntry,
   AgoraConsoleIcon,
@@ -104,7 +112,7 @@ export {
 } from './handlers.js';
 export type { Period, PeriodPreset } from './period.js';
 export { DEFAULT_PERIOD, PERIOD_PRESETS, resolvePeriod } from './period.js';
-export type { InjectedConfig, SwitcherConfig } from './spa.js';
+export type { InjectedConfig, ShellFields, SwitcherConfig } from './spa.js';
 export {
   BASE_PLACEHOLDER,
   CONFIG_ELEMENT_ID,

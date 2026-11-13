@@ -1,6 +1,10 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
+import { ChevronDownIcon } from '../agora-kit/icons';
+import { Popover, PopoverContent, PopoverTrigger } from '../agora-kit/ui/popover';
 import { paymentsClient, selectedTenant, type TenantPicker } from '../client/payments-client';
+import { BuildingIcon } from './icons';
+import { CONTROL_CLASS } from './ui/field';
 
 /** Put the picked organization in the page URL (`?tenant=`, absent = all), keeping the hash. */
 function writeTenantToUrl(tenant: string | undefined): void {
@@ -28,10 +32,10 @@ export function useTenantPicker(): TenantPicker | undefined {
 }
 
 const CHIP =
-  'mono flex items-center gap-1.5 rounded-sm border border-line bg-panel px-2 py-1 text-[11px] text-zinc-300';
+  'flex h-[30px] items-center gap-1.5 rounded-md border border-border bg-panel-2 px-2.5 text-[11.5px] text-fg-2 [&_svg]:size-3.5 [&_svg]:text-faint';
 
 /**
- * The header's "Organization" control (tenancy on): a fixed chip for one organization, a searchable
+ * The topbar's "Organization" control (tenancy on): a fixed chip for one organization, a searchable
  * list for several ("All organizations" first when the viewer may see every one). Nothing when
  * tenancy is off.
  */
@@ -41,38 +45,25 @@ export function OrgPicker({ onChange }: { onChange?: () => void }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [current, setCurrent] = useState(selectedTenant());
-  const root = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (root.current && !root.current.contains(event.target as Node)) setOpen(false);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false);
-    };
-    document.addEventListener('mousedown', close);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', close);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
 
   if (!picker || picker.mode === 'off') return null;
 
   if (picker.mode === 'none') {
     return (
       <span className={CHIP} data-org-picker="none">
-        <span className="text-zinc-500">Organization</span> none
+        <BuildingIcon />
+        <span className="hidden text-faint sm:inline">Organization</span> none
       </span>
     );
   }
   if (picker.mode === 'fixed') {
     return (
       <span className={CHIP} data-org-picker="fixed">
-        <span className="text-zinc-500">Organization</span>
-        {picker.tenants[0]?.label ?? picker.tenants[0]?.id}
+        <BuildingIcon />
+        <span className="hidden text-faint sm:inline">Organization</span>
+        <span className="max-w-40 truncate">
+          {picker.tenants[0]?.label ?? picker.tenants[0]?.id}
+        </span>
       </span>
     );
   }
@@ -95,60 +86,59 @@ export function OrgPicker({ onChange }: { onChange?: () => void }) {
   );
 
   return (
-    <div className="relative" ref={root} data-org-picker="pick">
-      <button
-        type="button"
-        className={`${CHIP} hover:border-zinc-600`}
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        className={`${CHIP} transition-colors hover:border-line-strong hover:text-fg`}
         aria-label="Organization"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
+        data-org-picker="pick"
       >
-        <span className="text-zinc-500">Organization</span>
-        {tenantLabel(picker, current)}
-      </button>
-      {open && (
-        <div className="absolute right-0 z-20 mt-1 w-64 max-w-[calc(100vw-2rem)] rounded-sm border border-line bg-panel p-1 shadow-lg">
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="search organizations…"
-            aria-label="search organizations"
-            className="mb-1 w-full rounded-sm border border-line bg-transparent px-2 py-1 text-xs text-zinc-200 outline-none"
-          />
-          <div role="listbox" aria-label="Organizations" className="max-h-72 overflow-y-auto">
-            {picker.all && (
-              <button
-                type="button"
-                role="option"
-                aria-selected={current === undefined}
-                onClick={() => void choose(undefined)}
-                className="w-full rounded-sm px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-panel-2"
-              >
-                All organizations
-              </button>
-            )}
-            {shown.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                role="option"
-                aria-selected={current === t.id}
-                onClick={() => void choose(t.id)}
-                className="flex w-full flex-col rounded-sm px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-panel-2"
-              >
-                <span className="truncate">{t.label}</span>
-                {t.label !== t.id && (
-                  <span className="mono truncate text-[10px] text-zinc-500">{t.id}</span>
-                )}
-              </button>
-            ))}
-            {shown.length === 0 && (
-              <p className="px-2 py-1.5 text-xs text-zinc-500">No organization matches.</p>
-            )}
-          </div>
+        <BuildingIcon />
+        <span className="max-w-40 truncate">{tenantLabel(picker, current)}</span>
+        <ChevronDownIcon />
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-64 max-w-[calc(100vw-2rem)] gap-1 p-1">
+        <input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search organizations…"
+          aria-label="search organizations"
+          className={`mb-1 h-7 w-full ${CONTROL_CLASS}`}
+        />
+        <div role="listbox" aria-label="Organizations" className="max-h-72 overflow-y-auto">
+          {picker.all && (
+            <button
+              type="button"
+              role="option"
+              aria-selected={current === undefined}
+              onClick={() => void choose(undefined)}
+              className={OPTION}
+            >
+              All organizations
+            </button>
+          )}
+          {shown.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="option"
+              aria-selected={current === t.id}
+              onClick={() => void choose(t.id)}
+              className={`flex flex-col ${OPTION}`}
+            >
+              <span className="truncate">{t.label}</span>
+              {t.label !== t.id && (
+                <span className="mono truncate text-[10px] text-faint">{t.id}</span>
+              )}
+            </button>
+          ))}
+          {shown.length === 0 && (
+            <p className="px-2 py-1.5 text-xs text-dim">No organization matches.</p>
+          )}
         </div>
-      )}
-    </div>
+      </PopoverContent>
+    </Popover>
   );
 }
+
+const OPTION =
+  'w-full rounded-md px-2 py-1.5 text-left text-xs text-fg hover:bg-hover aria-selected:bg-brand-soft';

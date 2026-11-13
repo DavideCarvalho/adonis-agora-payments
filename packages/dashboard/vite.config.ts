@@ -12,6 +12,13 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   base: '/__PAYMENTS_DASHBOARD__/',
   plugins: [react(), tailwindcss()],
+  // CSS-referenced assets (the bundled woff2 fonts) as RELATIVE urls: the provider rewrites the
+  // base placeholder only in `index.html`, never inside the CSS, so an absolute
+  // `/__PAYMENTS_DASHBOARD__/assets/…` font url would 404 under the real mount path.
+  experimental: {
+    renderBuiltUrl: (_filename, { hostType }) =>
+      hostType === 'css' ? { relative: true } : undefined,
+  },
   build: {
     outDir: 'dist/spa',
     emptyOutDir: true,

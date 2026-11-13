@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -94,7 +95,7 @@ describe('organization picker', () => {
     renderApp();
     await waitFor(() => expect(calls.some((c) => c.endsWith('/tenants'))).toBe(true));
     expect(document.querySelector('[data-org-picker]')).toBeNull();
-    expect(screen.getByRole('tab', { name: 'Webhook events' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Webhook events' })).toBeTruthy();
   });
 
   it('a viewer with no organization is asked to choose one', async () => {
@@ -112,8 +113,9 @@ describe('organization picker', () => {
       return element as HTMLElement;
     });
     expect(chip.textContent).toContain('Acme');
-    expect(screen.queryByRole('tab', { name: 'Webhook events' })).toBeNull();
-    expect(screen.queryByRole('tab', { name: 'Activity' })).toBeNull();
+    await waitFor(() => expect(screen.queryByRole('link', { name: 'Webhook events' })).toBeNull());
+    expect(screen.queryByRole('link', { name: 'Activity' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Payments' })).toBeTruthy();
   });
 
   it('every organization: "All organizations" first, a pick goes on every call', async () => {

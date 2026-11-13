@@ -1,41 +1,71 @@
-import { cva, type VariantProps } from 'class-variance-authority';
-import { forwardRef } from 'react';
-import { cn } from './cn';
+import type { ReactNode } from 'react';
+import { cn } from '../../agora-kit/lib/utils';
+import { Badge as KitBadge } from '../../agora-kit/ui/badge';
 
 /**
- * A non-interactive label chip: the provider, the event type, a gateway id.
+ * The console's label chips, on the kit's (shadcn) Badge.
  *
- * The `status` variant is colourless on purpose — a status badge takes its hue from the
- * `s-<status>` class in `index.css`, which is the single place status colour is defined.
- * Copied in shape from `@adonis-agora/durable-dashboard`'s `ui/badge.tsx`.
+ * - `provider` — the gateway that produced the row (stripe/asaas/woovi/abacate): info tone.
+ * - `type` — a webhook event type or an audit action: violet tone.
+ * - `danger` — something that needs acting on.
+ * - `outline` — neutral.
+ *
+ * Statuses go through {@link StatusBadge}: its hue comes from the `s-<status>` class in
+ * `index.css`, the single place status colour is defined.
  */
-export const badgeVariants = cva(
-  'inline-flex items-center gap-1.5 rounded-sm border px-1.5 text-[10px] leading-relaxed',
-  {
-    variants: {
-      variant: {
-        outline: 'border-line bg-zinc-800/40 text-zinc-400',
-        /** The gateway that produced the row (stripe/asaas/woovi/abacate). */
-        provider: 'border-sky-500/30 bg-sky-500/10 text-sky-300',
-        /** The webhook event type (`payment.succeeded`, ...). */
-        type: 'border-indigo-500/30 bg-indigo-500/10 text-indigo-300',
-        /** Something that needs acting on. */
-        danger: 'border-rose-500/40 bg-rose-500/10 text-rose-300',
-        /** Status — colour comes from the caller's `s-<status>` class. */
-        status: 'border-transparent px-0 uppercase tracking-wider',
-      },
-    },
-    defaultVariants: { variant: 'outline' },
-  },
-);
+const TONE = {
+  outline: 'neutral',
+  provider: 'info',
+  type: 'violet',
+  danger: 'destructive',
+} as const;
 
-export interface BadgeProps
-  extends React.HTMLAttributes<HTMLSpanElement>,
-    VariantProps<typeof badgeVariants> {}
+export function Badge({
+  variant = 'outline',
+  className,
+  children,
+}: {
+  variant?: keyof typeof TONE;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <KitBadge variant={TONE[variant]} className={className}>
+      {children}
+    </KitBadge>
+  );
+}
 
-export const Badge = forwardRef<HTMLSpanElement, BadgeProps>(
-  ({ className, variant, ...props }, ref) => (
-    <span ref={ref} className={cn(badgeVariants({ variant }), className)} {...props} />
-  ),
-);
-Badge.displayName = 'Badge';
+/** A status pill tinted by its `s-<status>` class (`statusClass`): dot + label. */
+export function StatusBadge({
+  statusClass,
+  children,
+  className,
+}: {
+  statusClass: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <KitBadge
+      variant="outline"
+      className={cn(
+        statusClass,
+        'border-current/25 bg-current/10 text-current uppercase tracking-[0.06em]',
+        className,
+      )}
+    >
+      <span className="size-1.5 rounded-full bg-current" aria-hidden />
+      {children}
+    </KitBadge>
+  );
+}
+
+/** A small caps qualifier next to a status ("not billing", "managed", "no money moved"). */
+export function Qualifier({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <span className={cn('text-[10px] uppercase tracking-wider text-faint', className)}>
+      {children}
+    </span>
+  );
+}

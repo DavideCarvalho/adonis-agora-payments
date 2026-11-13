@@ -1,120 +1,142 @@
 import type { UseQueryResult } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
+import { type Column, DataTable } from '../agora-kit/blocks/data-table';
+import { EmptyState } from '../agora-kit/blocks/empty-state';
+import { ErrorBoundary, RegionError } from '../agora-kit/blocks/error-boundary';
+import { Pager as KitPager } from '../agora-kit/blocks/pager';
+import { Panel } from '../agora-kit/blocks/panel';
+import { errorStatus } from '../agora-kit/blocks/query-boundary';
 import type { ListMeta } from '../client/payments-client';
-import { cn } from './ui/cn';
 
-/** A bordered surface with a heading — the one container every screen uses. */
-export function Panel({
+/**
+ * The payments console's list region: one titled kit `Panel` holding a `DataTable` over an offset
+ * page (`@adonis-agora/filter`'s `{ data, meta }` envelope) and its pager.
+ *
+ * The four states every list has are rendered here once instead of at each screen: skeleton rows
+ * while the first page loads, a retryable error (an access message on 401/403), a designed empty
+ * state, then the rows. The error keeps the server's sentence rather than a generic "something went
+ * wrong": the two errors this console actually produces — a 503 because the billing layer is off,
+ * and a 401 that has already redirected — are both things the operator can only act on if they can
+ * read them. The whole region sits in its own error boundary, so a crash in one table never blanks
+ * the page around it.
+ *
+ * Presentational: the screen's container owns the query and hands it in.
+ */
+export function ListPanel<T>({
   title,
-  subtitle,
-  actions,
-  className,
+  description,
+  action,
+  query,
+  columns,
+  rowKey,
+  emptyTitle,
+  emptyDescription,
+  emptyIcon,
+  onPage,
+  rowClassName,
+  subRow,
   children,
 }: {
   title: string;
-  subtitle?: string;
-  actions?: ReactNode;
-  className?: string;
-  children: ReactNode;
+  description?: ReactNode;
+  action?: ReactNode;
+  query: Pick<UseQueryResult<{ data: T[]; meta: ListMeta }>, 'data' | 'error' | 'refetch'>;
+  columns: Column<T>[];
+  rowKey: (row: T) => string;
+  emptyTitle: string;
+  emptyDescription?: ReactNode;
+  emptyIcon?: ReactNode;
+  onPage: (page: number) => void;
+  rowClassName?: (row: T) => string | undefined;
+  subRow?: (row: T) => ReactNode;
+  /** Dialogs owned by the list (detail, refund…), rendered after it. */
+  children?: ReactNode;
 }) {
+  const page = query.data;
   return (
-    <section className={cn('rounded-sm border border-line bg-panel', className)}>
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
-        <div>
-          <h2 className="text-sm text-zinc-200">{title}</h2>
-          {subtitle !== undefined && <p className="mt-0.5 text-[11px] text-zinc-500">{subtitle}</p>}
-        </div>
-        {/* `min-w-0` is what lets the filter row fit a phone. A flex item's default `min-width:
-            auto` is its min-content width — for a row of pills, ALL the pills side by side — so
-            without it this header pushed the whole page to 570px on a 390px screen. As a
-            block-level box inside a shrinkable item, the actions get the header's real width and
-            a `Segmented` inside them can scroll instead of overflowing. */}
-        {actions !== undefined && <div className="min-w-0 max-w-full">{actions}</div>}
-      </header>
-      <div className="overflow-x-auto">{children}</div>
-    </section>
+    <ErrorBoundary label={title} onReset={() => void query.refetch()}>
+      <Panel
+        title={title}
+        description={description}
+        action={action}
+        flush
+        bodyClassName="overflow-x-auto"
+      >
+        {query.error && page === undefined ? (
+          <div className="p-4">
+            <ListError label={title} error={query.error} onRetry={() => void query.refetch()} />
+          </div>
+        ) : (
+          <>
+            <DataTable
+              label={title}
+              columns={columns}
+              rows={page?.data}
+              loading={page === undefined}
+              rowKey={rowKey}
+              {...(rowClassName ? { rowClassName } : {})}
+              {...(subRow ? { subRow } : {})}
+              empty={
+                <EmptyState
+                  title={emptyTitle}
+                  description={emptyDescription}
+                  {...(emptyIcon ? { icon: emptyIcon } : {})}
+                />
+              }
+            />
+            {page !== undefined && page.data.length > 0 && (
+              <Pager meta={page.meta} onPage={onPage} />
+            )}
+          </>
+        )}
+      </Panel>
+      {children}
+    </ErrorBoundary>
   );
 }
 
-/**
- * The three states every fetch has, rendered once instead of at each call site.
- *
- * The error branch deliberately shows the message rather than a generic "something went wrong":
- * the two errors this console actually produces — a 503 because the billing layer is off, and a
- * 401 that has already redirected — are both things the operator can only act on if they can read
- * them.
- */
-export function QueryState<T>({
-  query,
-  empty,
-  emptyMessage,
-  children,
-}: {
-  query: UseQueryResult<T>;
-  /** Whether the (successful) result is empty. */
-  empty: boolean;
-  emptyMessage?: string;
-  children: ReactNode;
-}) {
-  if (query.isPending) {
-    return <p className="p-4 text-sm text-zinc-500">Loading…</p>;
-  }
-  if (query.isError) {
-    return (
-      <div className="rounded-sm border border-bad/40 bg-bad/10 p-4">
-        <p className="text-sm text-rose-300">
-          {query.error instanceof Error ? query.error.message : 'Request failed.'}
-        </p>
-      </div>
-    );
-  }
-  if (empty) {
-    return <p className="p-4 text-sm text-zinc-500">{emptyMessage ?? 'Nothing here yet.'}</p>;
-  }
-  return <>{children}</>;
-}
-
-/**
- * Page paging over a list's `meta` (`@adonis-agora/filter`'s offset envelope): 1-based
- * `currentPage`, `perPage` rows, the real `total` and `lastPage`. `count` is the rows on this page.
- */
-export function Pager({
-  meta,
-  count,
-  onPage,
-}: {
-  meta: ListMeta | undefined;
-  count: number;
-  onPage: (page: number) => void;
-}) {
-  const page = meta?.currentPage ?? 1;
-  const size = meta?.perPage ?? count;
-  const total = meta?.total ?? count;
-  const maybeMore = page < (meta?.lastPage ?? page);
-  const first = (page - 1) * size;
+/** The kit's offset pager under a list, on the list's own `meta`. */
+export function Pager({ meta, onPage }: { meta: ListMeta; onPage: (page: number) => void }) {
   return (
-    <div className="flex items-center justify-between border-t border-line px-4 py-2 text-xs text-zinc-500">
-      <span className="mono tnum">
-        {count === 0 ? `0 of ${total}` : `${first + 1}–${first + count} of ${total}`}
-      </span>
-      <span className="flex gap-1">
-        <button
-          type="button"
-          disabled={page <= 1}
-          onClick={() => onPage(Math.max(1, page - 1))}
-          className="rounded-sm border border-line px-2 py-1 text-zinc-300 enabled:hover:bg-panel-2 disabled:opacity-40"
-        >
-          Previous
-        </button>
-        <button
-          type="button"
-          disabled={!maybeMore}
-          onClick={() => onPage(page + 1)}
-          className="rounded-sm border border-line px-2 py-1 text-zinc-300 enabled:hover:bg-panel-2 disabled:opacity-40"
-        >
-          Next
-        </button>
-      </span>
+    <div className="border-t border-border px-3">
+      <KitPager meta={meta} onPage={onPage} />
     </div>
   );
+}
+
+/** A region's load failure: the server's sentence, a retry, and plain words on 401/403. */
+export function ListError({
+  label,
+  error,
+  onRetry,
+}: {
+  label: string;
+  error: unknown;
+  onRetry?: () => void;
+}) {
+  const status = errorStatus(error);
+  if (status === 401 || status === 403) {
+    return (
+      <RegionError
+        title={status === 401 ? 'Signed out' : `You can't see ${label.toLowerCase()} here`}
+        error={
+          status === 401
+            ? 'Your session ended. Sign in again to continue.'
+            : 'Your account is not allowed to read this.'
+        }
+      />
+    );
+  }
+  return (
+    <RegionError
+      title={`${label} could not be loaded`}
+      error={error instanceof Error ? error : 'Request failed.'}
+      {...(onRetry ? { onRetry } : {})}
+    />
+  );
+}
+
+/** A mono id or timestamp cell, in the table's dim ink. */
+export function Mono({ children, className }: { children: ReactNode; className?: string }) {
+  return <span className={`mono text-[12px] ${className ?? 'text-dim'}`}>{children}</span>;
 }

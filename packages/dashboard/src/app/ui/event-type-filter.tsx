@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { paymentsClient } from '../../client/payments-client';
-import { cn } from './cn';
+import { CONTROL_CLASS, FieldLabel } from './field';
 
 /**
  * "Which event type?" — driven by the DATA, exactly like {@link ProviderFilter}.
@@ -34,13 +34,12 @@ export function EventTypeFilter({
   if (types.length < 2 && value === undefined) return null;
 
   return (
-    <label className={cn('flex items-center gap-2 text-[11px] text-zinc-500', className)}>
-      Type
+    <FieldLabel label="Type" {...(className !== undefined ? { className } : {})}>
       <select
         aria-label="Event type"
         value={value ?? ''}
         onChange={(event) => onChange(event.target.value === '' ? undefined : event.target.value)}
-        className="rounded-sm border border-line bg-panel px-2 py-1 text-xs text-zinc-300 focus:border-brand focus:outline-hidden"
+        className={CONTROL_CLASS}
       >
         <option value="">All</option>
         {types.map((type) => (
@@ -49,6 +48,6 @@ export function EventTypeFilter({
           </option>
         ))}
       </select>
-    </label>
+    </FieldLabel>
   );
 }

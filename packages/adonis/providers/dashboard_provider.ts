@@ -23,6 +23,7 @@ import {
   type ConsoleAuthorizeDecision,
   resolveConsoleAuthorize,
 } from '../src/dashboard/console_authorize.js';
+import { resolveSignOut, resolveViewer } from '../src/dashboard/console_shell.js';
 import {
   listVisibleConsoles,
   otherConsoles,
@@ -62,7 +63,7 @@ import {
   subscriptions,
   webhookEvents,
 } from '../src/dashboard/handlers.js';
-import { contentTypeFor, renderIndexHtml } from '../src/dashboard/spa.js';
+import { contentTypeFor, renderIndexHtml, type ShellFields } from '../src/dashboard/spa.js';
 import {
   type ConsoleTenantScope,
   ownerScopeOfConsole,
@@ -717,6 +718,27 @@ export default class PaymentsDashboardProvider {
     return discoverWebhookHandlers(this.app.makePath('app/payment_handlers'));
   }
 
+  /**
+   * The console-shell fields of the page's data block: the switcher, ⌘K search (whenever a console
+   * registry exists — this console registers its own search), the signed-in viewer and the
+   * sign-out (the host's option, else the one an account console announced on the registry).
+   */
+  private async shellFields(
+    config: ResolvedPaymentsDashboardConfig,
+    ctx: HttpContext,
+    apiBase: string,
+  ): Promise<ShellFields> {
+    const registry = await readAgoraConsoles(this.app.container as never);
+    const viewer = await resolveViewer(ctx, config.viewer);
+    const signOut = resolveSignOut(ctx, config.signOut, registry);
+    return {
+      switcher: { endpoint: `${apiBase}/consoles`, others: otherConsoles(registry, CONSOLE_ID) },
+      ...(registry ? { search: { endpoint: `${apiBase}/consoles/search` } } : {}),
+      ...(viewer ? { viewer } : {}),
+      ...(signOut ? { signOut } : {}),
+    };
+  }
+
   /** Mount the React SPA at `config.path` plus its hashed asset bundle. */
   private registerSpaRoutes(
     router: HttpRouterService,
@@ -742,13 +764,13 @@ export default class PaymentsDashboardProvider {
           .header('content-type', 'text/html; charset=utf-8')
           .header('cache-control', 'no-store, must-revalidate')
           .send(
-            renderIndexHtml(html, config.path, apiBase, config.currency, {
-              endpoint: `${apiBase}/consoles`,
-              others: otherConsoles(
-                await readAgoraConsoles(this.app.container as never),
-                CONSOLE_ID,
-              ),
-            }),
+            renderIndexHtml(
+              html,
+              config.path,
+              apiBase,
+              config.currency,
+              await this.shellFields(config, ctx, apiBase),
+            ),
           );
       })
       .as('payments_dashboard.index');

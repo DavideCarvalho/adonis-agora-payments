@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -107,7 +108,7 @@ describe('what the screen leads with', () => {
     });
     renderScreen();
 
-    const headings = await screen.findAllByRole('heading', { level: 2 });
+    const headings = await screen.findAllByRole('heading', { level: 3 });
     expect(headings.map((h) => h.textContent)).toEqual([
       'Evidence windows closing',
       'All disputes',
@@ -117,7 +118,7 @@ describe('what the screen leads with', () => {
   it('asks the API for the work list on the same 72h horizon the cron uses', async () => {
     stubApi({});
     renderScreen();
-    await screen.findAllByRole('heading', { level: 2 });
+    await screen.findAllByRole('heading', { level: 3 });
 
     const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map((call) =>
       String(call[0]),

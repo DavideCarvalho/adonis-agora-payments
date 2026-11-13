@@ -1,10 +1,23 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
+import { type Column, DataTable } from '../agora-kit/blocks/data-table';
+import { EmptyState } from '../agora-kit/blocks/empty-state';
+import { ErrorBoundary } from '../agora-kit/blocks/error-boundary';
+import {
+  MetricCard,
+  MetricGrid,
+  MetricGridSkeleton,
+  type MetricTone,
+} from '../agora-kit/blocks/metric-card';
+import { PageHeader } from '../agora-kit/blocks/page-header';
+import { Panel } from '../agora-kit/blocks/panel';
+import { PageBody } from '../agora-kit/shell/app-shell';
 import type { OverviewMetric, PeriodPreset } from '../client/payments-client';
 import { paymentsClient } from '../client/payments-client';
 import { HealthPanel } from './HealthPanel';
+import { GaugeIcon } from './icons';
 import { formatCents, formatCount } from './money';
-import { Panel, QueryState } from './shell';
+import { ListError } from './shell';
 import { Segmented } from './ui/segmented';
 
 const PERIODS: ReadonlyArray<{ value: PeriodPreset; label: string }> = [
@@ -69,16 +82,19 @@ function meterName(metric: OverviewMetric): string {
   return metric.key.slice('meter:'.length);
 }
 
-function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
-  return (
-    <div className="rise rounded-sm border border-line bg-panel p-4">
-      <p className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</p>
-      <p className="mono tnum mt-2 text-2xl text-zinc-100">{value}</p>
-      {hint !== undefined && <p className="mt-1 text-[11px] text-zinc-500">{hint}</p>}
-    </div>
-  );
-}
+const METRIC_TONE: Record<string, MetricTone> = {
+  revenue: 'brand',
+  net_revenue: 'good',
+  mrr: 'violet',
+  active_subscriptions: 'info',
+};
 
+/**
+ * Overview (MONITOR): health first, then the money for a window, then metered usage.
+ *
+ * Container: owns the period and the overview query; the health panel is its own region with its
+ * own poll. Everything under it is presentational.
+ */
 export function Overview({
   onNavigate,
   showHealth = true,
@@ -96,81 +112,131 @@ export function Overview({
     queryKey: ['overview', period],
     queryFn: () => paymentsClient.overview(period),
   });
-
   const data = query.data;
-  const usage = data?.metrics.filter(isUsageMetric) ?? [];
-  const headline = data?.metrics.filter((m) => !isUsageMetric(m)) ?? [];
 
   return (
-    <div className="flex flex-col gap-4">
+    <PageBody>
+      <PageHeader
+        title="Overview"
+        description={
+          data !== undefined && data.period.from !== ''
+            ? `${new Date(data.period.from).toLocaleString()} → ${new Date(data.period.to).toLocaleString()}`
+            : 'Revenue, subscriptions and metered usage for a window.'
+        }
+        actions={
+          <Segmented
+            aria-label="Period"
+            options={PERIODS}
+            value={period}
+            onChange={(value) => setPeriod(value)}
+          />
+        }
+      />
+
       {/* Health comes FIRST, above the money. Revenue answers "how did we do"; this answers "is
           anything broken right now", and an operator opening the console in the morning needs the
           second one before the first. */}
-      {showHealth && <HealthPanel onNavigate={onNavigate} />}
+      {showHealth && (
+        <ErrorBoundary label="Health">
+          <HealthPanel onNavigate={onNavigate} />
+        </ErrorBoundary>
+      )}
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <Segmented
-          aria-label="Period"
-          options={PERIODS}
-          value={period}
-          onChange={(value) => setPeriod(value)}
-        />
-        {data !== undefined && (
-          <p className="mono text-[11px] text-zinc-500">
-            {new Date(data.period.from).toLocaleString()} →{' '}
-            {new Date(data.period.to).toLocaleString()}
-          </p>
+      <ErrorBoundary label="Metrics" onReset={() => void query.refetch()}>
+        {query.error && data === undefined ? (
+          <ListError label="Overview" error={query.error} onRetry={() => void query.refetch()} />
+        ) : data === undefined ? (
+          <>
+            <MetricGridSkeleton count={4} />
+            <Panel title="Usage" description="per meter" flush>
+              <DataTable
+                label="Usage"
+                columns={USAGE_COLUMNS}
+                rows={undefined}
+                loading
+                rowKey={(m) => m.key}
+                skeletonRows={3}
+              />
+            </Panel>
+          </>
+        ) : (
+          <OverviewMetrics metrics={data.metrics} currency={data.currency} />
         )}
-      </div>
+      </ErrorBoundary>
+    </PageBody>
+  );
+}
 
-      <QueryState query={query} empty={false}>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+/** The metric tiles and the usage table (presentational). */
+export function OverviewMetrics({
+  metrics,
+  currency,
+}: {
+  metrics: OverviewMetric[];
+  currency: string;
+}) {
+  const usage = metrics.filter(isUsageMetric);
+  const headline = metrics.filter((m) => !isUsageMetric(m));
+  return (
+    <>
+      {headline.length > 0 && (
+        <MetricGrid className="md:grid-cols-[repeat(auto-fit,minmax(200px,1fr))]">
           {headline.map((metric) => {
             const copy = STAT_COPY[metric.key];
             return (
-              <Stat
+              <MetricCard
                 key={metric.key}
                 label={copy?.label ?? metric.label}
+                tone={METRIC_TONE[metric.key] ?? 'default'}
                 value={
                   isMoneyMetric(metric)
-                    ? formatCents(metric.value, data?.currency ?? 'BRL')
+                    ? formatCents(metric.value, currency)
                     : formatCount(metric.value)
                 }
-                {...(copy !== undefined ? { hint: copy.hint } : {})}
+                caption={
+                  copy !== undefined ? (
+                    <span className="block whitespace-normal font-sans text-[11px] leading-snug">
+                      {copy.hint}
+                    </span>
+                  ) : undefined
+                }
               />
             );
           })}
-        </div>
+        </MetricGrid>
+      )}
 
-        <Panel
-          title="Usage"
-          subtitle="Metered consumption recorded in this window, per meter."
-          className="mt-4"
-        >
-          {usage.length === 0 ? (
-            <p className="p-4 text-sm text-zinc-500">No metered usage recorded in this window.</p>
-          ) : (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-line text-left text-[10px] uppercase tracking-wider text-zinc-500">
-                  <th className="px-4 py-2 font-normal">Meter</th>
-                  <th className="px-4 py-2 text-right font-normal">Quantity</th>
-                </tr>
-              </thead>
-              <tbody>
-                {usage.map((metric) => (
-                  <tr key={metric.key} className="border-b border-line-soft last:border-0">
-                    <td className="mono px-4 py-2 text-zinc-300">{meterName(metric)}</td>
-                    <td className="mono tnum px-4 py-2 text-right text-zinc-100">
-                      {formatCount(metric.value)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </Panel>
-      </QueryState>
-    </div>
+      <Panel title="Usage" description="metered consumption in this window, per meter" flush>
+        <DataTable
+          label="Usage"
+          columns={USAGE_COLUMNS}
+          rows={usage}
+          rowKey={(metric) => metric.key}
+          empty={
+            <EmptyState
+              icon={<GaugeIcon />}
+              title="No metered usage"
+              description="Nothing was recorded against a meter in this window."
+            />
+          }
+        />
+      </Panel>
+    </>
   );
 }
+
+const USAGE_COLUMNS: Column<OverviewMetric>[] = [
+  {
+    id: 'meter',
+    header: 'Meter',
+    cell: (metric) => <span className="mono text-[12px] text-fg-2">{meterName(metric)}</span>,
+  },
+  {
+    id: 'quantity',
+    header: 'Quantity',
+    align: 'right',
+    cell: (metric) => (
+      <span className="mono tnum text-[12.5px] text-fg">{formatCount(metric.value)}</span>
+    ),
+  },
+];

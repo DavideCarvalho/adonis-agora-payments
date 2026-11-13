@@ -1,4 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
+import { RegionError } from '../agora-kit/blocks/error-boundary';
+import { Button } from '../agora-kit/ui/button';
+import { Skeleton } from '../agora-kit/ui/skeleton';
 import { paymentsClient } from '../client/payments-client';
 import { deadlineTone, formatCountdown } from './disputes';
 import { failingChecks, healthTarget, healthyLine } from './health';
@@ -33,20 +36,27 @@ export function HealthPanel({
     refetchInterval: 30_000,
   });
 
-  if (query.isPending) {
+  if (query.isError && query.data === undefined) {
     return (
-      <div className="rounded-sm border border-line bg-panel px-4 py-3 text-sm text-zinc-500">
-        Checking…
-      </div>
+      <RegionError
+        title="The health check failed"
+        error={query.error}
+        onRetry={() => void query.refetch()}
+      />
     );
   }
 
-  if (query.isError) {
+  if (query.data === undefined) {
     return (
-      <div className="rounded-sm border border-bad/40 bg-bad/10 px-4 py-3">
-        <p className="text-sm text-rose-300">
-          {query.error instanceof Error ? query.error.message : 'The health check failed.'}
-        </p>
+      <div
+        className="agora-surface flex items-center gap-3 rounded-lg border border-border px-4 py-3.5"
+        role="status"
+        aria-label="Checking health"
+      >
+        <Skeleton className="size-2 rounded-full" />
+        <Skeleton className="h-3 w-24" />
+        <Skeleton className="h-3 w-64 max-w-[40%]" />
+        <Skeleton className="ml-auto h-3 w-28" />
       </div>
     );
   }
@@ -56,11 +66,11 @@ export function HealthPanel({
 
   if (report.healthy) {
     return (
-      <div className="flex flex-wrap items-center gap-3 rounded-sm border border-good/30 bg-good/[0.06] px-4 py-3">
+      <div className="agora-surface agora-rise flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-good/25 px-4 py-3">
         <span className="s-processed dot" aria-hidden />
-        <p className="text-sm text-zinc-200">All clear</p>
-        <p className="text-[11px] text-zinc-500">{healthyLine(report)}</p>
-        <p className="mono ml-auto text-[11px] text-zinc-600">
+        <p className="text-[13px] font-semibold text-fg">All clear</p>
+        <p className="text-[11.5px] text-dim">{healthyLine(report)}</p>
+        <p className="mono ml-auto text-[11px] text-faint">
           checked {formatWhen(report.checkedAt)}
         </p>
       </div>
@@ -68,17 +78,17 @@ export function HealthPanel({
   }
 
   return (
-    <section className="rise rounded-sm border border-bad/40 bg-bad/[0.05]">
+    <section className="agora-rise overflow-hidden rounded-lg border border-bad/30 bg-bad/[0.05]">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-bad/25 px-4 py-3">
         <div className="flex items-center gap-3">
           <span className="s-failed dot" aria-hidden />
-          <h2 className="text-sm text-zinc-100">
+          <h2 className="text-[13px] font-semibold text-fg">
             {failing.length === 1
               ? '1 thing needs attention'
               : `${failing.length} things need attention`}
           </h2>
         </div>
-        <p className="mono text-[11px] text-zinc-500">checked {formatWhen(report.checkedAt)}</p>
+        <p className="mono text-[11px] text-dim">checked {formatWhen(report.checkedAt)}</p>
       </header>
 
       <ul>
@@ -87,22 +97,22 @@ export function HealthPanel({
           return (
             <li
               key={check.key}
-              className="flex flex-wrap items-start gap-x-4 gap-y-2 border-b border-line-soft px-4 py-3 last:border-0"
+              className="flex flex-wrap items-start gap-x-4 gap-y-2 border-b border-bad/15 px-4 py-3 last:border-0"
             >
-              <span className="mono tnum s-failed min-w-[3ch] text-2xl leading-none">
+              <span className="mono tnum s-failed min-w-[3ch] text-[26px] font-semibold leading-none tracking-[-0.02em]">
                 {formatCount(check.count)}
               </span>
               <div className="min-w-[16rem] flex-1">
-                <p className="text-sm text-zinc-200">{check.label}</p>
-                <p className="mt-0.5 text-[11px] text-zinc-500">{check.hint}</p>
+                <p className="text-[13px] font-medium text-fg">{check.label}</p>
+                <p className="mt-0.5 text-[11px] text-dim">{check.hint}</p>
               </div>
-              <button
-                type="button"
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={() => onNavigate(target.screen, target.status)}
-                className="rounded-sm border border-line bg-panel px-2 py-1 text-xs text-zinc-300 hover:bg-panel-2 hover:text-zinc-100"
               >
                 {target.label}
-              </button>
+              </Button>
             </li>
           );
         })}
@@ -110,7 +120,7 @@ export function HealthPanel({
 
       {report.deadlines.length > 0 && (
         <div className="border-t border-bad/25 px-4 py-3">
-          <p className="text-[10px] uppercase tracking-wider text-zinc-500">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-faint">
             Which windows are closing
           </p>
           {/* WHICH ones, not just how many: a count names no dispute to open at the gateway. The
@@ -119,15 +129,15 @@ export function HealthPanel({
             {report.deadlines.map((dispute) => (
               <li
                 key={dispute.id}
-                className="flex items-center gap-1.5 rounded-sm border border-line bg-panel px-2 py-1"
+                className="flex items-center gap-1.5 rounded-md border border-border bg-panel px-2 py-1"
               >
                 <Badge variant="provider">{dispute.provider}</Badge>
-                <span className="mono text-[11px] text-zinc-400">{dispute.gatewayId}</span>
+                <span className="mono text-[11px] text-dim">{dispute.gatewayId}</span>
                 <span
                   className={
                     deadlineTone(dispute.evidenceDueBy) === 'past'
-                      ? 'mono text-[11px] text-rose-300'
-                      : 'mono text-[11px] text-amber-300'
+                      ? 'mono text-[11px] text-bad'
+                      : 'mono text-[11px] text-warn'
                   }
                 >
                   {formatCountdown(dispute.evidenceDueBy)}
@@ -140,7 +150,9 @@ export function HealthPanel({
 
       {report.openDisputes.length > 0 && (
         <div className="border-t border-bad/25 px-4 py-3">
-          <p className="text-[10px] uppercase tracking-wider text-zinc-500">Open and unanswered</p>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-faint">
+            Open and unanswered
+          </p>
           {/* Named separately from the closing windows, and overlapping them on purpose: on a
               gateway that publishes no deadline this is the ONLY list that is ever non-empty,
               and a dispute here with no countdown is not "no hurry" — nobody told us. */}
@@ -148,11 +160,11 @@ export function HealthPanel({
             {report.openDisputes.map((dispute) => (
               <li
                 key={dispute.id}
-                className="flex items-center gap-1.5 rounded-sm border border-line bg-panel px-2 py-1"
+                className="flex items-center gap-1.5 rounded-md border border-border bg-panel px-2 py-1"
               >
                 <Badge variant="provider">{dispute.provider}</Badge>
-                <span className="mono text-[11px] text-zinc-400">{dispute.gatewayId}</span>
-                <span className="mono text-[11px] text-zinc-500">
+                <span className="mono text-[11px] text-dim">{dispute.gatewayId}</span>
+                <span className="mono text-[11px] text-dim">
                   {dispute.evidenceDueBy === null
                     ? 'no deadline sent'
                     : formatCountdown(dispute.evidenceDueBy)}
@@ -165,16 +177,18 @@ export function HealthPanel({
 
       {report.failures.length > 0 && (
         <div className="border-t border-bad/25 px-4 py-3">
-          <p className="text-[10px] uppercase tracking-wider text-zinc-500">What is failing</p>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-faint">
+            What is failing
+          </p>
           <ul className="mt-2 flex flex-wrap gap-2">
             {report.failures.map((failure) => (
               <li
                 key={`${failure.provider}:${failure.type}`}
-                className="flex items-center gap-1.5 rounded-sm border border-line bg-panel px-2 py-1"
+                className="flex items-center gap-1.5 rounded-md border border-border bg-panel px-2 py-1"
               >
                 <Badge variant="provider">{failure.provider}</Badge>
                 <Badge variant="type">{failure.type}</Badge>
-                <span className="mono tnum text-[11px] text-rose-300">
+                <span className="mono tnum text-[11px] text-bad">
                   ×{formatCount(failure.count)}
                 </span>
               </li>

@@ -1,10 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Fragment, useState } from 'react';
-import { paymentsClient } from '../client/payments-client';
-import { formatWhen } from './money';
-import { Pager, Panel, QueryState } from './shell';
+import { useState } from 'react';
+import type { Column } from '../agora-kit/blocks/data-table';
+import { PageHeader, Toolbar } from '../agora-kit/blocks/page-header';
+import { PageBody } from '../agora-kit/shell/app-shell';
+import { Button } from '../agora-kit/ui/button';
+import { paymentsClient, type WebhookEventRow } from '../client/payments-client';
+import { PlugIcon } from './icons';
+import { formatCount, formatWhen } from './money';
+import { ListPanel, Mono } from './shell';
 import { isActionable, webhookStatusClass } from './status';
-import { Badge } from './ui/badge';
+import { Badge, StatusBadge } from './ui/badge';
 import { EventTypeFilter } from './ui/event-type-filter';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';
@@ -53,118 +58,115 @@ export function WebhookEvents({ initialStatus }: { initialStatus?: string | unde
     },
   });
 
-  const rows = query.data?.data ?? [];
   const refilter = (apply: () => void) => {
     apply();
     setPage(1);
   };
 
+  const columns: Column<WebhookEventRow>[] = [
+    {
+      id: 'status',
+      header: 'Status',
+      cell: (row) => (
+        <StatusBadge statusClass={webhookStatusClass(row.status)}>{row.status}</StatusBadge>
+      ),
+    },
+    { id: 'type', header: 'Type', cell: (row) => <Badge variant="type">{row.type}</Badge> },
+    {
+      id: 'provider',
+      header: 'Provider',
+      hideBelow: 'md',
+      cell: (row) => <Badge variant="provider">{row.provider}</Badge>,
+    },
+    {
+      id: 'event',
+      header: 'Gateway event id',
+      hideBelow: 'sm',
+      cell: (row) => <Mono>{row.gatewayEventId}</Mono>,
+    },
+    {
+      id: 'received',
+      header: 'Received',
+      hideBelow: 'lg',
+      cell: (row) => <Mono className="text-faint">{formatWhen(row.createdAt)}</Mono>,
+    },
+    {
+      id: 'updated',
+      header: 'Updated',
+      hideBelow: 'lg',
+      cell: (row) => <Mono className="text-faint">{formatWhen(row.updatedAt)}</Mono>,
+    },
+    {
+      id: 'action',
+      header: <span className="sr-only">Action</span>,
+      align: 'right',
+      // `retryable` is the server's rule. Disabled while in flight: the ledger would refuse a
+      // second claim anyway, but a button that still looks clickable reads as one that did nothing.
+      cell: (row) =>
+        row.retryable ? (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={retry.isPending}
+            onClick={() => retry.mutate(row.gatewayEventId)}
+          >
+            {retry.isPending && retry.variables === row.gatewayEventId ? 'Retrying…' : 'Retry'}
+          </Button>
+        ) : null,
+    },
+  ];
+
   return (
-    <Panel
-      title="Webhook events"
-      subtitle="The idempotency ledger. A failed row means a handler threw and the dispatcher gave up — its effect never happened."
-      actions={
-        <div className="flex flex-wrap items-center gap-3">
-          <EventTypeFilter value={type} onChange={(v) => refilter(() => setType(v))} />
-          <ProviderFilter value={provider} onChange={(v) => refilter(() => setProvider(v))} />
-          <Segmented
-            aria-label="Event status"
-            options={STATUS_OPTIONS}
-            value={status}
-            onChange={(value) => refilter(() => setStatus(value))}
-          />
-        </div>
-      }
-    >
-      <QueryState
+    <PageBody>
+      <PageHeader
+        title="Webhook events"
+        description="The idempotency ledger. A failed row means a handler threw and the dispatcher gave up — its effect never happened."
+      />
+      <Toolbar label="Event filters" className="gap-3">
+        <EventTypeFilter value={type} onChange={(v) => refilter(() => setType(v))} />
+        <ProviderFilter value={provider} onChange={(v) => refilter(() => setProvider(v))} />
+        <Segmented
+          aria-label="Event status"
+          options={STATUS_OPTIONS}
+          value={status}
+          onChange={(value) => refilter(() => setStatus(value))}
+        />
+      </Toolbar>
+      <ListPanel
+        title="Ledger"
+        description={
+          query.data !== undefined ? `${formatCount(query.data.meta.total)} events` : undefined
+        }
         query={query}
-        empty={rows.length === 0}
-        emptyMessage={emptyMessage(status, provider, type)}
-      >
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-line text-left text-[10px] uppercase tracking-wider text-zinc-500">
-              <th className="px-4 py-2 font-normal">Status</th>
-              <th className="px-4 py-2 font-normal">Type</th>
-              <th className="px-4 py-2 font-normal">Provider</th>
-              <th className="px-4 py-2 font-normal">Gateway event id</th>
-              <th className="px-4 py-2 font-normal">Received</th>
-              <th className="px-4 py-2 font-normal">Updated</th>
-              <th className="px-4 py-2 text-right font-normal">Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => {
-              const inFlight = retry.isPending && retry.variables === row.gatewayEventId;
-              const failedHere = retry.isError && retry.variables === row.gatewayEventId;
-              return (
-                <Fragment key={row.id}>
-                  <tr
-                    className={
-                      isActionable(row.status)
-                        ? 'border-b border-line-soft bg-bad/[0.04]'
-                        : 'border-b border-line-soft'
-                    }
-                  >
-                    <td className="px-4 py-2">
-                      <span className={webhookStatusClass(row.status)}>
-                        <Badge variant="status">{row.status}</Badge>
-                      </span>
-                    </td>
-                    <td className="px-4 py-2">
-                      <Badge variant="type">{row.type}</Badge>
-                    </td>
-                    <td className="px-4 py-2">
-                      <Badge variant="provider">{row.provider}</Badge>
-                    </td>
-                    <td className="mono px-4 py-2 text-zinc-400">{row.gatewayEventId}</td>
-                    <td className="mono px-4 py-2 text-zinc-500">{formatWhen(row.createdAt)}</td>
-                    <td className="mono px-4 py-2 text-zinc-500">{formatWhen(row.updatedAt)}</td>
-                    <td className="px-4 py-2 text-right">
-                      {/* `retryable` is the server's rule. Disabled while in flight: the ledger
-                          would refuse a second claim anyway, but a button that still looks
-                          clickable reads as one that did nothing. */}
-                      {row.retryable && (
-                        <button
-                          type="button"
-                          disabled={retry.isPending}
-                          onClick={() => retry.mutate(row.gatewayEventId)}
-                          className="rounded-sm border border-line px-2 py-1 text-xs text-zinc-300 enabled:hover:bg-panel-2 enabled:hover:text-zinc-100 disabled:opacity-40"
-                        >
-                          {inFlight ? 'Retrying…' : 'Retry'}
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                  {row.error !== null && row.error !== '' && (
-                    <tr className="border-b border-line-soft">
-                      <td />
-                      <td colSpan={6} className="px-4 pb-3">
-                        <pre className="mono whitespace-pre-wrap wrap-break-word rounded-sm border border-bad/30 bg-bad/[0.06] p-2 text-[11px] text-rose-300">
-                          {row.error}
-                        </pre>
-                      </td>
-                    </tr>
-                  )}
-                  {failedHere && (
-                    <tr className="border-b border-line-soft">
-                      <td />
-                      <td colSpan={6} className="px-4 pb-3">
-                        <p className="rounded-sm border border-warn/40 bg-warn/[0.08] p-2 text-[11px] text-amber-300">
-                          Retry refused:{' '}
-                          {retry.error instanceof Error ? retry.error.message : 'unknown reason'}
-                        </p>
-                      </td>
-                    </tr>
-                  )}
-                </Fragment>
-              );
-            })}
-          </tbody>
-        </table>
-        <Pager meta={query.data?.meta} count={rows.length} onPage={setPage} />
-      </QueryState>
-    </Panel>
+        rowKey={(row) => row.id}
+        onPage={setPage}
+        emptyIcon={<PlugIcon />}
+        emptyTitle={status === 'failed' && type === undefined ? 'Nothing is stuck' : 'No events'}
+        emptyDescription={emptyMessage(status, provider, type)}
+        rowClassName={(row) => (isActionable(row.status) ? 'bg-bad/[0.04]' : undefined)}
+        columns={columns}
+        subRow={(row) => {
+          const failedHere = retry.isError && retry.variables === row.gatewayEventId;
+          const hasError = row.error !== null && row.error !== '';
+          if (!hasError && !failedHere) return null;
+          return (
+            <div className="flex flex-col gap-2">
+              {hasError && (
+                <pre className="mono whitespace-pre-wrap wrap-break-word rounded-md border border-bad/25 bg-bad/[0.06] p-2 text-[11px] text-bad">
+                  {row.error}
+                </pre>
+              )}
+              {failedHere && (
+                <p className="rounded-md border border-warn/30 bg-warn/[0.08] p-2 text-[11px] text-warn">
+                  Retry refused:{' '}
+                  {retry.error instanceof Error ? retry.error.message : 'unknown reason'}
+                </p>
+              )}
+            </div>
+          );
+        }}
+      />
+    </PageBody>
   );
 }
 

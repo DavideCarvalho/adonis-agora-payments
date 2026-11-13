@@ -1,15 +1,19 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { paymentsClient } from '../client/payments-client';
+import type { Column } from '../agora-kit/blocks/data-table';
+import { PageHeader, Toolbar } from '../agora-kit/blocks/page-header';
+import { PageBody } from '../agora-kit/shell/app-shell';
+import { paymentsClient, type SubscriptionRow } from '../client/payments-client';
+import { RepeatIcon } from './icons';
 import { formatCents, formatCount, formatDay, formatDaysUntil, formatWhen } from './money';
 import { SubscriptionDetail } from './SubscriptionDetail';
-import { Pager, Panel, QueryState } from './shell';
+import { ListPanel, Mono } from './shell';
 import {
   subscriptionIsBilling,
   subscriptionNeedsAttention,
   subscriptionStatusClass,
 } from './status';
-import { Badge } from './ui/badge';
+import { Badge, Qualifier, StatusBadge } from './ui/badge';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';
 
@@ -74,7 +78,6 @@ export function Subscriptions({
       paymentsClient.subscriptions({ status, provider, customerId, size: PAGE_SIZE, page }),
   });
 
-  const rows = query.data?.data ?? [];
   const pastDue = query.data?.counts.past_due ?? 0;
   const refilter = (apply: () => void) => {
     apply();
@@ -82,140 +85,179 @@ export function Subscriptions({
   };
 
   return (
-    <Panel
-      title="Subscriptions"
-      subtitle={
-        // The past-due total is the whole install's: on one customer's view it would read as theirs.
-        customerId !== undefined
-          ? `Subscriptions of customer ${customerId}, newest first.`
-          : pastDue > 0
-            ? `${formatCount(pastDue)} past due — payments failing, access about to lapse.`
-            : 'Recurring subscriptions, newest first. Nothing is past due.'
-      }
-      actions={
-        <div className="flex flex-wrap items-center gap-3">
-          <ProviderFilter value={provider} onChange={(v) => refilter(() => setProvider(v))} />
-          <Segmented
-            aria-label="Subscription status"
-            options={STATUS_OPTIONS.map((option) =>
-              option.value === 'past_due' && pastDue > 0 && customerId === undefined
-                ? { ...option, hint: formatCount(pastDue) }
-                : option,
-            )}
-            value={status}
-            onChange={(value) => refilter(() => setStatus(value))}
-          />
-        </div>
-      }
-    >
-      <QueryState
-        query={query}
-        empty={rows.length === 0}
-        emptyMessage={emptyMessage(status, provider, customerId)}
-      >
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-line text-left text-[10px] uppercase tracking-wider text-zinc-500">
-              <th className="px-4 py-2 font-normal">Status</th>
-              <th className="px-4 py-2 font-normal">Subscription</th>
-              <th className="px-4 py-2 font-normal">Plan</th>
-              <th className="px-4 py-2 font-normal">Customer</th>
-              <th className="px-4 py-2 font-normal">Provider</th>
-              <th className="px-4 py-2 font-normal">Amount</th>
-              <th className="px-4 py-2 font-normal">Next charge</th>
-              <th className="px-4 py-2 font-normal">Trial ends</th>
-              <th className="px-4 py-2 font-normal">Period ends</th>
-              <th className="px-4 py-2 font-normal">Started</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr
-                key={row.id}
-                className={
-                  subscriptionNeedsAttention(row.status)
-                    ? 'border-b border-line-soft bg-bad/[0.04]'
-                    : 'border-b border-line-soft'
-                }
-              >
-                <td className="px-4 py-2">
-                  <span className={subscriptionStatusClass(row.status)}>
-                    <Badge variant="status">{row.status}</Badge>
-                  </span>
-                  {/* Spelled out, not implied by a hue: colour alone is not a thing to bet
-                      someone's access on. */}
-                  {!subscriptionIsBilling(row.status) && (
-                    <span className="ml-2 text-[10px] uppercase tracking-wider text-zinc-600">
-                      not billing
-                    </span>
-                  )}
-                </td>
-                <td className="px-4 py-2">
-                  <button
-                    type="button"
-                    onClick={() => setOpened(row.id)}
-                    className="mono text-left text-zinc-300 underline decoration-line underline-offset-2 hover:text-zinc-100"
-                  >
-                    {row.gatewayId ?? row.id}
-                  </button>
-                </td>
-                <td className="mono px-4 py-2 text-zinc-300">{row.planId || '—'}</td>
-                <td className="mono px-4 py-2 text-zinc-400">{row.customerId ?? '—'}</td>
-                <td className="px-4 py-2">
-                  <Badge variant="provider">{row.provider}</Badge>
-                  {/* Uma assinatura gerenciada não tem o que abrir no painel do gateway — o
-                      operador precisa saber disso ANTES de ir procurar lá. */}
-                  {row.managed && (
-                    <span className="ml-2 text-[10px] uppercase tracking-wider text-zinc-600">
-                      managed
-                    </span>
-                  )}
-                </td>
-                <td className="mono px-4 py-2 text-zinc-300">
-                  {row.amount === null
-                    ? '—'
-                    : `${formatCents(row.amount, row.currency ?? 'BRL')}${
-                        row.cycle ? ` / ${row.cycle.toLowerCase()}` : ''
-                      }`}
-                </td>
-                <td className="mono px-4 py-2 text-zinc-500">
-                  {row.lastRenewalError ? (
-                    // A falha ganha a célula da PRÓXIMA cobrança porque é isso que ela
-                    // significa: não vai haver uma até alguém resolver. Uma renovação que
-                    // falha não muda mais nada na linha — sem isto, "falhando há uma semana"
-                    // e "vence amanhã" eram visualmente idênticas.
-                    <span className="text-bad" title={row.lastRenewalError}>
-                      failed ×{row.renewalFailureCount}
-                    </span>
-                  ) : row.cancelAtPeriodEnd ? (
-                    <span className="text-zinc-600">cancels at period end</span>
-                  ) : (
-                    <WhenCell iso={row.nextChargeAt} />
-                  )}
-                </td>
-                <td className="mono px-4 py-2 text-zinc-500">
-                  <WhenCell iso={row.trialEndsAt} />
-                </td>
-                <td className="mono px-4 py-2 text-zinc-500">
-                  <WhenCell iso={row.endsAt} />
-                </td>
-                <td className="mono px-4 py-2 text-zinc-500">{formatWhen(row.createdAt)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <Pager meta={query.data?.meta} count={rows.length} onPage={setPage} />
-      </QueryState>
-      {opened !== null && (
-        <SubscriptionDetail
-          id={opened}
-          onClose={() => setOpened(null)}
-          onOpenPayment={onOpenPayment}
-          onOpenCustomer={onOpenCustomer}
+    <PageBody>
+      <PageHeader
+        title="Subscriptions"
+        description={
+          // The past-due total is the whole install's: on one customer's view it would read as theirs.
+          customerId !== undefined
+            ? `Subscriptions of customer ${customerId}, newest first.`
+            : pastDue > 0
+              ? `${formatCount(pastDue)} past due — payments failing, access about to lapse.`
+              : 'Recurring subscriptions, newest first. Nothing is past due.'
+        }
+      />
+      <Toolbar label="Subscription filters" className="gap-3">
+        <ProviderFilter value={provider} onChange={(v) => refilter(() => setProvider(v))} />
+        <Segmented
+          aria-label="Subscription status"
+          options={STATUS_OPTIONS.map((option) =>
+            option.value === 'past_due' && pastDue > 0 && customerId === undefined
+              ? { ...option, hint: formatCount(pastDue) }
+              : option,
+          )}
+          value={status}
+          onChange={(value) => refilter(() => setStatus(value))}
         />
-      )}
-    </Panel>
+      </Toolbar>
+      <ListPanel
+        title={status === undefined ? 'All subscriptions' : `${statusLabel(status)} subscriptions`}
+        description={
+          query.data !== undefined ? `${formatCount(query.data.meta.total)} total` : undefined
+        }
+        query={query}
+        rowKey={(row) => row.id}
+        onPage={setPage}
+        emptyIcon={<RepeatIcon />}
+        emptyTitle={status === 'past_due' ? 'Nothing past due' : 'No subscriptions'}
+        emptyDescription={emptyMessage(status, provider, customerId)}
+        rowClassName={(row) =>
+          subscriptionNeedsAttention(row.status) ? 'bg-bad/[0.04]' : undefined
+        }
+        columns={subscriptionColumns(setOpened)}
+      >
+        {opened !== null && (
+          <SubscriptionDetail
+            id={opened}
+            onClose={() => setOpened(null)}
+            onOpenPayment={onOpenPayment}
+            onOpenCustomer={onOpenCustomer}
+          />
+        )}
+      </ListPanel>
+    </PageBody>
   );
+}
+
+function statusLabel(status: string): string {
+  return STATUS_OPTIONS.find((option) => option.value === status)?.label ?? status;
+}
+
+/** The subscriptions table's columns (presentational). */
+function subscriptionColumns(onOpen: (id: string) => void): Column<SubscriptionRow>[] {
+  return [
+    {
+      id: 'status',
+      header: 'Status',
+      cell: (row) => (
+        <span className="inline-flex flex-wrap items-center gap-2">
+          <StatusBadge statusClass={subscriptionStatusClass(row.status)}>{row.status}</StatusBadge>
+          {/* Spelled out, not implied by a hue: colour alone is not a thing to bet someone's
+              access on. */}
+          {!subscriptionIsBilling(row.status) && <Qualifier>not billing</Qualifier>}
+        </span>
+      ),
+    },
+    {
+      id: 'subscription',
+      header: 'Subscription',
+      cell: (row) => (
+        <button
+          type="button"
+          onClick={() => onOpen(row.id)}
+          className="mono text-left text-[12px] text-fg-2 underline decoration-line-strong decoration-dotted underline-offset-4 hover:text-brand"
+        >
+          {row.gatewayId ?? row.id}
+        </button>
+      ),
+    },
+    {
+      id: 'plan',
+      header: 'Plan',
+      hideBelow: 'md',
+      cell: (row) => <Mono className="text-fg-2">{row.planId || '—'}</Mono>,
+    },
+    {
+      id: 'customer',
+      header: 'Customer',
+      hideBelow: 'lg',
+      cell: (row) => <Mono>{row.customerId ?? '—'}</Mono>,
+    },
+    {
+      id: 'provider',
+      header: 'Provider',
+      hideBelow: 'lg',
+      cell: (row) => (
+        <span className="inline-flex items-center gap-2">
+          <Badge variant="provider">{row.provider}</Badge>
+          {/* Uma assinatura gerenciada não tem o que abrir no painel do gateway — o operador
+              precisa saber disso ANTES de ir procurar lá. */}
+          {row.managed && <Qualifier>managed</Qualifier>}
+        </span>
+      ),
+    },
+    {
+      id: 'amount',
+      header: 'Amount',
+      hideBelow: 'sm',
+      cell: (row) => (
+        <span className="mono tnum text-[12px] text-fg">
+          {row.amount === null
+            ? '—'
+            : `${formatCents(row.amount, row.currency ?? 'BRL')}${
+                row.cycle ? ` / ${row.cycle.toLowerCase()}` : ''
+              }`}
+        </span>
+      ),
+    },
+    {
+      id: 'next',
+      header: 'Next charge',
+      hideBelow: 'md',
+      cell: (row) => (
+        <Mono className="text-faint">
+          {row.lastRenewalError ? (
+            // A falha ganha a célula da PRÓXIMA cobrança porque é isso que ela significa: não vai
+            // haver uma até alguém resolver. Uma renovação que falha não muda mais nada na linha —
+            // sem isto, "falhando há uma semana" e "vence amanhã" eram visualmente idênticas.
+            <span className="text-bad" title={row.lastRenewalError}>
+              failed ×{row.renewalFailureCount}
+            </span>
+          ) : row.cancelAtPeriodEnd ? (
+            <span className="text-faint">cancels at period end</span>
+          ) : (
+            <WhenCell iso={row.nextChargeAt} />
+          )}
+        </Mono>
+      ),
+    },
+    {
+      id: 'trial',
+      header: 'Trial ends',
+      hideBelow: 'lg',
+      cell: (row) => (
+        <Mono className="text-faint">
+          <WhenCell iso={row.trialEndsAt} />
+        </Mono>
+      ),
+    },
+    {
+      id: 'period',
+      header: 'Period ends',
+      hideBelow: 'lg',
+      cell: (row) => (
+        <Mono className="text-faint">
+          <WhenCell iso={row.endsAt} />
+        </Mono>
+      ),
+    },
+    {
+      id: 'started',
+      header: 'Started',
+      hideBelow: 'lg',
+      cell: (row) => <Mono className="text-faint">{formatWhen(row.createdAt)}</Mono>,
+    },
+  ];
 }
 
 /** A boundary date plus how far away it is — "in 3 days" is what gets acted on; the date alone is
@@ -225,7 +267,7 @@ function WhenCell({ iso }: { iso: string | null }) {
   return (
     <>
       {formatDay(iso)}
-      {relative !== null && <span className="ml-1.5 text-[10px] text-zinc-600">{relative}</span>}
+      {relative !== null && <span className="ml-1.5 text-[10px] text-faint">{relative}</span>}
     </>
   );
 }

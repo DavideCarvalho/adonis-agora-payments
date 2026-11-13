@@ -25,7 +25,7 @@
   ],
   "author": "Davi Carvalho <davi@goflip.ai>",
   "type": "module",
-  "sideEffects": false,
+  "sideEffects": ["*.css", "./src/agora-kit/fonts.ts"],
   "files": [
     "dist/",
     "README.md",

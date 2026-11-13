@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { basename, resolve as resolvePath } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import type { HttpContext } from '@adonisjs/core/http';
 import type { ApplicationService, HttpRouterService } from '@adonisjs/core/types';
 import {
@@ -11,14 +11,19 @@ import {
   tenantOwnerTypes,
 } from '../src/agora/tenancy.js';
 import { AUDIT_ACTIONS, type BillingStore } from '../src/billing/billing_store.js';
-import { OwnerScopingUnsupportedError, scopedBillingStore } from '../src/billing/scoped_store.js';
+import { scopedBillingStore } from '../src/billing/scoped_store.js';
 import type { WebhookHandler } from '../src/billing/webhook_processor.js';
-import { WebhookProcessor } from '../src/billing/webhook_processor.js';
 import {
   type AccessDeniedInfo,
   resolveAccessDeniedPage,
 } from '../src/dashboard/access_denied_page.js';
-import { createRefundAction, createReplayAction } from '../src/dashboard/actions.js';
+import {
+  consoleCapabilities,
+  createConsoleActions,
+  everyTenantId,
+  resolveAppWebhookHandlers,
+  serveConsoleRoute,
+} from '../src/dashboard/api_core.js';
 import {
   type ConsoleAuthorizeDecision,
   resolveConsoleAuthorize,
@@ -69,17 +74,9 @@ import {
   ownerScopeOfConsole,
   resolveConsoleTenantScope,
 } from '../src/dashboard/tenant_scope.js';
-import type { BillingHandlers, PaymentsConfig } from '../src/define_config.js';
+import type { PaymentsConfig } from '../src/define_config.js';
 import { PaymentsManager } from '../src/payments_manager.js';
 import { getBillingStore } from '../src/services/main.js';
-import { gatewayPerforms } from '../src/subscription_lifecycle.js';
-import type { WebhookEvent } from '../src/types.js';
-import {
-  discoverWebhookHandlers,
-  loadWebhookHandlersFromBarrel,
-  resolveWebhookHandler,
-  type WebhookHandlersBarrel,
-} from '../src/webhook_handlers.js';
 
 /**
  * Directory of the built SPA (`dist/assets/spa`, copied in by `copy:spa` — see `package.json`),
@@ -321,42 +318,21 @@ export default class PaymentsDashboardProvider {
     }
     // Organizations (tenancy): confine every read to what this viewer may see.
     const scope = await this.consoleTenantScope(ctx, store, tenant);
-    if (scope !== null && scope.ids !== undefined) {
-      if (route.everyOrganization === true) {
-        return {
-          status: 404,
-          body: { error: 'This view spans every organization; it is not available in one.' },
-        };
-      }
-      store = scopedBillingStore(
-        store,
-        ownerScopeOfConsole(scope, tenantOwnerTypes(this.tenancy())),
-      );
-    }
-    try {
-      const deps: Deps = {
-        store,
-        currency: config.currency,
-        // WHO is asking: the app's signed-in user (`ctx.auth.user`), or `bearer` for a
-        // token caller. It lets a refund and a dispute resolution be recorded against a
-        // person. Absent when nobody is identifiable — recorded as "unattributed", never
-        // invented.
-        ...(actor !== undefined ? { actor } : {}),
-        // Resolved lazily and only for the routes that need it: a console whose payments
-        // manager is unreachable must still serve every read.
-        ...(route.needsActions === true ? { actions: await this.actions(store) } : {}),
-        ...(await this.capabilityDeps(route.needsCapabilities === true)),
-      };
-      return await route.handler(deps, req);
-    } catch (error) {
-      if (error instanceof OwnerScopingUnsupportedError) {
-        return { status: 501, body: { error: error.message } };
-      }
-      return {
-        status: 500,
-        body: { error: error instanceof Error ? error.message : 'internal error' },
-      };
-    }
+    return serveConsoleRoute({
+      store,
+      route,
+      req,
+      currency: config.currency,
+      // WHO is asking: the app's signed-in user (`ctx.auth.user`), or `bearer` for a token
+      // caller. Absent when nobody is identifiable — recorded as "unattributed", never invented.
+      actor,
+      ownerScope:
+        scope !== null && scope.ids !== undefined
+          ? ownerScopeOfConsole(scope, tenantOwnerTypes(this.tenancy()))
+          : undefined,
+      actions: (scoped) => this.actions(scoped),
+      capabilities: () => this.capabilities(),
+    });
   }
 
   /** The console gate, remembered for the request so its organization scope reads the same verdict. */
@@ -604,17 +580,11 @@ export default class PaymentsDashboardProvider {
   }
 
   /**
-   * The two write actions, built once and reused.
-   *
-   * Both need the app's `PaymentsManager` — the refund needs the driver that took the payment, and
-   * the retry needs that driver to rebuild the normalized event from the stored payload. Neither is
-   * fatal when it is missing: the ports are simply absent and the handlers answer `503` with a
-   * sentence saying so.
-   *
-   * Only a successful build is cached. A failure here usually means "the app has not finished
-   * booting", and caching THAT would disable both buttons for the life of the process.
+   * The app's webhook handlers, resolved once for the replay port. Only a successful resolution is
+   * kept: a failure usually means "the app has not finished booting", and keeping THAT would
+   * disable the retry for the life of the process.
    */
-  private actionsCache: Partial<DashboardActions> | undefined;
+  private handlersCache: Promise<Record<string, WebhookHandler> | undefined> | undefined;
 
   /**
    * O que cada gateway configurado sabe fazer, para o console não oferecer o que falha.
@@ -622,100 +592,37 @@ export default class PaymentsDashboardProvider {
    * `undefined` quando o manager não está alcançável — a UI volta a mostrar as ações, que é o
    * comportamento anterior e melhor do que esconder tudo por falta de dado.
    */
-  /** O spread de `capabilities` só quando há valor — `exactOptionalPropertyTypes` é estrito. */
-  private async capabilityDeps(
-    needed: boolean,
-  ): Promise<{ capabilities?: Record<string, ProviderCapabilities> }> {
-    if (!needed) return {};
-    const capabilities = await this.capabilities();
-    return capabilities === undefined ? {} : { capabilities };
-  }
-
   private async capabilities(): Promise<Record<string, ProviderCapabilities> | undefined> {
-    let manager: PaymentsManager;
     try {
-      manager = await this.app.container.make(PaymentsManager);
+      return consoleCapabilities((await this.app.container.make(PaymentsManager)).drivers);
     } catch {
       return undefined;
     }
-
-    const capabilities: Record<string, ProviderCapabilities> = {};
-    for (const [name, driver] of manager.drivers) {
-      capabilities[name] = {
-        refunds: driver.capabilities?.refunds === true,
-        disputes: driver.capabilities?.disputes === true,
-        cancelSubscription: gatewayPerforms(driver, 'cancel'),
-      };
-    }
-    return capabilities;
   }
 
   private async actions(store: BillingStore): Promise<Partial<DashboardActions>> {
-    if (this.actionsCache) return this.actionsCache;
-
     let manager: PaymentsManager;
     try {
       manager = await this.app.container.make(PaymentsManager);
     } catch {
       return {};
     }
-
-    // The retry re-runs the app's OWN handlers, not just the built-in store sync — a retry that
-    // skipped them would silently do half the job, which is worse than no button. They are
-    // resolved the same way `payments_provider.ts` resolves them (config entries plus the
-    // `app/payment_handlers/` convention).
+    // The handlers are resolved once (a folder scan and service construction); the ports are
+    // rebuilt per call over the store THIS request may see.
     const config = this.app.config.get<PaymentsConfig>('payments', {});
-    const handlers = await this.resolveHandlers(config.billing?.handlers);
-    const processor = new WebhookProcessor({
+    this.handlersCache ??= resolveAppWebhookHandlers(this.app, config.billing?.handlers).catch(
+      (error: unknown) => {
+        this.handlersCache = undefined;
+        throw error;
+      },
+    );
+    const handlers = await this.handlersCache;
+    return createConsoleActions({
+      manager,
       store,
-      ...(handlers !== undefined ? { handlers } : {}),
+      handlers,
       tenancy: () => resolvePaymentsTenancy(config.tenancy),
     });
-
-    const actions: Partial<DashboardActions> = {
-      refund: createRefundAction((provider) => manager.driver(provider)),
-      replayWebhook: createReplayAction({
-        store,
-        // The event is rebuilt from the ledger's own `payload` + `normalized` columns and run
-        // straight through the processor — no driver, no `parseWebhook`, so no signature to
-        // re-verify from headers nobody kept. That is what makes a Stripe or Adyen row
-        // replayable at all. A row recorded before the `normalized` column existed is reported
-        // to the operator as `422`, ledger row untouched.
-        process: (event) => processor.process(event as WebhookEvent),
-      }),
-    };
-    this.actionsCache = actions;
-    return actions;
-  }
-
-  /** Webhook handlers from `config.billing.handlers` plus `app/payment_handlers/` (build-time
-   *  barrel, runtime scan as fallback) — the same two sources the payments provider merges. */
-  private async resolveHandlers(
-    configHandlers: BillingHandlers | undefined,
-  ): Promise<Record<string, WebhookHandler> | undefined> {
-    const handlers: Record<string, WebhookHandler> = {};
-    if (configHandlers) {
-      for (const [type, entry] of Object.entries(configHandlers)) {
-        handlers[type] = await resolveWebhookHandler(entry, this.app.container);
-      }
-    }
-    for (const discovered of await this.discoverHandlers()) {
-      handlers[discovered.type] = await resolveWebhookHandler(discovered.entry, this.app.container);
-    }
-    return Object.keys(handlers).length > 0 ? handlers : undefined;
-  }
-
-  private async discoverHandlers() {
-    try {
-      const path = this.app.makePath('.adonisjs/payments/webhook_handlers.js');
-      const mod = (await import(pathToFileURL(path).href)) as {
-        webhookHandlers?: WebhookHandlersBarrel;
-      };
-      if (mod.webhookHandlers) return loadWebhookHandlersFromBarrel(mod.webhookHandlers);
-    } catch {
-      // No generated barrel — fall through to the runtime scan.
-    }
-    return discoverWebhookHandlers(this.app.makePath('app/payment_handlers'));
   }
 
   /**
@@ -962,27 +869,6 @@ function findBillingStoreQuietly(): BillingStore | undefined {
   } catch {
     return undefined;
   }
-}
-
-/** The page size and page cap of the organization listing. */
-const TENANT_SCAN_PAGE = 200;
-const TENANT_SCAN_PAGES = 50;
-
-/** Every organization that owns a billing customer (bounded scan of `billing_customers`). */
-async function everyTenantId(
-  store: BillingStore | undefined,
-  ownerTypes: readonly string[],
-): Promise<string[]> {
-  if (store === undefined) return [];
-  const ids = new Set<string>();
-  for (const ownerType of ownerTypes) {
-    for (let page = 1; page <= TENANT_SCAN_PAGES; page++) {
-      const rows = await store.listCustomers({ ownerType, page, size: TENANT_SCAN_PAGE });
-      for (const row of rows) if (row.ownerId !== null && row.ownerId !== '') ids.add(row.ownerId);
-      if (rows.length < TENANT_SCAN_PAGE) break;
-    }
-  }
-  return [...ids];
 }
 
 /** The console decision as the dev-tools hub reads it. */

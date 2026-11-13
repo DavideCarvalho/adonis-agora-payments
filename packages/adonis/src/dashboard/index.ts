@@ -14,6 +14,9 @@ export {
   resolveAccessDeniedPage,
 } from './access_denied_page.js';
 export type {
+  EvidenceAction,
+  EvidenceCapableDriver,
+  EvidenceOutcome,
   RefundAction,
   RefundCapableDriver,
   RefundOutcome,
@@ -21,8 +24,19 @@ export type {
   ReplayableWebhookEvent,
   ReplayOutcome,
 } from './actions.js';
-// The two WRITE actions (refund + webhook retry), as framework-light ports.
-export { createRefundAction, createReplayAction } from './actions.js';
+// The gateway WRITE actions (refund, webhook retry, dispute evidence), as framework-light ports.
+export { createEvidenceAction, createRefundAction, createReplayAction } from './actions.js';
+export type {
+  ConsoleActionsManager,
+  ServeConsoleRouteOptions,
+} from './api_core.js';
+// The console's handlers as one core: the JSON API, the dev tools and the `payments:*` commands.
+export {
+  CONSOLE_ROUTES,
+  consoleCapabilities,
+  createConsoleActions,
+  serveConsoleRoute,
+} from './api_core.js';
 // The dashboard-gate contract shared (by copy) with every @adonis-agora console.
 export type {
   AuthorizeDecision,
@@ -84,10 +98,18 @@ export type {
 } from './dev_tools.js';
 // Developer tools for the app's dev MCP endpoint (`@adonis-agora/agent`), when it has one.
 export { DEV_TOOLS_BINDING, paymentsDevTools, registerPaymentsDevTools } from './dev_tools.js';
-export type { ApiRequest, ApiResponse, DashboardActions, Deps } from './handlers.js';
+export type {
+  ApiRequest,
+  ApiResponse,
+  DashboardActions,
+  Deps,
+  ProviderCapabilities,
+  SubscriptionOperations,
+} from './handlers.js';
 export {
   AUDIT_ACTION_FILTERS,
   auditEvents,
+  cancelSubscription,
   customers,
   DISPUTE_DEFAULT_DUE_WITHIN_HOURS,
   DISPUTE_RESOLUTION_STATUSES,
@@ -101,10 +123,13 @@ export {
   payments,
   providers,
   refundPayment,
+  repriceSubscription,
   resolveDispute,
+  resumeSubscription,
   retryWebhookEvent,
   SUBSCRIPTION_DEFAULT_STATUS,
   SUBSCRIPTION_STATUSES,
+  submitDisputeEvidence,
   subscriptionDetail,
   subscriptions,
   WEBHOOK_EVENT_STATUSES,

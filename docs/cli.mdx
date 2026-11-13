@@ -1,6 +1,6 @@
 ---
 title: CLI
-description: The five ace commands — scaffolding a billable model and a webhook handler, printing (or creating) the webhook endpoints, reporting the health of the billing install, and reconciling the local tables with a gateway.
+description: The ace commands — operating billing from the terminal (everything the console does, from payments to refunds, cancellations and dispute evidence), scaffolding a billable model and a webhook handler, printing the webhook endpoints, reporting the health of the install, and reconciling with a gateway.
 icon: SquareTerminal
 ---
 
@@ -12,8 +12,151 @@ node ace list | grep -E 'payments|billable|webhook-handler'
 # make:webhook-handler
 # payments:webhook
 # payments:sync
+# payments:renew
 # payments:health
+# payments:overview
+# payments:payments:list | :show | :refund
+# payments:subscriptions:list | :show | :cancel | :resume | :reprice
+# payments:customers:list
+# payments:disputes:list | :resolve | :evidence
+# payments:webhook-events:list | :retry
+# payments:audit:list
+# payments:providers:list
+# payments:organizations:list
 ```
+
+## Operating billing from the terminal
+
+Everything the [console](/docs/payments/dashboard) shows or does has a `payments:<noun>:<verb>`
+command. They answer exactly what the console answers for the same input — same filters, same
+refusals, same audit trail — so a script, a runbook or an incident shell gets the console without a
+browser.
+
+```sh
+node ace payments:payments:list --reference=order-4102
+node ace payments:payments:show pi_3Qx7
+node ace payments:subscriptions:list --status=past_due
+node ace payments:disputes:list --due-within=72
+node ace payments:webhook-events:list --status=failed --provider=stripe
+node ace payments:audit:list --action=payment.refunded
+```
+
+Every command takes:
+
+| Flag | Meaning |
+| --- | --- |
+| `--json` | print the result as JSON. Lists print `{ data, meta }`, the console's list format |
+| `--tenant` | with [organizations](/docs/payments/organizations) on, narrow to one organization (default: every one). `payments:organizations:list` lists the ids |
+
+Lists take `--page` and `--size` (default 50, at most 200). Money is printed in the currency
+(`50.00 BRL`); with `--json` it stays in integer minor units, as stored. A command that is refused
+prints why and **exits 1**.
+
+### Reads
+
+| Command | Filters |
+| --- | --- |
+| `payments:overview` | `--period` (`7d`, `30d`…), or `--from` / `--to` |
+| `payments:payments:list` | `--status`, `--provider`, `--reference` (your own), `--gateway-id`, `--customer-id` |
+| `payments:payments:show <gatewayId>` | — state, owner, disputes, webhook events, audit rows |
+| `payments:subscriptions:list` | `--status`, `--provider`, `--customer-id` |
+| `payments:subscriptions:show <id>` | — by its id or the gateway's id |
+| `payments:customers:list` | `--provider`, `--owner-type`, `--owner-id`, `--gateway-id` |
+| `payments:disputes:list` | `--status`, `--provider`, `--due-within=<hours>` (open windows closing soonest) |
+| `payments:webhook-events:list` | `--status`, `--provider`, `--type` |
+| `payments:audit:list` | `--action`, `--actor`, `--provider`, `--subject-type`, `--subject-id` |
+| `payments:providers:list` | — the gateways in use and what each can do |
+| `payments:organizations:list` | — the organizations that own billing customers |
+
+`payments:health` is the console's health panel as a cron check; see [below](#paymentshealth).
+
+### Actions
+
+| Command | What it does |
+| --- | --- |
+| `payments:payments:refund <gatewayId> [--amount=<minor units>]` | refunds a paid payment through its gateway — all of it, or a part |
+| `payments:subscriptions:cancel <id> [--now]` | cancels at the end of the paid period, or now with `--now` |
+| `payments:subscriptions:resume <id>` | undoes a scheduled cancellation (managed subscriptions) |
+| `payments:subscriptions:reprice <id> --amount=<minor units>` | changes the price per cycle (`--cycle`, `--description` too) |
+| `payments:disputes:resolve <gatewayId> --status=<lost\|won\|…>` | records how a dispute ended at the gateway; sends nothing |
+| `payments:disputes:evidence <gatewayId> --file=evidence.json` | submits evidence for an open dispute through its gateway |
+| `payments:webhook-events:retry <gatewayEventId>` | re-runs a failed webhook event through your handlers |
+
+Every action takes:
+
+| Flag | Meaning |
+| --- | --- |
+| `--dry-run` | run every check and show what would happen; nothing is sent or written |
+| `--force` | skip the confirmation prompt |
+| `--note` | why — recorded in the audit trail next to who did it |
+
+An action first checks itself, shows what it is about to do, and asks:
+
+```sh
+node ace payments:payments:refund pi_3Qx7 --amount=1990 --note="duplicate charge"
+```
+
+```text
+Refund 19.90 BRL (partial) of payment pi_3Qx7 through stripe. Continue? (y/N)
+```
+
+Without a terminal to answer (a CI job, a pipe) it refuses rather than waiting — pass `--force`
+once you have seen the `--dry-run`:
+
+```sh
+node ace payments:payments:refund pi_3Qx7 --amount=1990 --dry-run
+# [dry run] Refund 19.90 BRL (partial) of payment pi_3Qx7 through stripe.
+node ace payments:payments:refund pi_3Qx7 --amount=1990 --force
+```
+
+Each action lands in [the audit trail](/docs/payments/dashboard#activity--the-trail-nothing-else-keeps)
+with the actor `cli:<your OS user>`:
+
+```sh
+node ace payments:audit:list --actor=cli:deploy
+```
+
+<Callout type="warn" title="Refunds and evidence go to the gateway">
+A refund moves money and cannot be taken back. Most gateways accept dispute evidence **once**. Use
+`--dry-run` first. The payment or dispute row changes when the gateway's webhook arrives, not when
+the command returns.
+</Callout>
+
+#### Subscriptions
+
+`cancel` and `reprice` act wherever the subscription lives: a gateway-owned one is canceled or
+re-priced at the gateway (refused when the gateway cannot do it — do it from its dashboard), a
+managed one in your database. A managed re-price takes effect from the next cycle; nothing is
+prorated or charged now.
+
+```sh
+node ace payments:subscriptions:cancel sub_1PzK --dry-run
+node ace payments:subscriptions:cancel 42 --now --note="fraud" --force
+node ace payments:subscriptions:reprice 42 --amount=4990 --force
+```
+
+#### Dispute evidence
+
+`--file` is a JSON object with the evidence fields: `explanation`, `customerName`, `customerEmail`,
+`customerIpAddress`, `serviceDate`, `shippingCarrier`, `shippingTrackingNumber`, `shippingDate`,
+`termsAcceptedAt`, `documents` and `priorUndisputedPayments` (plus `metadata` for anything
+gateway-specific). Documents are files **already uploaded to the gateway**, by their id and what
+they prove:
+
+```json title="evidence.json"
+{
+  "explanation": "The customer logged in and used the course for 3 weeks.",
+  "documents": [{ "kind": "receipt", "id": "file_1Pz" }],
+  "priorUndisputedPayments": [{ "paymentGatewayId": "pi_1Ox2" }]
+}
+```
+
+```sh
+node ace payments:disputes:evidence dp_1Nx4 --file=evidence.json --dry-run
+node ace payments:disputes:evidence dp_1Nx4 --file=evidence.json --explanation="…" --force
+```
+
+The audit row records which fields were sent, never their contents.
 
 ## `payments:webhook`
 

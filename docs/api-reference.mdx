@@ -545,19 +545,20 @@ interface BillingStore {
   findCustomerByGatewayId(gatewayId): Promise<CustomerRow | null>
   findCustomerByOwner(ownerType, ownerId, provider): Promise<CustomerRow | null>
   listCustomers(query: CustomerListQuery): Promise<CustomerListItem[]>
+  countCustomers(query: CustomerCountQuery): Promise<number>         // the list's filters, no page
   listCustomersByGatewayIds(gatewayIds): Promise<CustomerListItem[]>   // a page of owners in one read
 
   saveSubscription(sub): Promise<SubscriptionRow>
   findSubscriptionByGatewayId(gatewayId): Promise<SubscriptionRow | null>
   listSubscriptions(query): Promise<SubscriptionListItem[]>
-  countSubscriptions(query): Promise<number>
+  countSubscriptions(query: SubscriptionCountQuery): Promise<number> // + every list filter
   countActiveSubscriptions(): Promise<number>
 
   savePayment(payment): Promise<PaymentRow>
   findPaymentByGatewayId(gatewayId): Promise<PaymentRow | null>
   findPaymentByExternalReference(reference): Promise<PaymentRow | null>
   listPayments(query: PaymentListQuery): Promise<PaymentListItem[]>
-  countPayments(query): Promise<number>
+  countPayments(query: PaymentCountQuery): Promise<number>         // + every list filter
   revenue(query: { from?: Date; to?: Date }): Promise<number>     // GROSS — sums `amount`
   netRevenue(query: { from?: Date; to?: Date }): Promise<number>  // NET   — minus refunded_amount
 
@@ -565,7 +566,7 @@ interface BillingStore {
   findDisputeByGatewayId(gatewayId): Promise<DisputeRow | null>
   findOpenDisputeByPayment(paymentGatewayId): Promise<DisputeRow | null>
   listDisputes(query: DisputeListQuery): Promise<DisputeListItem[]>   // + paymentGatewayId
-  countDisputes(query): Promise<number>
+  countDisputes(query: DisputeCountQuery): Promise<number>         // + every list filter
   listDisputesDueWithin(query: DisputeDeadlineQuery): Promise<DisputeListItem[]>
   countDisputesDueWithin(query): Promise<number>
   listOpenDisputes(query: OpenDisputeQuery): Promise<DisputeListItem[]>   // oldest first
@@ -577,7 +578,7 @@ interface BillingStore {
   findWebhookEventByGatewayEventId(gatewayEventId): Promise<WebhookEventListItem | null>
   listWebhookEvents(query: WebhookEventListQuery): Promise<WebhookEventListItem[]>
   listWebhookEventsForPayment(paymentGatewayId, query?): Promise<WebhookEventListItem[]>
-  countWebhookEvents(query): Promise<number>
+  countWebhookEvents(query: WebhookEventCountQuery): Promise<number> // + provider, type
   webhookEventBreakdown(query): Promise<WebhookEventBreakdownLine[]>
 
   recordAuditEvent(event): Promise<AuditEventListItem | null>  // null ⇒ no billing_audit_events table
@@ -594,6 +595,10 @@ const AUDIT_ACTIONS = {
   webhookRejected: 'webhook.rejected',
 }
 ```
+
+Each `count*` read takes the same filters as its `list*` read, without `page`/`size` — the console
+reports a list's `meta.total` from it, so a custom store applies them the same way it does for the
+list.
 
 `listOpenDisputes` / `countOpenDisputes` are the deadline-**free** counterpart to the two reads
 above them: they take every dispute in `OPEN_DISPUTE_STATUSES` regardless of `evidence_due_by`, and

@@ -112,21 +112,24 @@ export const NO_AUTHORIZE_WARNING =
  * `POST` (a refund reachable by URL is a refund a crawler can trigger) and both go through the same
  * {@link enforce} guard as every read.
  *
+ * The listings take `filter[field]=value`, `sort` (their one order) and `page`/`size`, and answer
+ * `{ data, meta: { total, perPage, currentPage, lastPage, firstPage } }`.
+ *
  * Routes (relative to the configured `path`, default `/payments`):
  * - `GET  /`                     -> the dashboard SPA's `index.html`
  * - `GET  /assets/:file`         -> the SPA's hashed JS/CSS bundle
  * - `GET  /api/health`           -> `billingHealth()` — what needs attention today
  * - `GET  /api/overview`         -> `billingOverview()` metrics for a period
- * - `GET  /api/payments`         -> a page of `billing_payments` (status/provider filters, plus
- *                                   `?reference=` / `?gatewayId=` / `?customerId=` lookups)
+ * - `GET  /api/payments`         -> a page of `billing_payments` (`filter[status|provider|
+ *                                   externalReference|gatewayId|customerId]`)
  * - `GET  /api/payments/:gatewayId` -> one payment: current state, owner, disputes, the ledger
  *                                   rows naming it, and who refunded it
  * - `GET  /api/customers`        -> a page of `billing_customers` — the owner mapping that ties
  *                                   a `cus_…` back to an app user
  * - `GET  /api/audit`            -> the trail: refunds issued here, disputes resolved here, and
  *                                   the gateway deliveries this endpoint REFUSED
- * - `GET  /api/disputes`         -> a page of `billing_disputes`; `?dueWithin=<hours>` for the
- *                                   open windows closing soonest
+ * - `GET  /api/disputes`         -> a page of `billing_disputes`; `filter[dueWithin]=<hours>`
+ *                                   for the open windows closing soonest
  * - `GET  /api/subscriptions`    -> a page of `billing_subscriptions` (status/provider/customer filters)
  * - `GET  /api/subscriptions/:id` -> one subscription: state, customer, its payments, the ledger
  *                                   rows naming them, and its audit rows
@@ -922,10 +925,7 @@ export function auditActor(ctx: HttpContext): string | undefined {
 /** Adapt an AdonisJS `HttpContext` to the framework-light {@link ApiRequest}. */
 function toApiRequest(ctx: HttpContext): ApiRequest {
   // `tenant` picks the console's organization (see `consoleTenantScope`); it is not a row filter.
-  const { tenant: _tenant, ...query } = ctx.request.qs() as Record<
-    string,
-    string | string[] | undefined
-  >;
+  const { tenant: _tenant, ...query } = ctx.request.qs() as Record<string, unknown>;
   return {
     params: ctx.params as Record<string, string | undefined>,
     query,

@@ -48,7 +48,7 @@ export function Activity({ initialAction }: { initialAction?: string | undefined
     queryFn: () => paymentsClient.audit({ action, size: PAGE_SIZE, page }),
   });
 
-  const rows = query.data?.audit ?? [];
+  const rows = query.data?.data ?? [];
 
   return (
     <Panel
@@ -104,12 +104,7 @@ export function Activity({ initialAction }: { initialAction?: string | undefined
             ))}
           </tbody>
         </table>
-        <Pager
-          page={query.data?.meta.page ?? page}
-          size={query.data?.meta.size ?? PAGE_SIZE}
-          count={query.data?.meta.count ?? 0}
-          onPage={setPage}
-        />
+        <Pager meta={query.data?.meta} count={rows.length} onPage={setPage} />
       </QueryState>
     </Panel>
   );

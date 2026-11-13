@@ -38,6 +38,7 @@
     "typecheck": "tsc -p tsconfig.spa.json --noEmit"
   },
   "devDependencies": {
+    "@adonis-agora/filter-client": "1.0.0-rc.1",
     "@tailwindcss/vite": "4.3.5",
     "@tanstack/react-query": "5.107.1",
     "@testing-library/dom": "10.4.2",

@@ -224,4 +224,42 @@ describe('default models on SQLite', () => {
     expect(audit?.id).toMatch(UUID);
     expect((await BillingAuditEvent.find(audit?.id as string))?.id).toBe(audit?.id);
   });
+
+  it('counts what each list matches, with the same filters', async () => {
+    await store.saveCustomer({
+      gatewayId: 'cus_cnt_a',
+      provider: 'stripe',
+      ownerType: 'users',
+      ownerId: '9',
+    });
+    await store.saveCustomer({
+      gatewayId: 'cus_cnt_b',
+      provider: 'asaas',
+      ownerType: 'users',
+      ownerId: '9',
+    });
+    for (const [gatewayId, provider, status] of [
+      ['pay_cnt_1', 'stripe', 'paid'],
+      ['pay_cnt_2', 'stripe', 'failed'],
+      ['pay_cnt_3', 'woovi', 'paid'],
+    ] as const) {
+      await store.savePayment({
+        gatewayId,
+        provider,
+        status,
+        amount: 100,
+        currency: 'BRL',
+        customerId: 'cus_cnt_a',
+      });
+    }
+    const paid = { status: 'paid', customerId: 'cus_cnt_a' };
+    expect(await store.countPayments(paid)).toBe((await store.listPayments(paid)).length);
+    expect(await store.countPayments({ ...paid, provider: 'stripe' })).toBe(1);
+    expect(await store.countPayments({ gatewayId: 'pay_cnt_2' })).toBe(1);
+    expect(await store.countCustomers({ ownerType: 'users', ownerId: '9' })).toBe(2);
+    expect(await store.countCustomers({ ownerId: '9', provider: 'asaas' })).toBe(1);
+    expect(await store.countWebhookEvents({ provider: 'nope' })).toBe(0);
+    expect(await store.countDisputes({ provider: 'asaas', paymentGatewayId: 'pay_1' })).toBe(1);
+    expect(await store.countSubscriptions({ provider: 'asaas', customerId: 'cus_1' })).toBe(1);
+  });
 });

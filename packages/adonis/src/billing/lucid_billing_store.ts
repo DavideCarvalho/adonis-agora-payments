@@ -6,8 +6,10 @@ import {
   type AuditEventQuery,
   type BillingCountQuery,
   type BillingStore,
+  type CustomerCountQuery,
   type CustomerListItem,
   type CustomerListQuery,
+  type DisputeCountQuery,
   type DisputeDeadlineQuery,
   type DisputeListItem,
   type DisputeListQuery,
@@ -16,13 +18,16 @@ import {
   OPEN_DISPUTE_STATUSES,
   type OpenDisputeQuery,
   type OwnerScoped,
+  type PaymentCountQuery,
   type PaymentListItem,
   type PaymentListQuery,
+  type SubscriptionCountQuery,
   type SubscriptionCycleTotal,
   type SubscriptionListItem,
   type SubscriptionListQuery,
   type UsageScope,
   type WebhookEventBreakdownLine,
+  type WebhookEventCountQuery,
   type WebhookEventListItem,
   type WebhookEventListQuery,
 } from './billing_store.js';
@@ -748,15 +753,28 @@ export class LucidBillingStore
   async listCustomers(query: CustomerListQuery): Promise<CustomerListItem[]> {
     await this.#ready();
     const builder = this.#customerModel.query().orderBy('created_at', 'desc');
-    if (query.provider !== undefined) builder.where('provider', query.provider);
-    if (query.ownerType !== undefined) builder.where('owner_type', query.ownerType);
-    if (query.ownerId !== undefined) builder.where('owner_id', query.ownerId);
-    if (query.gatewayId !== undefined) builder.where('gateway_id', query.gatewayId);
-    this.#scopeCustomers(builder, query.owners);
+    this.#applyCustomerFilters(builder, query);
     const rows = (await builder
       .limit(clampSize(query.size))
       .offset(listOffset(query.page, query.size))) as CustomerInstance[];
     return rows.map(customerItem);
+  }
+
+  async countCustomers(query: CustomerCountQuery): Promise<number> {
+    await this.#ready();
+    const builder = this.#customerModel.query().count('* as total').pojo();
+    this.#applyCustomerFilters(builder, query);
+    return toCount(await builder);
+  }
+
+  /** The customer filters, applied identically by the list and the count. */
+  #applyCustomerFilters(builder: unknown, query: CustomerCountQuery): void {
+    const b = builder as { where(column: string, value: unknown): unknown };
+    if (query.provider !== undefined) b.where('provider', query.provider);
+    if (query.ownerType !== undefined) b.where('owner_type', query.ownerType);
+    if (query.ownerId !== undefined) b.where('owner_id', query.ownerId);
+    if (query.gatewayId !== undefined) b.where('gateway_id', query.gatewayId);
+    this.#scopeCustomers(builder, query.owners);
   }
 
   async listCustomersByGatewayIds(gatewayIds: readonly string[]): Promise<CustomerListItem[]> {
@@ -907,16 +925,7 @@ export class LucidBillingStore
   async listSubscriptions(query: SubscriptionListQuery): Promise<SubscriptionListItem[]> {
     await this.#ready();
     const builder = this.#subscriptionModel.query().orderBy('created_at', 'desc');
-    if (query.status !== undefined) builder.where('status', query.status);
-    if (query.provider !== undefined) builder.where('provider', query.provider);
-    // Igualdade exata, como em `listPayments`: um LIKE deixaria `clinic-4` casar `clinic-42`.
-    if (query.externalReference !== undefined) {
-      builder.where('external_reference', query.externalReference);
-    }
-    if (query.gatewayId !== undefined) builder.where('gateway_id', query.gatewayId);
-    if (query.customerId !== undefined) builder.where('customer_id', query.customerId);
-    if (query.id !== undefined) builder.where('id', query.id);
-    this.#scopeByCustomer(builder, 'customer_id', query.owners);
+    this.#applySubscriptionFilters(builder, query);
     const rows = (await builder
       .limit(clampSize(query.size))
       .offset(listOffset(query.page, query.size))) as SubscriptionInstance[];
@@ -947,13 +956,18 @@ export class LucidBillingStore
     }));
   }
 
-  /** Os filtros que `countSubscriptions` e `subscriptionAmountByCycle` compartilham. */
-  #applySubscriptionFilters(
-    builder: SubscriptionQuery,
-    query: BillingCountQuery & OwnerScoped,
-  ): void {
+  /** The filters `listSubscriptions`, `countSubscriptions` and `subscriptionAmountByCycle` share. */
+  #applySubscriptionFilters(builder: SubscriptionQuery, query: SubscriptionCountQuery): void {
     this.#scopeByCustomer(builder, 'customer_id', query.owners);
     if (query.status !== undefined) builder.where('status', query.status);
+    if (query.provider !== undefined) builder.where('provider', query.provider);
+    // Exact equality, like `listPayments`: a LIKE would let `clinic-4` match `clinic-42`.
+    if (query.externalReference !== undefined) {
+      builder.where('external_reference', query.externalReference);
+    }
+    if (query.gatewayId !== undefined) builder.where('gateway_id', query.gatewayId);
+    if (query.customerId !== undefined) builder.where('customer_id', query.customerId);
+    if (query.id !== undefined) builder.where('id', query.id);
     if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
     if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
     if (query.managed !== undefined) builder.where('managed', query.managed);
@@ -967,7 +981,7 @@ export class LucidBillingStore
     }
   }
 
-  async countSubscriptions(query: BillingCountQuery & OwnerScoped): Promise<number> {
+  async countSubscriptions(query: SubscriptionCountQuery): Promise<number> {
     await this.#ready();
     const builder = this.#subscriptionModel.query().count('* as total').pojo();
     this.#applySubscriptionFilters(builder as unknown as SubscriptionQuery, query);
@@ -1090,19 +1104,7 @@ export class LucidBillingStore
   async listPayments(query: PaymentListQuery): Promise<PaymentListItem[]> {
     await this.#ready();
     const builder = this.#paymentModel.query().orderBy('created_at', 'desc');
-    if (query.status !== undefined) builder.where('status', query.status);
-    if (query.provider !== undefined) builder.where('provider', query.provider);
-    if (query.gatewayId !== undefined) builder.where('gateway_id', query.gatewayId);
-    if (query.customerId !== undefined) builder.where('customer_id', query.customerId);
-    if (query.subscriptionId !== undefined) builder.where('subscription_id', query.subscriptionId);
-    // Guarded like `findPaymentByExternalReference`: an install that has not run the ALTER has
-    // no column to match on, and every row it holds would answer nothing anyway. Returning an
-    // empty page beats raising `column "external_reference" does not exist` at a filter box.
-    if (query.externalReference !== undefined) {
-      if (!(await this.#hasColumn(this.#paymentModel, 'external_reference'))) return [];
-      builder.where('external_reference', query.externalReference);
-    }
-    this.#scopeByCustomer(builder, 'customer_id', query.owners);
+    if (!(await this.#applyPaymentFilters(builder, query))) return [];
     const rows = (await builder
       .limit(clampSize(query.size))
       .offset(listOffset(query.page, query.size))) as PaymentInstance[];
@@ -1127,14 +1129,36 @@ export class LucidBillingStore
     }));
   }
 
-  async countPayments(query: BillingCountQuery & OwnerScoped): Promise<number> {
+  async countPayments(query: PaymentCountQuery): Promise<number> {
     await this.#ready();
     const builder = this.#paymentModel.query().count('* as total').pojo();
-    this.#scopeByCustomer(builder, 'customer_id', query.owners);
-    if (query.status !== undefined) builder.where('status', query.status);
+    if (!(await this.#applyPaymentFilters(builder, query))) return 0;
     if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
     if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
     return toCount(await builder);
+  }
+
+  /**
+   * The payment filters, applied identically by the list and the count. `false` when the query
+   * can match nothing: an install that has not run the `external_reference` ALTER has no column
+   * to match on, and an empty answer beats raising `column does not exist` at a filter box.
+   */
+  async #applyPaymentFilters(
+    builder: unknown,
+    query: Omit<PaymentListQuery, 'page' | 'size'>,
+  ): Promise<boolean> {
+    const b = builder as { where(column: string, value: unknown): unknown };
+    if (query.status !== undefined) b.where('status', query.status);
+    if (query.provider !== undefined) b.where('provider', query.provider);
+    if (query.gatewayId !== undefined) b.where('gateway_id', query.gatewayId);
+    if (query.customerId !== undefined) b.where('customer_id', query.customerId);
+    if (query.subscriptionId !== undefined) b.where('subscription_id', query.subscriptionId);
+    if (query.externalReference !== undefined) {
+      if (!(await this.#hasColumn(this.#paymentModel, 'external_reference'))) return false;
+      b.where('external_reference', query.externalReference);
+    }
+    this.#scopeByCustomer(builder, 'customer_id', query.owners);
+    return true;
   }
 
   async saveDispute(dispute: {
@@ -1216,27 +1240,29 @@ export class LucidBillingStore
     await this.#ready();
     if (!(await this.#hasDisputesTable())) return [];
     const builder = this.#disputeModel.query().orderBy('created_at', 'desc');
-    if (query.status !== undefined) builder.where('status', query.status);
-    if (query.provider !== undefined) builder.where('provider', query.provider);
-    if (query.paymentGatewayId !== undefined) {
-      builder.where('payment_gateway_id', query.paymentGatewayId);
-    }
-    this.#scopeDisputes(builder, query.owners);
+    this.#applyDisputeFilters(builder, query);
     const rows = (await builder
       .limit(clampSize(query.size))
       .offset(listOffset(query.page, query.size))) as DisputeInstance[];
     return rows.map(disputeItem);
   }
 
-  async countDisputes(query: BillingCountQuery & OwnerScoped): Promise<number> {
+  async countDisputes(query: DisputeCountQuery): Promise<number> {
     await this.#ready();
     if (!(await this.#hasDisputesTable())) return 0;
     const builder = this.#disputeModel.query().count('* as total').pojo();
-    this.#scopeDisputes(builder, query.owners);
-    if (query.status !== undefined) builder.where('status', query.status);
+    this.#applyDisputeFilters(builder, query);
     if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
     if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
     return toCount(await builder);
+  }
+  /** The dispute filters, applied identically by the list and the count. */
+  #applyDisputeFilters(builder: unknown, query: Omit<DisputeListQuery, 'page' | 'size'>): void {
+    const b = builder as { where(column: string, value: unknown): unknown };
+    if (query.status !== undefined) b.where('status', query.status);
+    if (query.provider !== undefined) b.where('provider', query.provider);
+    if (query.paymentGatewayId !== undefined) b.where('payment_gateway_id', query.paymentGatewayId);
+    this.#scopeDisputes(builder, query.owners);
   }
 
   async listDisputesDueWithin(query: DisputeDeadlineQuery): Promise<DisputeListItem[]> {
@@ -1537,10 +1563,12 @@ export class LucidBillingStore
     return webhookEventItem(row);
   }
 
-  async countWebhookEvents(query: BillingCountQuery): Promise<number> {
+  async countWebhookEvents(query: WebhookEventCountQuery): Promise<number> {
     await this.#ready();
     const builder = this.#webhookEventModel.query().count('* as total').pojo();
     if (query.status !== undefined) builder.where('status', query.status);
+    if (query.provider !== undefined) builder.where('provider', query.provider);
+    if (query.type !== undefined) builder.where('type', query.type);
     if (query.createdBefore !== undefined) builder.where('created_at', '<', query.createdBefore);
     if (query.createdAfter !== undefined) builder.where('created_at', '>=', query.createdAfter);
     return toCount(await builder);

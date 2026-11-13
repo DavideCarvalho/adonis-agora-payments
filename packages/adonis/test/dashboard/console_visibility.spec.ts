@@ -18,7 +18,7 @@ import { InMemoryBillingStore } from '../../src/testing/in_memory_billing_store.
 const NOW = new Date('2026-08-27T12:00:00.000Z');
 
 function req(
-  query: Record<string, string | string[] | undefined> = {},
+  query: Record<string, unknown> = {},
   params: Record<string, string | undefined> = {},
   body?: unknown,
 ): ApiRequest {
@@ -70,15 +70,15 @@ async function seed(): Promise<InMemoryBillingStore> {
 describe('payments row identity', () => {
   it('carries the app’s OWN reference on every row', async () => {
     const res = await payments(deps(await seed()), req());
-    const body = res.body as { payments: Array<{ gatewayId: string; externalReference: unknown }> };
-    const row = body.payments.find((p) => p.gatewayId === 'pay_ana');
+    const body = res.body as { data: Array<{ gatewayId: string; externalReference: unknown }> };
+    const row = body.data.find((p) => p.gatewayId === 'pay_ana');
     expect(row?.externalReference).toBe('enrolment-4102');
   });
 
   it('reports a null reference as null rather than omitting the field', async () => {
     const res = await payments(deps(await seed()), req());
-    const body = res.body as { payments: Array<{ gatewayId: string; externalReference: unknown }> };
-    const row = body.payments.find((p) => p.gatewayId === 'pay_other');
+    const body = res.body as { data: Array<{ gatewayId: string; externalReference: unknown }> };
+    const row = body.data.find((p) => p.gatewayId === 'pay_other');
     expect(row).toHaveProperty('externalReference');
     expect(row?.externalReference).toBeNull();
   });
@@ -86,9 +86,9 @@ describe('payments row identity', () => {
   it('names the app-side OWNER, not just the gateway’s customer id', async () => {
     const res = await payments(deps(await seed()), req());
     const body = res.body as {
-      payments: Array<{ gatewayId: string; customerId: unknown; owner: unknown }>;
+      data: Array<{ gatewayId: string; customerId: unknown; owner: unknown }>;
     };
-    const row = body.payments.find((p) => p.gatewayId === 'pay_ana');
+    const row = body.data.find((p) => p.gatewayId === 'pay_ana');
     expect(
       row?.customerId,
       'the gateway id is still there — it is what you paste at the gateway',
@@ -103,33 +103,38 @@ describe('payments row identity', () => {
 
   it('reports an unmapped customer as a null owner rather than guessing', async () => {
     const res = await payments(deps(await seed()), req());
-    const body = res.body as { payments: Array<{ gatewayId: string; owner: unknown }> };
-    expect(body.payments.find((p) => p.gatewayId === 'pay_other')?.owner).toBeNull();
+    const body = res.body as { data: Array<{ gatewayId: string; owner: unknown }> };
+    expect(body.data.find((p) => p.gatewayId === 'pay_other')?.owner).toBeNull();
   });
 
   it('finds a payment by the app’s reference', async () => {
-    const res = await payments(deps(await seed()), req({ reference: 'enrolment-4102' }));
-    const body = res.body as { payments: Array<{ gatewayId: string }>; filters: unknown };
-    expect(body.payments.map((p) => p.gatewayId)).toEqual(['pay_ana']);
-    expect(body.filters).toMatchObject({ reference: 'enrolment-4102' });
+    const res = await payments(
+      deps(await seed()),
+      req({ filter: { externalReference: 'enrolment-4102' } }),
+    );
+    const body = res.body as { data: Array<{ gatewayId: string }>; filters: unknown };
+    expect(body.data.map((p) => p.gatewayId)).toEqual(['pay_ana']);
+    expect(body.filters).toMatchObject({ externalReference: 'enrolment-4102' });
   });
 
   it('finds a payment by the gateway id, and by the gateway customer id', async () => {
     const store = await seed();
-    const byGateway = (await payments(deps(store), req({ gatewayId: 'pay_ana' }))).body as {
-      payments: Array<{ gatewayId: string }>;
+    const byGateway = (await payments(deps(store), req({ filter: { gatewayId: 'pay_ana' } })))
+      .body as {
+      data: Array<{ gatewayId: string }>;
     };
-    expect(byGateway.payments.map((p) => p.gatewayId)).toEqual(['pay_ana']);
+    expect(byGateway.data.map((p) => p.gatewayId)).toEqual(['pay_ana']);
 
-    const byCustomer = (await payments(deps(store), req({ customerId: 'cus_ana' }))).body as {
-      payments: Array<{ gatewayId: string }>;
+    const byCustomer = (await payments(deps(store), req({ filter: { customerId: 'cus_ana' } })))
+      .body as {
+      data: Array<{ gatewayId: string }>;
     };
-    expect(byCustomer.payments.map((p) => p.gatewayId)).toEqual(['pay_ana']);
+    expect(byCustomer.data.map((p) => p.gatewayId)).toEqual(['pay_ana']);
   });
 
   it('treats an empty reference param as no filter, not as a search for ""', async () => {
-    const res = await payments(deps(await seed()), req({ reference: '' }));
-    expect((res.body as { payments: unknown[] }).payments).toHaveLength(2);
+    const res = await payments(deps(await seed()), req({ filter: { externalReference: '' } }));
+    expect((res.body as { data: unknown[] }).data).toHaveLength(2);
   });
 });
 
@@ -142,8 +147,8 @@ describe('payments row identity', () => {
 describe('customers', () => {
   it('lists the owner mapping', async () => {
     const res = await customers(deps(await seed()), req());
-    const body = res.body as { customers: Array<{ gatewayId: string; ownerId: string | null }> };
-    expect(body.customers).toEqual([
+    const body = res.body as { data: Array<{ gatewayId: string; ownerId: string | null }> };
+    expect(body.data).toEqual([
       expect.objectContaining({ gatewayId: 'cus_ana', ownerType: 'users', ownerId: '4102' }),
     ]);
   });
@@ -156,8 +161,8 @@ describe('customers', () => {
       ownerType: 'users',
       ownerId: '77',
     });
-    const res = await customers(deps(store), req({ ownerId: '4102' }));
-    expect((res.body as { customers: Array<{ gatewayId: string }> }).customers).toHaveLength(1);
+    const res = await customers(deps(store), req({ filter: { ownerId: '4102' } }));
+    expect((res.body as { data: Array<{ gatewayId: string }> }).data).toHaveLength(1);
   });
 });
 
@@ -277,9 +282,12 @@ describe('ledger filters', () => {
   };
 
   it('filters the ledger by event type', async () => {
-    const res = await webhookEvents(deps(await seedLedger()), req({ type: 'payment.refunded' }));
-    const body = res.body as { events: Array<{ gatewayEventId: string }> };
-    expect(body.events.map((e) => e.gatewayEventId)).toEqual(['evt_2']);
+    const res = await webhookEvents(
+      deps(await seedLedger()),
+      req({ filter: { type: 'payment.refunded' } }),
+    );
+    const body = res.body as { data: Array<{ gatewayEventId: string }> };
+    expect(body.data.map((e) => e.gatewayEventId)).toEqual(['evt_2']);
   });
 
   it('offers the event types this install has actually received', async () => {
@@ -448,10 +456,10 @@ describe('rejected deliveries', () => {
   it('surfaces the refusals through the audit endpoint', async () => {
     const res = await auditEvents(
       deps(await withRejection()),
-      req({ action: AUDIT_ACTIONS.webhookRejected }),
+      req({ filter: { action: AUDIT_ACTIONS.webhookRejected } }),
     );
-    const body = res.body as { audit: Array<{ message: string | null; provider: string | null }> };
-    expect(body.audit).toEqual([
+    const body = res.body as { data: Array<{ message: string | null; provider: string | null }> };
+    expect(body.data).toEqual([
       expect.objectContaining({ provider: 'asaas', message: 'signature did not verify' }),
     ]);
   });

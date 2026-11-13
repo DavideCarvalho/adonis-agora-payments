@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Fragment, useState } from 'react';
 import { paymentsClient } from '../client/payments-client';
 import { formatWhen } from './money';
-import { Pager, Panel, QueryState, ScanNotice } from './shell';
+import { Pager, Panel, QueryState } from './shell';
 import { isActionable, webhookStatusClass } from './status';
 import { Badge } from './ui/badge';
 import { EventTypeFilter } from './ui/event-type-filter';
@@ -53,7 +53,7 @@ export function WebhookEvents({ initialStatus }: { initialStatus?: string | unde
     },
   });
 
-  const rows = query.data?.events ?? [];
+  const rows = query.data?.data ?? [];
   const refilter = (apply: () => void) => {
     apply();
     setPage(1);
@@ -162,13 +162,7 @@ export function WebhookEvents({ initialStatus }: { initialStatus?: string | unde
             })}
           </tbody>
         </table>
-        <ScanNotice meta={query.data?.meta} noun="events" />
-        <Pager
-          page={query.data?.meta.page ?? page}
-          size={query.data?.meta.size ?? PAGE_SIZE}
-          count={query.data?.meta.count ?? 0}
-          onPage={setPage}
-        />
+        <Pager meta={query.data?.meta} count={rows.length} onPage={setPage} />
       </QueryState>
     </Panel>
   );

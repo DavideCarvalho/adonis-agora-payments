@@ -8,6 +8,8 @@ import type {
 } from '../../src/dashboard/actions.js';
 import type { ApiRequest, Deps } from '../../src/dashboard/handlers.js';
 import {
+  auditEvents,
+  customers,
   DISPUTE_STATUSES,
   disputes,
   health,
@@ -23,7 +25,7 @@ import { InMemoryBillingStore } from '../../src/testing/in_memory_billing_store.
 
 const NOW = new Date('2026-08-27T12:00:00.000Z');
 
-function req(query: Record<string, string | string[] | undefined> = {}): ApiRequest {
+function req(query: Record<string, unknown> = {}): ApiRequest {
   return { params: {}, query };
 }
 
@@ -174,79 +176,66 @@ describe('payments', () => {
     const store = await seed();
     const res = await payments(deps(store), req());
     const body = res.body as {
-      payments: Array<{ gatewayId: string; amount: number; paidAt: string | null }>;
-      meta: { page: number; size: number; count: number };
+      data: Array<{ gatewayId: string; amount: number; paidAt: string | null }>;
+      meta: unknown;
     };
-    expect(body.payments.map((p) => p.gatewayId)).toEqual(['pi_3', 'pi_2', 'pi_1']);
-    expect(body.payments[0]?.amount).toBe(1);
-    expect(body.meta).toEqual({
-      page: 1,
-      size: 50,
-      count: 3,
-      scanned: 3,
-      truncated: false,
-    });
+    expect(body.data.map((p) => p.gatewayId)).toEqual(['pi_3', 'pi_2', 'pi_1']);
+    expect(body.data[0]?.amount).toBe(1);
+    expect(body.meta).toEqual({ total: 3, perPage: 50, currentPage: 1, lastPage: 1, firstPage: 1 });
   });
 
   it('filters by status', async () => {
     const store = await seed();
-    const res = await payments(deps(store), req({ status: 'failed' }));
-    const body = res.body as { payments: Array<{ gatewayId: string }> };
-    expect(body.payments.map((p) => p.gatewayId)).toEqual(['pi_2']);
+    const res = await payments(deps(store), req({ filter: { status: 'failed' } }));
+    const body = res.body as { data: Array<{ gatewayId: string }> };
+    expect(body.data.map((p) => p.gatewayId)).toEqual(['pi_2']);
   });
 
   it('treats an empty status param as no filter', async () => {
     const store = await seed();
-    const res = await payments(deps(store), req({ status: '' }));
-    expect((res.body as { payments: unknown[] }).payments).toHaveLength(3);
+    const res = await payments(deps(store), req({ filter: { status: '' } }));
+    expect((res.body as { data: unknown[] }).data).toHaveLength(3);
   });
 
   it('serializes timestamps as ISO strings or null', async () => {
     const store = await seed();
-    const res = await payments(deps(store), req({ status: 'failed' }));
-    const row = (res.body as { payments: Array<{ paidAt: string | null; createdAt: string }> })
-      .payments[0];
+    const res = await payments(deps(store), req({ filter: { status: 'failed' } }));
+    const row = (res.body as { data: Array<{ paidAt: string | null; createdAt: string }> }).data[0];
     expect(row?.paidAt).toBeNull();
     expect(typeof row?.createdAt).toBe('string');
   });
 
-  it('pages with 1-based page/size and echoes the paging back', async () => {
+  it('pages with 1-based page/size and reports the real total', async () => {
     const store = await seed();
     const first = await payments(deps(store), req({ page: '1', size: '2' }));
     const second = await payments(deps(store), req({ page: '2', size: '2' }));
-    expect((first.body as { meta: { count: number } }).meta).toEqual({
-      page: 1,
-      size: 2,
-      count: 2,
-      scanned: 2,
-      truncated: false,
+    expect((first.body as { meta: unknown }).meta).toEqual({
+      total: 3,
+      perPage: 2,
+      currentPage: 1,
+      lastPage: 2,
+      firstPage: 1,
     });
-    // count < size is the client's "no more pages" signal.
-    expect((second.body as { meta: { count: number } }).meta.count).toBe(1);
+    expect((second.body as { meta: { currentPage: number } }).meta.currentPage).toBe(2);
+    expect((second.body as { data: unknown[] }).data).toHaveLength(1);
     // The second page is the NEXT rows, never a repeat of the first.
     expect(
-      (second.body as { payments: Array<{ gatewayId: string }> }).payments.map((p) => p.gatewayId),
+      (second.body as { data: Array<{ gatewayId: string }> }).data.map((p) => p.gatewayId),
     ).toEqual(['pi_1']);
   });
 
   it('caps an absurd size instead of selecting the table', async () => {
     const store = await seed();
     const res = await payments(deps(store), req({ size: '100000' }));
-    expect((res.body as { meta: { size: number } }).meta.size).toBe(200);
+    expect((res.body as { meta: { perPage: number } }).meta.perPage).toBe(200);
   });
 
   it('ignores a garbage page/size rather than returning nothing', async () => {
     const store = await seed();
     const res = await payments(deps(store), req({ size: 'lots', page: '-5' }));
-    const body = res.body as { meta: { page: number; size: number }; payments: unknown[] };
-    expect(body.meta).toEqual({
-      page: 1,
-      size: 50,
-      count: 3,
-      scanned: 3,
-      truncated: false,
-    });
-    expect(body.payments).toHaveLength(3);
+    const body = res.body as { meta: unknown; data: unknown[] };
+    expect(body.meta).toEqual({ total: 3, perPage: 50, currentPage: 1, lastPage: 1, firstPage: 1 });
+    expect(body.data).toHaveLength(3);
   });
 });
 
@@ -254,25 +243,25 @@ describe('webhookEvents', () => {
   it('lists the ledger newest first', async () => {
     const store = await seed();
     const res = await webhookEvents(deps(store), req());
-    const body = res.body as { events: Array<{ gatewayEventId: string }> };
-    expect(body.events.map((e) => e.gatewayEventId)).toEqual(['evt_new', 'evt_ok', 'evt_bad']);
+    const body = res.body as { data: Array<{ gatewayEventId: string }> };
+    expect(body.data.map((e) => e.gatewayEventId)).toEqual(['evt_new', 'evt_ok', 'evt_bad']);
   });
 
   it("surfaces a failed event WITH the handler's error message", async () => {
     // The single most operationally useful row in this console: the error is the only record
     // of why the event's effect never happened.
     const store = await seed();
-    const res = await webhookEvents(deps(store), req({ status: 'failed' }));
-    const body = res.body as { events: Array<{ gatewayEventId: string; error: string | null }> };
-    expect(body.events).toHaveLength(1);
-    expect(body.events[0]?.gatewayEventId).toBe('evt_bad');
-    expect(body.events[0]?.error).toContain('handler threw');
+    const res = await webhookEvents(deps(store), req({ filter: { status: 'failed' } }));
+    const body = res.body as { data: Array<{ gatewayEventId: string; error: string | null }> };
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]?.gatewayEventId).toBe('evt_bad');
+    expect(body.data[0]?.error).toContain('handler threw');
   });
 
   it('carries a null error for a healthy row', async () => {
     const store = await seed();
-    const res = await webhookEvents(deps(store), req({ status: 'processed' }));
-    expect((res.body as { events: Array<{ error: string | null }> }).events[0]?.error).toBeNull();
+    const res = await webhookEvents(deps(store), req({ filter: { status: 'processed' } }));
+    expect((res.body as { data: Array<{ error: string | null }> }).data[0]?.error).toBeNull();
   });
 
   it('offers the three ledger statuses as the filter list', async () => {
@@ -468,7 +457,7 @@ describe('subscriptions', () => {
     const res = await subscriptions(deps(await subsStore()), req());
     expect(res.status).toBe(200);
     const body = res.body as {
-      subscriptions: Array<{
+      data: Array<{
         gatewayId: string;
         planId: string;
         customerId: string | null;
@@ -476,34 +465,36 @@ describe('subscriptions', () => {
         endsAt: string | null;
       }>;
     };
-    expect(body.subscriptions[0]?.gatewayId).toBe('sub_trial');
-    expect(body.subscriptions[0]?.planId).toBe('pro');
-    expect(body.subscriptions[0]?.customerId).toBe('cus_sub_trial');
-    expect(body.subscriptions[0]?.trialEndsAt).toBe(
-      new Date(NOW.getTime() + 86_400_000).toISOString(),
-    );
-    expect(body.subscriptions[0]?.endsAt).toBe(
-      new Date(NOW.getTime() + 7 * 86_400_000).toISOString(),
-    );
+    expect(body.data[0]?.gatewayId).toBe('sub_trial');
+    expect(body.data[0]?.planId).toBe('pro');
+    expect(body.data[0]?.customerId).toBe('cus_sub_trial');
+    expect(body.data[0]?.trialEndsAt).toBe(new Date(NOW.getTime() + 86_400_000).toISOString());
+    expect(body.data[0]?.endsAt).toBe(new Date(NOW.getTime() + 7 * 86_400_000).toISOString());
   });
 
   it('filters by status — the past_due rows are the ones that cost money today', async () => {
-    const res = await subscriptions(deps(await subsStore()), req({ status: 'past_due' }));
-    const body = res.body as { subscriptions: Array<{ gatewayId: string }> };
-    expect(body.subscriptions.map((s) => s.gatewayId).sort()).toEqual(['sub_due_1', 'sub_due_2']);
+    const res = await subscriptions(
+      deps(await subsStore()),
+      req({ filter: { status: 'past_due' } }),
+    );
+    const body = res.body as { data: Array<{ gatewayId: string }> };
+    expect(body.data.map((s) => s.gatewayId).sort()).toEqual(['sub_due_1', 'sub_due_2']);
   });
 
   it('keeps paused OUT of the active filter — a paused subscriber is not paying', async () => {
-    const res = await subscriptions(deps(await subsStore()), req({ status: 'active' }));
-    const body = res.body as { subscriptions: Array<{ gatewayId: string; status: string }> };
-    expect(body.subscriptions.map((s) => s.gatewayId)).toEqual(['sub_active']);
-    expect(body.subscriptions.every((s) => s.status !== 'paused')).toBe(true);
+    const res = await subscriptions(deps(await subsStore()), req({ filter: { status: 'active' } }));
+    const body = res.body as { data: Array<{ gatewayId: string; status: string }> };
+    expect(body.data.map((s) => s.gatewayId)).toEqual(['sub_active']);
+    expect(body.data.every((s) => s.status !== 'paused')).toBe(true);
   });
 
   it('reports the WHOLE-TABLE past_due count, not the page count', async () => {
     // Paged down to one row, the count still has to say two — it is what decides whether the
     // operator opens the tab at all.
-    const res = await subscriptions(deps(await subsStore()), req({ status: 'active', size: '1' }));
+    const res = await subscriptions(
+      deps(await subsStore()),
+      req({ filter: { status: 'active' }, size: '1' }),
+    );
     expect((res.body as { counts: { past_due: number } }).counts.past_due).toBe(2);
   });
 
@@ -520,39 +511,44 @@ describe('subscriptions', () => {
 describe('provider filter', () => {
   it('narrows payments to one gateway', async () => {
     const store = await seed();
-    const res = await payments(deps(store), req({ provider: 'asaas' }));
+    const res = await payments(deps(store), req({ filter: { provider: 'asaas' } }));
     const body = res.body as {
-      payments: Array<{ gatewayId: string; provider: string }>;
-      meta: { count: number; truncated: boolean };
+      data: Array<{ gatewayId: string; provider: string }>;
+      meta: { total: number };
     };
-    expect(body.payments.map((p) => p.gatewayId)).toEqual(['pi_2']);
-    expect(body.meta.truncated).toBe(false);
+    expect(body.data.map((p) => p.gatewayId)).toEqual(['pi_2']);
+    expect(body.meta.total).toBe(1);
   });
 
   it('composes with the status filter instead of replacing it', async () => {
     const store = await seed();
-    const res = await payments(deps(store), req({ provider: 'stripe', status: 'paid' }));
-    const body = res.body as { payments: Array<{ gatewayId: string }> };
-    expect(body.payments.map((p) => p.gatewayId)).toEqual(['pi_3', 'pi_1']);
+    const res = await payments(
+      deps(store),
+      req({ filter: { provider: 'stripe', status: 'paid' } }),
+    );
+    const body = res.body as { data: Array<{ gatewayId: string }> };
+    expect(body.data.map((p) => p.gatewayId)).toEqual(['pi_3', 'pi_1']);
   });
 
   it('narrows webhook events to one gateway', async () => {
     const store = await seed();
-    const res = await webhookEvents(deps(store), req({ provider: 'woovi' }));
-    const body = res.body as { events: Array<{ gatewayEventId: string }> };
-    expect(body.events.map((e) => e.gatewayEventId)).toEqual(['evt_new']);
+    const res = await webhookEvents(deps(store), req({ filter: { provider: 'woovi' } }));
+    const body = res.body as { data: Array<{ gatewayEventId: string }> };
+    expect(body.data.map((e) => e.gatewayEventId)).toEqual(['evt_new']);
   });
 
   it('pages over the FILTERED set, not the raw one', async () => {
     const store = await seed();
-    const first = await payments(deps(store), req({ provider: 'stripe', size: '1', page: '1' }));
-    const second = await payments(deps(store), req({ provider: 'stripe', size: '1', page: '2' }));
-    expect((first.body as { payments: Array<{ gatewayId: string }> }).payments[0]?.gatewayId).toBe(
-      'pi_3',
+    const first = await payments(
+      deps(store),
+      req({ filter: { provider: 'stripe' }, size: '1', page: '1' }),
     );
-    expect((second.body as { payments: Array<{ gatewayId: string }> }).payments[0]?.gatewayId).toBe(
-      'pi_1',
+    const second = await payments(
+      deps(store),
+      req({ filter: { provider: 'stripe' }, size: '1', page: '2' }),
     );
+    expect((first.body as { data: Array<{ gatewayId: string }> }).data[0]?.gatewayId).toBe('pi_3');
+    expect((second.body as { data: Array<{ gatewayId: string }> }).data[0]?.gatewayId).toBe('pi_1');
   });
 
   it("finds a gateway's rows behind more than a scan's worth of other gateways", async () => {
@@ -576,13 +572,13 @@ describe('provider filter', () => {
       });
     }
     const listPayments = vi.spyOn(store, 'listPayments');
-    const res = await payments(deps(store), req({ provider: 'asaas' }));
+    const res = await payments(deps(store), req({ filter: { provider: 'asaas' } }));
     const body = res.body as {
-      payments: Array<{ gatewayId: string }>;
-      meta: { scanned: number; truncated: boolean };
+      data: Array<{ gatewayId: string }>;
+      meta: { total: number };
     };
-    expect(body.payments.map((p) => p.gatewayId)).toEqual(['pay_old']);
-    expect(body.meta.truncated).toBe(false);
+    expect(body.data.map((p) => p.gatewayId)).toEqual(['pay_old']);
+    expect(body.meta.total).toBe(1);
     expect(listPayments).toHaveBeenCalledTimes(1);
     expect(listPayments.mock.calls[0]?.[0]).toMatchObject({ provider: 'asaas' });
   });
@@ -594,19 +590,22 @@ describe('provider filter', () => {
       vi.spyOn(store, 'listSubscriptions'),
       vi.spyOn(store, 'listWebhookEvents'),
     ];
-    await payments(deps(store), req({ provider: 'stripe' }));
-    await subscriptions(deps(store), req({ provider: 'stripe' }));
-    await webhookEvents(deps(store), req({ provider: 'stripe' }));
+    await payments(deps(store), req({ filter: { provider: 'stripe' } }));
+    await subscriptions(deps(store), req({ filter: { provider: 'stripe' } }));
+    await webhookEvents(deps(store), req({ filter: { provider: 'stripe' } }));
     for (const spy of spies) {
       expect(spy).toHaveBeenCalledTimes(1);
       expect(spy.mock.calls[0]?.[0]).toMatchObject({ provider: 'stripe' });
     }
   });
 
-  it('never claims truncation for an unfiltered page', async () => {
+  it('counts the whole filtered set, not the page', async () => {
     const store = await seed();
-    const res = await payments(deps(store), req());
-    expect((res.body as { meta: { truncated: boolean } }).meta.truncated).toBe(false);
+    const res = await payments(deps(store), req({ filter: { provider: 'stripe' }, size: '1' }));
+    expect((res.body as { meta: { total: number; lastPage: number } }).meta).toMatchObject({
+      total: 2,
+      lastPage: 2,
+    });
   });
 });
 
@@ -925,9 +924,9 @@ describe('disputes', () => {
 
   const body = (res: { body: unknown }) =>
     res.body as {
-      disputes: Array<{ gatewayId: string; evidenceDueBy: string | null; amount: number | null }>;
-      dueWithin?: { hours: number; total: number };
-      meta: { page: number; size: number; count: number };
+      data: Array<{ gatewayId: string; evidenceDueBy: string | null; amount: number | null }>;
+      dueWithin?: { hours: number };
+      meta: { total: number; perPage: number; currentPage: number; lastPage: number };
       statuses: readonly string[];
     };
 
@@ -935,56 +934,58 @@ describe('disputes', () => {
     const res = await disputes(deps(await disputeStore()), req());
     expect(res.status).toBe(200);
     const payload = body(res);
-    expect(payload.disputes.map((row) => row.gatewayId)).toEqual([
-      'dp_warning',
-      'dp_soon',
-      'dp_lost',
-    ]);
+    expect(payload.data.map((row) => row.gatewayId)).toEqual(['dp_warning', 'dp_soon', 'dp_lost']);
     // NOT 49.90 — nothing on this boundary divides.
-    expect(payload.disputes[2]?.amount).toBe(4990);
+    expect(payload.data[2]?.amount).toBe(4990);
     expect(payload.statuses).toEqual(DISPUTE_STATUSES);
   });
 
   it('filters by status and by provider', async () => {
     const store = await disputeStore();
     expect(
-      body(await disputes(deps(store), req({ status: 'warning' }))).disputes.map(
+      body(await disputes(deps(store), req({ filter: { status: 'warning' } }))).data.map(
         (r) => r.gatewayId,
       ),
     ).toEqual(['dp_warning']);
     expect(
-      body(await disputes(deps(store), req({ provider: 'stripe' }))).disputes.map(
+      body(await disputes(deps(store), req({ filter: { provider: 'stripe' } }))).data.map(
         (r) => r.gatewayId,
       ),
     ).toEqual(['dp_soon', 'dp_lost']);
   });
 
-  it('switches to the closing windows on ?dueWithin, soonest first, open only', async () => {
-    const res = await disputes(deps(await disputeStore()), req({ dueWithin: '12' }));
+  it('switches to the closing windows on filter[dueWithin], soonest first, open only', async () => {
+    const res = await disputes(deps(await disputeStore()), req({ filter: { dueWithin: '12' } }));
     const payload = body(res);
     // The lost one is inside the horizon and must not appear — nobody has to answer it.
-    expect(payload.disputes.map((row) => row.gatewayId)).toEqual(['dp_warning', 'dp_soon']);
-    expect(payload.dueWithin).toEqual({ hours: 12, total: 2 });
+    expect(payload.data.map((row) => row.gatewayId)).toEqual(['dp_warning', 'dp_soon']);
+    expect(payload.dueWithin).toEqual({ hours: 12 });
+    expect(payload.meta.total).toBe(2);
   });
 
   it('reports the full number of closing windows even when the page is smaller', async () => {
-    const res = await disputes(deps(await disputeStore()), req({ dueWithin: '12', size: '1' }));
+    const res = await disputes(
+      deps(await disputeStore()),
+      req({ filter: { dueWithin: '12' }, size: '1' }),
+    );
     const payload = body(res);
     // A page that fills says nothing about how many more windows are closing, and that number
     // is the one an operator plans their day around.
-    expect(payload.disputes).toHaveLength(1);
-    expect(payload.dueWithin?.total).toBe(2);
+    expect(payload.data).toHaveLength(1);
+    expect(payload.meta.total).toBe(2);
   });
 
-  it('defaults a bare ?dueWithin to the horizon billingHealth alerts on', async () => {
-    const payload = body(await disputes(deps(await disputeStore()), req({ dueWithin: '' })));
+  it('defaults a blank filter[dueWithin] to the horizon billingHealth alerts on', async () => {
+    const payload = body(
+      await disputes(deps(await disputeStore()), req({ filter: { dueWithin: '' } })),
+    );
     expect(payload.dueWithin?.hours).toBe(72);
   });
 
   it.each(['-5', 'soon'])('rejects %s rather than answering a different question', async (raw) => {
     // Falling back to the default would answer something the caller did not ask, and they
     // could not tell from the response which horizon they got.
-    const res = await disputes(deps(await disputeStore()), req({ dueWithin: raw }));
+    const res = await disputes(deps(await disputeStore()), req({ filter: { dueWithin: raw } }));
     expect(res.status).toBe(400);
   });
 
@@ -998,8 +999,143 @@ describe('disputes', () => {
     });
     const payload = body(await disputes(deps(store), req()));
     // `null` means the gateway told us nothing — the SPA has to be able to say so.
-    expect(payload.disputes[0]?.evidenceDueBy).toBeNull();
+    expect(payload.data[0]?.evidenceDueBy).toBeNull();
     // And it is not in the work list at all: nothing to be late for.
-    expect(body(await disputes(deps(store), req({ dueWithin: '999' }))).disputes).toEqual([]);
+    expect(body(await disputes(deps(store), req({ filter: { dueWithin: '999' } }))).data).toEqual(
+      [],
+    );
+  });
+});
+
+// ── List wire format ──────────────────────────────────────────────────────────────────────────
+
+describe('list wire format', () => {
+  const listings = [
+    ['payments', payments],
+    ['subscriptions', subscriptions],
+    ['webhookEvents', webhookEvents],
+    ['disputes', disputes],
+    ['customers', customers],
+    ['auditEvents', auditEvents],
+  ] as const;
+
+  it.each(listings)('%s answers the offset envelope', async (_name, handler) => {
+    const res = await handler(deps(await seed()), req({ page: '1', size: '2' }));
+    expect(res.status).toBe(200);
+    const body = res.body as { data: unknown[]; meta: Record<string, number> };
+    expect(Array.isArray(body.data)).toBe(true);
+    expect(Object.keys(body.meta).sort()).toEqual([
+      'currentPage',
+      'firstPage',
+      'lastPage',
+      'perPage',
+      'total',
+    ]);
+    expect(body.meta.perPage).toBe(2);
+  });
+
+  it.each(listings)('%s rejects an unknown filter field with 400', async (_name, handler) => {
+    const res = await handler(deps(await seed()), req({ filter: { nope: 'x' } }));
+    expect(res.status).toBe(400);
+    expect((res.body as { error: string }).error).toContain('nope');
+  });
+
+  it.each(listings)('%s rejects a sort outside its one order with 400', async (_name, handler) => {
+    const store = await seed();
+    expect((await handler(deps(store), req({ sort: 'amount' }))).status).toBe(400);
+    // The right field in the wrong direction is a different order, too.
+    expect((await handler(deps(store), req({ sort: 'createdAt' }))).status).toBe(400);
+    expect((await handler(deps(store), req({ sort: '-createdAt' }))).status).toBe(200);
+  });
+
+  it('dispatches each filter field to the store query', async () => {
+    const store = await seed();
+    const listPayments = vi.spyOn(store, 'listPayments');
+    const countPayments = vi.spyOn(store, 'countPayments');
+    await payments(
+      deps(store),
+      req({
+        filter: {
+          status: 'paid',
+          provider: 'stripe',
+          externalReference: 'order-1',
+          gatewayId: 'pi_1',
+          customerId: 'cus_1',
+        },
+        page: '3',
+        size: '5',
+      }),
+    );
+    const filters = {
+      status: 'paid',
+      provider: 'stripe',
+      externalReference: 'order-1',
+      gatewayId: 'pi_1',
+      customerId: 'cus_1',
+    };
+    expect(listPayments.mock.calls[0]?.[0]).toEqual({ ...filters, page: 3, size: 5 });
+    expect(countPayments.mock.calls[0]?.[0]).toEqual(filters);
+  });
+
+  it('takes the operator spelling of an exact match', async () => {
+    const res = await payments(
+      deps(await seed()),
+      req({ filter: { status: { equals: 'failed' } } }),
+    );
+    expect(
+      (res.body as { data: Array<{ gatewayId: string }> }).data.map((p) => p.gatewayId),
+    ).toEqual(['pi_2']);
+  });
+
+  it('rejects an operator the field does not support with 400', async () => {
+    const res = await payments(deps(await seed()), req({ filter: { status: { contains: 'pa' } } }));
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects several values for a one-value field with 400', async () => {
+    const store = await seed();
+    expect(
+      (await payments(deps(store), req({ filter: { status: ['paid', 'failed'] } }))).status,
+    ).toBe(400);
+    expect((await payments(deps(store), req({ filter: { status: 'paid,failed' } }))).status).toBe(
+      400,
+    );
+  });
+
+  it('walks every page of a filtered list with offset math', async () => {
+    const store = await seed();
+    const seen: string[] = [];
+    for (let page = 1; page <= 3; page += 1) {
+      const res = await payments(deps(store), req({ page: String(page), size: '1' }));
+      const body = res.body as {
+        data: Array<{ gatewayId: string }>;
+        meta: { total: number; currentPage: number; lastPage: number };
+      };
+      expect(body.meta).toMatchObject({ total: 3, currentPage: page, lastPage: 3 });
+      seen.push(...body.data.map((p) => p.gatewayId));
+    }
+    expect(seen).toEqual(['pi_3', 'pi_2', 'pi_1']);
+    const past = await payments(deps(store), req({ page: '9', size: '1' }));
+    expect((past.body as { data: unknown[] }).data).toEqual([]);
+  });
+
+  it('sorts the dispute deadlines by evidenceDueBy only', async () => {
+    const store = await seed();
+    expect(
+      (await disputes(deps(store), req({ filter: { dueWithin: '12' }, sort: 'evidenceDueBy' })))
+        .status,
+    ).toBe(200);
+    expect(
+      (await disputes(deps(store), req({ filter: { dueWithin: '12' }, sort: '-createdAt' })))
+        .status,
+    ).toBe(400);
+  });
+
+  it('refuses a status beside dueWithin rather than ignoring it', async () => {
+    const res = await disputes(
+      deps(await seed()),
+      req({ filter: { dueWithin: '12', status: 'lost' } }),
+    );
+    expect(res.status).toBe(400);
   });
 });

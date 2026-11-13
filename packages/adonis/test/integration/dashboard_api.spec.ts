@@ -42,7 +42,7 @@ describe('payments dashboard API (integration)', () => {
   const NOW = new Date('2026-08-27T12:00:00.000Z');
   const ago = (ms: number) => new Date(NOW.getTime() - ms);
 
-  function req(query: Record<string, string | string[] | undefined> = {}): ApiRequest {
+  function req(query: Record<string, unknown> = {}): ApiRequest {
     return { params: {}, query };
   }
 
@@ -223,7 +223,7 @@ describe('payments dashboard API (integration)', () => {
     it('lists real rows newest first, in integer cents, with ISO timestamps', async () => {
       const res = await payments(deps(), req());
       const body = res.body as {
-        payments: Array<{
+        data: Array<{
           gatewayId: string;
           amount: number;
           currency: string;
@@ -231,30 +231,30 @@ describe('payments dashboard API (integration)', () => {
           createdAt: string | null;
           customerId: string | null;
         }>;
-        meta: { page: number; size: number; count: number };
+        meta: { total: number };
       };
-      expect(body.meta.count).toBe(5);
-      const recent = body.payments.find((p) => p.gatewayId === 'pi_recent');
+      expect(body.meta.total).toBe(5);
+      const recent = body.data.find((p) => p.gatewayId === 'pi_recent');
       expect(recent?.amount).toBe(123456);
       expect(recent?.currency).toBe('BRL');
       expect(recent?.customerId).toBe('cus_1');
       expect(recent?.paidAt).toBe(ago(2 * HOUR).toISOString());
       expect(typeof recent?.createdAt).toBe('string');
       // Never paid -> null, not an epoch-zero date.
-      expect(body.payments.find((p) => p.gatewayId === 'pi_failed')?.paidAt).toBeNull();
+      expect(body.data.find((p) => p.gatewayId === 'pi_failed')?.paidAt).toBeNull();
     });
 
     it('filters by status through real SQL', async () => {
-      const res = await payments(deps(), req({ status: 'failed' }));
-      const body = res.body as { payments: Array<{ gatewayId: string }> };
-      expect(body.payments.map((p) => p.gatewayId)).toEqual(['pi_failed']);
+      const res = await payments(deps(), req({ filter: { status: 'failed' } }));
+      const body = res.body as { data: Array<{ gatewayId: string }> };
+      expect(body.data.map((p) => p.gatewayId)).toEqual(['pi_failed']);
     });
 
     it('pages with page/size without repeating or skipping a row', async () => {
       const first = await payments(deps(), req({ page: '1', size: '3' }));
       const second = await payments(deps(), req({ page: '2', size: '3' }));
       const ids = (res: { body: unknown }) =>
-        (res.body as { payments: Array<{ gatewayId: string }> }).payments.map((p) => p.gatewayId);
+        (res.body as { data: Array<{ gatewayId: string }> }).data.map((p) => p.gatewayId);
       const all = [...ids(first), ...ids(second)];
       expect(all).toHaveLength(5);
       expect(new Set(all).size).toBe(5);
@@ -263,24 +263,24 @@ describe('payments dashboard API (integration)', () => {
 
   describe('GET /api/webhook-events', () => {
     it('surfaces the failed event WITH the handler error — the row an operator acts on', async () => {
-      const res = await webhookEvents(deps(), req({ status: 'failed' }));
+      const res = await webhookEvents(deps(), req({ filter: { status: 'failed' } }));
       const body = res.body as {
-        events: Array<{ gatewayEventId: string; type: string; error: string | null }>;
+        data: Array<{ gatewayEventId: string; type: string; error: string | null }>;
       };
-      expect(body.events).toHaveLength(1);
-      expect(body.events[0]?.gatewayEventId).toBe('evt_failed');
-      expect(body.events[0]?.type).toBe('invoice.payment_failed');
-      expect(body.events[0]?.error).toContain('Cannot read properties of null');
+      expect(body.data).toHaveLength(1);
+      expect(body.data[0]?.gatewayEventId).toBe('evt_failed');
+      expect(body.data[0]?.type).toBe('invoice.payment_failed');
+      expect(body.data[0]?.error).toContain('Cannot read properties of null');
     });
 
     it('lists the whole ledger newest first with a null error on the healthy rows', async () => {
       const res = await webhookEvents(deps(), req());
       const body = res.body as {
-        events: Array<{ gatewayEventId: string; createdAt: string | null; error: string | null }>;
-        meta: { count: number };
+        data: Array<{ gatewayEventId: string; createdAt: string | null; error: string | null }>;
+        meta: { total: number };
       };
-      expect(body.meta.count).toBe(3);
-      expect(body.events.map((e) => e.gatewayEventId).sort()).toEqual([
+      expect(body.meta.total).toBe(3);
+      expect(body.data.map((e) => e.gatewayEventId).sort()).toEqual([
         'evt_done',
         'evt_failed',
         'evt_inflight',
@@ -288,16 +288,16 @@ describe('payments dashboard API (integration)', () => {
       // Newest first, asserted on the timestamps rather than on a fixed id order: three rows
       // written in the same millisecond tie on `created_at`, and Postgres breaks a tie in
       // whatever order it likes.
-      const times = body.events.map((e) => new Date(String(e.createdAt)).getTime());
+      const times = body.data.map((e) => new Date(String(e.createdAt)).getTime());
       expect(times.every((t) => Number.isFinite(t))).toBe(true);
       expect(times).toEqual([...times].sort((a, b) => b - a));
-      expect(body.events.find((e) => e.gatewayEventId === 'evt_done')?.error).toBeNull();
+      expect(body.data.find((e) => e.gatewayEventId === 'evt_done')?.error).toBeNull();
     });
 
     it('filters the in-flight rows separately from the failed ones', async () => {
-      const res = await webhookEvents(deps(), req({ status: 'received' }));
-      const body = res.body as { events: Array<{ gatewayEventId: string }> };
-      expect(body.events.map((e) => e.gatewayEventId)).toEqual(['evt_inflight']);
+      const res = await webhookEvents(deps(), req({ filter: { status: 'received' } }));
+      const body = res.body as { data: Array<{ gatewayEventId: string }> };
+      expect(body.data.map((e) => e.gatewayEventId)).toEqual(['evt_inflight']);
     });
   });
   describe('GET /api/disputes', () => {
@@ -332,10 +332,10 @@ describe('payments dashboard API (integration)', () => {
     });
 
     it('lists real rows with the amount in integer cents and ISO timestamps', async () => {
-      const res = await disputes(deps(), req({ status: 'open' }));
+      const res = await disputes(deps(), req({ filter: { status: 'open' } }));
       expect(res.status).toBe(200);
       const body = res.body as {
-        disputes: Array<{
+        data: Array<{
           gatewayId: string;
           paymentGatewayId: string;
           amount: number | null;
@@ -345,7 +345,7 @@ describe('payments dashboard API (integration)', () => {
       };
       // `bigint` arrives from pg as a STRING; a panel that renders "123456" as a string is a
       // panel that cannot format money.
-      expect(body.disputes).toEqual([
+      expect(body.data).toEqual([
         expect.objectContaining({
           gatewayId: 'dp_open',
           paymentGatewayId: 'pi_recent',
@@ -357,32 +357,32 @@ describe('payments dashboard API (integration)', () => {
     });
 
     it('answers the work list through a real ORDER BY, soonest window first', async () => {
-      const res = await disputes(deps(), req({ dueWithin: '24' }));
+      const res = await disputes(deps(), req({ filter: { dueWithin: '24' } }));
       const body = res.body as {
-        disputes: Array<{ gatewayId: string }>;
-        dueWithin: { hours: number; total: number };
+        data: Array<{ gatewayId: string }>;
+        meta: { total: number };
       };
       // The won dispute is due in an hour and must not appear: nobody has to answer it.
-      expect(body.disputes.map((row) => row.gatewayId)).toEqual(['dp_warning', 'dp_open']);
-      expect(body.dueWithin.total).toBe(2);
+      expect(body.data.map((row) => row.gatewayId)).toEqual(['dp_warning', 'dp_open']);
+      expect(body.meta.total).toBe(2);
     });
 
     it('reports the full total even when the page holds one row', async () => {
-      const res = await disputes(deps(), req({ dueWithin: '24', size: '1' }));
+      const res = await disputes(deps(), req({ filter: { dueWithin: '24' }, size: '1' }));
       const body = res.body as {
-        disputes: unknown[];
-        dueWithin: { total: number };
+        data: unknown[];
+        meta: { total: number };
       };
       // The count is a separate `count(*)`, and a Lucid aggregate that lands in `$extras`
       // rather than on the row is exactly how this reads a silent zero.
-      expect(body.disputes).toHaveLength(1);
-      expect(body.dueWithin.total).toBe(2);
+      expect(body.data).toHaveLength(1);
+      expect(body.meta.total).toBe(2);
     });
 
     it('narrows to one gateway through real SQL', async () => {
-      const res = await disputes(deps(), req({ provider: 'asaas' }));
-      const body = res.body as { disputes: Array<{ gatewayId: string }> };
-      expect(body.disputes.map((row) => row.gatewayId)).toEqual(['dp_warning']);
+      const res = await disputes(deps(), req({ filter: { provider: 'asaas' } }));
+      const body = res.body as { data: Array<{ gatewayId: string }> };
+      expect(body.data.map((row) => row.gatewayId)).toEqual(['dp_warning']);
     });
   });
 
@@ -417,10 +417,10 @@ describe('payments dashboard API (integration)', () => {
 
   describe('GET /api/subscriptions', () => {
     it('lists real rows with plan, customer and both boundary dates as ISO strings', async () => {
-      const res = await subscriptions(deps(), req({ status: 'trialing' }));
+      const res = await subscriptions(deps(), req({ filter: { status: 'trialing' } }));
       expect(res.status).toBe(200);
       const body = res.body as {
-        subscriptions: Array<{
+        data: Array<{
           gatewayId: string;
           planId: string;
           customerId: string | null;
@@ -428,8 +428,8 @@ describe('payments dashboard API (integration)', () => {
           endsAt: string | null;
         }>;
       };
-      expect(body.subscriptions).toHaveLength(1);
-      expect(body.subscriptions[0]).toMatchObject({
+      expect(body.data).toHaveLength(1);
+      expect(body.data[0]).toMatchObject({
         gatewayId: 'sub_trial',
         planId: 'pro',
         customerId: 'cus_sub_trial',
@@ -439,50 +439,44 @@ describe('payments dashboard API (integration)', () => {
     });
 
     it('filters past_due through real SQL — the rows that cost money today', async () => {
-      const res = await subscriptions(deps(), req({ status: 'past_due' }));
-      const body = res.body as { subscriptions: Array<{ gatewayId: string }> };
-      expect(body.subscriptions.map((sub) => sub.gatewayId).sort()).toEqual([
-        'sub_late',
-        'sub_late_2',
-      ]);
+      const res = await subscriptions(deps(), req({ filter: { status: 'past_due' } }));
+      const body = res.body as { data: Array<{ gatewayId: string }> };
+      expect(body.data.map((sub) => sub.gatewayId).sort()).toEqual(['sub_late', 'sub_late_2']);
     });
 
     it('keeps paused out of active, and counts past_due over the WHOLE table', async () => {
-      const res = await subscriptions(deps(), req({ status: 'active', size: '1' }));
+      const res = await subscriptions(deps(), req({ filter: { status: 'active' }, size: '1' }));
       const body = res.body as {
-        subscriptions: Array<{ gatewayId: string }>;
+        data: Array<{ gatewayId: string }>;
         counts: { past_due: number };
       };
-      expect(body.subscriptions.map((sub) => sub.gatewayId)).toEqual(['sub_active']);
+      expect(body.data.map((sub) => sub.gatewayId)).toEqual(['sub_active']);
       expect(body.counts.past_due).toBe(2);
     });
   });
 
   describe('provider filter + discovery', () => {
     it('narrows real payment rows to one gateway', async () => {
-      const res = await payments(deps(), req({ provider: 'asaas' }));
+      const res = await payments(deps(), req({ filter: { provider: 'asaas' } }));
       const body = res.body as {
-        payments: Array<{ gatewayId: string; provider: string }>;
-        meta: { truncated: boolean };
+        data: Array<{ gatewayId: string; provider: string }>;
+        meta: { total: number };
       };
-      expect(body.payments.map((p) => p.gatewayId).sort()).toEqual([
-        'pi_ancient',
-        'pi_unconfirmed',
-      ]);
-      expect(body.payments.every((p) => p.provider === 'asaas')).toBe(true);
-      expect(body.meta.truncated).toBe(false);
+      expect(body.data.map((p) => p.gatewayId).sort()).toEqual(['pi_ancient', 'pi_unconfirmed']);
+      expect(body.data.every((p) => p.provider === 'asaas')).toBe(true);
+      expect(body.meta.total).toBe(2);
     });
 
     it('narrows real subscription rows to one gateway', async () => {
-      const res = await subscriptions(deps(), req({ provider: 'asaas' }));
-      const body = res.body as { subscriptions: Array<{ gatewayId: string }> };
-      expect(body.subscriptions.map((sub) => sub.gatewayId)).toEqual(['sub_late_2']);
+      const res = await subscriptions(deps(), req({ filter: { provider: 'asaas' } }));
+      const body = res.body as { data: Array<{ gatewayId: string }> };
+      expect(body.data.map((sub) => sub.gatewayId)).toEqual(['sub_late_2']);
     });
 
     it('narrows the real ledger to one gateway', async () => {
-      const res = await webhookEvents(deps(), req({ provider: 'woovi' }));
-      const body = res.body as { events: Array<{ gatewayEventId: string }> };
-      expect(body.events.map((e) => e.gatewayEventId)).toEqual(['evt_inflight']);
+      const res = await webhookEvents(deps(), req({ filter: { provider: 'woovi' } }));
+      const body = res.body as { data: Array<{ gatewayEventId: string }> };
+      expect(body.data.map((e) => e.gatewayEventId)).toEqual(['evt_inflight']);
     });
 
     it('reports the gateways this install actually has data for', async () => {

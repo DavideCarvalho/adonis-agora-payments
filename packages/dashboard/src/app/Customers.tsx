@@ -38,7 +38,7 @@ export function Customers({
     queryFn: () => paymentsClient.customers({ provider, ownerId, size: PAGE_SIZE, page }),
   });
 
-  const rows = query.data?.customers ?? [];
+  const rows = query.data?.data ?? [];
 
   return (
     <Panel
@@ -133,12 +133,7 @@ export function Customers({
             ))}
           </tbody>
         </table>
-        <Pager
-          page={query.data?.meta.page ?? page}
-          size={query.data?.meta.size ?? PAGE_SIZE}
-          count={query.data?.meta.count ?? 0}
-          onPage={setPage}
-        />
+        <Pager meta={query.data?.meta} count={rows.length} onPage={setPage} />
       </QueryState>
     </Panel>
   );

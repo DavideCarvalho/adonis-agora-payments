@@ -41,7 +41,7 @@ function inHours(hours: number): string {
 }
 
 /**
- * Answer the two dispute reads separately: the work list (`?dueWithin=`) and the log. They are the
+ * Answer the two dispute reads separately: the work list (`filter[dueWithin]`) and the log. They are the
  * same route, and a screen that showed the same rows in both panels would look right and be wrong.
  */
 function stubApi(options: { due?: DisputeRow[]; total?: number; log?: DisputeRow[] }): void {
@@ -49,15 +49,27 @@ function stubApi(options: { due?: DisputeRow[]; total?: number; log?: DisputeRow
     const url = String(input);
     const body = url.includes('dueWithin')
       ? {
-          disputes: options.due ?? [],
-          dueWithin: { hours: 72, total: options.total ?? (options.due ?? []).length },
-          meta: { page: 1, size: 50, count: (options.due ?? []).length },
+          data: options.due ?? [],
+          dueWithin: { hours: 72 },
+          meta: {
+            total: options.total ?? (options.due ?? []).length,
+            perPage: 50,
+            currentPage: 1,
+            lastPage: 1,
+            firstPage: 1,
+          },
           statuses: [],
         }
       : url.includes('/disputes')
         ? {
-            disputes: options.log ?? [],
-            meta: { page: 1, size: 50, count: (options.log ?? []).length },
+            data: options.log ?? [],
+            meta: {
+              total: (options.log ?? []).length,
+              perPage: 50,
+              currentPage: 1,
+              lastPage: 1,
+              firstPage: 1,
+            },
             statuses: [],
           }
         : { providers: ['stripe', 'asaas'] };
@@ -110,7 +122,7 @@ describe('what the screen leads with', () => {
     const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map((call) =>
       String(call[0]),
     );
-    expect(calls).toContain('/pd/api/disputes?dueWithin=72&page=1&size=50');
+    expect(calls).toContain('/pd/api/disputes?filter%5BdueWithin%5D=72&page=1&size=50');
   });
 
   it('counts the windows with the server’s unbounded total, not the page it fit', async () => {

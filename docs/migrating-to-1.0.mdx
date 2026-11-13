@@ -321,6 +321,49 @@ assume `/payments-dashboard`).
 `@adonis-agora/payments-dashboard` also stops declaring `react` and `react-dom` as peers. The
 console ships prebuilt with React inside it, so your app does not need to install React for it.
 
+## Dashboard API: lists use the filter wire format
+
+The console's list endpoints (`payments`, `subscriptions`, `disputes`, `webhook-events`,
+`customers`, `audit`) take `filter[field]=value` and answer `{ data, meta }` with a real total. The
+bundled console already speaks it; change any script or client of your own that calls these routes.
+
+Before:
+
+```
+GET /payments/api/payments?status=failed&reference=order-42&page=2&size=25
+→ { "payments": [...], "meta": { "page": 2, "size": 25, "count": 25, "scanned": 25, "truncated": false }, ... }
+```
+
+After:
+
+```
+GET /payments/api/payments?filter[status]=failed&filter[externalReference]=order-42&page=2&size=25
+→ { "data": [...], "meta": { "total": 120, "perPage": 25, "currentPage": 2, "lastPage": 5, "firstPage": 1 }, ... }
+```
+
+- Every filter moves under `filter[...]`. The payments `reference` lookup is now
+  `filter[externalReference]`; the disputes work list is `filter[dueWithin]=<hours>`.
+- The rows are under `data` (no more `payments`, `subscriptions`, `disputes`, `events`, `customers`,
+  `audit` keys on the lists). `meta` is `{ total, perPage, currentPage, lastPage, firstPage }`.
+- The disputes work list answers `dueWithin: { hours }`; its total is `meta.total`.
+- The payments `filters` echo names `externalReference` instead of `reference`.
+- An unknown filter field, an operator other than `equals`, several values for one field, a `sort`
+  other than the list's order, or `filter[status]` beside `filter[dueWithin]` answer `400`.
+
+## Billing store: `count*` reads take the list filters
+
+`countPayments`, `countSubscriptions`, `countDisputes` and `countWebhookEvents` accept every filter of
+their `list*` read (types `PaymentCountQuery`, `SubscriptionCountQuery`, `DisputeCountQuery`,
+`WebhookEventCountQuery`), and the store has a new `countCustomers(query: CustomerCountQuery)`. The
+built-in Lucid and in-memory stores do this already. A custom `BillingStore` adds `countCustomers` and
+applies the list filters in its counts:
+
+```ts
+async countCustomers(query: CustomerCountQuery) {
+  return (await this.matchingCustomers(query)).length // the same filters as listCustomers
+}
+```
+
 ## Peer range for `@adonis-agora/durable`
 
 The optional `@adonis-agora/durable` peer now accepts `>=0.1.0 <2.0.0 || >=1.0.0-rc.0 <2.0.0`, so

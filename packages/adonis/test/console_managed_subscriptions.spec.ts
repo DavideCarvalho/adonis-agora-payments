@@ -192,9 +192,9 @@ describe('console: ação que o gateway não sabe fazer', () => {
         },
         { params: {}, query: {} },
       )
-    ).body as { payments: { gatewayId: string; refundable: boolean }[] };
+    ).body as { data: { gatewayId: string; refundable: boolean }[] };
 
-    const byId = new Map(body.payments.map((row) => [row.gatewayId, row.refundable]));
+    const byId = new Map(body.data.map((row) => [row.gatewayId, row.refundable]));
     // O OpenPix não tem estorno por API. Antes, todo Pix pago mostrava um botão que só podia
     // falhar — e o operador descobria clicando.
     expect(byId.get('chg_woovi')).toBe(false);
@@ -221,7 +221,7 @@ describe('console: ação que o gateway não sabe fazer', () => {
     // Sem manager alcançável não há o que consultar. Esconder a ação puniria o operador por
     // uma indisponibilidade de lookup — mostrar é o comportamento anterior, e o pior caso é
     // um erro do gateway, que é o que acontecia antes o tempo todo.
-    expect(body.payments[0]?.refundable).toBe(true);
+    expect(body.data[0]?.refundable).toBe(true);
   });
 });
 

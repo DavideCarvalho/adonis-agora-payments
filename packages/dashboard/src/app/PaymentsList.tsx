@@ -5,7 +5,7 @@ import { paymentsClient } from '../client/payments-client';
 import { formatCents, formatWhen } from './money';
 import { PaymentDetail } from './PaymentDetail';
 import { RefundDialog } from './RefundDialog';
-import { Pager, Panel, QueryState, ScanNotice } from './shell';
+import { Pager, Panel, QueryState } from './shell';
 import { paymentStatusClass } from './status';
 import { Badge } from './ui/badge';
 import { ProviderFilter } from './ui/provider-filter';
@@ -82,16 +82,16 @@ export function PaymentsList({
       // if nothing carries the term as a reference is it tried as the gateway's own id.
       const byReference = await paymentsClient.payments({
         provider,
-        reference: term,
+        externalReference: term,
         size: PAGE_SIZE,
         page,
       });
-      if (byReference.payments.length > 0) return byReference;
+      if (byReference.data.length > 0) return byReference;
       return paymentsClient.payments({ provider, gatewayId: term, size: PAGE_SIZE, page });
     },
   });
 
-  const rows = query.data?.payments ?? [];
+  const rows = query.data?.data ?? [];
   // A filter change makes the current page meaningless — page 3 of "all" is not page 3 of
   // "failed", nor page 3 of "asaas".
   const refilter = (apply: () => void) => {
@@ -232,13 +232,7 @@ export function PaymentsList({
             ))}
           </tbody>
         </table>
-        <ScanNotice meta={query.data?.meta} noun="payments" />
-        <Pager
-          page={query.data?.meta.page ?? page}
-          size={query.data?.meta.size ?? PAGE_SIZE}
-          count={query.data?.meta.count ?? 0}
-          onPage={setPage}
-        />
+        <Pager meta={query.data?.meta} count={rows.length} onPage={setPage} />
       </QueryState>
 
       {refunding !== null && (

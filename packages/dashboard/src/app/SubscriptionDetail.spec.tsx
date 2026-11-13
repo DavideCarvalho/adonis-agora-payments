@@ -140,8 +140,8 @@ describe('Subscriptions for one customer', () => {
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) =>
       String(input).includes('/subscriptions')
         ? json({
-            subscriptions: [],
-            meta: { page: 1, size: 50, count: 0, scanned: 0, truncated: false },
+            data: [],
+            meta: { total: 0, perPage: 50, currentPage: 1, lastPage: 1, firstPage: 1 },
             statuses: [],
             counts: { past_due: 7, failing_renewals: 0 },
           })
@@ -160,8 +160,8 @@ describe('Subscriptions links to the detail', () => {
       String(input).includes('/subscriptions/')
         ? json(detail)
         : json({
-            subscriptions: [row],
-            meta: { page: 1, size: 50, count: 1, scanned: 1, truncated: false },
+            data: [row],
+            meta: { total: 1, perPage: 50, currentPage: 1, lastPage: 1, firstPage: 1 },
             statuses: [],
             counts: { past_due: 0, failing_renewals: 0 },
           }),
@@ -174,7 +174,7 @@ describe('Subscriptions links to the detail', () => {
     const url = fetchMock.mock.calls
       .map((call) => String(call[0]))
       .find((u) => u.includes('/subscriptions?')) as string;
-    expect(url).toContain('customerId=cus_1');
+    expect(url).toContain('filter%5BcustomerId%5D=cus_1');
     // One customer's subscriptions open on every status, not on past-due.
     expect(url).not.toContain('status=');
   });

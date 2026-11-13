@@ -48,14 +48,9 @@ function stubApi(): void {
           : url.includes('/overview')
             ? { period: { from: '', to: '', preset: '30d' }, currency: 'BRL', metrics: [] }
             : {
-                payments: [],
-                customers: [],
-                subscriptions: [],
-                disputes: [],
-                events: [],
-                audit: [],
+                data: [],
                 counts: { past_due: 0 },
-                meta: { page: 1, size: 50, count: 0, scanned: 0, truncated: false },
+                meta: { total: 0, perPage: 50, currentPage: 1, lastPage: 1, firstPage: 1 },
               };
     return { ok: true, status: 200, statusText: 'OK', json: async () => body } as Response;
   }) as typeof globalThis.fetch;

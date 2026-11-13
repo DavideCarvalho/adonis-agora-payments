@@ -12,6 +12,11 @@ export default class PaymentsOrganizationsList extends PaymentsConsoleCommand {
     'List the organizations that own billing customers (the ids --tenant takes)';
 
   protected async handle(): Promise<void> {
+    if (this.tenant !== undefined) {
+      throw new CliError(
+        '`--tenant` narrows the other commands; this one lists the organizations.',
+      );
+    }
     const tenancy = this.tenancy();
     if (!tenancy.enabled) {
       throw new CliError('Organizations (tenancy) are off in config/payments.ts.');

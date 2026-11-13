@@ -562,3 +562,69 @@ describe('registration', () => {
     }
   });
 });
+
+describe('--tenant with organizations on', () => {
+  const TENANCY = Symbol.for('@agora/context:tenancy');
+  const globals = globalThis as Record<symbol, unknown>;
+
+  beforeEach(async () => {
+    globals[TENANCY] = {
+      version: 1,
+      tenancy: () => ({ enabled: true, kinds: ['organization'] }),
+      tenantFilter: () => ({ mode: 'system' }),
+    };
+    paymentsConfig = {};
+    await store.saveCustomer({
+      gatewayId: 'cus_1',
+      provider: 'stripe',
+      ownerType: 'organization',
+      ownerId: 'org_a',
+    });
+    await store.saveCustomer({
+      gatewayId: 'cus_2',
+      provider: 'stripe',
+      ownerType: 'organization',
+      ownerId: 'org_b',
+    });
+    await store.savePayment({
+      gatewayId: 'pi_b',
+      provider: 'stripe',
+      status: 'paid',
+      amount: 100,
+      currency: 'BRL',
+      customerId: 'cus_2',
+    });
+  });
+  afterEach(() => {
+    delete globals[TENANCY];
+  });
+
+  it('narrows reads to the organization, rows of none excluded by default', async () => {
+    const body = json((await run(PaymentsPaymentsList, ['--tenant=org_b', '--json'])).output);
+    expect((body.data as Array<{ gatewayId: string }>).map((p) => p.gatewayId)).toEqual(['pi_b']);
+  });
+
+  it("includes rows of no organization with nullRows: 'shared', as the console does", async () => {
+    paymentsConfig = { tenancy: { nullRows: 'shared' } };
+    const body = json((await run(PaymentsPaymentsList, ['--tenant=org_b', '--json'])).output);
+    expect((body.data as Array<{ gatewayId: string }>).map((p) => p.gatewayId).sort()).toEqual([
+      'pi_b',
+      'pi_pending',
+      'pix_1',
+    ]);
+  });
+
+  it('refuses a view over every organization inside one', async () => {
+    const { output, exitCode } = await run(PaymentsAuditList, ['--tenant=org_a']);
+    expect(exitCode).toBe(1);
+    expect(output).toContain('spans every organization');
+  });
+
+  it('payments:organizations:list lists them, and refuses --tenant', async () => {
+    const body = json((await run(PaymentsOrganizationsList, ['--json'])).output);
+    expect((body.data as Array<{ id: string }>).map((o) => o.id)).toEqual(['org_a', 'org_b']);
+    const refused = await run(PaymentsOrganizationsList, ['--tenant=org_a']);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.output).toContain('this one lists the organizations');
+  });
+});

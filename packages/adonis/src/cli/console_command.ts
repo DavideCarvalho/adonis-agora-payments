@@ -16,6 +16,7 @@ import {
 import { resolveConfig } from '../dashboard/define_config.js';
 import type { PaymentsApiRoute } from '../dashboard/dev_tools.js';
 import type { ApiRequest, ApiResponse } from '../dashboard/handlers.js';
+import { ownerScopeOfConsole, resolveConsoleTenantScope } from '../dashboard/tenant_scope.js';
 import type { PaymentsConfig } from '../define_config.js';
 import { formatDecimal } from '../money.js';
 import { PaymentsManager } from '../payments_manager.js';
@@ -127,13 +128,19 @@ export abstract class PaymentsConsoleCommand extends BaseCommand {
       req: { params: req.params ?? {}, query: req.query ?? {}, body: req.body },
       currency: dashboard.currency,
       actor: this.auditActor(),
+      // The console's own rule for an operator who may see every organization and picked one:
+      // that organization, plus rows of none when `nullRows: 'shared'`.
       ownerScope:
         this.tenant !== undefined
-          ? {
-              tenantOwnerTypes: tenantOwnerTypes(tenancy),
-              tenantIds: [this.tenant],
-              includeNull: false,
-            }
+          ? ownerScopeOfConsole(
+              resolveConsoleTenantScope({
+                granted: '*',
+                own: undefined,
+                selected: this.tenant,
+                nullRows: tenancy.nullRows,
+              }),
+              tenantOwnerTypes(tenancy),
+            )
           : undefined,
       actions: async (scoped) => {
         const manager = await this.manager();

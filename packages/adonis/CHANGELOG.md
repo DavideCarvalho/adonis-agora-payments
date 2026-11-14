@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.13
+
+### Patch Changes
+
+- [#242](https://github.com/DavideCarvalho/adonis-agora-payments/pull/242) [`383b4d0`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/383b4d00022de7dfc8a0e8155e20bb2d17bb51de) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Console footer: the signed-in user's role now shows when no `viewer` hook is set. The structural read of `ctx.auth.user` takes `role`, `roles` (strings, `{ name }` or authz `{ role }` rows) and `globalRoles`, plus the global roles of authkit's per-request identity on `ctx.authkit` (read structurally, 250 ms cap). One role is shown: an admin-like one first, else the first.
+
 ## 1.0.0-rc.12
 
 ### Minor Changes

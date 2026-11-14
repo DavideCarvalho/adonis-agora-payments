@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.14
+
+### Patch Changes
+
+- [#243](https://github.com/DavideCarvalho/adonis-agora-payments/pull/243) [`412ff0f`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/412ff0f78dfe386d63613390e5ffd822db44b9c3) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Console ⌘K shows its loading state: a spinner in the search box while a request is in flight, skeleton rows until the first answer, earlier hits kept but dimmed during a re-search, "Nothing found" only after an empty answer, and a quiet "didn't answer" line with Retry when the search fails. Synced with the shared console kit (DataTable `rowClassName`/`subRow`, ⌘K console-local `commands`, collapsible nav sections).
+
 ## 1.0.0-rc.13
 
 ### Patch Changes

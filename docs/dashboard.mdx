@@ -544,6 +544,15 @@ shield is installed. `{ href: '/bye' }` renders a link instead. Without `signOut
 the sign-out that authkit's account console registers. `false` removes the button. Only
 same-origin paths are accepted.
 
+### When authkit runs on another server
+
+The console needs nothing from authkit-server in its own process. On an app that signs in against a
+remote authkit with `@adonis-agora/authkit-client`, gate it with
+`authorize: authkitDashboardAuthorize()` (from `@adonis-agora/authkit-client`) and leave `signOut`
+unset: the footer uses the `POST /auth/logout` that `registerOidcClient` announces. The console runs
+in the app that owns the payments database. For the billing pages in the account console, see
+[IdP in another app](/docs/payments/account-console#idp-in-another-app).
+
 ### Content Security Policy
 
 The console works under a strict CSP. Everything it needs is same-origin: the bundle and the

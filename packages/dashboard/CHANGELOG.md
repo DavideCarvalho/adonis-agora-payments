@@ -1,5 +1,11 @@
 # @adonis-agora/payments-dashboard
 
+## 1.0.0-rc.9
+
+### Patch Changes
+
+- [#255](https://github.com/DavideCarvalho/adonis-agora-payments/pull/255) [`a728e0b`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/a728e0ba00e8b4f5d7959ef0b1f08f7b2d742eaa) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - The console kit gains charts on TanStack Charts (`agora-kit/charts`: TimeSeriesChart, BarChart, Sparkline, DonutChart) with a themed tooltip on hover and keyboard focus. No chart in this console uses it yet; nothing changes on screen and its JS bundle stays the same (the chart styles add a few lines of CSS).
+
 ## 1.0.0-rc.8
 
 ### Patch Changes

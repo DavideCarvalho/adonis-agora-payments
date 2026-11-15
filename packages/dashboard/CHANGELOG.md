@@ -1,5 +1,11 @@
 # @adonis-agora/payments-dashboard
 
+## 1.0.0-rc.10
+
+### Patch Changes
+
+- [#256](https://github.com/DavideCarvalho/adonis-agora-payments/pull/256) [`4c8a8ab`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/4c8a8ab232c12e3e94853058eb6c3be617375a09) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - ⌘K now navigates: it lists every page of the console's sidebar and every other Agora console you can open ("Go to Workflows", found by "durable" too), matched case- and accent-insensitively, before the console's own commands and the cross-console search hits. ⌘K opens even without a search endpoint, and shows the pages and consoles before anything is typed.
+
 ## 1.0.0-rc.9
 
 ### Patch Changes

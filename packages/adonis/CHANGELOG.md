@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.17
+
+### Patch Changes
+
+- [#257](https://github.com/DavideCarvalho/adonis-agora-payments/pull/257) [`9aa3e15`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/9aa3e15d07306c08cb328fb59136b915721593d0) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Ships the current console: chart tooltips (TanStack Charts) and ⌘K navigation to pages and consoles. The console is bundled into this package, so the dashboard-only release did not reach apps.
+
 ## 1.0.0-rc.16
 
 ### Patch Changes

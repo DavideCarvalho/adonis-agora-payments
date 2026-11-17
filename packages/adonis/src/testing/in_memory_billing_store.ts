@@ -299,29 +299,27 @@ export class InMemoryBillingStore
    * Newest first: `createdAt` descending, ties broken by insertion order descending.
    *
    * The tie-break matters — several rows written inside the same millisecond is the normal
-   * case in a test, and `sort` alone would leave them in whatever order the map yields.
-   * `Array.prototype.sort` is stable, so reversing first and sorting after gives
-   * last-inserted-first within a tie. Mirrors the Lucid store's `order by created_at desc`.
+   * case in a test, and `sort` alone would leave them in whatever order the map yields. Ties
+   * break on `id`, newest first, on both the offset and the keyset path, like the Lucid store's
+   * `order by created_at desc, id desc`.
    */
   #page<Row extends { createdAt: Date; id: string }>(
     rows: Iterable<Row>,
     query: BillingListQuery,
   ): Row[] {
     const size = clampSize(query.size);
+    // Both paths order `(createdAt, id)` newest first — the Lucid store's order on both paths.
+    const newer = (a: { createdAt: Date; id: string }, b: { createdAt: Date; id: string }) =>
+      b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
     if (query.keyset !== undefined) {
-      // Keyset paging orders `(createdAt, id)` newest first, the Lucid store's order, and reads one
-      // row past the page (see `BillingListQuery.keyset`).
+      // Keyset paging reads one row past the page (see `BillingListQuery.keyset`).
       const after = query.keyset.after;
-      const newer = (a: { createdAt: Date; id: string }, b: { createdAt: Date; id: string }) =>
-        b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
       return [...rows]
         .filter((row) => after === undefined || newer(row, { ...after }) > 0)
         .sort(newer)
         .slice(0, size + 1);
     }
-    const sorted = [...rows]
-      .reverse()
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    const sorted = [...rows].sort(newer);
     const offset = listOffset(query.page, query.size);
     return sorted.slice(offset, offset + size);
   }

@@ -69,6 +69,12 @@ export async function keysetContract(store: BillingStore): Promise<void> {
   const whole = await store.listPayments({ provider, size: 50, keyset: {} });
   expect(whole.map((row) => row.gatewayId)).toEqual(ids);
 
+  // The offset read orders ties the same way: page by page it walks the keyset order.
+  const byOffset = (
+    await Promise.all([1, 2, 3, 4].map((page) => store.listPayments({ provider, size: 2, page })))
+  ).flat();
+  expect(byOffset.map((row) => row.gatewayId)).toEqual(ids);
+
   // A filter holds on every page: the four `paid` ones.
   const paid = await walk((after) =>
     store.listPayments({ provider, status: 'paid', size: 2, keyset: keyset(after) }),

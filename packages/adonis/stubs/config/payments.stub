@@ -6,7 +6,7 @@ import { defineConfig, payments, invoice } from '@adonis-agora/payments'
 
 export default defineConfig({
   /**
-   * Default payment provider — a key of `providers`.
+   * Default payment provider — a key of \`providers\`.
    */
   default: 'stripe',
 
@@ -41,7 +41,7 @@ export default defineConfig({
     //   token: env.get('PAGBANK_TOKEN'),
     //   // Webhooks are verified with the SAME token (x-authenticity-token); there is no
     //   // separate secret. Only turn verification off for the sandbox, never in production.
-    //   notificationUrls: [`${env.get('APP_URL')}/payments/webhook/pagbank`],
+    //   notificationUrls: [\`\${env.get('APP_URL')}/payments/webhook/pagbank\`],
     // }),
     // efi: payments.efi({
     //   clientId: env.get('EFI_CLIENT_ID'),
@@ -53,8 +53,8 @@ export default defineConfig({
   },
 
   /**
-   * Route a payment method to a provider (a key of `providers`). The charge call then
-   * resolves the driver per method: `payments.driver('pix').charge(...)`.
+   * Route a payment method to a provider (a key of \`providers\`). The charge call then
+   * resolves the driver per method: \`payments.driver('pix').charge(...)\`.
    */
   methods: {
     pix: 'stripe',
@@ -66,7 +66,7 @@ export default defineConfig({
 
   /**
    * Invoice (NFe/NFSe) emission. Optional — only needed when you want to emit invoices
-   * for charges (e.g. `charge({ ..., invoice: true })`).
+   * for charges (e.g. \`charge({ ..., invoice: true })\`).
    */
   invoice: {
     default: 'focus',
@@ -99,9 +99,9 @@ export default defineConfig({
     dispatcher: 'auto',
     /**
      * Business webhook handlers run inside the lib-mounted route (errors mark the event
-     * failed + retry). Accepts a DI service class (the lib calls its `.handle`) or a
-     * plain function. Alternative: drop files in `app/payment_handlers/` (durable-style
-     * discovery, see `@adonis-agora/payments/hooks/webhook_handlers`). Recommended: the
+     * failed + retry). Accepts a DI service class (the lib calls its \`.handle\`) or a
+     * plain function. Alternative: drop files in \`app/payment_handlers/\` (durable-style
+     * discovery, see \`@adonis-agora/payments/hooks/webhook_handlers\`). Recommended: the
      * handler only dispatches to a durable workflow / queue — never heavy work inline.
      *
      * handlers: {

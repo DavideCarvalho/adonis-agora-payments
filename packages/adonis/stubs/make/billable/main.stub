@@ -10,17 +10,17 @@ import { column } from '@adonisjs/lucid/orm'
 import { withBillable } from '@adonis-agora/payments'
 
 /**
- * {{ billableName }} — the billable model. Compose `withBillable()` to add the billing
+ * {{ billableName }} — the billable model. Compose \`withBillable()\` to add the billing
  * customer columns (billingCustomerId, billingProvider) and use the payments service
  * to charge, subscribe and manage payment methods.
  *
- * ```ts
+ * \`\`\`ts
  * const payments = await app.container.make(PaymentsManager)
  * const driver = payments.driver('pix')
  * const customer = await driver.createCustomer({ name: user.name, email: user.email })
  * user.billingCustomerId = customer.id
  * await user.save()
- * ```
+ * \`\`\`
  */
 export default class {{ billableName }} extends compose(BaseModel, withBillable()) {
   @column({ isPrimary: true })

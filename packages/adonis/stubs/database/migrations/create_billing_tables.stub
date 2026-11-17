@@ -9,8 +9,8 @@ import { createBillingTables, dropBillingTables } from '@adonis-agora/payments'
  * The billing tables, for an app that would rather run DDL explicitly than have the library
  * do it.
  *
- * **You may not need this file.** `@adonis-agora/payments` creates its own tables on first
- * use, the same way `@adonis-agora/durable` and `@adonis-agora/authz` do — that is the
+ * **You may not need this file.** \`@adonis-agora/payments\` creates its own tables on first
+ * use, the same way \`@adonis-agora/durable\` and \`@adonis-agora/authz\` do — that is the
  * ecosystem convention, and it is on by default. This migration exists for the case where
  * that is not wanted: a shared database you do not own, a team that reviews every DDL, a
  * deploy that runs migrations as a separate step.
@@ -23,20 +23,20 @@ import { createBillingTables, dropBillingTables } from '@adonis-agora/payments'
  * Leaving both on is harmless — the DDL is idempotent, so whichever runs second does
  * nothing — but "who creates this table" should have one answer.
  *
- * Both paths call the SAME `createBillingTables`, which is the point: a schema defined twice
+ * Both paths call the SAME \`createBillingTables\`, which is the point: a schema defined twice
  * is a schema that drifts, and this package spent a release finding the consequences of two
  * things that were supposed to agree and did not.
  *
- * `this.defer` is how a Lucid migration hands over the query client.
+ * \`this.defer\` is how a Lucid migration hands over the query client.
  *
- * `createBillingTables` is idempotent in both directions: it creates what is missing AND
- * applies the guarded `ALTER`s for columns the library added after a table shipped. So
+ * \`createBillingTables\` is idempotent in both directions: it creates what is missing AND
+ * applies the guarded \`ALTER\`s for columns the library added after a table shipped. So
  * re-running this migration after upgrading the package carries those columns — which is
  * why running it twice is safe and why there is no second file.
  *
- * `billing.schema` is read from config/payments.ts, so the tables land where the store reads
- * them (and the schema is created when missing). With `billing.connection` set, run it on that
- * connection: `node ace migration:run --connection=<name>`.
+ * \`billing.schema\` is read from config/payments.ts, so the tables land where the store reads
+ * them (and the schema is created when missing). With \`billing.connection\` set, run it on that
+ * connection: \`node ace migration:run --connection=<name>\`.
  */
 const billingSchema = () => app.config.get<string | undefined>('payments.billing.schema', undefined)
 

@@ -15,7 +15,7 @@ import type { BaseSchema } from '@adonisjs/lucid/schema';
  * explicitly — both call the same `createBillingTables`, which is what this suite exercises
  * end to end against a real Postgres.
  */
-const STUBS = ['create_billing_tables'].map((name) => ({
+const STUBS = ['create_billing_tables', 'add_billing_list_indexes'].map((name) => ({
   name,
   path: fileURLToPath(new URL(`../../stubs/database/migrations/${name}.stub`, import.meta.url)),
 }));
@@ -46,9 +46,11 @@ async function loadMigration(schemaName: string, stub: string): Promise<typeof B
   // which is what a consumer app writes and what cannot resolve from inside this package.
   // Everything else — the DDL call, the `defer`, the `down()` — is the published file
   // verbatim, so a change to the stub still fails this suite rather than sliding past it.
+  // The body is a template: `\`` and `\${` are how it spells a literal backtick and `${`.
   const source = raw
     .slice(header + 3)
     .trimStart()
+    .replace(/\\([`$])/g, '$1')
     .replace(/from '@adonis-agora\/payments'/g, "from '../../../src/index.js'");
   await writeFile(generated, source, 'utf-8');
   const mod = (await import(generated)) as { default: typeof BaseSchema };

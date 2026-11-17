@@ -1,4 +1,4 @@
-import { createParser } from 'nuqs';
+import { createParser, parseAsArrayOf, parseAsString } from 'nuqs';
 
 /**
  * The console's view state in the URL (`#/<screen>?<query>`, through the kit's `NuqsHashAdapter`):
@@ -20,8 +20,39 @@ export const parseAsIntegerAtLeast = (min: number) =>
     serialize: (value: number) => String(value),
   });
 
-/** `?page=<n>` (1 or more); page 1 has no param. */
+/** `?page=<n>` (1 or more); page 1 has no param. The disputes work list pages this way. */
 export const pageParam = parseAsIntegerAtLeast(1).withDefault(1);
+
+/**
+ * `?after=<c1>,<c2>`: the `after` cursor of every page walked so far (page N carries N-1), so a
+ * shared link opens on the same page and back/forward step through pages. Page 1 has no param.
+ */
+export const afterParam = parseAsArrayOf(parseAsString).withDefault([]);
+
+/** What a list screen needs from its {@link afterParam}: the cursor to send, and the moves. */
+export interface CursorPaging {
+  /** 1-based: how many pages deep the operator walked. */
+  page: number;
+  /** The `after` to send; absent on page 1. */
+  after: string | undefined;
+  next: (nextCursor: string | null) => void;
+  previous: () => void;
+}
+
+/** {@link CursorPaging} over the screen's `after` param and its setter. */
+export function cursorPaging(
+  cursors: readonly string[],
+  set: (next: string[] | null) => void,
+): CursorPaging {
+  return {
+    page: cursors.length + 1,
+    after: cursors.at(-1),
+    next: (nextCursor) => {
+      if (nextCursor) set([...cursors, nextCursor]);
+    },
+    previous: () => set(cursors.length <= 1 ? null : cursors.slice(0, -1)),
+  };
+}
 
 /** An optional pick (`?provider=asaas`); absent or empty (`?provider=`) = every value. */
 export const optionalParam = createParser({

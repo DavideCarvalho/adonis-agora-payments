@@ -6,7 +6,7 @@ import { PageHeader } from '../agora-kit/blocks/page-header';
 import { PageBody } from '../agora-kit/shell/app-shell';
 import { Button } from '../agora-kit/ui/button';
 import type { DisputeRow } from '../client/payments-client';
-import { displayCurrency, paymentsClient } from '../client/payments-client';
+import { displayCurrency, isCursorMeta, paymentsClient } from '../client/payments-client';
 import {
   DEFAULT_DUE_WITHIN_HOURS,
   type DeadlineTone,
@@ -28,6 +28,8 @@ import { Badge, Qualifier, StatusBadge } from './ui/badge';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';
 import {
+  afterParam,
+  cursorPaging,
   optionalParam,
   pageParam,
   parseAsIntegerAtLeast,
@@ -114,7 +116,8 @@ function ClosingWindows() {
     queryFn: () => paymentsClient.disputes({ dueWithin: hours, size: PAGE_SIZE, page }),
   });
 
-  const total = query.data?.meta.total;
+  const meta = query.data?.meta;
+  const total = meta !== undefined && !isCursorMeta(meta) ? meta.total : undefined;
 
   return (
     <ListPanel
@@ -187,22 +190,22 @@ const WORK_LIST_COLUMNS: Column<DisputeRow>[] = [
 function DisputeLog() {
   // `?status=lost&provider=asaas&page=2`; the status is also a health check's seed.
   const [view, setView] = useQueryStates(
-    { status: optionalParam, provider: optionalParam, page: pageParam },
+    { status: optionalParam, provider: optionalParam, after: afterParam },
     { history: 'push' },
   );
   const status = readStatus(view.status, undefined);
   const provider = view.provider ?? undefined;
-  const page = view.page;
-  const setPage = (next: number) => void setView({ page: next });
+  const paging = cursorPaging(view.after, (next) => void setView({ after: next }));
 
   const query = useQuery({
-    queryKey: ['disputes', 'log', status, provider, page],
-    queryFn: () => paymentsClient.disputes({ status, provider, size: PAGE_SIZE, page }),
+    queryKey: ['disputes', 'log', status, provider, paging.after],
+    queryFn: () =>
+      paymentsClient.disputes({ status, provider, size: PAGE_SIZE, after: paging.after }),
   });
 
   const [resolving, setResolving] = useState<DisputeRow | null>(null);
   const refilter = (change: Partial<{ status: string | null; provider: string | null }>) =>
-    void setView({ ...change, page: null });
+    void setView({ ...change, after: null });
 
   const columns: Column<DisputeRow>[] = [
     { id: 'status', header: 'Status', cell: (row) => <StatusCell row={row} /> },
@@ -276,7 +279,7 @@ function DisputeLog() {
       }
       query={query}
       rowKey={(row) => row.id}
-      onPage={setPage}
+      cursor={paging}
       emptyIcon={<ShieldIcon />}
       emptyTitle="No disputes"
       emptyDescription={logEmptyMessage(status, provider)}

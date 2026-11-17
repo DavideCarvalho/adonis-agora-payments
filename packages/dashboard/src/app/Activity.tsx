@@ -10,7 +10,7 @@ import { formatCents, formatCount, formatWhen } from './money';
 import { ListPanel, Mono } from './shell';
 import { Badge } from './ui/badge';
 import { Segmented } from './ui/segmented';
-import { optionalParam, pageParam, readStatus, writeStatus } from './url-state';
+import { afterParam, cursorPaging, optionalParam, readStatus, writeStatus } from './url-state';
 
 const PAGE_SIZE = 50;
 
@@ -48,17 +48,16 @@ const ACTION_LABEL: Record<string, string> = {
  * The log's view, in the hash's query (`#/activity?status=refund.issued&page=2`). The action rides
  * in `status`, the param a health check seeds this screen with.
  */
-export const activityParams = { status: optionalParam, page: pageParam };
+export const activityParams = { status: optionalParam, after: afterParam };
 
 export function Activity() {
   const [view, setView] = useQueryStates(activityParams, { history: 'push' });
   const action = readStatus(view.status, undefined);
-  const page = view.page;
-  const setPage = (next: number) => void setView({ page: next });
+  const paging = cursorPaging(view.after, (next) => void setView({ after: next }));
 
   const query = useQuery({
-    queryKey: ['audit', action, page],
-    queryFn: () => paymentsClient.audit({ action, size: PAGE_SIZE, page }),
+    queryKey: ['audit', action, paging.after],
+    queryFn: () => paymentsClient.audit({ action, size: PAGE_SIZE, after: paging.after }),
   });
 
   return (
@@ -72,17 +71,14 @@ export function Activity() {
           aria-label="Action"
           options={ACTION_OPTIONS}
           value={action}
-          onChange={(value) => void setView({ status: writeStatus(value, undefined), page: null })}
+          onChange={(value) => void setView({ status: writeStatus(value, undefined), after: null })}
         />
       </Toolbar>
       <ListPanel
         title="Audit log"
-        description={
-          query.data !== undefined ? `${formatCount(query.data.meta.total)} entries` : undefined
-        }
         query={query}
         rowKey={(row) => row.id}
-        onPage={setPage}
+        cursor={paging}
         emptyIcon={<LogIcon />}
         emptyTitle="Nothing here"
         emptyDescription={emptyMessage(action)}

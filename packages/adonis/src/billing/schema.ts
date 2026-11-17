@@ -634,6 +634,70 @@ export async function createBillingTables(
 }
 
 /**
+ * The console lists' order indexes: newest-first pages (`created_at, id`) on the tables
+ * {@link createBillingTables} indexes only by filter, plus disputes by status. Not part of
+ * {@link createBillingTables}, which runs at boot: on a table that already holds years of rows an
+ * index build is long, so these ship as their own opt-in migration.
+ */
+export const BILLING_LIST_INDEXES: ReadonlyArray<
+  readonly [name: string, table: (typeof BILLING_TABLES)[number], columns: string]
+> = [
+  ['billing_audit_events_created_id_idx', 'billing_audit_events', 'created_at, id'],
+  ['billing_customers_created_id_idx', 'billing_customers', 'created_at, id'],
+  ['billing_disputes_created_id_idx', 'billing_disputes', 'created_at, id'],
+  ['billing_disputes_status_created_idx', 'billing_disputes', 'status, created_at'],
+  ['billing_subscriptions_created_id_idx', 'billing_subscriptions', 'created_at, id'],
+];
+
+/**
+ * Create {@link BILLING_LIST_INDEXES}, the ones missing — what the opt-in
+ * `add_billing_list_indexes` migration runs, once, on an existing install. On Postgres every index
+ * is built `CONCURRENTLY`, so writes go on while it builds (run it outside a transaction).
+ */
+export async function createBillingListIndexes(
+  db: LucidDatabase,
+  options: BillingSchemaOptions = {},
+): Promise<void> {
+  const dialect = detectDialect(db);
+  const schema = options.schema;
+  if (schema !== undefined) {
+    assertBillingSchemaName(schema);
+    assertSchemaDialect(schema, dialect);
+  }
+  for (const [name, table, columns] of BILLING_LIST_INDEXES) {
+    const ref = billingTableRef(dialect, schema, table);
+    if (isPostgres(dialect)) {
+      await db.rawQuery(`CREATE INDEX CONCURRENTLY IF NOT EXISTS ${name} ON ${ref} (${columns})`);
+    } else {
+      await createIndexOn(db, dialect, name, ref, columns);
+    }
+  }
+}
+
+/** Drop {@link BILLING_LIST_INDEXES} (the opt-in migration's `down()`). */
+export async function dropBillingListIndexes(
+  db: LucidDatabase,
+  options: BillingSchemaOptions = {},
+): Promise<void> {
+  const dialect = detectDialect(db);
+  for (const [name, table] of BILLING_LIST_INDEXES) {
+    if (isPostgres(dialect)) {
+      await db.rawQuery(
+        `DROP INDEX CONCURRENTLY IF EXISTS ${billingTableRef(dialect, options.schema, name)}`,
+      );
+    } else {
+      await dropIndexOn(
+        db,
+        dialect,
+        options.schema,
+        name,
+        billingTableRef(dialect, options.schema, table),
+      );
+    }
+  }
+}
+
+/**
  * Callbacks that forget a store's memoized "the schema exists" answer.
  *
  * A `LucidBillingStore` creates the tables once and caches the promise, so after

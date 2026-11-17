@@ -80,6 +80,7 @@ await store.listCustomersByGatewayIds(['cus_1', 'cus_2']) // a page of owners in
 await store.findPaymentByGatewayId(gatewayId)          // one payment, by the GATEWAY's id
 await store.findPaymentByExternalReference('order-1042') // ...or by YOURS
 await store.listPayments({ status: 'failed', size: 20 })
+await store.listPayments({ status: 'failed', size: 20, keyset: { after } }) // past `after`, size + 1 rows
 await store.listPayments({ externalReference: 'order-1042' }) // exact, never a prefix
 await store.listPayments({ gatewayId: 'pay_1abc' })
 await store.listPayments({ customerId: 'cus_123' })
@@ -109,6 +110,11 @@ await store.netRevenue({ from, to })                    // cents, NET    — min
 await store.countActiveSubscriptions()
 await store.usageReport({ subscriptionId, from, to })
 ```
+
+Every `list*` read takes `page` and `size`, or `keyset: { after }` to page by position: rows ordered
+`(createdAt, id)` newest first and strictly past `after` (the `createdAt` and `id` of the last row
+you have), `size + 1` of them so you know whether another page follows. A keyset read costs the
+same at any depth; an offset read gets slower the deeper the page.
 
 The three payment filters — `externalReference`, `gatewayId`, `customerId` — are **exact**, never
 prefixes or substrings. They are join keys, and a substring match letting `order-4` return

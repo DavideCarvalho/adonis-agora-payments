@@ -1,0 +1,32 @@
+{{{
+  exports({ to: app.migrationsPath(`${new Date().getTime() + 1}_add_billing_list_indexes.ts`) })
+}}}
+import app from '@adonisjs/core/services/app'
+import { BaseSchema } from '@adonisjs/lucid/schema'
+import { createBillingListIndexes, dropBillingListIndexes } from '@adonis-agora/payments'
+
+/**
+ * The console lists' indexes: Activity, Customers, Subscriptions and the Disputes log read
+ * their next page straight from an index on \`(created_at, id)\` instead of sorting the table.
+ * Run it once on an existing install; it creates only the indexes that are missing.
+ *
+ * On Postgres every index is built CONCURRENTLY, so writes go on while it builds. That cannot
+ * run inside a transaction, hence \`disableTransactions\`.
+ */
+const billingSchema = () => app.config.get<string | undefined>('payments.billing.schema', undefined)
+
+export default class extends BaseSchema {
+  static disableTransactions = true
+
+  async up() {
+    this.defer(async (db) => {
+      await createBillingListIndexes(db, { schema: billingSchema() })
+    })
+  }
+
+  async down() {
+    this.defer(async (db) => {
+      await dropBillingListIndexes(db, { schema: billingSchema() })
+    })
+  }
+}

@@ -1,5 +1,6 @@
 import { expect } from 'vitest';
 import type { LucidBillingStore } from '../../src/billing/lucid_billing_store.js';
+import { keysetContract } from '../keyset_contract.js';
 
 /**
  * One pass over every kind of read and write the store does: upserts, finds, lists, counts,
@@ -110,4 +111,7 @@ export async function exerciseStore(store: LucidBillingStore): Promise<void> {
   expect(await store.usageReport({ subscriptionId: 'sub_schema' })).toEqual([
     { meter: 'api', quantity: 3 },
   ]);
+
+  // Keyset paging: the seek predicate binds a timestamp, which each dialect stores its own way.
+  await keysetContract(store);
 }

@@ -21,10 +21,13 @@ import {
   CustomerFilter,
   DISPUTE_DEFAULT_DUE_WITHIN_HOURS,
   DisputeFilter,
+  keysetPage,
+  type ListPaging,
   PaymentFilter,
   readFilters,
-  readPage,
+  readPaging,
   SubscriptionFilter,
+  storePaging,
   WebhookEventFilter,
 } from './list_filters.js';
 import { resolvePeriod } from './period.js';
@@ -218,12 +221,12 @@ async function readList<Q extends object>(
   Filter: Parameters<typeof readFilters<Q>>[1],
   order: string | ((filters: Partial<Q>) => string) = NEWEST_FIRST,
 ): Promise<
-  { ok: true; filters: Partial<Q>; page: number; size: number } | { ok: false; error: ApiResponse }
+  { ok: true; filters: Partial<Q>; paging: ListPaging } | { ok: false; error: ApiResponse }
 > {
   try {
     const filters = await readFilters(req.query, Filter);
     assertSort(req.query.sort, typeof order === 'function' ? order(filters) : order);
-    return { ok: true, filters, ...readPage(req.query) };
+    return { ok: true, filters, paging: readPaging(req.query) };
   } catch (error) {
     if (error instanceof InvalidColumnFilterError) {
       return { ok: false, error: badRequest(error.message) };
@@ -244,6 +247,21 @@ function listPage<T>(
     ...extra,
   };
   return ok(body);
+}
+
+/**
+ * A list response in the request's paging style: the cursor envelope over a keyset read (no
+ * total), or the offset envelope with the exact total.
+ */
+function listResponse<R extends { id: string; createdAt: Date | null }, T>(
+  paging: ListPaging,
+  rows: R[],
+  total: number | undefined,
+  toJson: (row: R) => T,
+  extra: Record<string, unknown> = {},
+): ApiResponse {
+  if (paging.cursor) return ok({ ...keysetPage(rows, paging, toJson), ...extra });
+  return listPage(rows.map(toJson), total ?? 0, paging, extra);
 }
 
 /**
@@ -350,12 +368,14 @@ export async function disputes(deps: Deps, req: ApiRequest): Promise<ApiResponse
   );
   if (!list.ok) return list.error;
   const { dueWithin, ...filters } = list.filters;
-  const paging = { page: list.page, size: list.size };
+  const { paging } = list;
 
   if (dueWithin !== undefined) {
     if (filters.status !== undefined) {
       return badRequest('dueWithin lists open disputes only; drop the status filter.');
     }
+    // The work list is ordered by deadline and bounded by it: it pages by `page`/`size`.
+    if (paging.cursor) return badRequest('dueWithin pages with page and size.');
     const now = deps.now?.();
     const deadline = {
       withinHours: dueWithin,
@@ -373,10 +393,10 @@ export async function disputes(deps: Deps, req: ApiRequest): Promise<ApiResponse
   }
 
   const [rows, total] = await Promise.all([
-    deps.store.listDisputes({ ...filters, ...paging }),
-    deps.store.countDisputes(filters),
+    deps.store.listDisputes({ ...filters, ...storePaging(paging) }),
+    paging.cursor ? undefined : deps.store.countDisputes(filters),
   ]);
-  return listPage(rows.map(disputeJson), total, paging, { statuses: DISPUTE_STATUSES });
+  return listResponse(paging, rows, total, disputeJson, { statuses: DISPUTE_STATUSES });
 }
 
 /** The app-side owner of a payment, resolved through `billing_customers`. */
@@ -473,19 +493,18 @@ async function ownersFor(
 export async function payments(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
   const list = await readList(req, PaymentFilter);
   if (!list.ok) return list.error;
-  const { filters } = list;
-  const paging = { page: list.page, size: list.size };
+  const { filters, paging } = list;
   const [rows, total] = await Promise.all([
-    deps.store.listPayments({ ...filters, ...paging }),
-    deps.store.countPayments(filters),
+    deps.store.listPayments({ ...filters, ...storePaging(paging) }),
+    paging.cursor ? undefined : deps.store.countPayments(filters),
   ]);
   const owners = await ownersFor(deps.store, rows);
-  return listPage(
-    rows.map((row) =>
-      paymentJson(row, (row.customerId && owners.get(row.customerId)) || null, deps.capabilities),
-    ),
-    total,
+  return listResponse(
     paging,
+    rows,
+    total,
+    (row) =>
+      paymentJson(row, (row.customerId && owners.get(row.customerId)) || null, deps.capabilities),
     {
       statuses: PAYMENT_STATUSES,
       currency: deps.currency,
@@ -579,29 +598,31 @@ const PAYMENT_TIMELINE_LIMIT = 50;
 export async function subscriptions(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
   const list = await readList(req, SubscriptionFilter);
   if (!list.ok) return list.error;
-  const { filters } = list;
-  const paging = { page: list.page, size: list.size };
+  const { filters, paging } = list;
   // The page, its total and the two whole-table counts are independent reads, so they go out
-  // together instead of as four sequential round trips.
+  // together instead of as four sequential round trips. A cursor page has no total, and only the
+  // first one carries the two counts (they do not change as the operator pages down).
+  const firstPage = !paging.cursor || paging.after === undefined;
   const [rows, total, pastDue, failingRenewals] = await Promise.all([
-    deps.store.listSubscriptions({ ...filters, ...paging }),
-    deps.store.countSubscriptions(filters),
+    deps.store.listSubscriptions({ ...filters, ...storePaging(paging) }),
+    paging.cursor ? undefined : deps.store.countSubscriptions(filters),
     // The one number that makes the filter tabs worth reading: how many are past due IN TOTAL,
     // whatever the filter. It is the figure that decides the operator's morning.
-    deps.store.countSubscriptions({ status: SUBSCRIPTION_DEFAULT_STATUS }),
+    firstPage ? deps.store.countSubscriptions({ status: SUBSCRIPTION_DEFAULT_STATUS }) : undefined,
     // How many are failing renewal right now, in total — same reason as `past_due`.
-    deps.store.countSubscriptions({
-      status: 'active',
-      managed: true,
-      minRenewalFailures: 1,
-    }),
+    firstPage
+      ? deps.store.countSubscriptions({
+          status: 'active',
+          managed: true,
+          minRenewalFailures: 1,
+        })
+      : undefined,
   ]);
-  return listPage(rows.map(subscriptionJson), total, paging, {
+  return listResponse(paging, rows, total, subscriptionJson, {
     statuses: SUBSCRIPTION_STATUSES,
-    counts: {
-      past_due: pastDue,
-      failing_renewals: failingRenewals,
-    },
+    ...(pastDue !== undefined && failingRenewals !== undefined
+      ? { counts: { past_due: pastDue, failing_renewals: failingRenewals } }
+      : {}),
   });
 }
 
@@ -755,13 +776,12 @@ export async function webhookEvents(deps: Deps, req: ApiRequest): Promise<ApiRes
   // ledger gets read for the moment one specific charge is in doubt.
   const list = await readList(req, WebhookEventFilter);
   if (!list.ok) return list.error;
-  const { filters } = list;
-  const paging = { page: list.page, size: list.size };
+  const { filters, paging } = list;
   const [rows, total] = await Promise.all([
-    deps.store.listWebhookEvents({ ...filters, ...paging }),
-    deps.store.countWebhookEvents(filters),
+    deps.store.listWebhookEvents({ ...filters, ...storePaging(paging) }),
+    paging.cursor ? undefined : deps.store.countWebhookEvents(filters),
   ]);
-  return listPage(rows.map(webhookEventJson), total, paging, {
+  return listResponse(paging, rows, total, webhookEventJson, {
     statuses: WEBHOOK_EVENT_STATUSES,
   });
 }
@@ -839,13 +859,12 @@ function customerJson(row: CustomerListItem) {
 export async function customers(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
   const list = await readList(req, CustomerFilter);
   if (!list.ok) return list.error;
-  const { filters } = list;
-  const paging = { page: list.page, size: list.size };
+  const { filters, paging } = list;
   const [rows, total] = await Promise.all([
-    deps.store.listCustomers({ ...filters, ...paging }),
-    deps.store.countCustomers(filters),
+    deps.store.listCustomers({ ...filters, ...storePaging(paging) }),
+    paging.cursor ? undefined : deps.store.countCustomers(filters),
   ]);
-  return listPage(rows.map(customerJson), total, paging);
+  return listResponse(paging, rows, total, customerJson);
 }
 
 /** The audit actions the filter offers. A free string in the column, so this is a UI convenience
@@ -879,13 +898,12 @@ export const AUDIT_ACTION_FILTERS = [
 export async function auditEvents(deps: Deps, req: ApiRequest): Promise<ApiResponse> {
   const list = await readList(req, AuditFilter);
   if (!list.ok) return list.error;
-  const { filters } = list;
-  const paging = { page: list.page, size: list.size };
+  const { filters, paging } = list;
   const [rows, total] = await Promise.all([
-    deps.store.listAuditEvents({ ...filters, ...paging }),
-    deps.store.countAuditEvents(filters),
+    deps.store.listAuditEvents({ ...filters, ...storePaging(paging) }),
+    paging.cursor ? undefined : deps.store.countAuditEvents(filters),
   ]);
-  return listPage(rows.map(auditJson), total, paging, { actions: AUDIT_ACTION_FILTERS });
+  return listResponse(paging, rows, total, auditJson, { actions: AUDIT_ACTION_FILTERS });
 }
 
 /**

@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useQueryStates } from 'nuqs';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Column } from '../agora-kit/blocks/data-table';
 import { PageHeader, Toolbar } from '../agora-kit/blocks/page-header';
 import { PageBody } from '../agora-kit/shell/app-shell';
@@ -81,6 +81,8 @@ export function PaymentsList({
    * choose the right field first is how a lookup becomes a thing nobody uses.
    */
   const [lookup, setLookup] = useState(view.find ?? '');
+  // The box follows the URL (back/forward, a pasted link): typing edits the box, Enter commits it.
+  useEffect(() => setLookup(view.find ?? ''), [view.find]);
   const submitted = view.find ?? '';
 
   const term = submitted.trim() === '' ? undefined : submitted.trim();
@@ -126,7 +128,7 @@ export function PaymentsList({
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            refilter({ find: lookup.trim() === '' ? null : lookup });
+            refilter({ find: lookup.trim() === '' ? null : lookup.trim() });
           }}
         >
           <FieldLabel label="Find">

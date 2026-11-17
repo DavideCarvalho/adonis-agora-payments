@@ -1,4 +1,4 @@
-import { parseAsInteger, parseAsString } from 'nuqs';
+import { createParser } from 'nuqs';
 
 /**
  * The console's view state in the URL (`#/<screen>?<query>`, through the kit's `NuqsHashAdapter`):
@@ -7,11 +7,27 @@ import { parseAsInteger, parseAsString } from 'nuqs';
  * so the screens write with `history: 'push'`: back steps through filters and pages.
  */
 
-/** `?page=<n>`; page 1 has no param. */
-export const pageParam = parseAsInteger.withDefault(1);
+/**
+ * A whole number at least `min`; anything else in a hand-edited link (`?page=0`, `?page=-3`,
+ * `?page=x`) reads as absent, so the default applies instead of a nonsensical request to the API.
+ */
+export const parseAsIntegerAtLeast = (min: number) =>
+  createParser({
+    parse: (raw) => {
+      const value = Number(raw);
+      return Number.isInteger(value) && value >= min ? value : null;
+    },
+    serialize: (value: number) => String(value),
+  });
 
-/** An optional pick (`?provider=asaas`); absent = every value. */
-export const optionalParam = parseAsString;
+/** `?page=<n>` (1 or more); page 1 has no param. */
+export const pageParam = parseAsIntegerAtLeast(1).withDefault(1);
+
+/** An optional pick (`?provider=asaas`); absent or empty (`?provider=`) = every value. */
+export const optionalParam = createParser({
+  parse: (raw) => (raw.trim() === '' ? null : raw),
+  serialize: (value: string) => value,
+});
 
 /**
  * How "every status" is spelled on a screen whose default is ONE status (Webhook events opens on

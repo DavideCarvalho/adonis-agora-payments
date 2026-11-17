@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { parseAsInteger, useQueryStates } from 'nuqs';
+import { useQueryStates } from 'nuqs';
 import { useState } from 'react';
 import type { Column } from '../agora-kit/blocks/data-table';
 import { PageHeader } from '../agora-kit/blocks/page-header';
@@ -27,7 +27,13 @@ import { disputeIsChargeback, disputeIsOpen, disputeStatusClass } from './status
 import { Badge, Qualifier, StatusBadge } from './ui/badge';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';
-import { optionalParam, pageParam, readStatus, writeStatus } from './url-state';
+import {
+  optionalParam,
+  pageParam,
+  parseAsIntegerAtLeast,
+  readStatus,
+  writeStatus,
+} from './url-state';
 
 const PAGE_SIZE = 50;
 
@@ -96,7 +102,7 @@ export function Disputes() {
 function ClosingWindows() {
   // `?due=168&duePage=2`: its own params, since the log below has a status, gateway and page too.
   const [view, setView] = useQueryStates(
-    { due: parseAsInteger.withDefault(DEFAULT_DUE_WITHIN_HOURS), duePage: pageParam },
+    { due: parseAsIntegerAtLeast(1).withDefault(DEFAULT_DUE_WITHIN_HOURS), duePage: pageParam },
     { history: 'push' },
   );
   const hours = view.due;

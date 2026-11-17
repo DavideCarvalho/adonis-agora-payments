@@ -49,9 +49,9 @@ import { WebhookEvents } from './WebhookEvents';
  *
  * The one thing that needs cross-screen state is the health panel: "12 events the dispatcher gave
  * up on" has to be able to land on those twelve rows, or the number is decoration. The seed
- * (`status`, `customer`) travels IN the hash, and the target screen is keyed on it so a new seed
- * remounts it — a screen already showing `paid` must not keep showing it when the operator was
- * sent to `pending`.
+ * (`status`, `customer`) travels IN the hash. `status` arrives as the screen's own `?status=`
+ * filter value (nuqs), so a new seed simply changes the filter; only a different `customer`
+ * remounts the screen.
  */
 function useHashRoute(): [Route, (next: Route, options?: { keepQuery?: boolean }) => void] {
   const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));

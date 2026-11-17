@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { NuqsHashAdapter } from '../agora-kit/url-state/nuqs-hash-adapter';
 import type { SubscriptionRow } from '../client/payments-client';
 import { clearConfig, injectConfig } from '../client/test-config.test-helper';
 import { SubscriptionDetail } from './SubscriptionDetail';
@@ -88,7 +89,11 @@ function json(body: unknown, status = 200) {
 
 function wrap(children: ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  return (
+    <NuqsHashAdapter>
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    </NuqsHashAdapter>
+  );
 }
 
 beforeEach(() => {

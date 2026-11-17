@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
+import { useQueryStates } from 'nuqs';
 import { useState } from 'react';
 import type { Column } from '../agora-kit/blocks/data-table';
 import { PageHeader, Toolbar } from '../agora-kit/blocks/page-header';
@@ -16,6 +17,7 @@ import { Badge, StatusBadge } from './ui/badge';
 import { CONTROL_CLASS, FieldLabel } from './ui/field';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';
+import { optionalParam, pageParam, readStatus, writeStatus } from './url-state';
 
 const PAGE_SIZE = 50;
 
@@ -30,14 +32,23 @@ const STATUS_OPTIONS: ReadonlyArray<{ value: string | undefined; label: string }
   { value: 'canceled', label: 'Canceled' },
 ];
 
+/**
+ * The list's view, in the hash's query (`#/payments?status=failed&provider=asaas&find=order-4102`):
+ * status (also the seed a health check sends), gateway, the submitted lookup and the page.
+ */
+export const paymentsParams = {
+  status: optionalParam,
+  provider: optionalParam,
+  find: optionalParam,
+  page: pageParam,
+};
+
 export function PaymentsList({
-  initialStatus,
   initialCustomerId,
   openedGatewayId,
   onOpen,
   organizations,
 }: {
-  initialStatus?: string | undefined;
   initialCustomerId?: string | undefined;
   /**
    * The payment whose detail dialog is open, owned by the CALLER: it lives in the URL hash
@@ -50,9 +61,11 @@ export function PaymentsList({
   /** Viewing every organization at once (tenancy): adds an "Organization" column. */
   organizations?: TenantPicker | undefined;
 } = {}) {
-  const [status, setStatus] = useState<string | undefined>(initialStatus);
-  const [provider, setProvider] = useState<string | undefined>(undefined);
-  const [page, setPage] = useState(1);
+  const [view, setView] = useQueryStates(paymentsParams, { history: 'push' });
+  const status = readStatus(view.status, undefined);
+  const provider = view.provider ?? undefined;
+  const page = view.page;
+  const setPage = (next: number) => void setView({ page: next });
   const [refunding, setRefunding] = useState<PaymentRow | null>(null);
   // Uncontrolled fallback for a caller that does not route the detail dialog (a test, a host
   // embedding just this screen). `App` always does.
@@ -67,8 +80,8 @@ export function PaymentsList({
    * `order-4102` and `pay_8f2…` look different to us and identical to them — and making them
    * choose the right field first is how a lookup becomes a thing nobody uses.
    */
-  const [lookup, setLookup] = useState('');
-  const [submitted, setSubmitted] = useState('');
+  const [lookup, setLookup] = useState(view.find ?? '');
+  const submitted = view.find ?? '';
 
   const term = submitted.trim() === '' ? undefined : submitted.trim();
   const query = useQuery({
@@ -98,11 +111,10 @@ export function PaymentsList({
   });
 
   // A filter change makes the current page meaningless — page 3 of "all" is not page 3 of
-  // "failed", nor page 3 of "asaas".
-  const refilter = (apply: () => void) => {
-    apply();
-    setPage(1);
-  };
+  // "failed", nor page 3 of "asaas" — so every filter write also drops the page.
+  const refilter = (
+    change: Partial<{ status: string | null; provider: string | null; find: string | null }>,
+  ) => void setView({ ...change, page: null });
 
   return (
     <PageBody>
@@ -114,7 +126,7 @@ export function PaymentsList({
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            refilter(() => setSubmitted(lookup));
+            refilter({ find: lookup.trim() === '' ? null : lookup });
           }}
         >
           <FieldLabel label="Find">
@@ -124,7 +136,7 @@ export function PaymentsList({
               onChange={(event) => {
                 setLookup(event.target.value);
                 // Clearing the box clears the search, without needing a second keystroke.
-                if (event.target.value === '') refilter(() => setSubmitted(''));
+                if (event.target.value === '') refilter({ find: null });
               }}
               placeholder="order-4102 or pay_8f2…"
               aria-label="Reference or gateway id"
@@ -132,12 +144,12 @@ export function PaymentsList({
             />
           </FieldLabel>
         </form>
-        <ProviderFilter value={provider} onChange={(v) => refilter(() => setProvider(v))} />
+        <ProviderFilter value={provider} onChange={(v) => refilter({ provider: v ?? null })} />
         <Segmented
           aria-label="Payment status"
           options={STATUS_OPTIONS}
           value={status}
-          onChange={(value) => refilter(() => setStatus(value))}
+          onChange={(value) => refilter({ status: writeStatus(value, undefined) })}
         />
       </Toolbar>
 

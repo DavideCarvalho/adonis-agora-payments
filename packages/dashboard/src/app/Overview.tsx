@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { parseAsStringLiteral, useQueryState } from 'nuqs';
 import { type Column, DataTable } from '../agora-kit/blocks/data-table';
 import { EmptyState } from '../agora-kit/blocks/empty-state';
 import { ErrorBoundary } from '../agora-kit/blocks/error-boundary';
@@ -107,7 +107,13 @@ export function Overview({
     status?: string,
   ) => void;
 }) {
-  const [period, setPeriod] = useState<PeriodPreset>('30d');
+  // `#/overview?period=7d`; 30 days (the default) leaves the URL.
+  const [period, setPeriod] = useQueryState(
+    'period',
+    parseAsStringLiteral(PERIODS.map((p) => p.value))
+      .withDefault('30d')
+      .withOptions({ history: 'push' }),
+  );
   const query = useQuery({
     queryKey: ['overview', period],
     queryFn: () => paymentsClient.overview(period),
@@ -128,7 +134,7 @@ export function Overview({
             aria-label="Period"
             options={PERIODS}
             value={period}
-            onChange={(value) => setPeriod(value)}
+            onChange={(value: PeriodPreset) => void setPeriod(value)}
           />
         }
       />

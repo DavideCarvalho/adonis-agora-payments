@@ -321,6 +321,12 @@ export interface CreateCustomerInput {
   taxId?: string;
   /** Extra provider-specific fields, e.g. phone, address. */
   metadata?: Record<string, unknown>;
+  /**
+   * The account that pays (an authkit subject), with `topology: 'tenant'`: the control plane
+   * keeps ONE gateway customer per account and provider, shared by every app of that person, and
+   * returns the existing one instead of creating another. Gateways never see it.
+   */
+  account?: string;
 }
 
 export interface UpdateCustomerInput {

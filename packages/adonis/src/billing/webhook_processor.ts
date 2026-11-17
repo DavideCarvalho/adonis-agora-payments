@@ -32,6 +32,12 @@ export interface WebhookProcessorOptions {
    * built-in sync is unchanged.
    */
   tenancy?: () => ResolvedPaymentsTenancy;
+  /**
+   * Runs after the built-in sync and the app's handler, before the event is marked processed:
+   * the control plane forwards the event to the app that owns it here. A throw fails the event
+   * (and the gateway or the dispatcher retries it); it must therefore be idempotent.
+   */
+  afterProcess?: (event: WebhookEvent) => Promise<unknown>;
 }
 
 /** A string field read structurally off any store's row (Lucid model or plain object). */
@@ -71,8 +77,10 @@ export class WebhookProcessor {
   #driver: PaymentsDriver | undefined;
   #handlers: Record<string, WebhookHandler>;
   #tenancy: (() => ResolvedPaymentsTenancy) | undefined;
+  #afterProcess: ((event: WebhookEvent) => Promise<unknown>) | undefined;
 
   constructor(options: WebhookProcessorOptions) {
+    this.#afterProcess = options.afterProcess;
     this.#store = options.store;
     this.#driver = options.driver;
     this.#handlers = options.handlers ?? {};
@@ -140,6 +148,7 @@ export class WebhookProcessor {
       await this.#runBuiltIn(event);
       const handler = this.#handlers[event.type];
       if (handler) await this.#inCustomerTenant(event, async () => handler(event));
+      if (this.#afterProcess) await this.#afterProcess(event);
       await this.#store.markWebhookProcessed(ledger.id);
       publishPayments('webhook.processed', {
         id: event.id,

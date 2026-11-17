@@ -1,0 +1,332 @@
+---
+title: Control plane and tenants
+description: One app holds the gateways, the webhooks and the billing console; the other apps charge through it and react to its events with the handlers they already have.
+icon: Network
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+By default every app is `standalone`: it holds its own gateway credentials, receives its own
+webhooks and keeps its own billing tables. With `topology` you can move all of that into ONE app
+(the control plane) and turn the others into tenants:
+
+- the **control plane** holds the gateway credentials, receives every webhook, keeps the billing
+  store and serves the console;
+- a **tenant** keeps calling `getPayments().driver(...)`, `subscriptions()` and `ensureCustomer()` as
+  before. Each gateway call runs on the control plane, with the control plane's credentials;
+- each webhook is processed on the control plane, then forwarded to the app that owns the payment
+  or subscription. There it runs through the same `app/payment_handlers/` as before.
+
+Nothing changes for an app that never sets `topology`.
+
+---
+
+## The control plane
+
+```ts title="config/payments.ts"
+import { defineConfig, payments } from '@adonis-agora/payments'
+import { authkitTenantVerifier } from '@adonis-agora/authkit-server'
+import env from '#start/env'
+
+export default defineConfig({
+  topology: 'control-plane',
+  controlPlane: {
+    // Every call carries the tenant's token; this checks it on every call.
+    verifyTenant: authkitTenantVerifier({ audience: 'urn:agora:payments' }),
+    // Only these apps may call, and each one's payers may only be sent back to its own origins.
+    apps: {
+      'entre-textos': { returnOrigins: ['https://www.entretextosassessoria.com.br'] },
+      eduliberta: { returnOrigins: ['https://eduliberta.com.br', 'https://www.eduliberta.com.br'] },
+    },
+  },
+  default: 'asaas',
+  providers: {
+    asaas: payments.asaas({
+      apiKey: env.get('ASAAS_API_KEY'),
+      webhookToken: env.get('ASAAS_WEBHOOK_ACCESS_TOKEN'),
+    }),
+  },
+  billing: { schema: 'payments' },
+})
+```
+
+This mounts `POST /_payments/rpc` (change it with `controlPlane.path`) next to the usual
+`/payments/webhook/:provider`. Point every gateway's webhook at the control plane.
+
+Four tables join the billing tables, on the same connection and schema:
+
+| Table | Holds |
+| --- | --- |
+| `billing_tenant_objects` | which app owns each gateway customer, payment, subscription, checkout and dispute |
+| `billing_tenant_events` | the processed webhooks waiting for each app |
+| `billing_tenant_calls` | the answer of each call already run, so a retry gets it back instead of charging twice |
+| `billing_tenant_locks` | short locks shared by every control-plane process (one customer per account) |
+
+They are created on first use. With `billing.autoCreateSchema: false`, create them from a migration:
+
+```ts title="database/migrations/1700000000000_payments_control_plane.ts"
+import { BaseSchema } from '@adonisjs/lucid/schema'
+import { createTenantLedgerTables, dropTenantLedgerTables } from '@adonis-agora/payments'
+
+export default class extends BaseSchema {
+  async up() {
+    this.defer((db) => createTenantLedgerTables(db, { schema: 'payments' }))
+  }
+
+  async down() {
+    this.defer((db) => dropTenantLedgerTables(db, { schema: 'payments' }))
+  }
+}
+```
+
+### Over Redis too
+
+HTTP stays mounted. To also take calls over Redis, give payments a connection of its own (it
+blocks on `BRPOP`) and a second one for replies:
+
+```ts title="config/payments.ts"
+import redis from '@adonisjs/redis/services/main'
+
+const bus = (name: 'payments_rpc' | 'payments_bus') => () => {
+  const connection = redis.connection(name)
+  return {
+    lpush: (key: string, value: string) => connection.lpush(key, value),
+    brpop: (keys: string[], seconds: number) =>
+      connection.brpop(...keys, seconds) as Promise<[string, string] | null>,
+    del: (key: string) => connection.del(key),
+  }
+}
+
+export default defineConfig({
+  topology: 'control-plane',
+  controlPlane: {
+    verifyTenant: authkitTenantVerifier({ audience: 'urn:agora:payments' }),
+    redis: { connection: bus('payments_rpc'), writer: bus('payments_bus') },
+  },
+  // …
+})
+```
+
+Both connections must use the same Redis and the same key prefix on the control plane and on
+every tenant.
+
+---
+
+## A tenant
+
+```ts title="config/payments.ts"
+import { defineConfig } from '@adonis-agora/payments'
+import { authkitTenantToken } from '@adonis-agora/authkit-client'
+import env from '#start/env'
+
+export default defineConfig({
+  topology: 'tenant',
+  tenant: {
+    partition: 'entre-textos',
+    url: 'https://hub.example.com/_payments',
+    token: authkitTenantToken({
+      issuer: env.get('AUTHKIT_ISSUER'),
+      clientId: env.get('AGORA_SERVICE_CLIENT_ID'),
+      clientSecret: env.get('AGORA_SERVICE_CLIENT_SECRET'),
+      resource: 'urn:agora:payments',
+    }),
+    // The control plane's providers this app uses, by their key there.
+    providers: ['asaas', 'woovi'],
+  },
+  // Routing stays here: which control plane provider takes each method.
+  methods: { pix: 'woovi', credit_card: 'asaas' },
+  subscriptions: { mode: 'managed' },
+  billing: { enabled: true },
+})
+```
+
+A tenant has no `providers`: the boot refuses one that still builds a gateway, because the
+credentials belong to the control plane. It has no webhook route either.
+
+Your code does not change:
+
+```ts title="app/billing/services/checkout_service.ts"
+import { getPayments } from '@adonis-agora/payments/services/main'
+
+const payment = await getPayments()
+  .driver('pix')
+  .charge({ amount: 4990, customerId, externalReference: `order:${order.id}` })
+```
+
+### Over Redis
+
+```ts title="config/payments.ts"
+import { hubTransports } from '@adonis-agora/payments'
+
+tenant: {
+  // …
+  url: 'https://hub.example.com/_payments',
+  transport: hubTransports.redis({ connection: bus('payments_rpc'), wakeConnection: bus('payments_bus') }),
+}
+```
+
+With both `url` and `transport`, a call the bus cannot deliver goes over HTTP with the same id.
+`wakeConnection` lets the control plane wake this app the moment an event is waiting, instead of
+the app checking every 30 seconds.
+
+---
+
+## One customer per person
+
+Pass the payer's account (the authkit subject) when you create a customer. The control plane
+keeps one gateway customer per account and provider, shared by every app of that person:
+
+```ts title="app/billing/services/gateway_customer.ts"
+import { ensureCustomer } from '@adonis-agora/payments'
+import { getBillingStore, getPayments } from '@adonis-agora/payments/services/main'
+
+const customer = await ensureCustomer(
+  getPayments().driver('credit_card'),
+  user.asaasCustomerId,
+  { name: user.fullName, email: user.email, taxId: user.cpf, account: user.authkitSubject },
+  { store: getBillingStore(), owner: { type: 'User', id: user.id } }
+)
+```
+
+Or ask for it directly:
+
+```ts
+const { id, created } = await getPayments()
+  .hub()
+  .customer(user.authkitSubject, 'asaas', { name: user.fullName, email: user.email })
+```
+
+The control plane records it in `billing_customers` with `owner_type = 'account'` (change it with
+`controlPlane.accountOwnerType`). Several control-plane processes can run side by side: they take a
+lock in `billing_tenant_locks` before creating, so an account never gets two gateway customers.
+
+<Callout type="warn">
+  The control plane trusts each app in `controlPlane.apps` with the `account` it passes: an app
+  can resolve (and then charge) the customer of any account whose subject it knows, and every app
+  of an account sees that account's customer ids. List only apps you run.
+</Callout>
+
+---
+
+## Sending the payer back to the app
+
+A checkout, payment link or card/portal page always returns the payer to the app that opened it.
+Pass that app's own URLs, as in standalone; the gateway's webhooks still go to the control plane:
+
+```ts title="app/billing/controllers/checkout_controller.ts"
+const session = await getPayments().driver('credit_card').createCheckout({
+  customerId,
+  amount: 4990,
+  successUrl: `${env.get('APP_URL')}/assinatura/obrigado`,
+  cancelUrl: `${env.get('APP_URL')}/assinatura`,
+})
+```
+
+The control plane only accepts return URLs on the calling app's `returnOrigins`: `successUrl`,
+`cancelUrl`, `returnUrl` and any `*url*`, `redirect` or `callback` field of the call, `metadata`
+included. Anything else (another app's origin, a foreign host, a relative path) answers `400
+bad_request` and never reaches the gateway. An app without `returnOrigins` may send none.
+
+Origins can also be resolved per call (added to `returnOrigins`), for example from a table of
+your own:
+
+```ts
+controlPlane: {
+  returnOrigins: async (app) =>
+    (await AppOrigin.query().where('app', app)).map((row) => row.origin),
+}
+```
+
+<Callout type="info">
+  Asaas only redirects when `cancelUrl` is set too, and only to domains registered in the Asaas
+  account (Minha Conta → Informações comerciais). Register every app's domain in the control
+  plane's Asaas account.
+</Callout>
+
+---
+
+## Reacting to payments
+
+Nothing new: the handlers in `app/payment_handlers/` (or `billing.handlers`) run for the events the
+control plane forwards to this app, deduplicated by event id like any webhook. Grant and revoke
+features there.
+
+```ts title="app/payment_handlers/payment_succeeded.ts"
+import { defineWebhookHandler } from '@adonis-agora/payments'
+
+export default defineWebhookHandler('payment.succeeded', async (event) => {
+  await Entitlements.grantFor(event.data.gatewayId)
+})
+```
+
+An event goes to the app that owns its payment, subscription, checkout or dispute. A renewal of a
+subscription goes to the subscription's app. An event that only names a customer goes to every app
+of that customer.
+
+To read an account's billing in this app (for a "my plan" page):
+
+```ts
+const billing = await getPayments().hub().account(user.authkitSubject)
+// { account, customers, subscriptions, payments } — only this app's
+```
+
+---
+
+## What an app may touch
+
+- The control plane takes the app from the verified token, never from the call.
+- An app only reaches the payments, subscriptions, checkouts and disputes it created, and the
+  customers it created or asked for. Anything else answers `not_found`.
+- Each call needs a capability on the token: `payments:charge`, `payments:refund`,
+  `payments:subscriptions`, `payments:customers`, `payments:disputes`, `payments:events`,
+  `payments:read`, or `payments:*`.
+
+### Objects from before
+
+A customer or subscription the app created while it was standalone is unknown to the control
+plane. Hand it over once:
+
+```ts
+await controlPlane.adopt('entre-textos', 'subscription', 'sub_123', 'asaas')
+```
+
+Or let each app take over objects nobody owns yet with `controlPlane.adoptUnclaimed: true`.
+
+---
+
+## When the control plane is down
+
+- A gateway call throws `PaymentsHubError` with code `unavailable` or `timeout`; check it with
+  `isHubUnavailable(error)` and show "try again" rather than "your card was declined".
+- Each call is retried with the same id. The control plane runs a call once and replays its answer,
+  so a retry never charges twice.
+- A call refused with a date more than 30 s ahead of the control plane's clock answers
+  `bad_request` (`controlPlane.maxClockSkewMs`).
+- Webhooks keep arriving at the control plane and wait there; the app takes them when it is back.
+- The managed renewal pass stops at the first subscription it cannot reach the control plane for,
+  without counting a failure, and the next pass picks up where it stopped.
+
+### If the control plane stops mid-call
+
+A retry of a call whose run was interrupted waits for its lease (`controlPlane.callLeaseMs`,
+default 2 min; until then it answers `conflict`), then:
+
+- re-runs it when the gateway deduplicates that call on `idempotencyKey`, with the same key, so the
+  gateway answers the first result;
+- otherwise answers `indeterminate`: the gateway may or may not have acted. Check it with
+  `isHubOutcomeUnknown(error)` and look the object up (by `externalReference`) before charging
+  again with a new call.
+
+| Gateway | Deduplicated calls | Key |
+| --- | --- | --- |
+| Stripe | `createCustomer`, `charge`, `refund`, `createCheckout`, `createSubscription`, `updateSubscription` | yours, or one the control plane derives from the call id (`Idempotency-Key`) |
+| Asaas | `charge` | yours only (it becomes the `externalReference` suffix) |
+| Others | none | — |
+
+Pass `idempotencyKey` on every `charge` (an order id): it is also what protects an app-level retry,
+which is a new call with a new id. Extend the table with `controlPlane.idempotency`.
+
+<Callout type="info">
+  Forwarded events are delivered at least once. A handler sees the same event id at most once,
+  because the app's webhook ledger skips an id it already processed.
+</Callout>

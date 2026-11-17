@@ -42,6 +42,23 @@ import {
   setPayments,
   setWebhookDispatcher,
 } from '../src/services/main.js';
+import type { PaymentsControlPlane } from '../src/topology/control_plane.js';
+import { HUB_MESSAGE_VERSION } from '../src/topology/protocol.js';
+import {
+  buildControlPlane,
+  buildTenantRuntime,
+  controlPlanePath,
+  resolveTopology,
+  type TenantRuntime,
+} from '../src/topology/runtime.js';
+import {
+  createPaymentsHubApi,
+  describeRemoteDrivers,
+  HubEventPump,
+  type PaymentsHubApi,
+} from '../src/topology/tenant.js';
+import { serveRedisHub } from '../src/topology/transports.js';
+import type { WebhookEvent } from '../src/types.js';
 import {
   assertWebhookHandlerTypes,
   type DiscoveredWebhookHandler,
@@ -64,6 +81,14 @@ export default class PaymentsProvider {
   /** Held for the webhook route: a REFUSED delivery is filed here, having no ledger row. */
   #store: BillingStore | undefined;
   #secret: string | undefined;
+  /** `topology: 'tenant'`: the client and remote drivers. */
+  #tenant: TenantRuntime | undefined;
+  #pump: HubEventPump | undefined;
+  #hubApi: PaymentsHubApi | undefined;
+  #describeTimer: NodeJS.Timeout | undefined;
+  /** `topology: 'control-plane'`. */
+  #controlPlane: PaymentsControlPlane | undefined;
+  #redisServer: { stop(): Promise<void>; notify(partition: string): Promise<void> } | undefined;
 
   constructor(protected app: ApplicationService) {}
 
@@ -87,7 +112,18 @@ export default class PaymentsProvider {
         const providers = await resolveInvoiceProviders(config.invoice);
         invoices = new InvoiceManager(providers);
       }
-      const drivers = await resolveDrivers(config, invoices);
+      const topology = resolveTopology(config);
+      if (topology === 'tenant') {
+        this.#tenant ??= buildTenantRuntime(config);
+        this.#hubApi ??= createPaymentsHubApi(
+          this.#tenant.client,
+          () => this.#pump ?? this.#manualPump(config),
+        );
+      }
+      const drivers =
+        topology === 'tenant'
+          ? new Map<string, PaymentsDriver>(this.#tenant?.drivers ?? new Map())
+          : await resolveDrivers(config, invoices);
       const manager = new PaymentsManager({
         drivers,
         ...(invoices !== undefined ? { invoices } : {}),
@@ -100,6 +136,7 @@ export default class PaymentsProvider {
         // resolving the store here would either fail or force billing on apps that route
         // every subscription to the gateway and never need it.
         store: () => getBillingStore(),
+        hub: () => this.#hubApi,
       });
       // Hand the manager to the lazy `services/main` singleton so `getPayments()` works.
       setPayments(manager);
@@ -144,12 +181,145 @@ export default class PaymentsProvider {
       });
       // A 'worker' process consumes what the api half enqueued; it must not also
       // advertise an endpoint gateways could deliver to.
+      const topology = resolveTopology(config);
       if (resolveRole(config) !== 'worker') {
         const router = await this.app.container.make('router');
-        this.#registerWebhookRoute(router);
+        // A tenant has no gateway credentials: its webhooks go to the control plane.
+        if (topology !== 'tenant') this.#registerWebhookRoute(router);
         this.#registerAccountRoutes(router, config);
+        if (topology === 'control-plane') this.#registerControlPlaneRoute(router, config);
       }
+      if (topology === 'control-plane') await this.#startControlPlane(config);
+      if (topology === 'tenant') await this.#startTenant(config);
     });
+  }
+
+  /** The control plane, built once (the webhook processor forwards through it). */
+  #controlPlaneFor(config: PaymentsConfig): PaymentsControlPlane {
+    this.#controlPlane ??= buildControlPlane(config, {
+      manager: () => this.app.container.make(PaymentsManager),
+      store: () => this.#store,
+      notify: async (partition) => {
+        await this.#redisServer?.notify(partition);
+      },
+      logger: { warn: (message) => void this.#warn(message) },
+    });
+    return this.#controlPlane;
+  }
+
+  async #warn(message: string): Promise<void> {
+    try {
+      const logger = await this.app.container.make('logger');
+      logger.warn(message);
+    } catch {
+      /* logging never breaks payments */
+    }
+  }
+
+  /** `POST <controlPlane.path>/rpc`: the HTTP side of the tenant calls. */
+  #registerControlPlaneRoute(router: HttpRouterService, config: PaymentsConfig): void {
+    const path = controlPlanePath(config);
+    router
+      .post(`${path}/rpc`, async (ctx: HttpContext) => {
+        ctx.response.header('cache-control', 'no-store');
+        const reply = await this.#controlPlaneFor(config).handle(ctx.request.body());
+        const status = reply.ok
+          ? 200
+          : reply.error?.code === 'unauthorized'
+            ? 401
+            : reply.error?.code === 'forbidden'
+              ? 403
+              : reply.error?.code === 'bad_request'
+                ? 400
+                : reply.error?.code === 'not_found'
+                  ? 404
+                  : reply.error?.code === 'conflict' || reply.error?.code === 'indeterminate'
+                    ? 409
+                    : reply.error?.code === 'gateway'
+                      ? 502
+                      : 503;
+        return ctx.response.status(status).json(reply);
+      })
+      .as('payments.control_plane.rpc');
+    router
+      .get(`${path}/health`, async (ctx: HttpContext) =>
+        ctx.response.json({ v: HUB_MESSAGE_VERSION, ok: true }),
+      )
+      .as('payments.control_plane.health');
+  }
+
+  async #startControlPlane(config: PaymentsConfig): Promise<void> {
+    const plane = this.#controlPlaneFor(config);
+    const redis = config.controlPlane?.redis;
+    if (redis && resolveRole(config) !== 'api' && !this.app.inTest) {
+      this.#redisServer = serveRedisHub((message) => plane.handle(message), {
+        connection: redis.connection,
+        ...(redis.writer !== undefined ? { writer: redis.writer } : {}),
+        ...(redis.prefix !== undefined ? { prefix: redis.prefix } : {}),
+        ...(redis.blockSeconds !== undefined ? { blockSeconds: redis.blockSeconds } : {}),
+        logger: { warn: (message) => void this.#warn(message) },
+      });
+    }
+  }
+
+  /** A pump that is never started, for `hub().drain()` where the loop does not run. */
+  #manualPump(config: PaymentsConfig): HubEventPump | undefined {
+    const runtime = this.#tenant;
+    const dispatcher = this.#webhook;
+    if (!runtime || !dispatcher) return undefined;
+    return this.#makePump(runtime, dispatcher, config);
+  }
+
+  #makePump(
+    runtime: TenantRuntime,
+    dispatcher: WebhookDispatcher,
+    config: PaymentsConfig,
+  ): HubEventPump {
+    const events = config.tenant?.events;
+    return new HubEventPump({
+      client: runtime.client,
+      transport: runtime.transport,
+      partition: config.tenant?.partition ?? '',
+      deliver: async (event) => {
+        const result = await dispatcher.dispatchAll(event);
+        const failure = result.failures[0];
+        if (failure) throw failure.error;
+      },
+      ...(events && events.batch !== undefined ? { batch: events.batch } : {}),
+      ...(events && events.idleSeconds !== undefined ? { idleSeconds: events.idleSeconds } : {}),
+      logger: { warn: (message) => void this.#warn(message) },
+    });
+  }
+
+  async #startTenant(config: PaymentsConfig): Promise<void> {
+    const runtime = this.#tenant;
+    if (!runtime) return;
+    // What the control plane's providers are (capabilities, methods). Down at boot: the
+    // declarations stand in, and it is asked again every minute until it answers.
+    let warned = false;
+    const describe = async (): Promise<void> => {
+      if (await describeRemoteDrivers(runtime.client, runtime.drivers.values())) return;
+      if (!warned) {
+        warned = true;
+        void this.#warn(
+          '[payments] the payments control plane did not answer `describe` at boot; using tenant.providers until it does.',
+        );
+      }
+      this.#describeTimer = setTimeout(() => void describe(), 60_000);
+      this.#describeTimer.unref?.();
+    };
+    void describe();
+    const events = config.tenant?.events;
+    if (events === false || resolveRole(config) === 'api' || this.app.inTest) return;
+    const dispatcher = this.#webhook;
+    if (!dispatcher) {
+      void this.#warn(
+        '[payments] topology tenant with billing disabled: the control plane forwards events nobody here processes.',
+      );
+      return;
+    }
+    this.#pump = this.#makePump(runtime, dispatcher, config);
+    this.#pump.start();
   }
 
   /** The HMAC secret of the card form's tickets: the app key, else a process key. */
@@ -286,6 +456,11 @@ export default class PaymentsProvider {
 
   /** Release the watcher's channel claims and subscriptions on shutdown. */
   async shutdown(): Promise<void> {
+    if (this.#describeTimer) clearTimeout(this.#describeTimer);
+    await this.#pump?.stop();
+    this.#pump = undefined;
+    await this.#redisServer?.stop();
+    this.#redisServer = undefined;
     this.#telescopeWatcher?.dispose();
     this.#telescopeWatcher = undefined;
   }
@@ -324,6 +499,10 @@ export default class PaymentsProvider {
       store,
       ...(handlers !== undefined ? { handlers } : {}),
       tenancy: () => resolvePaymentsTenancy(config.tenancy),
+      // The control plane hands each processed event to the app that owns its payment.
+      ...(resolveTopology(config) === 'control-plane'
+        ? { afterProcess: (event: WebhookEvent) => this.#controlPlaneFor(config).forward(event) }
+        : {}),
     });
     const dispatcher = new WebhookDispatcher({
       processor,

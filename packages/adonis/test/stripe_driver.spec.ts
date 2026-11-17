@@ -734,7 +734,11 @@ describe('StripeDriver webhooks', () => {
       client_reference_id: 'order_7',
     });
     expect(paid.type).toBe('payment.succeeded');
-    expect(paid.data).toMatchObject({ gatewayId: 'pi_1', externalReference: 'order_7' });
+    expect(paid.data).toMatchObject({
+      gatewayId: 'pi_1',
+      checkoutId: 'cs_1',
+      externalReference: 'order_7',
+    });
   });
 
   it('normalizes the subscription lifecycle, including a paused one', () => {

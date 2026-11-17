@@ -21,6 +21,7 @@ import type { InvoiceManager } from './invoice/invoice_manager.js';
 import { gatewayPerforms, type SubscriptionOperation } from './subscription_lifecycle.js';
 import { resolveSubscriptionMode, type SubscriptionsConfig } from './subscription_mode.js';
 import { SubscriptionsApi } from './subscriptions_api.js';
+import type { PaymentsHubApi } from './topology/tenant.js';
 import type { PaymentMethodName } from './types.js';
 import { PAYMENT_METHOD_NAMES } from './types.js';
 
@@ -46,6 +47,8 @@ export interface PaymentsManagerOptions {
   tenancy?: PaymentsTenancyOption;
   /** `config.userOwnerType`: the owner type of a user's customer. Default `'User'`. */
   userOwnerType?: string;
+  /** `topology: 'tenant'`: the control plane calls beyond the gateway. */
+  hub?: () => PaymentsHubApi | undefined;
 }
 
 export class PaymentsManager {
@@ -65,8 +68,10 @@ export class PaymentsManager {
   #subscriptionsApi: SubscriptionsApi | undefined;
   #tenancyOption: PaymentsTenancyOption | undefined;
   #userOwnerType: string;
+  #hub: (() => PaymentsHubApi | undefined) | undefined;
 
   constructor(options: PaymentsManagerOptions) {
+    this.#hub = options.hub;
     this.#tenancyOption = options.tenancy;
     this.#userOwnerType = options.userOwnerType ?? 'User';
     this.#drivers = options.drivers;
@@ -87,6 +92,24 @@ export class PaymentsManager {
     this.#defaultName = options.defaultName ?? names[0] ?? '';
     this.#subscriptionsConfig = options.subscriptions;
     this.#store = options.store;
+  }
+
+  /**
+   * The payments control plane, when this app is a tenant (`topology: 'tenant'`): the shared
+   * customer of an account, this app's billing of an account, and the forwarded events.
+   *
+   * ```ts
+   * const { id } = await getPayments().hub().customer(user.authkitSubject, 'asaas', { name, email })
+   * ```
+   */
+  hub(): PaymentsHubApi {
+    const api = this.#hub?.();
+    if (!api) {
+      throw new Error(
+        "[payments] hub() is only available with topology: 'tenant' in config/payments.ts.",
+      );
+    }
+    return api;
   }
 
   /**

@@ -1530,6 +1530,9 @@ export class StripeDriver implements PaymentsDriver {
     const metadata = (session.metadata ?? {}) as Record<string, string | undefined>;
     return {
       gatewayId,
+      // The session's own id: what `createCheckout` answered and the control plane claimed for
+      // the app that opened it (`topology: 'control-plane'` routes the event by it).
+      ...(typeof session.id === 'string' ? { checkoutId: session.id } : {}),
       amount: session.amount_total,
       currency: session.currency,
       ...(typeof session.customer === 'string' ? { customerId: session.customer } : {}),

@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.18
+
+### Patch Changes
+
+- [#264](https://github.com/DavideCarvalho/adonis-agora-payments/pull/264) [`ab7a74c`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/ab7a74cbf4660b6dd0978b56b24120f0da578baf) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Ships the console with its filters in the URL (copy the link to share a filtered view). The console is bundled into this package at build time, so it needs its own release to reach apps.
+
 ## 1.0.0-rc.17
 
 ### Patch Changes

@@ -296,7 +296,7 @@ export class InMemoryBillingStore
   }
 
   /**
-   * Newest first: `createdAt` descending, ties broken by insertion order descending.
+   * Newest first: `createdAt` descending, ties broken by `id` descending.
    *
    * The tie-break matters — several rows written inside the same millisecond is the normal
    * case in a test, and `sort` alone would leave them in whatever order the map yields. Ties

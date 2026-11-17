@@ -78,6 +78,14 @@ jobs:
   # the SQL the store emits, not the runtime, and the unit suite above already covers every Node line.
   integration:
     runs-on: ubuntu-latest
+    # The control plane's Redis transport is tested against a real Redis.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+    env:
+      PAYMENTS_TEST_REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@v7.0.1
 

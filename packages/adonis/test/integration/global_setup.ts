@@ -10,6 +10,8 @@ import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testconta
 let container: StartedPostgreSqlContainer | undefined;
 
 export async function setup(): Promise<void> {
+  // An existing Postgres (a local dev stack) instead of a container: set the URL yourself.
+  if (process.env.PAYMENTS_TEST_PG_URL) return;
   container = await new PostgreSqlContainer('postgres:16-alpine').start();
   process.env.PAYMENTS_TEST_PG_URL = container.getConnectionUri();
 }

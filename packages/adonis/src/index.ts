@@ -176,7 +176,10 @@ export type {
   PagBankDriverConfig,
   PaymentsConfig,
   PaymentsContext,
+  PaymentsControlPlaneConfig,
   PaymentsDriverFactory,
+  PaymentsTenantConfig,
+  PaymentsTopology,
   PayPalDriverConfig,
   PlugNotasInvoiceConfig,
   PolarDriverConfig,
@@ -273,6 +276,79 @@ export type { SubscriptionMode, SubscriptionsConfig } from './subscription_mode.
 export { resolveSubscriptionMode } from './subscription_mode.js';
 export type { CreateSubscriptionRequest, SubscriptionHandle } from './subscriptions_api.js';
 export { SubscriptionsApi } from './subscriptions_api.js';
+// ── Topology: control plane and tenants ─────────────────────────────────────────────────────
+export type {
+  PaymentsControlPlane,
+  PaymentsControlPlaneOptions,
+} from './topology/control_plane.js';
+export { createPaymentsControlPlane } from './topology/control_plane.js';
+export type { TenantCallState, TenantLedger, TenantObjectKind } from './topology/ledger.js';
+export { memoryTenantLedger } from './topology/ledger.js';
+export type { LucidTenantLedgerOptions } from './topology/lucid_ledger.js';
+export {
+  createTenantLedgerTables,
+  dropTenantLedgerTables,
+  lucidTenantLedger,
+  TENANT_LEDGER_TABLES,
+} from './topology/lucid_ledger.js';
+export type {
+  HubCallMessage,
+  HubDriverCall,
+  HubErrorCode,
+  HubEventEnvelope,
+  HubOperation,
+  HubProviderDescription,
+  HubReplyMessage,
+} from './topology/protocol.js';
+export {
+  HUB_DRIVER_CALLS,
+  HUB_MESSAGE_VERSION,
+  HUB_OPERATION_CAPABILITY,
+  HUB_OPERATIONS,
+  hasCapability,
+  isHubUnavailable,
+  PaymentsHubError,
+} from './topology/protocol.js';
+export { fallbackTransport, resolveTopology } from './topology/runtime.js';
+export type {
+  HubAccountBilling,
+  HubClient,
+  HubClientOptions,
+  HubEventPumpOptions,
+  HubProviderDeclaration,
+  HubTokenSource,
+  PaymentsHubApi,
+} from './topology/tenant.js';
+export {
+  createHubClient,
+  createPaymentsHubApi,
+  describeRemoteDrivers,
+  HubEventPump,
+  RemoteDriver,
+} from './topology/tenant.js';
+export type {
+  HttpHubTransportOptions,
+  HubRedisLike,
+  HubRedisSource,
+  HubTransport,
+  HubUrlSource,
+  RedisHubTransportOptions,
+  ServeRedisOptions,
+} from './topology/transports.js';
+export {
+  httpHubTransport,
+  hubTransports,
+  redisHubTransport,
+  serveRedisHub,
+} from './topology/transports.js';
+export type {
+  SharedSecretTenant,
+  TenantAuthRequest,
+  TenantVerifier,
+  TenantVerifierInput,
+  VerifiedTenant,
+} from './topology/verify.js';
+export { resolveTenantVerifier, sharedSecretVerifier } from './topology/verify.js';
 export type {
   BillingStatus,
   CheckoutSession,

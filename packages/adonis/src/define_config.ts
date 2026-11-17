@@ -16,6 +16,10 @@ import type { RazorpayDriverConfig } from './drivers/razorpay.js';
 import type { SquareDriverConfig } from './drivers/square.js';
 import type { InvoiceProvider } from './invoice/invoice_provider.js';
 import type { SubscriptionsConfig } from './subscription_mode.js';
+import type { TenantLedger } from './topology/ledger.js';
+import type { HubProviderDeclaration, HubTokenSource } from './topology/tenant.js';
+import type { HubRedisSource, HubTransport, HubUrlSource } from './topology/transports.js';
+import type { TenantVerifierInput } from './topology/verify.js';
 import type { InvoiceOptions, PaymentMethodName } from './types.js';
 import type { WebhookHandlerService } from './webhook_handlers.js';
 
@@ -307,7 +311,77 @@ export interface WooviDriverConfig {
  * })
  * ```
  */
+/**
+ * Where this process sits:
+ *
+ * - `'standalone'` (default): the app holds the gateway credentials, receives the webhooks and
+ *   keeps its own billing store. Nothing changes for an app that never sets `topology`.
+ * - `'control-plane'`: the same, plus it runs gateway calls for tenant apps and forwards each
+ *   processed webhook to the app that owns the payment/subscription (the Agora Hub).
+ * - `'tenant'`: no credentials and no webhook route. Every gateway call runs on the control
+ *   plane; the control plane's forwarded events run through this app's own webhook handlers.
+ */
+export type PaymentsTopology = 'standalone' | 'control-plane' | 'tenant';
+
+/** `controlPlane` of `config/payments.ts` (`topology: 'control-plane'`). */
+export interface PaymentsControlPlaneConfig {
+  /** Verifies a tenant's token on every call. With authkit: `authkitTenantVerifier({ audience })`. */
+  verifyTenant: TenantVerifierInput;
+  /** Where the call route is mounted (`POST <path>/rpc`). Default `'/_payments'`. */
+  path?: string;
+  /**
+   * Who owns which gateway object, the per-app event queue, and replayable answers. Default: the
+   * ledger tables (`billing_tenant_*`) on `billing.connection`/`billing.schema`.
+   */
+  ledger?: TenantLedger;
+  /** `billing_customers.owner_type` of a customer that is a Hub account. Default `'account'`. */
+  accountOwnerType?: string;
+  /** Only these apps may call. Default: any app the verifier accepts. */
+  apps?: readonly string[];
+  /** Let an app take over a gateway object nobody claimed yet. Default `false`. */
+  adoptUnclaimed?: boolean;
+  /** Also take calls over Redis (the bus). HTTP stays mounted either way. */
+  redis?: {
+    /** The connection the server blocks on. Give payments its own. */
+    connection: HubRedisSource;
+    /** A non-blocking connection for replies and wake-ups (same Redis and prefix). */
+    writer?: HubRedisSource;
+    prefix?: string;
+    blockSeconds?: number;
+  };
+}
+
+/** `tenant` of `config/payments.ts` (`topology: 'tenant'`). */
+export interface PaymentsTenantConfig {
+  /** This app's name on the control plane. The control plane trusts the TOKEN, not this. */
+  partition: string;
+  /** The control plane mount (`https://hub.example.com/_payments`): HTTP calls. */
+  url?: HubUrlSource;
+  /**
+   * Another transport (`hubTransports.redis(...)`). With `url` too, a call the transport cannot
+   * deliver falls back to HTTP with the same id (the control plane never runs it twice).
+   */
+  transport?: HubTransport;
+  /** The bearer token. With authkit: `authkitTenantToken({ ..., resource: 'urn:agora:payments' })`. */
+  token: HubTokenSource;
+  /**
+   * The control plane providers this app uses, by their key there. A list, or a map with what to
+   * assume before the control plane answered `describe` (methods, provider name).
+   */
+  providers: readonly string[] | Record<string, HubProviderDeclaration>;
+  /** Forwarded events: `false` turns the pump off (another process takes them). */
+  events?: false | { batch?: number; idleSeconds?: number };
+  /** Per-call budget. Default 15 s. */
+  timeoutMs?: number;
+}
+
 export interface PaymentsConfig {
+  /** See {@link PaymentsTopology}. Default `'standalone'`. */
+  topology?: PaymentsTopology;
+  /** Required with `topology: 'control-plane'`. */
+  controlPlane?: PaymentsControlPlaneConfig;
+  /** Required with `topology: 'tenant'`. */
+  tenant?: PaymentsTenantConfig;
   /** Name of the default payment provider (a key of `providers`). */
   default?: string;
   /**

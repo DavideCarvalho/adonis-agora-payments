@@ -11,6 +11,7 @@
     "client",
     "billing",
     "organizations",
+    "control-plane",
     "account-console",
     "invoices",
     "---Extending---",
@@ -31,6 +32,6 @@
     "roadmap"
   ],
   "root": true,
-  "description": "Multi-gateway payments and Cashier-style billing for AdonisJS \u2014 18 gateways behind one driver contract, with invoice emission and method-based routing.",
+  "description": "Multi-gateway payments and Cashier-style billing for AdonisJS — 18 gateways behind one driver contract, with invoice emission and method-based routing.",
   "icon": "CreditCard"
 }

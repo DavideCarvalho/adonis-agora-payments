@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.20
+
+### Minor Changes
+
+- [#265](https://github.com/DavideCarvalho/adonis-agora-payments/pull/265) [`a74b6ef`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/a74b6ef7fbf15966332813e64136eef923c89803) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - `topology: 'control-plane' | 'tenant'`: one app (the Agora Hub) holds the gateway credentials, the webhooks, the billing store and the console; tenant apps keep calling `getPayments().driver(...)`, `subscriptions()` and `ensureCustomer()`, and each call runs on the control plane over HTTP (`POST /_payments/rpc`) or the Redis bus. Processed webhooks are forwarded to the app that owns the payment/subscription and run through that app's own handlers. One gateway customer per account (`CreateCustomerInput.account`, `getPayments().hub().customer()`), per-app ownership enforced on every call, replay-safe call ids, `verifyTenant` on every message. `standalone` stays the default: nothing changes for an app that does not set `topology`. The managed renewal pass now stops (without counting a failure) when the control plane is unreachable. Hardened before release: an interrupted call is reconciled after a lease (re-run with the same gateway idempotency key when the gateway deduplicates it — Stripe gets a key derived from the call id — else answered `indeterminate`, `isHubOutcomeUnknown`), never `conflict` forever; one gateway customer per account across control-plane processes (`billing_tenant_locks`); nothing after the gateway acted can release a call id; checkout/session and dispute ids route events (Stripe session events now carry `checkoutId`); long event keys are hashed instead of truncated; future-dated calls are refused; return URLs must be on the calling app's `controlPlane.apps[app].returnOrigins` (`400` otherwise).
+
 ## 1.0.0-rc.19
 
 ### Minor Changes

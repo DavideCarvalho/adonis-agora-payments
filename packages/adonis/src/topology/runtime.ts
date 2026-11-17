@@ -148,3 +148,20 @@ export function controlPlanePath(config: PaymentsConfig): string {
   const path = config.controlPlane?.path ?? '/_payments';
   return `/${path.replace(/^\/+|\/+$/g, '')}`;
 }
+
+/**
+ * Whether shield's CSRF check must skip a URL: the gateway webhooks and the control plane's call
+ * route are called by servers (signed deliveries, bearer tokens), never by a browser with cookies.
+ *
+ * ```ts title="config/shield.ts"
+ * csrf: { enabled: true, exceptRoutes: (ctx) => paymentsCsrfExceptions(ctx.request.url()) }
+ * ```
+ */
+export function paymentsCsrfExceptions(
+  url: string,
+  options: { controlPlanePath?: string } = {},
+): boolean {
+  const pathname = url.split('?')[0] ?? url;
+  const path = `/${(options.controlPlanePath ?? '/_payments').replace(/^\/+|\/+$/g, '')}`;
+  return pathname.startsWith('/payments/webhook/') || pathname === `${path}/rpc`;
+}

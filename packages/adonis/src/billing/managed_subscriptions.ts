@@ -1,5 +1,5 @@
-import { isHubUnavailable } from '../topology/protocol.js';
 import type { CreateSubscriptionInput, PaymentsDriver } from '../driver.js';
+import { isHubUnavailable } from '../topology/protocol.js';
 import type { BillingStore, ManagedSubscriptionInput } from './billing_store.js';
 
 /** The cycles a managed subscription can advance by. Mirrors `CreateSubscriptionInput.cycle`. */

@@ -542,3 +542,14 @@ describe('payments topology: managed renewals during an outage', () => {
     expect(row?.lastRenewalError ?? null).toBeNull();
   });
 });
+
+describe('payments topology: csrf exceptions', () => {
+  it('skips the webhook and rpc routes only', async () => {
+    const { paymentsCsrfExceptions } = await import('../src/topology/runtime.js');
+    expect(paymentsCsrfExceptions('/payments/webhook/asaas')).toBe(true);
+    expect(paymentsCsrfExceptions('/_payments/rpc?x=1')).toBe(true);
+    expect(paymentsCsrfExceptions('/_payments/rpcx')).toBe(false);
+    expect(paymentsCsrfExceptions('/payments/api/refund')).toBe(false);
+    expect(paymentsCsrfExceptions('/hub/rpc', { controlPlanePath: 'hub/' })).toBe(true);
+  });
+});

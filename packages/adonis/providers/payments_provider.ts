@@ -85,6 +85,7 @@ export default class PaymentsProvider {
   #tenant: TenantRuntime | undefined;
   #pump: HubEventPump | undefined;
   #hubApi: PaymentsHubApi | undefined;
+  #describeTimer: NodeJS.Timeout | undefined;
   /** `topology: 'control-plane'`. */
   #controlPlane: PaymentsControlPlane | undefined;
   #redisServer: { stop(): Promise<void>; notify(partition: string): Promise<void> } | undefined;
@@ -293,15 +294,21 @@ export default class PaymentsProvider {
   async #startTenant(config: PaymentsConfig): Promise<void> {
     const runtime = this.#tenant;
     if (!runtime) return;
-    // What the control plane's providers are. Down at boot: the declarations stand in, and the
-    // next call that needs a capability finds out.
-    void describeRemoteDrivers(runtime.client, runtime.drivers.values()).then((ok) => {
-      if (!ok) {
+    // What the control plane's providers are (capabilities, methods). Down at boot: the
+    // declarations stand in, and it is asked again every minute until it answers.
+    let warned = false;
+    const describe = async (): Promise<void> => {
+      if (await describeRemoteDrivers(runtime.client, runtime.drivers.values())) return;
+      if (!warned) {
+        warned = true;
         void this.#warn(
           '[payments] the payments control plane did not answer `describe` at boot; using tenant.providers until it does.',
         );
       }
-    });
+      this.#describeTimer = setTimeout(() => void describe(), 60_000);
+      this.#describeTimer.unref?.();
+    };
+    void describe();
     const events = config.tenant?.events;
     if (events === false || resolveRole(config) === 'api' || this.app.inTest) return;
     const dispatcher = this.#webhook;
@@ -449,6 +456,7 @@ export default class PaymentsProvider {
 
   /** Release the watcher's channel claims and subscriptions on shutdown. */
   async shutdown(): Promise<void> {
+    if (this.#describeTimer) clearTimeout(this.#describeTimer);
     await this.#pump?.stop();
     this.#pump = undefined;
     await this.#redisServer?.stop();

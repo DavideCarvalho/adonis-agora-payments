@@ -487,7 +487,14 @@ export function createPaymentsControlPlane(
       // feature in the wrong app. A customer-only event goes to every app of that customer.
       if (!hasObject || owners.length === 1) partitions = owners;
     }
-    if (partitions.length === 0) return [];
+    if (partitions.length === 0) {
+      // Not an error (an event of the control plane's own, or of an object nobody claimed yet),
+      // but the one line that tells an operator which events to replay after an adoption.
+      options.logger?.warn(
+        `[payments] webhook ${event.provider}/${event.id} (${event.type}) belongs to no app; kept on the control plane only`,
+      );
+      return [];
+    }
     const provider = event.provider;
     for (const partition of partitions) {
       // Learn the objects this event introduced (a renewal payment of a claimed subscription, a

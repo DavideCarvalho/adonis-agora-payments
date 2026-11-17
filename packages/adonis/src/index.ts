@@ -309,7 +309,11 @@ export {
   isHubUnavailable,
   PaymentsHubError,
 } from './topology/protocol.js';
-export { fallbackTransport, resolveTopology } from './topology/runtime.js';
+export {
+  fallbackTransport,
+  paymentsCsrfExceptions,
+  resolveTopology,
+} from './topology/runtime.js';
 export type {
   HubAccountBilling,
   HubClient,

@@ -33,8 +33,11 @@ export default defineConfig({
   controlPlane: {
     // Every call carries the tenant's token; this checks it on every call.
     verifyTenant: authkitTenantVerifier({ audience: 'urn:agora:payments' }),
-    // Optional: only these apps may call.
-    apps: ['entre-textos', 'eduliberta'],
+    // Only these apps may call, and each one's payers may only be sent back to its own origins.
+    apps: {
+      'entre-textos': { returnOrigins: ['https://www.entretextosassessoria.com.br'] },
+      eduliberta: { returnOrigins: ['https://eduliberta.com.br', 'https://www.eduliberta.com.br'] },
+    },
   },
   default: 'asaas',
   providers: {
@@ -50,13 +53,14 @@ export default defineConfig({
 This mounts `POST /_payments/rpc` (change it with `controlPlane.path`) next to the usual
 `/payments/webhook/:provider`. Point every gateway's webhook at the control plane.
 
-Three tables join the billing tables, on the same connection and schema:
+Four tables join the billing tables, on the same connection and schema:
 
 | Table | Holds |
 | --- | --- |
 | `billing_tenant_objects` | which app owns each gateway customer, payment, subscription, checkout and dispute |
 | `billing_tenant_events` | the processed webhooks waiting for each app |
 | `billing_tenant_calls` | the answer of each call already run, so a retry gets it back instead of charging twice |
+| `billing_tenant_locks` | short locks shared by every control-plane process (one customer per account) |
 
 They are created on first use. With `billing.autoCreateSchema: false`, create them from a migration:
 
@@ -193,7 +197,51 @@ const { id, created } = await getPayments()
 ```
 
 The control plane records it in `billing_customers` with `owner_type = 'account'` (change it with
-`controlPlane.accountOwnerType`).
+`controlPlane.accountOwnerType`). Several control-plane processes can run side by side: they take a
+lock in `billing_tenant_locks` before creating, so an account never gets two gateway customers.
+
+<Callout type="warn">
+  The control plane trusts each app in `controlPlane.apps` with the `account` it passes: an app
+  can resolve (and then charge) the customer of any account whose subject it knows, and every app
+  of an account sees that account's customer ids. List only apps you run.
+</Callout>
+
+---
+
+## Sending the payer back to the app
+
+A checkout, payment link or card/portal page always returns the payer to the app that opened it.
+Pass that app's own URLs, as in standalone; the gateway's webhooks still go to the control plane:
+
+```ts title="app/billing/controllers/checkout_controller.ts"
+const session = await getPayments().driver('credit_card').createCheckout({
+  customerId,
+  amount: 4990,
+  successUrl: `${env.get('APP_URL')}/assinatura/obrigado`,
+  cancelUrl: `${env.get('APP_URL')}/assinatura`,
+})
+```
+
+The control plane only accepts return URLs on the calling app's `returnOrigins`: `successUrl`,
+`cancelUrl`, `returnUrl` and any `*url*`, `redirect` or `callback` field of the call, `metadata`
+included. Anything else (another app's origin, a foreign host, a relative path) answers `400
+bad_request` and never reaches the gateway. An app without `returnOrigins` may send none.
+
+Origins can also be resolved per call (added to `returnOrigins`), for example from a table of
+your own:
+
+```ts
+controlPlane: {
+  returnOrigins: async (app) =>
+    (await AppOrigin.query().where('app', app)).map((row) => row.origin),
+}
+```
+
+<Callout type="info">
+  Asaas only redirects when `cancelUrl` is set too, and only to domains registered in the Asaas
+  account (Minha Conta → Informações comerciais). Register every app's domain in the control
+  plane's Asaas account.
+</Callout>
 
 ---
 
@@ -252,9 +300,31 @@ Or let each app take over objects nobody owns yet with `controlPlane.adoptUnclai
   `isHubUnavailable(error)` and show "try again" rather than "your card was declined".
 - Each call is retried with the same id. The control plane runs a call once and replays its answer,
   so a retry never charges twice.
+- A call refused with a date more than 30 s ahead of the control plane's clock answers
+  `bad_request` (`controlPlane.maxClockSkewMs`).
 - Webhooks keep arriving at the control plane and wait there; the app takes them when it is back.
 - The managed renewal pass stops at the first subscription it cannot reach the control plane for,
   without counting a failure, and the next pass picks up where it stopped.
+
+### If the control plane stops mid-call
+
+A retry of a call whose run was interrupted waits for its lease (`controlPlane.callLeaseMs`,
+default 2 min; until then it answers `conflict`), then:
+
+- re-runs it when the gateway deduplicates that call on `idempotencyKey`, with the same key, so the
+  gateway answers the first result;
+- otherwise answers `indeterminate`: the gateway may or may not have acted. Check it with
+  `isHubOutcomeUnknown(error)` and look the object up (by `externalReference`) before charging
+  again with a new call.
+
+| Gateway | Deduplicated calls | Key |
+| --- | --- | --- |
+| Stripe | `createCustomer`, `charge`, `refund`, `createCheckout`, `createSubscription`, `updateSubscription` | yours, or one the control plane derives from the call id (`Idempotency-Key`) |
+| Asaas | `charge` | yours only (it becomes the `externalReference` suffix) |
+| Others | none | — |
+
+Pass `idempotencyKey` on every `charge` (an order id): it is also what protects an app-level retry,
+which is a new call with a new id. Extend the table with `controlPlane.idempotency`.
 
 <Callout type="info">
   Forwarded events are delivered at least once. A handler sees the same event id at most once,

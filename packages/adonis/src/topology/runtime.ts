@@ -138,6 +138,10 @@ export function buildControlPlane(
       : {}),
     ...(options.apps !== undefined ? { apps: options.apps } : {}),
     ...(options.adoptUnclaimed !== undefined ? { adoptUnclaimed: options.adoptUnclaimed } : {}),
+    ...(options.returnOrigins !== undefined ? { returnOrigins: options.returnOrigins } : {}),
+    ...(options.maxClockSkewMs !== undefined ? { maxClockSkewMs: options.maxClockSkewMs } : {}),
+    ...(options.callLeaseMs !== undefined ? { callLeaseMs: options.callLeaseMs } : {}),
+    ...(options.idempotency !== undefined ? { idempotency: options.idempotency } : {}),
     ...(deps.notify ? { notify: deps.notify } : {}),
     ...(deps.logger ? { logger: deps.logger } : {}),
   });

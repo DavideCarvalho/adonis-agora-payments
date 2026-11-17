@@ -278,10 +278,15 @@ export type { CreateSubscriptionRequest, SubscriptionHandle } from './subscripti
 export { SubscriptionsApi } from './subscriptions_api.js';
 // ── Topology: control plane and tenants ─────────────────────────────────────────────────────
 export type {
+  GatewayIdempotencyPolicy,
   PaymentsControlPlane,
   PaymentsControlPlaneOptions,
+  PaymentsTenantAppOptions,
 } from './topology/control_plane.js';
-export { createPaymentsControlPlane } from './topology/control_plane.js';
+export {
+  createPaymentsControlPlane,
+  GATEWAY_IDEMPOTENCY,
+} from './topology/control_plane.js';
 export type { TenantCallState, TenantLedger, TenantObjectKind } from './topology/ledger.js';
 export { memoryTenantLedger } from './topology/ledger.js';
 export type { LucidTenantLedgerOptions } from './topology/lucid_ledger.js';
@@ -306,6 +311,7 @@ export {
   HUB_OPERATION_CAPABILITY,
   HUB_OPERATIONS,
   hasCapability,
+  isHubOutcomeUnknown,
   isHubUnavailable,
   PaymentsHubError,
 } from './topology/protocol.js';

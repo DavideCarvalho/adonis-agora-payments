@@ -92,7 +92,13 @@ export type HubErrorCode =
   | 'conflict'
   | 'gateway'
   | 'unavailable'
-  | 'timeout';
+  | 'timeout'
+  /**
+   * The control plane stopped while this call was running and cannot tell whether the gateway
+   * ran it (no gateway idempotency to lean on). Do NOT retry with a fresh id: look the object up
+   * first (e.g. by `externalReference`). See {@link isHubOutcomeUnknown}.
+   */
+  | 'indeterminate';
 
 /** One answer, as it travels. */
 export interface HubReplyMessage {
@@ -125,6 +131,15 @@ export function isHubUnavailable(error: unknown): boolean {
   return (
     error instanceof PaymentsHubError && (error.code === 'unavailable' || error.code === 'timeout')
   );
+}
+
+/**
+ * Whether a call's outcome at the gateway is unknown: the control plane crashed mid-call and the
+ * gateway offers nothing to deduplicate a re-run on. The gateway MAY have charged; reconcile (look
+ * the payment up by your `externalReference`) before charging again with a new call.
+ */
+export function isHubOutcomeUnknown(error: unknown): boolean {
+  return error instanceof PaymentsHubError && error.code === 'indeterminate';
 }
 
 export function newHubMessageId(): string {

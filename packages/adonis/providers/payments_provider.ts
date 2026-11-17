@@ -233,7 +233,7 @@ export default class PaymentsProvider {
                 ? 400
                 : reply.error?.code === 'not_found'
                   ? 404
-                  : reply.error?.code === 'conflict'
+                  : reply.error?.code === 'conflict' || reply.error?.code === 'indeterminate'
                     ? 409
                     : reply.error?.code === 'gateway'
                       ? 502

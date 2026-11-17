@@ -1,5 +1,5 @@
 import type { CreateSubscriptionInput, PaymentsDriver } from '../driver.js';
-import { isHubUnavailable } from '../topology/protocol.js';
+import { isHubOutcomeUnknown, isHubUnavailable } from '../topology/protocol.js';
 import type { BillingStore, ManagedSubscriptionInput } from './billing_store.js';
 
 /** The cycles a managed subscription can advance by. Mirrors `CreateSubscriptionInput.cycle`. */
@@ -303,7 +303,9 @@ export async function renewDueManagedSubscriptions(
       // The payments control plane is unreachable (`topology: 'tenant'`): nothing was charged and
       // nothing was declined. Counting it as a failure would walk every subscriber towards the
       // app's dunning policy during an outage; stop the pass and let the next one retry.
-      if (isHubUnavailable(error)) break;
+      // `indeterminate` (the control plane died mid-charge) is the same: the next pass charges
+      // with the SAME cycle idempotency key, which the gateway deduplicates.
+      if (isHubUnavailable(error) || isHubOutcomeUnknown(error)) break;
       const message = error instanceof Error ? error.message : String(error);
       // Period untouched on purpose: it stays due and is retried, rather than silently
       // rolling forward a month the customer never paid for.

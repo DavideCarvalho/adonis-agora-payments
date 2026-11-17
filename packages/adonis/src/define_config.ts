@@ -16,6 +16,10 @@ import type { RazorpayDriverConfig } from './drivers/razorpay.js';
 import type { SquareDriverConfig } from './drivers/square.js';
 import type { InvoiceProvider } from './invoice/invoice_provider.js';
 import type { SubscriptionsConfig } from './subscription_mode.js';
+import type {
+  PaymentsControlPlaneOptions,
+  PaymentsTenantAppOptions,
+} from './topology/control_plane.js';
 import type { TenantLedger } from './topology/ledger.js';
 import type { HubProviderDeclaration, HubTokenSource } from './topology/tenant.js';
 import type { HubRedisSource, HubTransport, HubUrlSource } from './topology/transports.js';
@@ -336,10 +340,28 @@ export interface PaymentsControlPlaneConfig {
   ledger?: TenantLedger;
   /** `billing_customers.owner_type` of a customer that is a Hub account. Default `'account'`. */
   accountOwnerType?: string;
-  /** Only these apps may call. Default: any app the verifier accepts. */
-  apps?: readonly string[];
+  /**
+   * Only these apps may call. Default: any app the verifier accepts. As a map, each app also
+   * declares the origins its payers may be sent back to (`returnOrigins`); a checkout, payment
+   * link or card/portal page with a return URL anywhere else is refused (`400`).
+   *
+   * ```ts
+   * apps: {
+   *   'entre-textos': { returnOrigins: ['https://www.entretextosassessoria.com.br'] },
+   * }
+   * ```
+   */
+  apps?: readonly string[] | Readonly<Record<string, PaymentsTenantAppOptions>>;
+  /** More return origins per app, resolved per call (e.g. from the authkit client). */
+  returnOrigins?: PaymentsControlPlaneOptions['returnOrigins'];
   /** Let an app take over a gateway object nobody claimed yet. Default `false`. */
   adoptUnclaimed?: boolean;
+  /** Refuse a call dated more than this ahead of the clock. Default 30 s. */
+  maxClockSkewMs?: number;
+  /** How long an interrupted call holds its id before a retry reconciles it. Default 2 min. */
+  callLeaseMs?: number;
+  /** Which calls each gateway deduplicates on `idempotencyKey` (merged over the defaults). */
+  idempotency?: PaymentsControlPlaneOptions['idempotency'];
   /** Also take calls over Redis (the bus). HTTP stays mounted either way. */
   redis?: {
     /** The connection the server blocks on. Give payments its own. */

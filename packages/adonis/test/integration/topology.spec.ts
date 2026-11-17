@@ -2,6 +2,7 @@ import { Redis } from 'ioredis';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PaymentsManager } from '../../src/payments_manager.js';
 import { FakePaymentsDriver } from '../../src/testing/fake_payments_driver.js';
+import { InMemoryBillingStore } from '../../src/testing/index.js';
 import { createPaymentsControlPlane } from '../../src/topology/control_plane.js';
 import type { TenantLedger } from '../../src/topology/ledger.js';
 import { dropTenantLedgerTables, lucidTenantLedger } from '../../src/topology/lucid_ledger.js';
@@ -51,6 +52,7 @@ describe('lucid tenant ledger (integration)', () => {
     expect(result.rows.map((row) => row.table_name)).toEqual([
       'billing_tenant_calls',
       'billing_tenant_events',
+      'billing_tenant_locks',
       'billing_tenant_objects',
     ]);
   });
@@ -101,14 +103,115 @@ describe('lucid tenant ledger (integration)', () => {
   });
 
   it('replays a finished call and releases an abandoned one', async () => {
-    expect(await ledger.beginCall('a', 'call_1')).toEqual({ state: 'new' });
+    expect(await ledger.beginCall('a', 'call_1')).toMatchObject({ state: 'new' });
     expect(await ledger.beginCall('a', 'call_1')).toEqual({ state: 'running' });
-    expect(await ledger.beginCall('b', 'call_1')).toEqual({ state: 'new' });
+    expect(await ledger.beginCall('b', 'call_1')).toMatchObject({ state: 'new' });
     const reply = { v: HUB_MESSAGE_VERSION, id: 'call_1', ok: true, result: { n: 1 } };
     await ledger.finishCall('a', 'call_1', reply);
     expect(await ledger.beginCall('a', 'call_1')).toEqual({ state: 'done', reply });
     await ledger.abandonCall('b', 'call_1');
-    expect(await ledger.beginCall('b', 'call_1')).toEqual({ state: 'new' });
+    expect(await ledger.beginCall('b', 'call_1')).toMatchObject({ state: 'new' });
+  });
+
+  it('hands an expired in-flight call to exactly one retrier, guarded by its claim', async () => {
+    const crashed = await ledger.beginCall('a', 'call_crash');
+    if (crashed.state !== 'new') throw new Error('expected new');
+    expect(await ledger.beginCall('a', 'call_crash', { leaseMs: 60_000 })).toEqual({
+      state: 'running',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const racers = await Promise.all(
+      [1, 2, 3, 4].map(() => ledger.beginCall('a', 'call_crash', { leaseMs: 10 })),
+    );
+    const winners = racers.filter((state) => state.state === 'stale');
+    expect(winners).toHaveLength(1);
+    const winner = winners[0] as { state: 'stale'; claim: string };
+    // The crashed run coming back late can neither release nor overwrite it.
+    await ledger.abandonCall('a', 'call_crash', crashed.claim);
+    const late = { v: HUB_MESSAGE_VERSION, id: 'call_crash', ok: true, result: 'late' };
+    await ledger.finishCall('a', 'call_crash', late, crashed.claim);
+    expect(await ledger.beginCall('a', 'call_crash', { leaseMs: 60_000 })).toEqual({
+      state: 'running',
+    });
+    const reply = { v: HUB_MESSAGE_VERSION, id: 'call_crash', ok: true, result: 'won' };
+    await ledger.finishCall('a', 'call_crash', reply, winner.claim);
+    expect(await ledger.beginCall('a', 'call_crash')).toEqual({ state: 'done', reply });
+  });
+
+  it('prunes in-flight rows of crashed runs', async () => {
+    await ledger.beginCall('z', 'call_orphan');
+    await ledger.prune(new Date(Date.now() + 60_000));
+    expect(await ledger.beginCall('z', 'call_orphan')).toMatchObject({ state: 'new' });
+  });
+
+  it('keeps two events whose keys only differ past the column width', async () => {
+    const long = 'e'.repeat(600);
+    await ledger.enqueue('long', event(`${long}1`, 'pay_l'));
+    await ledger.enqueue('long', event(`${long}2`, 'pay_l'));
+    await ledger.enqueue('long', event(`${long}2`, 'pay_l'));
+    expect((await ledger.pull('long', 10)).map((row) => row.event.id.slice(-1))).toEqual([
+      '1',
+      '2',
+    ]);
+  });
+
+  it('locks across ledger instances (two control-plane processes), expired locks taken over', async () => {
+    const other = lucidTenantLedger({
+      schema: SCHEMA,
+      db: () => database.db.connection() as never,
+    });
+    const holders = await Promise.all([
+      ledger.lock('customer|asaas|sub_lock', 60_000),
+      other.lock('customer|asaas|sub_lock', 60_000),
+      ledger.lock('customer|asaas|sub_lock', 60_000),
+    ]);
+    expect(holders.filter((holder) => holder !== null)).toHaveLength(1);
+    const holder = holders.find((value) => value !== null) as string;
+    await other.unlock('customer|asaas|sub_lock', 'not-the-holder');
+    expect(await other.lock('customer|asaas|sub_lock', 60_000)).toBeNull();
+    await ledger.unlock('customer|asaas|sub_lock', holder);
+    const short = await other.lock('customer|asaas|sub_lock', 10);
+    expect(short).not.toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(await ledger.lock('customer|asaas|sub_lock', 60_000)).not.toBeNull();
+  });
+
+  it('two control planes on one database create ONE gateway customer per account', async () => {
+    const gateway = new FakePaymentsDriver({ provider: 'asaas' });
+    const createCustomer = gateway.createCustomer.bind(gateway);
+    gateway.createCustomer = async (input) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return createCustomer(input);
+    };
+    const store = new InMemoryBillingStore();
+    const plane = () =>
+      createPaymentsControlPlane({
+        manager: () => new PaymentsManager({ drivers: new Map([['asaas', gateway]]) }),
+        store: () => store,
+        // Each process its own ledger instance on the shared tables.
+        ledger: lucidTenantLedger({ schema: SCHEMA, db: () => database.db.connection() as never }),
+        verifyTenant: sharedSecretVerifier({
+          partitions: { a: { secret: 's', capabilities: ['payments:*'] } },
+        }),
+      });
+    const planes = [plane(), plane()];
+    const answers = await Promise.all(
+      planes.map((cp, index) =>
+        cp.handle({
+          v: HUB_MESSAGE_VERSION,
+          id: `ensure_${index}`,
+          operation: 'customers.ensure',
+          input: { provider: 'asaas', account: 'sub_two_planes', input: { name: 'Ana' } },
+          token: 's',
+          partition: 'a',
+          issuedAt: Date.now(),
+        }),
+      ),
+    );
+    expect(answers.every((answer) => answer.ok)).toBe(true);
+    expect(gateway.createCustomerCalls).toHaveLength(1);
+    const ids = answers.map((answer) => (answer.result as { id: string }).id);
+    expect(ids[0]).toBe(ids[1]);
   });
 });
 

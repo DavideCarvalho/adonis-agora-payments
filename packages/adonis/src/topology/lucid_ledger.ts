@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   assertBillingSchemaName,
   assertSchemaDialect,
@@ -7,7 +7,7 @@ import {
   type LucidDatabase,
 } from '../billing/schema.js';
 import type { TenantLedger, TenantObjectKind } from './ledger.js';
-import { isSharedKind, serializeEvent } from './ledger.js';
+import { DEFAULT_CALL_LEASE_MS, isSharedKind, serializeEvent } from './ledger.js';
 import type { HubEventEnvelope, HubReplyMessage } from './protocol.js';
 
 /** The tables the control plane adds next to the billing tables. */
@@ -15,6 +15,7 @@ export const TENANT_LEDGER_TABLES = [
   'billing_tenant_objects',
   'billing_tenant_events',
   'billing_tenant_calls',
+  'billing_tenant_locks',
 ] as const;
 
 type LedgerTable = (typeof TENANT_LEDGER_TABLES)[number];
@@ -50,6 +51,23 @@ function rowsOf(result: unknown): Record<string, unknown>[] {
 function parseJson<T>(value: unknown): T {
   return (typeof value === 'string' ? JSON.parse(value) : value) as T;
 }
+
+const EVENT_KEY_MAX = 512;
+
+/**
+ * The dedupe key of a queued event. A key that fits is stored as is (the rows written before
+ * hashing existed keep matching); a longer one is hashed WHOLE instead of truncated, so two
+ * events that only differ past the column width stay two rows.
+ */
+export function eventKey(partition: string, provider: string, eventId: string): string {
+  const raw = `${partition}|${provider}|${eventId}`;
+  if (raw.length <= EVENT_KEY_MAX) return raw;
+  return `#sha256|${createHash('sha256').update(raw).digest('hex')}`;
+}
+
+/** A lock key that fits its column whatever the account id. */
+const lockKey = (key: string) =>
+  key.length <= 191 ? key : `#sha256|${createHash('sha256').update(key).digest('hex')}`;
 
 /**
  * Create the ledger tables. Idempotent: the lazy first-use path and an app's own migration may
@@ -107,6 +125,13 @@ export async function createTenantLedgerTables(
       reply ${json} NULL,
       created_at ${timestamp} NOT NULL,
       PRIMARY KEY (tenant, call_id)
+    )`,
+  );
+  await db.rawQuery(
+    `CREATE TABLE IF NOT EXISTS ${T('billing_tenant_locks')} (
+      lock_key VARCHAR(191) NOT NULL PRIMARY KEY,
+      holder VARCHAR(64) NOT NULL,
+      expires_at ${timestamp} NOT NULL
     )`,
   );
   const index = isMysql(dialect)
@@ -220,7 +245,7 @@ export function lucidTenantLedger(options: LucidTenantLedgerOptions = {}): Tenan
     owners,
 
     async enqueue(partition, event) {
-      const key = `${partition}|${event.provider}|${event.id}`.slice(0, 512);
+      const key = eventKey(partition, event.provider, event.id);
       await query(
         (T, dialect) =>
           insertIgnore(
@@ -261,7 +286,7 @@ export function lucidTenantLedger(options: LucidTenantLedgerOptions = {}): Tenan
       return pending.length;
     },
 
-    async beginCall(partition, id) {
+    async beginCall(partition, id, callOptions = {}) {
       const claim = randomUUID();
       await query(
         (T, dialect) =>
@@ -271,29 +296,80 @@ export function lucidTenantLedger(options: LucidTenantLedgerOptions = {}): Tenan
           ),
         [partition, id, claim, now()],
       );
+      const read = () =>
+        query(
+          (T) =>
+            `SELECT claim, reply FROM ${T('billing_tenant_calls')} WHERE tenant = ? AND call_id = ?`,
+          [partition, id],
+        );
+      let row = (await read())[0];
+      if (row === undefined) return { state: 'new', claim };
+      if (String(row.claim) === claim) return { state: 'new', claim };
+      if (row.reply !== null && row.reply !== undefined) {
+        return { state: 'done', reply: parseJson<HubReplyMessage>(row.reply) };
+      }
+      // An attempt that never finished nor released the id (the process died mid-call). Past its
+      // lease, ONE caller takes it over (compare-and-set on the claim it saw) and reconciles.
+      const leaseMs = callOptions.leaseMs ?? DEFAULT_CALL_LEASE_MS;
+      const expiredBefore = new Date(Date.now() - leaseMs).toISOString();
+      await query(
+        (T) =>
+          `UPDATE ${T('billing_tenant_calls')} SET claim = ?, created_at = ? WHERE tenant = ? AND call_id = ? AND claim = ? AND reply IS NULL AND created_at < ?`,
+        [claim, now(), partition, id, String(row.claim), expiredBefore],
+      );
+      row = (await read())[0];
+      if (row !== undefined && String(row.claim) === claim) return { state: 'stale', claim };
+      if (row !== undefined && row.reply !== null && row.reply !== undefined) {
+        return { state: 'done', reply: parseJson<HubReplyMessage>(row.reply) };
+      }
+      return { state: 'running' };
+    },
+
+    async finishCall(partition, id, reply, claim) {
+      await query(
+        (T) =>
+          `UPDATE ${T('billing_tenant_calls')} SET reply = ? WHERE tenant = ? AND call_id = ?${claim !== undefined ? ' AND claim = ?' : ''}`,
+        [JSON.stringify(reply), partition, id, ...(claim !== undefined ? [claim] : [])],
+      );
+    },
+
+    async abandonCall(partition, id, claim) {
+      await query(
+        (T) =>
+          `DELETE FROM ${T('billing_tenant_calls')} WHERE tenant = ? AND call_id = ? AND reply IS NULL${claim !== undefined ? ' AND claim = ?' : ''}`,
+        [partition, id, ...(claim !== undefined ? [claim] : [])],
+      );
+    },
+
+    async lock(key, leaseMs) {
+      const holder = randomUUID();
+      const lock = lockKey(key);
+      const expiresAt = new Date(Date.now() + leaseMs).toISOString();
+      await query(
+        (T, dialect) =>
+          insertIgnore(
+            dialect,
+            `${T('billing_tenant_locks')} (lock_key, holder, expires_at) VALUES (?, ?, ?)`,
+          ),
+        [lock, holder, expiresAt],
+      );
+      // A holder that died without unlocking: take its expired lock over.
+      await query(
+        (T) =>
+          `UPDATE ${T('billing_tenant_locks')} SET holder = ?, expires_at = ? WHERE lock_key = ? AND holder <> ? AND expires_at < ?`,
+        [holder, expiresAt, lock, holder, now()],
+      );
       const rows = await query(
-        (T) =>
-          `SELECT claim, reply FROM ${T('billing_tenant_calls')} WHERE tenant = ? AND call_id = ?`,
-        [partition, id],
+        (T) => `SELECT holder FROM ${T('billing_tenant_locks')} WHERE lock_key = ?`,
+        [lock],
       );
-      const row = rows[0];
-      if (row === undefined || String(row.claim) === claim) return { state: 'new' };
-      if (row.reply === null || row.reply === undefined) return { state: 'running' };
-      return { state: 'done', reply: parseJson<HubReplyMessage>(row.reply) };
+      return rows[0] !== undefined && String(rows[0].holder) === holder ? holder : null;
     },
 
-    async finishCall(partition, id, reply) {
+    async unlock(key, holder) {
       await query(
-        (T) => `UPDATE ${T('billing_tenant_calls')} SET reply = ? WHERE tenant = ? AND call_id = ?`,
-        [JSON.stringify(reply), partition, id],
-      );
-    },
-
-    async abandonCall(partition, id) {
-      await query(
-        (T) =>
-          `DELETE FROM ${T('billing_tenant_calls')} WHERE tenant = ? AND call_id = ? AND reply IS NULL`,
-        [partition, id],
+        (T) => `DELETE FROM ${T('billing_tenant_locks')} WHERE lock_key = ? AND holder = ?`,
+        [lockKey(key), holder],
       );
     },
 
@@ -310,15 +386,11 @@ export function lucidTenantLedger(options: LucidTenantLedgerOptions = {}): Tenan
         [cutoff],
       );
       const calls = await query(
-        (T) =>
-          `SELECT COUNT(*) AS n FROM ${T('billing_tenant_calls')} WHERE reply IS NOT NULL AND created_at < ?`,
+        (T) => `SELECT COUNT(*) AS n FROM ${T('billing_tenant_calls')} WHERE created_at < ?`,
         [cutoff],
       );
-      await query(
-        (T) =>
-          `DELETE FROM ${T('billing_tenant_calls')} WHERE reply IS NOT NULL AND created_at < ?`,
-        [cutoff],
-      );
+      await query((T) => `DELETE FROM ${T('billing_tenant_calls')} WHERE created_at < ?`, [cutoff]);
+      await query((T) => `DELETE FROM ${T('billing_tenant_locks')} WHERE expires_at < ?`, [cutoff]);
       return { events: Number(events[0]?.n ?? 0), calls: Number(calls[0]?.n ?? 0) };
     },
 

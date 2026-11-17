@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { WebhookEvent } from '../types.js';
 import type { HubEventEnvelope, HubReplyMessage } from './protocol.js';
 
@@ -9,9 +10,20 @@ export type TenantObjectKind = 'customer' | 'payment' | 'subscription' | 'checko
 
 /** The state of one call id, for replaying a retried call instead of running it twice. */
 export type TenantCallState =
-  | { state: 'new' }
+  /** First time this id is seen: the caller now holds it (`claim`) and runs the call. */
+  | { state: 'new'; claim: string }
+  /** Another attempt holds it and its lease has not expired yet. */
   | { state: 'running' }
-  | { state: 'done'; reply: HubReplyMessage };
+  | { state: 'done'; reply: HubReplyMessage }
+  /**
+   * An earlier attempt took the id and never finished nor released it (the process died
+   * mid-call) and its lease expired. The caller now holds it (`claim`) and must RECONCILE: re-run
+   * only when the gateway deduplicates the call, else record an `indeterminate` answer.
+   */
+  | { state: 'stale'; claim: string };
+
+/** Default lease of an in-flight call: longer than any gateway call is allowed to take. */
+export const DEFAULT_CALL_LEASE_MS = 2 * 60 * 1000;
 
 /**
  * The control plane's own bookkeeping: which app owns which gateway object, which forwarded
@@ -39,13 +51,34 @@ export interface TenantLedger {
   pull(partition: string, limit: number): Promise<HubEventEnvelope[]>;
   /** Mark events delivered. Ids of another app are ignored. */
   ack(partition: string, seqs: readonly string[]): Promise<number>;
-  /** Claim a call id before running it. */
-  beginCall(partition: string, id: string): Promise<TenantCallState>;
-  /** Store a call's successful answer, so a retry of the same id gets it back. */
-  finishCall(partition: string, id: string, reply: HubReplyMessage): Promise<void>;
-  /** Release a call id whose run failed, so a retry runs it again. */
-  abandonCall(partition: string, id: string): Promise<void>;
-  /** Delete delivered events and finished calls older than `before`. */
+  /**
+   * Claim a call id before running it. An in-flight claim older than `leaseMs` (default
+   * {@link DEFAULT_CALL_LEASE_MS}) is taken over once, as `stale`.
+   */
+  beginCall(
+    partition: string,
+    id: string,
+    options?: { leaseMs?: number },
+  ): Promise<TenantCallState>;
+  /**
+   * Store a call's answer, so a retry of the same id gets it back. With `claim`, only while the
+   * caller still holds the id (a run that outlived its lease does not overwrite its successor).
+   */
+  finishCall(partition: string, id: string, reply: HubReplyMessage, claim?: string): Promise<void>;
+  /** Release a call id whose run failed, so a retry runs it again. `claim`: as in `finishCall`. */
+  abandonCall(partition: string, id: string, claim?: string): Promise<void>;
+  /**
+   * Take a short-lived lock shared by every control-plane process (one gateway customer per
+   * account). Answers the holder token, or `null` when someone else holds it. An expired lock is
+   * taken over.
+   */
+  lock(key: string, leaseMs: number): Promise<string | null>;
+  /** Release a lock this holder took. */
+  unlock(key: string, holder: string): Promise<void>;
+  /**
+   * Delete delivered events, finished calls and abandoned in-flight calls (crashed runs) older
+   * than `before`. Keep `before` far behind the call lease: a pruned id is a new id again.
+   */
   prune(before: Date): Promise<{ events: number; calls: number }>;
   /** Undelivered events per app, for the console and the doctor. */
   backlog(): Promise<Record<string, number>>;
@@ -89,7 +122,11 @@ export function memoryTenantLedger(): TenantLedger {
   const objects = new Map<string, { partitions: Set<string>; provider: string }>();
   const events: MemoryEvent[] = [];
   const keys = new Set<string>();
-  const calls = new Map<string, { reply: HubReplyMessage | null; createdAt: Date }>();
+  const calls = new Map<
+    string,
+    { reply: HubReplyMessage | null; createdAt: Date; claim: string }
+  >();
+  const locks = new Map<string, { holder: string; expiresAt: number }>();
   let seq = 0;
 
   return {
@@ -139,22 +176,43 @@ export function memoryTenantLedger(): TenantLedger {
       }
       return count;
     },
-    async beginCall(partition, id) {
+    async beginCall(partition, id, options = {}) {
       const key = `${partition}|${id}`;
       const existing = calls.get(key);
+      const claim = randomUUID();
       if (existing === undefined) {
-        calls.set(key, { reply: null, createdAt: new Date() });
-        return { state: 'new' };
+        calls.set(key, { reply: null, createdAt: new Date(), claim });
+        return { state: 'new', claim };
       }
-      return existing.reply === null
-        ? { state: 'running' }
-        : { state: 'done', reply: existing.reply };
+      if (existing.reply !== null) return { state: 'done', reply: existing.reply };
+      const leaseMs = options.leaseMs ?? DEFAULT_CALL_LEASE_MS;
+      if (Date.now() - existing.createdAt.getTime() < leaseMs) return { state: 'running' };
+      calls.set(key, { reply: null, createdAt: new Date(), claim });
+      return { state: 'stale', claim };
     },
-    async finishCall(partition, id, reply) {
-      calls.set(`${partition}|${id}`, { reply, createdAt: new Date() });
+    async finishCall(partition, id, reply, claim) {
+      const key = `${partition}|${id}`;
+      const existing = calls.get(key);
+      if (claim !== undefined && existing !== undefined && existing.claim !== claim) return;
+      calls.set(key, { reply, createdAt: new Date(), claim: existing?.claim ?? claim ?? '' });
     },
-    async abandonCall(partition, id) {
-      calls.delete(`${partition}|${id}`);
+    async abandonCall(partition, id, claim) {
+      const key = `${partition}|${id}`;
+      const existing = calls.get(key);
+      if (existing === undefined || existing.reply !== null) return;
+      if (claim !== undefined && existing.claim !== claim) return;
+      calls.delete(key);
+    },
+    async lock(key, leaseMs) {
+      const now = Date.now();
+      const held = locks.get(key);
+      if (held !== undefined && held.expiresAt > now) return null;
+      const holder = randomUUID();
+      locks.set(key, { holder, expiresAt: now + leaseMs });
+      return holder;
+    },
+    async unlock(key, holder) {
+      if (locks.get(key)?.holder === holder) locks.delete(key);
     },
     async prune(before) {
       let removedEvents = 0;
@@ -168,7 +226,7 @@ export function memoryTenantLedger(): TenantLedger {
       }
       let removedCalls = 0;
       for (const [key, call] of calls) {
-        if (call.reply !== null && call.createdAt < before) {
+        if (call.createdAt < before) {
           calls.delete(key);
           removedCalls += 1;
         }

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useQueryStates } from 'nuqs';
 import type { Column } from '../agora-kit/blocks/data-table';
 import { PageHeader, Toolbar } from '../agora-kit/blocks/page-header';
 import { PageBody } from '../agora-kit/shell/app-shell';
@@ -13,6 +13,7 @@ import { Badge, StatusBadge } from './ui/badge';
 import { EventTypeFilter } from './ui/event-type-filter';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';
+import { optionalParam, pageParam, readStatus, writeStatus } from './url-state';
 
 const PAGE_SIZE = 50;
 
@@ -38,11 +39,22 @@ const STATUS_OPTIONS: ReadonlyArray<{ value: string | undefined; label: string }
  * finally happens. It is safe to repeat — the ledger re-claims a `failed` event and refuses an
  * in-flight or already-processed one, so a redelivery can never double-apply.
  */
-export function WebhookEvents({ initialStatus }: { initialStatus?: string | undefined } = {}) {
-  const [status, setStatus] = useState<string | undefined>(initialStatus ?? 'failed');
-  const [provider, setProvider] = useState<string | undefined>(undefined);
-  const [type, setType] = useState<string | undefined>(undefined);
-  const [page, setPage] = useState(1);
+/** The ledger's view, in the hash's query (`#/webhooks?status=all&type=payment.paid&page=2`).
+ *  It opens on `failed`: every status is `?status=all`. */
+export const webhookParams = {
+  status: optionalParam,
+  provider: optionalParam,
+  type: optionalParam,
+  page: pageParam,
+};
+
+export function WebhookEvents() {
+  const [view, setView] = useQueryStates(webhookParams, { history: 'push' });
+  const status = readStatus(view.status, 'failed');
+  const provider = view.provider ?? undefined;
+  const type = view.type ?? undefined;
+  const page = view.page;
+  const setPage = (next: number) => void setView({ page: next });
   const queryClient = useQueryClient();
 
   const query = useQuery({
@@ -58,10 +70,9 @@ export function WebhookEvents({ initialStatus }: { initialStatus?: string | unde
     },
   });
 
-  const refilter = (apply: () => void) => {
-    apply();
-    setPage(1);
-  };
+  const refilter = (
+    change: Partial<{ status: string | null; provider: string | null; type: string | null }>,
+  ) => void setView({ ...change, page: null });
 
   const columns: Column<WebhookEventRow>[] = [
     {
@@ -123,13 +134,13 @@ export function WebhookEvents({ initialStatus }: { initialStatus?: string | unde
         description="The idempotency ledger. A failed row means a handler threw and the dispatcher gave up — its effect never happened."
       />
       <Toolbar label="Event filters" className="gap-3">
-        <EventTypeFilter value={type} onChange={(v) => refilter(() => setType(v))} />
-        <ProviderFilter value={provider} onChange={(v) => refilter(() => setProvider(v))} />
+        <EventTypeFilter value={type} onChange={(v) => refilter({ type: v ?? null })} />
+        <ProviderFilter value={provider} onChange={(v) => refilter({ provider: v ?? null })} />
         <Segmented
           aria-label="Event status"
           options={STATUS_OPTIONS}
           value={status}
-          onChange={(value) => refilter(() => setStatus(value))}
+          onChange={(value) => refilter({ status: writeStatus(value, 'failed') })}
         />
       </Toolbar>
       <ListPanel

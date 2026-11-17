@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
+import { useQueryStates } from 'nuqs';
 import { useState } from 'react';
 import type { Column } from '../agora-kit/blocks/data-table';
 import { PageHeader, Toolbar } from '../agora-kit/blocks/page-header';
@@ -16,6 +17,7 @@ import {
 import { Badge, Qualifier, StatusBadge } from './ui/badge';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';
+import { optionalParam, pageParam, readStatus, writeStatus } from './url-state';
 
 const PAGE_SIZE = 50;
 
@@ -44,15 +46,19 @@ const STATUS_OPTIONS: ReadonlyArray<{ value: string | undefined; label: string }
  * exists, will bill again, and is NOT billing now. Several gateways collapse the two, and an
  * operator who reads them as the same grants access to someone who is not paying.
  */
+export const subscriptionsParams = {
+  status: optionalParam,
+  provider: optionalParam,
+  page: pageParam,
+};
+
 export function Subscriptions({
-  initialStatus,
   customerId,
   openedId,
   onOpen,
   onOpenPayment,
   onOpenCustomer,
 }: {
-  initialStatus?: string | undefined;
   /** Only this gateway customer's subscriptions (`#/subscriptions?customer=…`). */
   customerId?: string | undefined;
   /** The subscription open in the detail dialog (`#/subscriptions/<id>`). */
@@ -63,11 +69,13 @@ export function Subscriptions({
   onOpenCustomer?: ((customerId: string) => void) | undefined;
 } = {}) {
   // One customer's subscriptions open on all of them: a past-due default would hide the rest.
-  const [status, setStatus] = useState<string | undefined>(
-    initialStatus ?? (customerId !== undefined ? undefined : 'past_due'),
-  );
-  const [provider, setProvider] = useState<string | undefined>(undefined);
-  const [page, setPage] = useState(1);
+  // `#/subscriptions?status=all&provider=asaas&page=2`; the status is also a health check's seed.
+  const defaultStatus = customerId !== undefined ? undefined : 'past_due';
+  const [view, setView] = useQueryStates(subscriptionsParams, { history: 'push' });
+  const status = readStatus(view.status, defaultStatus);
+  const provider = view.provider ?? undefined;
+  const page = view.page;
+  const setPage = (next: number) => void setView({ page: next });
   const [openedLocal, setOpenedLocal] = useState<string | null>(null);
   const opened = onOpen === undefined ? openedLocal : (openedId ?? null);
   const setOpened = onOpen ?? setOpenedLocal;
@@ -79,10 +87,8 @@ export function Subscriptions({
   });
 
   const pastDue = query.data?.counts.past_due ?? 0;
-  const refilter = (apply: () => void) => {
-    apply();
-    setPage(1);
-  };
+  const refilter = (change: Partial<{ status: string | null; provider: string | null }>) =>
+    void setView({ ...change, page: null });
 
   return (
     <PageBody>
@@ -98,7 +104,7 @@ export function Subscriptions({
         }
       />
       <Toolbar label="Subscription filters" className="gap-3">
-        <ProviderFilter value={provider} onChange={(v) => refilter(() => setProvider(v))} />
+        <ProviderFilter value={provider} onChange={(v) => refilter({ provider: v ?? null })} />
         <Segmented
           aria-label="Subscription status"
           options={STATUS_OPTIONS.map((option) =>
@@ -107,7 +113,7 @@ export function Subscriptions({
               : option,
           )}
           value={status}
-          onChange={(value) => refilter(() => setStatus(value))}
+          onChange={(value) => refilter({ status: writeStatus(value, defaultStatus) })}
         />
       </Toolbar>
       <ListPanel

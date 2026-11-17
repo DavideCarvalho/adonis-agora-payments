@@ -2,6 +2,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { NuqsHashAdapter } from '../agora-kit/url-state/nuqs-hash-adapter';
 import type { OverviewMetric } from '../client/payments-client';
 import { clearConfig, injectConfig } from '../client/test-config.test-helper';
 import { Overview } from './Overview';
@@ -50,9 +51,11 @@ function renderScreen() {
     defaultOptions: { queries: { retry: false, refetchInterval: false } },
   });
   return render(
-    <QueryClientProvider client={client}>
-      <Overview onNavigate={() => {}} />
-    </QueryClientProvider>,
+    <NuqsHashAdapter>
+      <QueryClientProvider client={client}>
+        <Overview onNavigate={() => {}} />
+      </QueryClientProvider>
+    </NuqsHashAdapter>,
   );
 }
 

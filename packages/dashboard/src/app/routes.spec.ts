@@ -98,8 +98,8 @@ describe('subscription detail route', () => {
 });
 
 describe('screenKey', () => {
-  it('changes with the seed, so a new seed remounts the screen', () => {
-    expect(screenKey({ screen: 'payments', status: 'pending' })).not.toBe(
+  it('changes with the customer, not the status seed (the screens read that from the URL)', () => {
+    expect(screenKey({ screen: 'payments', status: 'pending' })).toBe(
       screenKey({ screen: 'payments', status: 'failed' }),
     );
     expect(screenKey({ screen: 'payments' })).not.toBe(

@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useQueryStates } from 'nuqs';
 import type { Column } from '../agora-kit/blocks/data-table';
 import { PageHeader, Toolbar } from '../agora-kit/blocks/page-header';
 import { PageBody } from '../agora-kit/shell/app-shell';
@@ -10,6 +10,7 @@ import { formatCents, formatCount, formatWhen } from './money';
 import { ListPanel, Mono } from './shell';
 import { Badge } from './ui/badge';
 import { Segmented } from './ui/segmented';
+import { optionalParam, pageParam, readStatus, writeStatus } from './url-state';
 
 const PAGE_SIZE = 50;
 
@@ -43,9 +44,17 @@ const ACTION_LABEL: Record<string, string> = {
  * subscribe to, going to a log that has usually rotated by the time anybody asks who refunded a
  * customer in March, or why three weeks of Asaas deliveries never arrived.
  */
-export function Activity({ initialAction }: { initialAction?: string | undefined } = {}) {
-  const [action, setAction] = useState<string | undefined>(initialAction);
-  const [page, setPage] = useState(1);
+/**
+ * The log's view, in the hash's query (`#/activity?status=refund.issued&page=2`). The action rides
+ * in `status`, the param a health check seeds this screen with.
+ */
+export const activityParams = { status: optionalParam, page: pageParam };
+
+export function Activity() {
+  const [view, setView] = useQueryStates(activityParams, { history: 'push' });
+  const action = readStatus(view.status, undefined);
+  const page = view.page;
+  const setPage = (next: number) => void setView({ page: next });
 
   const query = useQuery({
     queryKey: ['audit', action, page],
@@ -63,10 +72,7 @@ export function Activity({ initialAction }: { initialAction?: string | undefined
           aria-label="Action"
           options={ACTION_OPTIONS}
           value={action}
-          onChange={(value) => {
-            setAction(value);
-            setPage(1);
-          }}
+          onChange={(value) => void setView({ status: writeStatus(value, undefined), page: null })}
         />
       </Toolbar>
       <ListPanel

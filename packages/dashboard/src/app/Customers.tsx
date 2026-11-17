@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { parseAsString, useQueryStates } from 'nuqs';
 import type { Column } from '../agora-kit/blocks/data-table';
 import { PageHeader, Toolbar } from '../agora-kit/blocks/page-header';
 import { UsersIcon } from '../agora-kit/icons';
@@ -11,6 +11,7 @@ import { ListPanel, Mono } from './shell';
 import { Badge } from './ui/badge';
 import { CONTROL_CLASS, FieldLabel } from './ui/field';
 import { ProviderFilter } from './ui/provider-filter';
+import { optionalParam, pageParam } from './url-state';
 
 const PAGE_SIZE = 50;
 
@@ -27,6 +28,12 @@ const PAGE_SIZE = 50;
  * being taken through a gateway customer nobody mapped, and no screen here will ever be able to
  * name who they belong to.
  */
+export const customersParams = {
+  provider: optionalParam,
+  owner: parseAsString.withDefault(''),
+  page: pageParam,
+};
+
 export function Customers({
   onOpenPayments,
   onOpenSubscriptions,
@@ -34,9 +41,13 @@ export function Customers({
   onOpenPayments?: (customerId: string) => void;
   onOpenSubscriptions?: (customerId: string) => void;
 }) {
-  const [provider, setProvider] = useState<string | undefined>(undefined);
-  const [owner, setOwner] = useState('');
-  const [page, setPage] = useState(1);
+  // `#/customers?provider=asaas&owner=4102&page=2`. Typing the owner id replaces the history
+  // entry; a gateway or page pick adds one. Any filter change goes back to page 1.
+  const [view, setView] = useQueryStates(customersParams, { history: 'push' });
+  const provider = view.provider ?? undefined;
+  const owner = view.owner;
+  const page = view.page;
+  const setPage = (next: number) => void setView({ page: next });
 
   const ownerId = owner.trim() === '' ? undefined : owner.trim();
   const query = useQuery({
@@ -53,19 +64,15 @@ export function Customers({
       <Toolbar label="Customer filters" className="gap-3">
         <ProviderFilter
           value={provider}
-          onChange={(v) => {
-            setProvider(v);
-            setPage(1);
-          }}
+          onChange={(v) => void setView({ provider: v ?? null, page: null })}
         />
         <FieldLabel label="Owner id">
           <input
             type="search"
             value={owner}
-            onChange={(event) => {
-              setOwner(event.target.value);
-              setPage(1);
-            }}
+            onChange={(event) =>
+              void setView({ owner: event.target.value, page: null }, { history: 'replace' })
+            }
             placeholder="4102"
             className={`mono w-32 ${CONTROL_CLASS}`}
           />

@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
+import { useQueryStates } from 'nuqs';
 import { useState } from 'react';
 import type { Column } from '../agora-kit/blocks/data-table';
 import { PageHeader } from '../agora-kit/blocks/page-header';
@@ -26,6 +27,13 @@ import { disputeIsChargeback, disputeIsOpen, disputeStatusClass } from './status
 import { Badge, Qualifier, StatusBadge } from './ui/badge';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';
+import {
+  optionalParam,
+  pageParam,
+  parseAsIntegerAtLeast,
+  readStatus,
+  writeStatus,
+} from './url-state';
 
 const PAGE_SIZE = 50;
 
@@ -70,7 +78,7 @@ const TONE_CLASS: Record<DeadlineTone, string> = {
  * that — Asaas publishes no lost-dispute event at all — so a lost dispute would otherwise sit
  * `open` forever, holding the health check red until nobody reads it any more.
  */
-export function Disputes({ initialStatus }: { initialStatus?: string | undefined } = {}) {
+export function Disputes() {
   return (
     <PageBody>
       <PageHeader
@@ -78,7 +86,7 @@ export function Disputes({ initialStatus }: { initialStatus?: string | undefined
         description="Chargebacks and the alerts that precede them. The open windows closing soonest come first."
       />
       <ClosingWindows />
-      <DisputeLog initialStatus={initialStatus} />
+      <DisputeLog />
     </PageBody>
   );
 }
@@ -92,8 +100,14 @@ export function Disputes({ initialStatus }: { initialStatus?: string | undefined
  * the log below instead; it is the same table.
  */
 function ClosingWindows() {
-  const [hours, setHours] = useState(DEFAULT_DUE_WITHIN_HOURS);
-  const [page, setPage] = useState(1);
+  // `?due=168&duePage=2`: its own params, since the log below has a status, gateway and page too.
+  const [view, setView] = useQueryStates(
+    { due: parseAsIntegerAtLeast(1).withDefault(DEFAULT_DUE_WITHIN_HOURS), duePage: pageParam },
+    { history: 'push' },
+  );
+  const hours = view.due;
+  const page = view.duePage;
+  const setPage = (next: number) => void setView({ duePage: next });
 
   const query = useQuery({
     queryKey: ['disputes', 'due-within', hours, page],
@@ -114,11 +128,8 @@ function ClosingWindows() {
             label: horizon.label,
           }))}
           value={String(hours)}
-          onChange={(value) => {
-            setHours(Number(value));
-            // A different horizon is a different list; page 3 of "3 days" is not page 3 of "30".
-            setPage(1);
-          }}
+          // A different horizon is a different list; page 3 of "3 days" is not page 3 of "30".
+          onChange={(value) => void setView({ due: Number(value), duePage: null })}
         />
       }
       query={query}
@@ -173,10 +184,16 @@ const WORK_LIST_COLUMNS: Column<DisputeRow>[] = [
 
 /** The log: every dispute, newest first, filterable — including the ones with no deadline at all,
  *  which the work list cannot show because there is nothing to be late for. */
-function DisputeLog({ initialStatus }: { initialStatus?: string | undefined }) {
-  const [status, setStatus] = useState<string | undefined>(initialStatus);
-  const [provider, setProvider] = useState<string | undefined>(undefined);
-  const [page, setPage] = useState(1);
+function DisputeLog() {
+  // `?status=lost&provider=asaas&page=2`; the status is also a health check's seed.
+  const [view, setView] = useQueryStates(
+    { status: optionalParam, provider: optionalParam, page: pageParam },
+    { history: 'push' },
+  );
+  const status = readStatus(view.status, undefined);
+  const provider = view.provider ?? undefined;
+  const page = view.page;
+  const setPage = (next: number) => void setView({ page: next });
 
   const query = useQuery({
     queryKey: ['disputes', 'log', status, provider, page],
@@ -184,10 +201,8 @@ function DisputeLog({ initialStatus }: { initialStatus?: string | undefined }) {
   });
 
   const [resolving, setResolving] = useState<DisputeRow | null>(null);
-  const refilter = (apply: () => void) => {
-    apply();
-    setPage(1);
-  };
+  const refilter = (change: Partial<{ status: string | null; provider: string | null }>) =>
+    void setView({ ...change, page: null });
 
   const columns: Column<DisputeRow>[] = [
     { id: 'status', header: 'Status', cell: (row) => <StatusCell row={row} /> },
@@ -250,12 +265,12 @@ function DisputeLog({ initialStatus }: { initialStatus?: string | undefined }) {
       description="every chargeback and alert, newest first"
       action={
         <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
-          <ProviderFilter value={provider} onChange={(v) => refilter(() => setProvider(v))} />
+          <ProviderFilter value={provider} onChange={(v) => refilter({ provider: v ?? null })} />
           <Segmented
             aria-label="Dispute status"
             options={STATUS_OPTIONS}
             value={status}
-            onChange={(value) => refilter(() => setStatus(value))}
+            onChange={(value) => refilter({ status: writeStatus(value, undefined) })}
           />
         </div>
       }

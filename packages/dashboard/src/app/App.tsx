@@ -4,6 +4,8 @@ import { ErrorBoundary } from '../agora-kit/blocks/error-boundary';
 import { UsersIcon } from '../agora-kit/icons';
 import { AppShell, type NavSection, PageBody } from '../agora-kit/shell/app-shell';
 import { readShellConfig } from '../agora-kit/shell-config';
+import { splitHash, subscribeHashUrl } from '../agora-kit/url-state/hash-url';
+import { NuqsHashAdapter } from '../agora-kit/url-state/nuqs-hash-adapter';
 import { CONFIG_ELEMENT_ID, isScopedView } from '../client/payments-client';
 import { Activity } from './Activity';
 import { Customers } from './Customers';
@@ -21,7 +23,15 @@ import {
 import { OrgPicker, useTenantPicker } from './OrgPicker';
 import { Overview } from './Overview';
 import { PaymentsList } from './PaymentsList';
-import { formatRoute, parseRoute, type Route, SCREENS, type Screen, screenKey } from './routes';
+import {
+  formatRoute,
+  parseRoute,
+  type Route,
+  SCREENS,
+  type Screen,
+  sameRoute,
+  screenKey,
+} from './routes';
 import { Subscriptions } from './Subscriptions';
 import { WebhookEvents } from './WebhookEvents';
 
@@ -39,23 +49,36 @@ import { WebhookEvents } from './WebhookEvents';
  *
  * The one thing that needs cross-screen state is the health panel: "12 events the dispatcher gave
  * up on" has to be able to land on those twelve rows, or the number is decoration. The seed
- * (`status`, `customer`) travels IN the hash, and the target screen is keyed on it so a new seed
- * remounts it — a screen already showing `paid` must not keep showing it when the operator was
- * sent to `pending`.
+ * (`status`, `customer`) travels IN the hash. `status` arrives as the screen's own `?status=`
+ * filter value (nuqs), so a new seed simply changes the filter; only a different `customer`
+ * remounts the screen.
  */
-function useHashRoute(): [Route, (next: Route) => void] {
+function useHashRoute(): [Route, (next: Route, options?: { keepQuery?: boolean }) => void] {
   const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));
 
   // Follow back/forward and hand-edited hashes. Our own navigations also arrive here, so the
   // hash is the single source of truth rather than something state has to be kept in step with.
-  useEffect(() => {
-    const sync = () => setRoute(parseRoute(window.location.hash));
-    window.addEventListener('hashchange', sync);
-    return () => window.removeEventListener('hashchange', sync);
-  }, []);
+  // The screens' own filter writes (nuqs, query-only, no `hashchange`) arrive too; the route keeps
+  // its object unless the screen, detail or seed changed.
+  useEffect(
+    () =>
+      subscribeHashUrl(() =>
+        setRoute((prev) => {
+          const next = parseRoute(window.location.hash);
+          return sameRoute(prev, next) ? prev : next;
+        }),
+      ),
+    [],
+  );
 
-  const navigate = useCallback((next: Route) => {
-    const hash = formatRoute(next);
+  const navigate = useCallback((next: Route, options: { keepQuery?: boolean } = {}) => {
+    let hash = formatRoute(next);
+    // Opening or closing a detail on top of the same list keeps every filter in the query.
+    if (options.keepQuery) {
+      const { search } = splitHash(window.location.hash);
+      const { path } = splitHash(hash);
+      hash = search === '' ? `#${path}` : `#${path}?${search}`;
+    }
     // Assigning an identical hash fires no `hashchange`, so the same tab pressed twice is a no-op
     // rather than a history entry.
     if (window.location.hash !== hash) window.location.hash = hash;
@@ -97,7 +120,20 @@ const NAV: ReadonlyArray<{ section: string; items: ReadonlyArray<[Screen, ReactN
   { section: 'Integrations', items: [['webhooks', <PlugIcon key="i" />]] },
 ];
 
+/**
+ * The console, wrapped in the kit's `NuqsHashAdapter`: every screen's filters (status, gateway,
+ * page, …) live in the hash's query (`#/payments?status=failed&provider=asaas`), so a filtered
+ * view is a link.
+ */
 export function App() {
+  return (
+    <NuqsHashAdapter>
+      <Console />
+    </NuqsHashAdapter>
+  );
+}
+
+function Console() {
   // What the provider put in the page: switcher, ⌘K search, viewer, sign-out (all optional).
   const shell = useMemo(() => readShellConfig(CONFIG_ELEMENT_ID), []);
   const [route, navigate] = useHashRoute();
@@ -150,14 +186,20 @@ export function App() {
 
   /** Open (or close, with `null`) one subscription's detail on top of the CURRENT list. */
   const openSubscription = (subscriptionId: string | null) =>
-    navigate({ ...route, screen: 'subscriptions', subscriptionId: subscriptionId ?? undefined });
+    navigate(
+      { ...route, screen: 'subscriptions', subscriptionId: subscriptionId ?? undefined },
+      { keepQuery: true },
+    );
 
   /** A payment named in a subscription's detail: the payments screen with its detail open. */
   const openPaymentDetail = (paymentId: string) => navigate({ screen: 'payments', paymentId });
 
   /** Open (or close, with `null`) one payment's detail on top of the CURRENT list, seed intact. */
   const openPayment = (paymentId: string | null) =>
-    navigate({ ...route, screen: 'payments', paymentId: paymentId ?? undefined });
+    navigate(
+      { ...route, screen: 'payments', paymentId: paymentId ?? undefined },
+      { keepQuery: true },
+    );
 
   return (
     <AppShell
@@ -199,7 +241,6 @@ export function App() {
         return (
           <PaymentsList
             key={key}
-            initialStatus={route.status}
             initialCustomerId={route.customerId}
             openedGatewayId={route.paymentId ?? null}
             onOpen={openPayment}
@@ -220,7 +261,6 @@ export function App() {
         return (
           <Subscriptions
             key={key}
-            initialStatus={route.status}
             customerId={route.customerId}
             openedId={route.subscriptionId ?? null}
             onOpen={openSubscription}
@@ -229,11 +269,11 @@ export function App() {
           />
         );
       case 'disputes':
-        return <Disputes key={key} initialStatus={route.status} />;
+        return <Disputes key={key} />;
       case 'webhooks':
-        return <WebhookEvents key={key} initialStatus={route.status} />;
+        return <WebhookEvents key={key} />;
       case 'activity':
-        return <Activity key={key} initialAction={route.status} />;
+        return <Activity key={key} />;
     }
   }
 }

@@ -104,13 +104,19 @@ export function formatRoute(route: Route): string {
 }
 
 /**
- * What makes two routes "the same screen showing the same seeded rows" — the React `key` a screen
- * is mounted under, so a NEW seed remounts it (a screen already showing `paid` must not keep
- * showing it when the operator was sent to `pending`) while opening a detail dialog on top of the
- * same list does not throw away its page and filters.
+ * The React `key` a screen is mounted under. The status seed is no longer part of it: every
+ * screen reads its filters (`status` included) from the hash's query, so a new seed simply shows
+ * up as the new filter. A different customer is a different list, so it still remounts (its
+ * lookup box and dialogs start clean), and opening a detail dialog on top of the same list does
+ * not throw away its page and filters.
  */
 export function screenKey(route: Route): string {
-  return `${route.screen}:${route.status ?? ''}:${route.customerId ?? ''}`;
+  return `${route.screen}:${route.customerId ?? ''}`;
+}
+
+/** Whether two routes name the same screen, detail and seed (the router keeps its object then). */
+export function sameRoute(a: Route, b: Route): boolean {
+  return formatRoute(a) === formatRoute(b);
 }
 
 /** A hand-edited hash may carry a `%` that is not an escape; that is not worth a blank page. */

@@ -69,6 +69,14 @@ same place, and a view can be pasted into a ticket:
 | `#/payments/pay_8f2…` | the payments screen with that one payment open in full |
 | `#/subscriptions?customer=cus_9f2` | every subscription of one gateway customer |
 | `#/subscriptions/<id>` | the subscriptions screen with that one subscription open in full (its id or gateway id) |
+| `#/payments?status=failed&provider=asaas&page=2` | the filters you picked, and the page |
+| `#/webhooks?status=all` | every status, on a screen whose default is one (Webhook events, Subscriptions) |
+
+Filters are in the URL: copy the link to share a filtered view. Every screen keeps its filters
+there — status, gateway (`provider`), page, the Payments lookup (`find`), the Customers owner id
+(`owner`), the webhook event `type`, the Disputes horizon and its page (`due`, `duePage`) and the
+Overview `period` — and back/forward step through your picks. Opening a payment or a subscription
+keeps the list's filters.
 
 It is a fragment rather than a path on purpose. The provider registers `<path>` as an **exact** route
 and no catch-all — the prefix is shared with the package's own webhook endpoints — so

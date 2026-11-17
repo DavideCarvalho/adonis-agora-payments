@@ -1,5 +1,17 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.19
+
+### Minor Changes
+
+- [#263](https://github.com/DavideCarvalho/adonis-agora-payments/pull/263) [`1b64797`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/1b647976717980423b691f45eaf224d1a8b0350a) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - The console's lists page by cursor, so a deep page costs what the first one does and no page counts the whole table.
+  
+  - `GET <api>/payments`, `/subscriptions`, `/customers`, `/webhook-events`, `/audit` and `/disputes` (the log) accept `first`/`after` and answer `{ data, meta: { nextCursor, prevCursor, hasNext, hasPrev } }`. They seek past `(created_at, id)` with no `COUNT(*)`. `page`/`size` keep the offset envelope and its `meta.total`. Subscriptions sends its two status counts (`past_due`, failing renewals) on the first page only. The Disputes work list (`dueWithin`) keeps `page`/`size`.
+  - `BillingStore` list queries take an optional `keyset: { after }`: newest first by `(createdAt, id)`, `size + 1` rows. Both built-in stores implement it. The offset order now breaks ties on `created_at` by `id` too, so rows written in the same instant no longer repeat or go missing across pages.
+  - The console pages with Previous/Next and keeps the walked cursors in the URL (`#/payments?after=…`), so back/forward and shared links still work. The lists no longer show a row total.
+  - New migration `add_billing_list_indexes` (published by `configure`), plus `createBillingListIndexes` / `dropBillingListIndexes`. It adds `(created_at, id)` on audit events, customers, disputes and subscriptions, and `(status, created_at)` on disputes, built `CONCURRENTLY` on Postgres. Opt-in: run it once on existing installs (see Production → Indexes).
+  - Fix: `node ace configure @adonis-agora/payments`, `make:billable` and `make:webhook-handler` failed to render their stubs: unescaped backticks in the comments broke the stub template. A spec now renders every stub through the real engine.
+
 ## 1.0.0-rc.18
 
 ### Patch Changes

@@ -13,7 +13,7 @@ import { Badge, StatusBadge } from './ui/badge';
 import { EventTypeFilter } from './ui/event-type-filter';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';
-import { optionalParam, pageParam, readStatus, writeStatus } from './url-state';
+import { afterParam, cursorPaging, optionalParam, readStatus, writeStatus } from './url-state';
 
 const PAGE_SIZE = 50;
 
@@ -45,7 +45,7 @@ export const webhookParams = {
   status: optionalParam,
   provider: optionalParam,
   type: optionalParam,
-  page: pageParam,
+  after: afterParam,
 };
 
 export function WebhookEvents() {
@@ -53,13 +53,19 @@ export function WebhookEvents() {
   const status = readStatus(view.status, 'failed');
   const provider = view.provider ?? undefined;
   const type = view.type ?? undefined;
-  const page = view.page;
-  const setPage = (next: number) => void setView({ page: next });
+  const paging = cursorPaging(view.after, (next) => void setView({ after: next }));
   const queryClient = useQueryClient();
 
   const query = useQuery({
-    queryKey: ['webhook-events', status, provider, type, page],
-    queryFn: () => paymentsClient.webhookEvents({ status, provider, type, size: PAGE_SIZE, page }),
+    queryKey: ['webhook-events', status, provider, type, paging.after],
+    queryFn: () =>
+      paymentsClient.webhookEvents({
+        status,
+        provider,
+        type,
+        size: PAGE_SIZE,
+        after: paging.after,
+      }),
   });
 
   const retry = useMutation({
@@ -72,7 +78,7 @@ export function WebhookEvents() {
 
   const refilter = (
     change: Partial<{ status: string | null; provider: string | null; type: string | null }>,
-  ) => void setView({ ...change, page: null });
+  ) => void setView({ ...change, after: null });
 
   const columns: Column<WebhookEventRow>[] = [
     {
@@ -145,12 +151,9 @@ export function WebhookEvents() {
       </Toolbar>
       <ListPanel
         title="Ledger"
-        description={
-          query.data !== undefined ? `${formatCount(query.data.meta.total)} events` : undefined
-        }
         query={query}
         rowKey={(row) => row.id}
-        onPage={setPage}
+        cursor={paging}
         emptyIcon={<PlugIcon />}
         emptyTitle={status === 'failed' && type === undefined ? 'Nothing is stuck' : 'No events'}
         emptyDescription={emptyMessage(status, provider, type)}

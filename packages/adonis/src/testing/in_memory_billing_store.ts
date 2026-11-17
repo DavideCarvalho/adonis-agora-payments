@@ -303,12 +303,27 @@ export class InMemoryBillingStore
    * `Array.prototype.sort` is stable, so reversing first and sorting after gives
    * last-inserted-first within a tie. Mirrors the Lucid store's `order by created_at desc`.
    */
-  #page<Row extends { createdAt: Date }>(rows: Iterable<Row>, query: BillingListQuery): Row[] {
+  #page<Row extends { createdAt: Date; id: string }>(
+    rows: Iterable<Row>,
+    query: BillingListQuery,
+  ): Row[] {
+    const size = clampSize(query.size);
+    if (query.keyset !== undefined) {
+      // Keyset paging orders `(createdAt, id)` newest first, the Lucid store's order, and reads one
+      // row past the page (see `BillingListQuery.keyset`).
+      const after = query.keyset.after;
+      const newer = (a: { createdAt: Date; id: string }, b: { createdAt: Date; id: string }) =>
+        b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
+      return [...rows]
+        .filter((row) => after === undefined || newer(row, { ...after }) > 0)
+        .sort(newer)
+        .slice(0, size + 1);
+    }
     const sorted = [...rows]
       .reverse()
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     const offset = listOffset(query.page, query.size);
-    return sorted.slice(offset, offset + clampSize(query.size));
+    return sorted.slice(offset, offset + size);
   }
 
   /** Reads honour `owners` (tenant scope), like the Lucid store. */

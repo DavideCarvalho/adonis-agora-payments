@@ -37,6 +37,8 @@ export type {
   AuditEventListItem,
   AuditEventQuery,
   BillingCountQuery,
+  BillingKeyset,
+  BillingKeysetPosition,
   BillingListQuery,
   BillingStore,
   CustomerCountQuery,
@@ -99,8 +101,11 @@ export type {
   LucidQueryClient,
 } from './billing/schema.js';
 export {
+  BILLING_LIST_INDEXES,
   BILLING_TABLES,
+  createBillingListIndexes,
   createBillingTables,
+  dropBillingListIndexes,
   dropBillingTables,
   truncateBillingTables,
 } from './billing/schema.js';

@@ -13,7 +13,7 @@
  * the divisor is not always 100 either (`src/app/money.ts` knows the rule and formats at render).
  */
 
-import { filterQuery, type OffsetPage, type OffsetPageMeta } from '@adonis-agora/filter-client';
+import { filterQuery, type OffsetPageMeta } from '@adonis-agora/filter-client';
 
 // ── Wire types (every `Date` is already an ISO string by the time it reaches this client — see
 // `packages/adonis/src/dashboard/handlers.ts`). ─────────────────────────────────────────────────
@@ -217,12 +217,34 @@ export interface Health {
 }
 
 /**
- * The `meta` of every list: the real `total` across pages, `perPage`, the 1-based `currentPage`,
- * `lastPage` and `firstPage` — `@adonis-agora/filter`'s offset envelope.
+ * The cursor envelope's `meta` (`@adonis-agora/filter`'s `cursorPage`): no total — pass
+ * `nextCursor` back as `after`. What the lists page with.
  */
-export type ListMeta = OffsetPageMeta;
+export interface CursorListMeta {
+  nextCursor: string | null;
+  prevCursor: string | null;
+  hasNext: boolean;
+  hasPrev: boolean;
+}
 
-export interface PaymentsPage extends OffsetPage<PaymentRow> {
+/**
+ * The `meta` of a list: the cursor envelope, or — for a `page`-paged request (the disputes work
+ * list) — the offset one, with the real `total` across pages.
+ */
+export type ListMeta = CursorListMeta | OffsetPageMeta;
+
+/** Whether a list page is cursor-paged (no total). */
+export function isCursorMeta(meta: ListMeta): meta is CursorListMeta {
+  return 'hasNext' in meta;
+}
+
+/** One page of a list, in either envelope. */
+export interface ListPage<T> {
+  data: T[];
+  meta: ListMeta;
+}
+
+export interface PaymentsPage extends ListPage<PaymentRow> {
   statuses: readonly string[];
   currency: string;
   /** The lookup filters the server applied, echoed back so an empty page can say "no payment
@@ -268,21 +290,24 @@ export interface SubscriptionDetail {
   currency: string;
 }
 
-export interface AuditPage extends OffsetPage<AuditRow> {
+export interface AuditPage extends ListPage<AuditRow> {
   /** The actions the filter offers. A UI list, not a whitelist — an app may record its own. */
   actions: readonly string[];
 }
 
-export type CustomersPage = OffsetPage<CustomerRow>;
+export type CustomersPage = ListPage<CustomerRow>;
 
-export interface WebhookEventsPage extends OffsetPage<WebhookEventRow> {
+export interface WebhookEventsPage extends ListPage<WebhookEventRow> {
   statuses: readonly string[];
 }
 
-export interface SubscriptionsPage extends OffsetPage<SubscriptionRow> {
+export interface SubscriptionsPage extends ListPage<SubscriptionRow> {
   statuses: readonly string[];
-  /** Whole-table counts, not page counts — `past_due` is the figure that decides the morning. */
-  counts: { past_due: number; failing_renewals: number };
+  /**
+   * Whole-table counts, not page counts — `past_due` is the figure that decides the morning. On
+   * the first page only: they do not change as the operator pages down.
+   */
+  counts?: { past_due: number; failing_renewals: number };
 }
 
 /**
@@ -290,7 +315,7 @@ export interface SubscriptionsPage extends OffsetPage<SubscriptionRow> {
  * `meta.total` is then every closing window, not just this page — the number an operator plans the
  * day around.
  */
-export interface DisputesPage extends OffsetPage<DisputeRow> {
+export interface DisputesPage extends ListPage<DisputeRow> {
   statuses: readonly string[];
   dueWithin?: { hours: number };
 }
@@ -528,19 +553,28 @@ const DEFAULT_PAGE_SIZE = 50;
 
 /**
  * A list request's query string: each given filter as `filter[field]=value` (empty/absent ones
- * skipped, so a cleared filter box never reaches the server) plus `page`/`size`.
+ * skipped, so a cleared filter box never reaches the server), then the paging: `page`/`size` when
+ * a page is named, the cursor (`first`, and `after` past the first page) when a size or a cursor
+ * is, and nothing otherwise (the server's first page).
  */
 export function listQuery(
   filters: Record<string, string | number | undefined>,
-  paging: { page?: number | undefined; size?: number | undefined } = {},
+  paging: {
+    page?: number | undefined;
+    size?: number | undefined;
+    after?: string | undefined;
+  } = {},
 ): string {
   const query = filterQuery();
   for (const [field, value] of Object.entries(filters)) {
     if (value === undefined || value === '') continue;
     query.where(field, 'equals', value);
   }
-  if (paging.page !== undefined || paging.size !== undefined) {
-    query.page(paging.page ?? 1, paging.size ?? DEFAULT_PAGE_SIZE);
+  if (paging.page !== undefined) {
+    query.page(paging.page, paging.size ?? DEFAULT_PAGE_SIZE);
+  } else if (paging.size !== undefined || paging.after !== undefined) {
+    query.first(paging.size ?? DEFAULT_PAGE_SIZE);
+    if (paging.after !== undefined) query.after(paging.after);
   }
   const qs = query.toQueryString();
   return qs === '' ? '' : `?${qs}`;
@@ -561,10 +595,12 @@ export interface ListOptions {
   status?: string | undefined;
   /** Gateway name (`'stripe'`, `'asaas'`, …). Comes from `providers()`, never from a fixed list. */
   provider?: string | undefined;
-  /** 1-based page number, like `@adonis-agora/filter`'s `page`. Default `1` server-side. */
+  /** 1-based page number: pages by offset (with a total). Omit it to page by cursor. */
   page?: number | undefined;
-  /** Rows per page, like `@adonis-agora/filter`'s `size`. Default 50, capped at 200 server-side. */
+  /** Rows per page. Default 50, capped at 200 server-side. */
   size?: number | undefined;
+  /** The previous page's `meta.nextCursor`; absent on the first page. */
+  after?: string | undefined;
 }
 
 /** {@link ListOptions} plus the three EXACT lookups only payments have. */
@@ -596,6 +632,7 @@ export interface AuditListOptions {
   subjectId?: string | undefined;
   page?: number | undefined;
   size?: number | undefined;
+  after?: string | undefined;
 }
 
 export interface CustomerListOptions {
@@ -605,6 +642,7 @@ export interface CustomerListOptions {
   gatewayId?: string | undefined;
   page?: number | undefined;
   size?: number | undefined;
+  after?: string | undefined;
 }
 
 /** {@link ListOptions} plus the one filter only disputes have: a deadline horizon in HOURS. */

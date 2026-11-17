@@ -473,10 +473,17 @@ export interface AuditEventQuery {
    * `BILLING_LIST_MAX_SIZE` (200). Mirrors `@adonis-agora/filter`'s `FilterInput.size`.
    */
   size?: number;
+  /**
+   * Keyset paging instead of `page`: rows ordered `(created_at, id)` newest first, strictly older
+   * than `after` when given, and ONE row more than `size` so the caller knows whether another page
+   * follows. `page` is ignored. What the console pages with: no offset, so a deep page costs what
+   * the first one does.
+   */
+  keyset?: BillingKeyset;
 }
 
 /** The same filter without a page — the count a health check alerts on. */
-export type AuditEventCountQuery = Omit<AuditEventQuery, 'page' | 'size'>;
+export type AuditEventCountQuery = Omit<AuditEventQuery, 'page' | 'size' | 'keyset'>;
 
 /**
  * Filter + page for the two list queries. `page`/`size` are applied after the filter.
@@ -506,24 +513,45 @@ export interface BillingListQuery {
    * `BILLING_LIST_MAX_SIZE` (200). Mirrors `@adonis-agora/filter`'s `FilterInput.size`.
    */
   size?: number;
+  /**
+   * Keyset paging instead of `page`: rows ordered `(created_at, id)` newest first, strictly older
+   * than `after` when given, and ONE row more than `size` so the caller knows whether another page
+   * follows. `page` is ignored. What the console pages with: no offset, so a deep page costs what
+   * the first one does.
+   */
+  keyset?: BillingKeyset;
+}
+
+/** A position in a newest-first list: the `(createdAt, id)` of the last row a page returned. */
+export interface BillingKeysetPosition {
+  createdAt: Date;
+  id: string;
+}
+
+/** See {@link BillingListQuery.keyset}. */
+export interface BillingKeyset {
+  /** Absent on the first page. */
+  after?: BillingKeysetPosition;
 }
 
 /** {@link BillingStore.countPayments}: the count window plus every {@link PaymentListQuery} filter. */
-export type PaymentCountQuery = BillingCountQuery & Omit<PaymentListQuery, 'page' | 'size'>;
+export type PaymentCountQuery = BillingCountQuery &
+  Omit<PaymentListQuery, 'page' | 'size' | 'keyset'>;
 
 /** {@link BillingStore.countSubscriptions}: the count window plus every {@link SubscriptionListQuery} filter. */
 export type SubscriptionCountQuery = BillingCountQuery &
-  Omit<SubscriptionListQuery, 'page' | 'size'>;
+  Omit<SubscriptionListQuery, 'page' | 'size' | 'keyset'>;
 
 /** {@link BillingStore.countDisputes}: the count window plus every {@link DisputeListQuery} filter. */
-export type DisputeCountQuery = BillingCountQuery & Omit<DisputeListQuery, 'page' | 'size'>;
+export type DisputeCountQuery = BillingCountQuery &
+  Omit<DisputeListQuery, 'page' | 'size' | 'keyset'>;
 
 /** {@link BillingStore.countWebhookEvents}: the count window plus every {@link WebhookEventListQuery} filter. */
 export type WebhookEventCountQuery = BillingCountQuery &
-  Omit<WebhookEventListQuery, 'page' | 'size'>;
+  Omit<WebhookEventListQuery, 'page' | 'size' | 'keyset'>;
 
 /** {@link BillingStore.countCustomers}: every {@link CustomerListQuery} filter, without the page. */
-export type CustomerCountQuery = Omit<CustomerListQuery, 'page' | 'size'>;
+export type CustomerCountQuery = Omit<CustomerListQuery, 'page' | 'size' | 'keyset'>;
 
 /**
  * The persistence SPI for the billing layer. The Lucid implementation writes through the

@@ -1,12 +1,18 @@
 import {
   applyCustomFilter,
   BaseFilter,
+  type CursorPageResponse,
+  decodeCursor,
+  encodeCursor,
   InvalidColumnFilterError,
+  parseCursorParams,
   parsePageParams,
   resolveSort,
 } from '@adonis-agora/filter';
 import type {
   AuditEventCountQuery,
+  BillingKeyset,
+  BillingKeysetPosition,
   CustomerCountQuery,
   DisputeCountQuery,
   PaymentCountQuery,
@@ -174,6 +180,84 @@ export function readPage(query: Record<string, unknown>): { page: number; size: 
     defaultSize: BILLING_LIST_DEFAULT_SIZE,
     maxSize: BILLING_LIST_MAX_SIZE,
   });
+}
+
+/**
+ * How a listing request pages: `page`/`size` (offset, with the exact total — older clients and
+ * links), or a cursor (`first` and `after`, no total) — what the console sends. Cursor paging is
+ * forward-only: `before`/`last` are a `400`.
+ */
+export type ListPaging =
+  | { cursor: false; page: number; size: number }
+  | { cursor: true; size: number; after?: BillingKeysetPosition };
+
+export function readPaging(query: Record<string, unknown>): ListPaging {
+  const sent = (name: string) => query[name] !== undefined && query[name] !== '';
+  if (!sent('after') && !sent('first') && !sent('before') && !sent('last')) {
+    return { cursor: false, ...readPage(query) };
+  }
+  const params = parseCursorParams(query, {
+    defaultSize: BILLING_LIST_DEFAULT_SIZE,
+    maxSize: BILLING_LIST_MAX_SIZE,
+  });
+  if (params.before !== undefined || params.backward) {
+    throw new InvalidColumnFilterError('This list pages forward only: use after and first.');
+  }
+  if (params.after === undefined) return { cursor: true, size: params.size };
+  return { cursor: true, size: params.size, after: positionOf(params.after) };
+}
+
+/** `[iso, id]` → a keyset position; anything else is a `400`. */
+function positionOf(cursor: string): BillingKeysetPosition {
+  const values = decodeCursor(cursor);
+  const at = typeof values?.[0] === 'string' ? new Date(values[0]) : undefined;
+  if (
+    values?.length !== 2 ||
+    at === undefined ||
+    Number.isNaN(at.getTime()) ||
+    typeof values[1] !== 'string'
+  ) {
+    throw new InvalidColumnFilterError('Invalid cursor.');
+  }
+  return { createdAt: at, id: values[1] };
+}
+
+/** The store half of {@link ListPaging}: `page`/`size`, or `keyset` (one row past the page). */
+export function storePaging(
+  paging: ListPaging,
+): { page: number; size: number } | { size: number; keyset: BillingKeyset } {
+  if (!paging.cursor) return { page: paging.page, size: paging.size };
+  return {
+    size: paging.size,
+    keyset: paging.after === undefined ? {} : { after: paging.after },
+  };
+}
+
+/**
+ * A keyset read (`size + 1` rows) → the cursor envelope: the page, and the next cursor at its
+ * last row when the extra row says another page follows. Forward-only, so `prevCursor` is `null`;
+ * `hasPrev` says whether this page came after another one.
+ */
+export function keysetPage<R extends { id: string; createdAt: Date | null }, T>(
+  rows: readonly R[],
+  paging: { size: number; after?: BillingKeysetPosition },
+  toJson: (row: R) => T,
+): CursorPageResponse<T> {
+  const hasNext = rows.length > paging.size;
+  const page = rows.slice(0, paging.size);
+  const last = page.at(-1);
+  return {
+    data: page.map(toJson),
+    meta: {
+      nextCursor:
+        hasNext && last !== undefined
+          ? encodeCursor([(last.createdAt ?? new Date(0)).toISOString(), last.id])
+          : null,
+      prevCursor: null,
+      hasNext,
+      hasPrev: paging.after !== undefined,
+    },
+  };
 }
 
 /**

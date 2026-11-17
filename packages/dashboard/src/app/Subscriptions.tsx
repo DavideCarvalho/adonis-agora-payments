@@ -17,7 +17,7 @@ import {
 import { Badge, Qualifier, StatusBadge } from './ui/badge';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';
-import { optionalParam, pageParam, readStatus, writeStatus } from './url-state';
+import { afterParam, cursorPaging, optionalParam, readStatus, writeStatus } from './url-state';
 
 const PAGE_SIZE = 50;
 
@@ -49,7 +49,7 @@ const STATUS_OPTIONS: ReadonlyArray<{ value: string | undefined; label: string }
 export const subscriptionsParams = {
   status: optionalParam,
   provider: optionalParam,
-  page: pageParam,
+  after: afterParam,
 };
 
 export function Subscriptions({
@@ -74,21 +74,32 @@ export function Subscriptions({
   const [view, setView] = useQueryStates(subscriptionsParams, { history: 'push' });
   const status = readStatus(view.status, defaultStatus);
   const provider = view.provider ?? undefined;
-  const page = view.page;
-  const setPage = (next: number) => void setView({ page: next });
+  const paging = cursorPaging(view.after, (next) => void setView({ after: next }));
   const [openedLocal, setOpenedLocal] = useState<string | null>(null);
   const opened = onOpen === undefined ? openedLocal : (openedId ?? null);
   const setOpened = onOpen ?? setOpenedLocal;
 
   const query = useQuery({
-    queryKey: ['subscriptions', status, provider, customerId, page],
+    queryKey: ['subscriptions', status, provider, customerId, paging.after],
     queryFn: () =>
-      paymentsClient.subscriptions({ status, provider, customerId, size: PAGE_SIZE, page }),
+      paymentsClient.subscriptions({
+        status,
+        provider,
+        customerId,
+        size: PAGE_SIZE,
+        after: paging.after,
+      }),
   });
 
-  const pastDue = query.data?.counts.past_due ?? 0;
+  // The whole-table counts ride on the first page only; deeper in, read them from it (cached).
+  const firstPage = useQuery({
+    queryKey: ['subscriptions', 'counts'],
+    queryFn: () => paymentsClient.subscriptions({ size: 1 }),
+    enabled: paging.after !== undefined && customerId === undefined,
+  });
+  const pastDue = (query.data?.counts ?? firstPage.data?.counts)?.past_due ?? 0;
   const refilter = (change: Partial<{ status: string | null; provider: string | null }>) =>
-    void setView({ ...change, page: null });
+    void setView({ ...change, after: null });
 
   return (
     <PageBody>
@@ -118,12 +129,9 @@ export function Subscriptions({
       </Toolbar>
       <ListPanel
         title={status === undefined ? 'All subscriptions' : `${statusLabel(status)} subscriptions`}
-        description={
-          query.data !== undefined ? `${formatCount(query.data.meta.total)} total` : undefined
-        }
         query={query}
         rowKey={(row) => row.id}
-        onPage={setPage}
+        cursor={paging}
         emptyIcon={<RepeatIcon />}
         emptyTitle={status === 'past_due' ? 'Nothing past due' : 'No subscriptions'}
         emptyDescription={emptyMessage(status, provider, customerId)}

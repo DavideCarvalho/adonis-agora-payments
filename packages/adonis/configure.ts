@@ -34,6 +34,8 @@ export async function configure(command: Configure) {
   await codemods.makeUsingStub(stubs, 'config/payments_dashboard.stub', {});
   await codemods.makeUsingStub(stubs, 'config/payments_client.stub', {});
   await codemods.makeUsingStub(stubs, 'database/migrations/create_billing_tables.stub', {});
+  // Opt-in on an existing install (CONCURRENTLY on Postgres): the console lists' indexes.
+  await codemods.makeUsingStub(stubs, 'database/migrations/add_billing_list_indexes.stub', {});
 
   await codemods.defineEnvValidations({
     leadingComment: 'PAYMENTS_',

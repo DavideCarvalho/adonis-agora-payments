@@ -6,11 +6,14 @@ import { ErrorBoundary, RegionError } from '../agora-kit/blocks/error-boundary';
 import { Pager as KitPager } from '../agora-kit/blocks/pager';
 import { Panel } from '../agora-kit/blocks/panel';
 import { errorStatus } from '../agora-kit/blocks/query-boundary';
-import type { ListMeta } from '../client/payments-client';
+import { ChevronLeftIcon, ChevronRightIcon } from '../agora-kit/icons';
+import { Button } from '../agora-kit/ui/button';
+import { type CursorListMeta, isCursorMeta, type ListMeta } from '../client/payments-client';
+import type { CursorPaging } from './url-state';
 
 /**
- * The payments console's list region: one titled kit `Panel` holding a `DataTable` over an offset
- * page (`@adonis-agora/filter`'s `{ data, meta }` envelope) and its pager.
+ * The payments console's list region: one titled kit `Panel` holding a `DataTable` over a page
+ * (`@adonis-agora/filter`'s `{ data, meta }` envelope, cursor or offset) and its pager.
  *
  * The four states every list has are rendered here once instead of at each screen: skeleton rows
  * while the first page loads, a retryable error (an access message on 401/403), a designed empty
@@ -33,6 +36,7 @@ export function ListPanel<T>({
   emptyDescription,
   emptyIcon,
   onPage,
+  cursor,
   rowClassName,
   subRow,
   children,
@@ -46,7 +50,10 @@ export function ListPanel<T>({
   emptyTitle: string;
   emptyDescription?: ReactNode;
   emptyIcon?: ReactNode;
-  onPage: (page: number) => void;
+  /** An offset-paged list (the disputes work list): go to that page. */
+  onPage?: (page: number) => void;
+  /** A cursor-paged list: where the operator is, and how to move. */
+  cursor?: CursorPaging;
   rowClassName?: (row: T) => string | undefined;
   subRow?: (row: T) => ReactNode;
   /** Dialogs owned by the list (detail, refund…), rendered after it. */
@@ -84,9 +91,14 @@ export function ListPanel<T>({
                 />
               }
             />
-            {page !== undefined && page.data.length > 0 && (
-              <Pager meta={page.meta} onPage={onPage} />
-            )}
+            {page !== undefined &&
+              (isCursorMeta(page.meta)
+                ? cursor !== undefined &&
+                  (page.data.length > 0 || cursor.page > 1 || page.meta.hasNext) && (
+                    <CursorPager meta={page.meta} paging={cursor} />
+                  )
+                : onPage !== undefined &&
+                  page.data.length > 0 && <Pager meta={page.meta} onPage={onPage} />)}
           </>
         )}
       </Panel>
@@ -95,8 +107,46 @@ export function ListPanel<T>({
   );
 }
 
+/**
+ * Previous / next under a cursor-paged list. No total and no last page: the number is how far the
+ * operator walked, and back is the cursor they came from.
+ */
+export function CursorPager({ meta, paging }: { meta: CursorListMeta; paging: CursorPaging }) {
+  return (
+    <div className="flex items-center justify-end gap-1 border-t border-border px-3 py-2">
+      <Button
+        variant="ghost"
+        size="sm"
+        aria-label="Previous page"
+        disabled={paging.page <= 1}
+        onClick={paging.previous}
+      >
+        <ChevronLeftIcon />
+        <span className="hidden sm:inline">Previous</span>
+      </Button>
+      <span className="mono tnum px-2 text-[11px] text-fg-2">page {paging.page}</span>
+      <Button
+        variant="ghost"
+        size="sm"
+        aria-label="Next page"
+        disabled={!meta.hasNext}
+        onClick={() => paging.next(meta.nextCursor)}
+      >
+        <span className="hidden sm:inline">Next</span>
+        <ChevronRightIcon />
+      </Button>
+    </div>
+  );
+}
+
 /** The kit's offset pager under a list, on the list's own `meta`. */
-export function Pager({ meta, onPage }: { meta: ListMeta; onPage: (page: number) => void }) {
+export function Pager({
+  meta,
+  onPage,
+}: {
+  meta: Exclude<ListMeta, CursorListMeta>;
+  onPage: (page: number) => void;
+}) {
   return (
     <div className="border-t border-border px-3">
       <KitPager meta={meta} onPage={onPage} />

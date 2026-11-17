@@ -5,6 +5,7 @@ import {
   type AuditEventListItem,
   type AuditEventQuery,
   type BillingCountQuery,
+  type BillingKeyset,
   type BillingStore,
   type CustomerCountQuery,
   type CustomerListItem,
@@ -50,6 +51,13 @@ import {
   type LucidDatabase,
   registerBillingSchemaCache,
 } from './schema.js';
+
+/** The slice of a Lucid query builder the keyset predicate needs. */
+interface KeysetBuilder {
+  where(column: string, operator: string, value: unknown): KeysetBuilder;
+  where(callback: (q: KeysetBuilder) => void): KeysetBuilder;
+  orWhere(column: string, operator: string, value: unknown): KeysetBuilder;
+}
 
 /**
  * Models the billing layer persists through. Apps may override any of them with their own
@@ -750,13 +758,39 @@ export class LucidBillingStore
       .first()) as CustomerInstance | null;
   }
 
+  /**
+   * One page of a newest-first list (`created_at, id` descending — the builder carries the order).
+   * `page`/`size` read by offset; `keyset` seeks past the previous page's last row with a predicate
+   * every dialect can range-scan on `(created_at[, id])`, and reads one row more than `size` so
+   * the caller knows whether another page follows. The timestamp is bound as a Luxon `DateTime`,
+   * so it is written in the same format the column was (on SQLite, a string compared as one).
+   */
+  #page(builder: unknown, query: { page?: number; size?: number; keyset?: BillingKeyset }) {
+    const b = builder as {
+      client: { dialect: { dateTimeFormat: string } };
+      where(callback: (q: KeysetBuilder) => void): unknown;
+      limit(n: number): { offset(n: number): unknown } & PromiseLike<unknown>;
+    };
+    const size = clampSize(query.size);
+    if (query.keyset === undefined) return b.limit(size).offset(listOffset(query.page, query.size));
+    const after = query.keyset.after;
+    if (after !== undefined) {
+      // Written exactly as `@column.dateTime` writes the column on this dialect.
+      const at = DateTime.fromJSDate(after.createdAt).toFormat(b.client.dialect.dateTimeFormat);
+      b.where((q) => {
+        q.where('created_at', '<=', at).where((tie) => {
+          tie.where('created_at', '<', at).orWhere('id', '<', after.id);
+        });
+      });
+    }
+    return b.limit(size + 1);
+  }
+
   async listCustomers(query: CustomerListQuery): Promise<CustomerListItem[]> {
     await this.#ready();
-    const builder = this.#customerModel.query().orderBy('created_at', 'desc');
+    const builder = this.#customerModel.query().orderBy('created_at', 'desc').orderBy('id', 'desc');
     this.#applyCustomerFilters(builder, query);
-    const rows = (await builder
-      .limit(clampSize(query.size))
-      .offset(listOffset(query.page, query.size))) as CustomerInstance[];
+    const rows = (await this.#page(builder, query)) as CustomerInstance[];
     return rows.map(customerItem);
   }
 
@@ -924,11 +958,12 @@ export class LucidBillingStore
 
   async listSubscriptions(query: SubscriptionListQuery): Promise<SubscriptionListItem[]> {
     await this.#ready();
-    const builder = this.#subscriptionModel.query().orderBy('created_at', 'desc');
+    const builder = this.#subscriptionModel
+      .query()
+      .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc');
     this.#applySubscriptionFilters(builder, query);
-    const rows = (await builder
-      .limit(clampSize(query.size))
-      .offset(listOffset(query.page, query.size))) as SubscriptionInstance[];
+    const rows = (await this.#page(builder, query)) as SubscriptionInstance[];
     return rows.map((row) => ({
       id: String(row.id),
       gatewayId: row.gatewayId,
@@ -1103,11 +1138,9 @@ export class LucidBillingStore
 
   async listPayments(query: PaymentListQuery): Promise<PaymentListItem[]> {
     await this.#ready();
-    const builder = this.#paymentModel.query().orderBy('created_at', 'desc');
+    const builder = this.#paymentModel.query().orderBy('created_at', 'desc').orderBy('id', 'desc');
     if (!(await this.#applyPaymentFilters(builder, query))) return [];
-    const rows = (await builder
-      .limit(clampSize(query.size))
-      .offset(listOffset(query.page, query.size))) as PaymentInstance[];
+    const rows = (await this.#page(builder, query)) as PaymentInstance[];
     return rows.map((row) => ({
       id: String(row.id),
       gatewayId: row.gatewayId,
@@ -1239,11 +1272,9 @@ export class LucidBillingStore
   async listDisputes(query: DisputeListQuery): Promise<DisputeListItem[]> {
     await this.#ready();
     if (!(await this.#hasDisputesTable())) return [];
-    const builder = this.#disputeModel.query().orderBy('created_at', 'desc');
+    const builder = this.#disputeModel.query().orderBy('created_at', 'desc').orderBy('id', 'desc');
     this.#applyDisputeFilters(builder, query);
-    const rows = (await builder
-      .limit(clampSize(query.size))
-      .offset(listOffset(query.page, query.size))) as DisputeInstance[];
+    const rows = (await this.#page(builder, query)) as DisputeInstance[];
     return rows.map(disputeItem);
   }
 
@@ -1366,11 +1397,12 @@ export class LucidBillingStore
   async listAuditEvents(query: AuditEventQuery): Promise<AuditEventListItem[]> {
     await this.#ready();
     if (!(await this.#hasAuditTable())) return [];
-    const builder = this.#auditEventModel.query().orderBy('created_at', 'desc');
+    const builder = this.#auditEventModel
+      .query()
+      .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc');
     this.#applyAuditFilters(builder, query);
-    const rows = (await builder
-      .limit(clampSize(query.size))
-      .offset(listOffset(query.page, query.size))) as AuditEventInstance[];
+    const rows = (await this.#page(builder, query)) as AuditEventInstance[];
     return rows.map(auditItem);
   }
 
@@ -1493,13 +1525,14 @@ export class LucidBillingStore
 
   async listWebhookEvents(query: WebhookEventListQuery): Promise<WebhookEventListItem[]> {
     await this.#ready();
-    const builder = this.#webhookEventModel.query().orderBy('created_at', 'desc');
+    const builder = this.#webhookEventModel
+      .query()
+      .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc');
     if (query.status !== undefined) builder.where('status', query.status);
     if (query.provider !== undefined) builder.where('provider', query.provider);
     if (query.type !== undefined) builder.where('type', query.type);
-    const rows = (await builder
-      .limit(clampSize(query.size))
-      .offset(listOffset(query.page, query.size))) as WebhookEventInstance[];
+    const rows = (await this.#page(builder, query)) as WebhookEventInstance[];
     return rows.map(webhookEventItem);
   }
 

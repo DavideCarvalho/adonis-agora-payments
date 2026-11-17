@@ -399,6 +399,39 @@ big table, run that migration in a quiet window — or build the indexes yoursel
 same names (`CREATE INDEX CONCURRENTLY` on Postgres); `createBillingTables` skips any that already
 exist.
 
+#### The console lists' indexes (opt-in)
+
+`configure` also publishes `add_billing_list_indexes`, a migration of its own. It indexes
+`(created_at, id)` on the audit trail, customers, disputes and subscriptions, and
+`(status, created_at)` on disputes, so the console's Activity, Customers, Subscriptions and
+Disputes pages read the next page from an index. `createBillingTables` does not create these. On
+Postgres the migration builds them `CONCURRENTLY`, so writes go on during the build. Run it once on
+an existing install. If you installed before it existed, add it yourself:
+
+```ts title="database/migrations/xxxx_add_billing_list_indexes.ts"
+import app from '@adonisjs/core/services/app'
+import { BaseSchema } from '@adonisjs/lucid/schema'
+import { createBillingListIndexes, dropBillingListIndexes } from '@adonis-agora/payments'
+
+const billingSchema = () => app.config.get<string | undefined>('payments.billing.schema', undefined)
+
+export default class extends BaseSchema {
+  static disableTransactions = true
+
+  async up() {
+    this.defer(async (db) => {
+      await createBillingListIndexes(db, { schema: billingSchema() })
+    })
+  }
+
+  async down() {
+    this.defer(async (db) => {
+      await dropBillingListIndexes(db, { schema: billingSchema() })
+    })
+  }
+}
+```
+
 `billing_webhook_events.payment_gateway_id` is not backfilled: rows recorded before it existed are
 `NULL`, and a payment's timeline finds those by a payload substring scan limited to the `NULL` rows.
 That scan shrinks as old rows age out of the ledger.

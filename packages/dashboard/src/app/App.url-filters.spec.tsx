@@ -9,7 +9,10 @@ import { readStatus, writeStatus } from './url-state';
 const originalFetch = globalThis.fetch;
 let urls: string[] = [];
 
-/** Lists answer three pages; a payment's detail answers one payment. */
+/**
+ * Lists answer three pages (cursor pages when asked by cursor: `c1` → page 2, `c2` → page 3);
+ * a payment's detail answers one payment.
+ */
 function stubApi(): void {
   urls = [];
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -17,6 +20,8 @@ function stubApi(): void {
     urls.push(url);
     const detail = /\/api\/payments\/([^?]+)/.exec(url);
     const page = Number(/page\]?=(\d+)/.exec(url)?.[1] ?? '1');
+    const after = /[?&]after=c(\d+)/.exec(url)?.[1];
+    const cursorPage = Number(after ?? '0') + 1;
     const body = url.includes('/health')
       ? { healthy: true, checkedAt: new Date().toISOString(), checks: [], failures: [] }
       : detail !== null
@@ -45,11 +50,22 @@ function stubApi(): void {
           ? { providers: ['stripe', 'asaas'], eventTypes: [] }
           : url.includes('/overview')
             ? { period: { from: '', to: '', preset: '30d' }, currency: 'BRL', metrics: [] }
-            : {
-                data: [],
-                counts: { past_due: 0 },
-                meta: { total: 150, perPage: 50, currentPage: page, lastPage: 3, firstPage: 1 },
-              };
+            : url.includes('first=')
+              ? {
+                  data: [],
+                  counts: { past_due: 0 },
+                  meta: {
+                    nextCursor: cursorPage < 3 ? `c${cursorPage}` : null,
+                    prevCursor: null,
+                    hasNext: cursorPage < 3,
+                    hasPrev: cursorPage > 1,
+                  },
+                }
+              : {
+                  data: [],
+                  counts: { past_due: 0 },
+                  meta: { total: 150, perPage: 50, currentPage: page, lastPage: 3, firstPage: 1 },
+                };
     return { ok: true, status: 200, statusText: 'OK', json: async () => body } as Response;
   }) as typeof globalThis.fetch;
 }
@@ -85,28 +101,45 @@ afterEach(() => {
 
 describe('payments: filters in the URL', () => {
   it('opens filtered from a shared link', async () => {
-    window.history.replaceState(null, '', '/pd#/payments?status=failed&provider=asaas&page=2');
+    window.history.replaceState(null, '', '/pd#/payments?status=failed&provider=asaas&after=c1');
     renderApp();
     await waitFor(() => expect(lastList('/payments')).toContain('failed'));
     expect(lastList('/payments')).toContain('asaas');
-    expect(lastList('/payments')).toMatch(/page\]?=2/);
+    expect(lastList('/payments')).toContain('after=c1');
+    expect(lastList('/payments')).not.toMatch(/page/);
     expect(tab('Payment status', 'Failed')?.getAttribute('aria-selected')).toBe('true');
   });
 
-  it('a status pick pushes and goes back to page 1; back undoes it', async () => {
-    window.history.replaceState(null, '', '/pd?tenant=acme#/payments?page=2');
+  it('a status pick pushes and goes back to the first page; back undoes it', async () => {
+    window.history.replaceState(null, '', '/pd?tenant=acme#/payments?after=c1');
     renderApp();
-    await waitFor(() => expect(lastList('/payments')).toMatch(/page\]?=2/));
+    await waitFor(() => expect(lastList('/payments')).toContain('after=c1'));
     fireEvent.click(tab('Payment status', 'Failed') as HTMLElement);
     await waitFor(() => expect(window.location.hash).toBe('#/payments?status=failed'));
     expect(window.location.search).toBe('?tenant=acme');
     await waitFor(() => expect(lastList('/payments')).toContain('failed'));
 
     act(() => window.history.back());
-    await waitFor(() => expect(window.location.hash).toBe('#/payments?page=2'));
+    await waitFor(() => expect(window.location.hash).toBe('#/payments?after=c1'));
     await waitFor(() =>
       expect(tab('Payment status', 'All')?.getAttribute('aria-selected')).toBe('true'),
     );
+  });
+
+  it('next pushes the cursor, previous pops it', async () => {
+    window.history.replaceState(null, '', '/pd#/payments');
+    renderApp();
+    await waitFor(() => expect(lastList('/payments')).toContain('first=50'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(window.location.hash).toBe('#/payments?after=c1'));
+    await waitFor(() => expect(lastList('/payments')).toContain('after=c1'));
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => expect(window.location.hash).toBe('#/payments?after=c1,c2'));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Next page' })).toHaveProperty('disabled', true),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Previous page' }));
+    await waitFor(() => expect(window.location.hash).toBe('#/payments?after=c1'));
   });
 
   it('the lookup is in the URL once submitted', async () => {
@@ -123,12 +156,12 @@ describe('payments: filters in the URL', () => {
     window.history.replaceState(
       null,
       '',
-      '/pd#/payments/pay_8f2?status=paid&provider=asaas&page=2',
+      '/pd#/payments/pay_8f2?status=paid&provider=asaas&after=c1',
     );
     renderApp();
     fireEvent.click(await screen.findByRole('button', { name: 'Close' }));
     await waitFor(() =>
-      expect(window.location.hash).toBe('#/payments?status=paid&provider=asaas&page=2'),
+      expect(window.location.hash).toBe('#/payments?status=paid&provider=asaas&after=c1'),
     );
   });
 });

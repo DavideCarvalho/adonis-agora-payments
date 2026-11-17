@@ -11,7 +11,7 @@ import { ListPanel, Mono } from './shell';
 import { Badge } from './ui/badge';
 import { CONTROL_CLASS, FieldLabel } from './ui/field';
 import { ProviderFilter } from './ui/provider-filter';
-import { optionalParam, pageParam } from './url-state';
+import { afterParam, cursorPaging, optionalParam } from './url-state';
 
 const PAGE_SIZE = 50;
 
@@ -31,7 +31,7 @@ const PAGE_SIZE = 50;
 export const customersParams = {
   provider: optionalParam,
   owner: parseAsString.withDefault(''),
-  page: pageParam,
+  after: afterParam,
 };
 
 export function Customers({
@@ -46,13 +46,13 @@ export function Customers({
   const [view, setView] = useQueryStates(customersParams, { history: 'push' });
   const provider = view.provider ?? undefined;
   const owner = view.owner;
-  const page = view.page;
-  const setPage = (next: number) => void setView({ page: next });
+  const paging = cursorPaging(view.after, (next) => void setView({ after: next }));
 
   const ownerId = owner.trim() === '' ? undefined : owner.trim();
   const query = useQuery({
-    queryKey: ['customers', provider, ownerId, page],
-    queryFn: () => paymentsClient.customers({ provider, ownerId, size: PAGE_SIZE, page }),
+    queryKey: ['customers', provider, ownerId, paging.after],
+    queryFn: () =>
+      paymentsClient.customers({ provider, ownerId, size: PAGE_SIZE, after: paging.after }),
   });
 
   return (
@@ -64,14 +64,14 @@ export function Customers({
       <Toolbar label="Customer filters" className="gap-3">
         <ProviderFilter
           value={provider}
-          onChange={(v) => void setView({ provider: v ?? null, page: null })}
+          onChange={(v) => void setView({ provider: v ?? null, after: null })}
         />
         <FieldLabel label="Owner id">
           <input
             type="search"
             value={owner}
             onChange={(event) =>
-              void setView({ owner: event.target.value, page: null }, { history: 'replace' })
+              void setView({ owner: event.target.value, after: null }, { history: 'replace' })
             }
             placeholder="4102"
             className={`mono w-32 ${CONTROL_CLASS}`}
@@ -80,12 +80,9 @@ export function Customers({
       </Toolbar>
       <ListPanel
         title="Customer mappings"
-        description={
-          query.data !== undefined ? `${formatCount(query.data.meta.total)} total` : undefined
-        }
         query={query}
         rowKey={(row) => row.id}
-        onPage={setPage}
+        cursor={paging}
         emptyIcon={<UsersIcon />}
         emptyTitle={ownerId === undefined ? 'No customer mapping recorded' : 'No match'}
         emptyDescription={

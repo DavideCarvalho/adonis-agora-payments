@@ -17,7 +17,7 @@ import { Badge, StatusBadge } from './ui/badge';
 import { CONTROL_CLASS, FieldLabel } from './ui/field';
 import { ProviderFilter } from './ui/provider-filter';
 import { Segmented } from './ui/segmented';
-import { optionalParam, pageParam, readStatus, writeStatus } from './url-state';
+import { afterParam, cursorPaging, optionalParam, readStatus, writeStatus } from './url-state';
 
 const PAGE_SIZE = 50;
 
@@ -40,7 +40,7 @@ export const paymentsParams = {
   status: optionalParam,
   provider: optionalParam,
   find: optionalParam,
-  page: pageParam,
+  after: afterParam,
 };
 
 export function PaymentsList({
@@ -64,8 +64,7 @@ export function PaymentsList({
   const [view, setView] = useQueryStates(paymentsParams, { history: 'push' });
   const status = readStatus(view.status, undefined);
   const provider = view.provider ?? undefined;
-  const page = view.page;
-  const setPage = (next: number) => void setView({ page: next });
+  const paging = cursorPaging(view.after, (next) => void setView({ after: next }));
   const [refunding, setRefunding] = useState<PaymentRow | null>(null);
   // Uncontrolled fallback for a caller that does not route the detail dialog (a test, a host
   // embedding just this screen). `App` always does.
@@ -87,7 +86,7 @@ export function PaymentsList({
 
   const term = submitted.trim() === '' ? undefined : submitted.trim();
   const query = useQuery({
-    queryKey: ['payments', status, provider, term, initialCustomerId, page],
+    queryKey: ['payments', status, provider, term, initialCustomerId, paging.after],
     queryFn: async () => {
       if (term === undefined) {
         return paymentsClient.payments({
@@ -95,7 +94,7 @@ export function PaymentsList({
           provider,
           customerId: initialCustomerId,
           size: PAGE_SIZE,
-          page,
+          after: paging.after,
         });
       }
       // Both keys, in that order: `externalReference` is the id the app itself chose, so it is
@@ -105,10 +104,15 @@ export function PaymentsList({
         provider,
         externalReference: term,
         size: PAGE_SIZE,
-        page,
+        after: paging.after,
       });
       if (byReference.data.length > 0) return byReference;
-      return paymentsClient.payments({ provider, gatewayId: term, size: PAGE_SIZE, page });
+      return paymentsClient.payments({
+        provider,
+        gatewayId: term,
+        size: PAGE_SIZE,
+        after: paging.after,
+      });
     },
   });
 
@@ -116,7 +120,7 @@ export function PaymentsList({
   // "failed", nor page 3 of "asaas" — so every filter write also drops the page.
   const refilter = (
     change: Partial<{ status: string | null; provider: string | null; find: string | null }>,
-  ) => void setView({ ...change, page: null });
+  ) => void setView({ ...change, after: null });
 
   return (
     <PageBody>
@@ -157,12 +161,9 @@ export function PaymentsList({
 
       <ListPanel
         title="Recorded payments"
-        description={
-          query.data !== undefined ? `${formatCount(query.data.meta.total)} total` : undefined
-        }
         query={query}
         rowKey={(row) => row.id}
-        onPage={setPage}
+        cursor={paging}
         emptyIcon={<CardIcon />}
         emptyTitle={term !== undefined ? 'No match' : 'No payments'}
         emptyDescription={emptyMessage(status, provider, term)}

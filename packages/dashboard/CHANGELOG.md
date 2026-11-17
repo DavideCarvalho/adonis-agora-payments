@@ -1,5 +1,11 @@
 # @adonis-agora/payments-dashboard
 
+## 1.0.0-rc.11
+
+### Minor Changes
+
+- [#262](https://github.com/DavideCarvalho/adonis-agora-payments/pull/262) [`1aa545a`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/1aa545aad30d751a0f573bbf0b03e7320b88859e) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Console filters now live in the URL, so a filtered view can be shared, bookmarked and reloaded, and back/forward step through it: status, gateway and page on Payments, Subscriptions, Disputes, Webhook events and Activity, the Payments lookup, the Customers gateway and owner id, the webhook event type, the Disputes horizon and the Overview period. They sit in the hash's query next to the `status`/`customer` seeds the health panel already wrote (`#/payments?status=failed&provider=asaas&page=2`); a value at its default is left out, so existing links open as before, and opening a payment or a subscription keeps the list's filters.
+
 ## 1.0.0-rc.10
 
 ### Patch Changes

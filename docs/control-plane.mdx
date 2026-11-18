@@ -279,7 +279,12 @@ const billing = await getPayments().hub().account(user.authkitSubject)
   customers it created or asked for. Anything else answers `not_found`.
 - Each call needs a capability on the token: `payments:charge`, `payments:refund`,
   `payments:subscriptions`, `payments:customers`, `payments:disputes`, `payments:events`,
-  `payments:read`, or `payments:*`.
+  `payments:read`, or a wildcard that covers it.
+- Wildcards follow the Agora-wide rule. Capabilities are compared segment by segment (split on
+  `:`). A `*` segment matches exactly one segment, and a `*` at the end also matches any number
+  of further segments: `*` grants everything, `payments:*` grants every payments capability.
+  Nothing else is implied: `payments:read` does not grant `payments:charge`, and `flags:*` grants
+  nothing here.
 
 ### Objects from before
 

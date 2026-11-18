@@ -306,6 +306,7 @@ export type {
   HubReplyMessage,
 } from './topology/protocol.js';
 export {
+  capabilityAllows,
   HUB_DRIVER_CALLS,
   HUB_MESSAGE_VERSION,
   HUB_OPERATION_CAPABILITY,

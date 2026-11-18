@@ -209,3 +209,136 @@ describe('ComboSelect input text', () => {
     expect(input.value).toBe('E-mails');
   });
 });
+
+describe('ComboSelect creatable, leaving the field', () => {
+  const creatableQueue = (onValueChange: (v: string | null) => void) =>
+    render(
+      <ComboSelect
+        aria-label="Queue"
+        options={queues}
+        value={null}
+        onValueChange={onValueChange}
+        creatable
+      />,
+    );
+
+  it('keeps typed text as the value on blur, once', async () => {
+    const onValueChange = vi.fn();
+    creatableQueue(onValueChange);
+    const input = screen.getByRole('combobox', { name: 'Queue' });
+    await type(input, 'billing');
+    await act(async () => {
+      // Tabbing out with the popup open: blur and the focus-out close land together.
+      fireEvent.blur(input);
+      fireEvent.focusOut(input);
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(onValueChange).toHaveBeenCalledTimes(1);
+    expect(onValueChange).toHaveBeenLastCalledWith('billing');
+  });
+
+  it('a pick wins over the pending typed text', async () => {
+    const onValueChange = vi.fn();
+    creatableQueue(onValueChange);
+    const input = screen.getByRole('combobox', { name: 'Queue' });
+    await type(input, 'relat');
+    await pick(/Relatórios/);
+    await act(async () => {
+      fireEvent.blur(input);
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(onValueChange).toHaveBeenCalledTimes(1);
+    expect(onValueChange).toHaveBeenLastCalledWith('relatorios');
+  });
+
+  it('Escape reverts even when blur follows in the same tick', async () => {
+    const onValueChange = vi.fn();
+    creatableQueue(onValueChange);
+    const input = screen.getByRole('combobox', { name: 'Queue' });
+    await type(input, 'billing');
+    await act(async () => {
+      fireEvent.keyDown(input, { key: 'Escape' });
+      fireEvent.blur(input);
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(onValueChange).not.toHaveBeenCalled();
+  });
+
+  it('does not commit typed text without creatable', async () => {
+    const onValueChange = vi.fn();
+    render(
+      <ComboSelect
+        aria-label="Queue"
+        options={queues}
+        value={null}
+        onValueChange={onValueChange}
+      />,
+    );
+    const input = screen.getByRole('combobox', { name: 'Queue' });
+    await type(input, 'billing');
+    await act(async () => {
+      fireEvent.blur(input);
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(onValueChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('ComboSelect creatable, near matches', () => {
+  it('resolves typed text to an existing option ignoring accents and case', async () => {
+    const onValueChange = vi.fn();
+    render(
+      <ComboSelect
+        aria-label="Queue"
+        options={queues}
+        value={null}
+        onValueChange={onValueChange}
+        creatable
+      />,
+    );
+    const input = screen.getByRole('combobox', { name: 'Queue' });
+    await type(input, 'RELATORIOS');
+    await act(async () => {
+      fireEvent.blur(input);
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(onValueChange).toHaveBeenLastCalledWith('relatorios');
+  });
+});
+
+describe('ComboSelect review edge cases', () => {
+  it('shows a selected value missing from options as itself, not as "Use …"', async () => {
+    render(
+      <ComboSelect aria-label="Queue" options={queues} value="legacy" onValueChange={() => {}} />,
+    );
+    const input = screen.getByRole('combobox', { name: 'Queue' });
+    await type(input, 'legacy');
+    expect(await screen.findByRole('option', { name: 'legacy' })).toBeTruthy();
+    expect(screen.queryByRole('option', { name: 'Use “legacy”' })).toBeNull();
+  });
+
+  it('does not filter server results again on the client', async () => {
+    render(
+      <ComboSelect
+        aria-label="User"
+        options={[{ value: 'u1', label: 'Robert Smith' }]}
+        value={null}
+        onValueChange={() => {}}
+        onQueryChange={() => {}}
+        serverFiltered
+      />,
+    );
+    // The server matched "bob" by nickname; the label doesn't contain it.
+    await type(screen.getByRole('combobox', { name: 'User' }), 'bob');
+    expect(await screen.findByRole('option', { name: 'Robert Smith' })).toBeTruthy();
+  });
+
+  it('a late label does not overwrite what the user is typing', async () => {
+    const props = { 'aria-label': 'Queue', value: 'late', onValueChange: () => {} };
+    const { rerender } = render(<ComboSelect {...props} options={[]} />);
+    const input = screen.getByRole('combobox', { name: 'Queue' }) as HTMLInputElement;
+    await type(input, 'rel');
+    rerender(<ComboSelect {...props} options={[{ value: 'late', label: 'Late label' }]} />);
+    expect(input.value).toBe('rel');
+  });
+});

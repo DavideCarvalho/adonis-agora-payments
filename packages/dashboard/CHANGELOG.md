@@ -1,5 +1,11 @@
 # @adonis-agora/payments-dashboard
 
+## 1.0.0-rc.13
+
+### Patch Changes
+
+- [#267](https://github.com/DavideCarvalho/adonis-agora-payments/pull/267) [`8f9f728`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/8f9f72838b9cb59f98346d1892f5335c54e753c8) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Console ⌘K: arrow keys now visibly move the selection. The highlighted item was styled with a bare `data-selected:` (cmdk marks every item `true` or `false`) and with the dialog's own surface color, so moving looked like nothing happened.
+
 ## 1.0.0-rc.12
 
 ### Minor Changes

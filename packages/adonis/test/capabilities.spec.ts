@@ -77,3 +77,20 @@ describe('hasCapability', () => {
     expect(hasCapability([], null)).toBe(false);
   });
 });
+
+describe('capabilityAllows: a `*` before the last one consumes a segment', () => {
+  it('does not let a non-trailing `*` run past the end of the required capability', () => {
+    expect(capabilityAllows(['payments:*:*'], 'payments')).toBe(false);
+    expect(capabilityAllows(['payments:*:*:*'], 'payments:a')).toBe(false);
+    expect(capabilityAllows(['payments:*:*'], 'payments:a')).toBe(true);
+    expect(capabilityAllows(['payments:*:*'], 'payments:a:b')).toBe(true);
+    expect(capabilityAllows(['payments:*'], 'payments')).toBe(true);
+  });
+});
+
+describe('hasCapability(whoami)', () => {
+  it('needs one real capability: an empty string does not count', () => {
+    expect(hasCapability([''], null)).toBe(false);
+    expect(hasCapability(['', 'payments:read'], null)).toBe(true);
+  });
+});

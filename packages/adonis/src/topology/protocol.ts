@@ -76,7 +76,15 @@ export function capabilityAllows(granted: readonly string[], required: string): 
     let matched = true;
     for (let index = 0; index < have.length; index += 1) {
       const segment = have[index];
-      if (segment === '*') continue;
+      if (segment === '*') {
+        // A `*` before the last one stands for exactly one segment, so it needs one to consume;
+        // only the last `*` may match nothing (`a:*` covers `a`, `a:*:*` does not).
+        if (index >= want.length && index !== have.length - 1) {
+          matched = false;
+          break;
+        }
+        continue;
+      }
       if (index >= want.length || segment !== want[index]) {
         matched = false;
         break;
@@ -90,11 +98,12 @@ export function capabilityAllows(granted: readonly string[], required: string): 
 }
 
 /**
- * Whether `granted` covers `needed`, by {@link capabilityAllows}. `null` (`whoami`) only needs a
- * non-empty capability list.
+ * Whether `granted` covers `needed`, by {@link capabilityAllows}. `null` (`whoami`) only needs one
+ * real (non-empty) capability.
  */
 export function hasCapability(granted: readonly string[], needed: string | null): boolean {
-  if (needed === null) return granted.length > 0;
+  // Same notion of "a capability" as `capabilityAllows`: empty and non-string grants don't count.
+  if (needed === null) return granted.some((c) => typeof c === 'string' && c !== '');
   return capabilityAllows(granted, needed);
 }
 

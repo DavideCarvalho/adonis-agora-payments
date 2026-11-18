@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.22
+
+### Patch Changes
+
+- [#266](https://github.com/DavideCarvalho/adonis-agora-payments/pull/266) [`6d8cae3`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/6d8cae3478a3ca1148302f4154e1a87554404396) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Control plane: service-token capabilities now match with the Agora-wide wildcard rule. A `*` segment matches exactly one segment and a trailing `*` matches any further segments (`*`, `payments:*` keep working as before). New `capabilityAllows(granted, required)` export; `hasCapability` delegates to it.
+
 ## 1.0.0-rc.21
 
 ### Patch Changes

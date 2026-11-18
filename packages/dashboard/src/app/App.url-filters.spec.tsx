@@ -47,7 +47,7 @@ function stubApi(): void {
             currency: 'BRL',
           }
         : url.includes('/providers')
-          ? { providers: ['stripe', 'asaas'], eventTypes: [] }
+          ? { providers: ['stripe', 'asaas'], eventTypes: ['payment.paid', 'payment.refunded'] }
           : url.includes('/overview')
             ? { period: { from: '', to: '', preset: '30d' }, currency: 'BRL', metrics: [] }
             : url.includes('first=')
@@ -176,6 +176,39 @@ describe('webhook events: a screen whose default is one status', () => {
     await waitFor(() => expect(lastList('/webhook-events')).not.toContain('failed'));
     fireEvent.click(tab('Event status', 'Failed') as HTMLElement);
     await waitFor(() => expect(window.location.hash).toBe('#/webhooks'));
+  });
+});
+
+describe('webhook events: the event type filter', () => {
+  it('autocompletes the types the ledger has seen and writes the pick to the URL', async () => {
+    window.history.replaceState(null, '', '/pd#/webhooks');
+    renderApp();
+    const input = await screen.findByRole('combobox', { name: 'Event type' });
+    await act(async () => {
+      input.focus();
+      // Base UI opens the popup on ArrowDown, not on input events.
+      fireEvent.keyDown(input, { key: 'ArrowDown' });
+      fireEvent.change(input, { target: { value: 'refund' } });
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(screen.queryByRole('option', { name: 'payment.paid' })).toBeNull();
+    const option = await screen.findByRole('option', { name: 'payment.refunded' });
+    await act(async () => {
+      fireEvent.click(option);
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    await waitFor(() => expect(window.location.hash).toBe('#/webhooks?type=payment.refunded'));
+    await waitFor(() => expect(lastList('/webhook-events')).toContain('payment.refunded'));
+  });
+
+  it('shows the type from a shared link', async () => {
+    window.history.replaceState(null, '', '/pd#/webhooks?type=payment.paid');
+    renderApp();
+    const input = (await screen.findByRole('combobox', {
+      name: 'Event type',
+    })) as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe('payment.paid'));
+    await waitFor(() => expect(lastList('/webhook-events')).toContain('payment.paid'));
   });
 });
 

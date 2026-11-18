@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.23
+
+### Patch Changes
+
+- [#268](https://github.com/DavideCarvalho/adonis-agora-payments/pull/268) [`5da31db`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/5da31db51c41e8eac56ac5d14514d7768004d04d) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Console: the webhook events "Type" filter is a select with autocomplete (type `refund` to find `payment.refunded`), over the event types the ledger has received. Adds the kit's `ComboSelect` / `ComboMultiSelect`.
+
 ## 1.0.0-rc.22
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @adonis-agora/payments-dashboard
 
+## 1.0.0-rc.15
+
+### Patch Changes
+
+- [#269](https://github.com/DavideCarvalho/adonis-agora-payments/pull/269) [`b5d56d0`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/b5d56d0a4da4db0bc60c9199869b263f2ced5d47) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Console: creatable comboboxes keep the typed text when you leave the field, and server-side suggestions no longer wipe what you are typing.
+
 ## 1.0.0-rc.14
 
 ### Patch Changes

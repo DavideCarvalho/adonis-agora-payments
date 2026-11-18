@@ -1,9 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
+import { ComboSelect } from '../../agora-kit/blocks/combo-field';
 import { paymentsClient } from '../../client/payments-client';
-import { CONTROL_CLASS, FieldLabel } from './field';
+import { FieldLabel } from './field';
 
 /**
- * "Which event type?" — driven by the DATA, exactly like {@link ProviderFilter}.
+ * "Which event type?" — driven by the DATA, exactly like {@link ProviderFilter}, but a select with
+ * autocomplete: event types are dotted names (`payment.refunded`, `invoice.paid`…) and an install
+ * that has seen a few gateways has dozens, so typing `refund` beats scrolling a native list.
  *
  * `GET /api/providers` reports the types this install has actually RECEIVED, taken from the
  * ledger's own group-by. A hardcoded list would offer every type the package can emit, most of
@@ -35,19 +38,15 @@ export function EventTypeFilter({
 
   return (
     <FieldLabel label="Type" {...(className !== undefined ? { className } : {})}>
-      <select
+      <ComboSelect
         aria-label="Event type"
-        value={value ?? ''}
-        onChange={(event) => onChange(event.target.value === '' ? undefined : event.target.value)}
-        className={CONTROL_CLASS}
-      >
-        <option value="">All</option>
-        {types.map((type) => (
-          <option key={type} value={type}>
-            {type}
-          </option>
-        ))}
-      </select>
+        placeholder="All"
+        options={types}
+        loading={query.isLoading}
+        value={value ?? null}
+        onValueChange={(next) => onChange(next ?? undefined)}
+        className="h-[26px] w-52 bg-panel-2 text-xs font-normal normal-case tracking-normal"
+      />
     </FieldLabel>
   );
 }

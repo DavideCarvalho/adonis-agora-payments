@@ -60,10 +60,51 @@ export const HUB_OPERATION_CAPABILITY: Record<Exclude<HubOperation, 'driver'>, s
   'events.ack': 'payments:events',
 };
 
-/** Whether `granted` covers `needed` (`payments:*` covers every payments capability). */
+/**
+ * Whether a token holding `granted` may do `required`. Mirrors the Agora-wide capability rule.
+ * Segments (split on `:`) are compared one by one; a `*` matches exactly one segment, and a
+ * trailing `*` matches zero or more remaining segments. So `*` matches everything, `payments:*`
+ * matches every payments capability, and `payments:*:read` matches `payments:<anything>:read` —
+ * but nothing is implied: `payments:read` does not grant `payments:charge`. Empty and non-string
+ * grants are ignored.
+ */
+export function capabilityAllows(granted: readonly string[], required: string): boolean {
+  const want = required.split(':');
+  for (const capability of granted) {
+    if (typeof capability !== 'string' || capability === '') continue;
+    const have = capability.split(':');
+    let matched = true;
+    for (let index = 0; index < have.length; index += 1) {
+      const segment = have[index];
+      if (segment === '*') {
+        // A `*` before the last one stands for exactly one segment, so it needs one to consume;
+        // only the last `*` may match nothing (`a:*` covers `a`, `a:*:*` does not).
+        if (index >= want.length && index !== have.length - 1) {
+          matched = false;
+          break;
+        }
+        continue;
+      }
+      if (index >= want.length || segment !== want[index]) {
+        matched = false;
+        break;
+      }
+    }
+    if (!matched) continue;
+    // A trailing `*` covers the rest; otherwise the shapes must have the same length.
+    if (have.length === want.length || have[have.length - 1] === '*') return true;
+  }
+  return false;
+}
+
+/**
+ * Whether `granted` covers `needed`, by {@link capabilityAllows}. `null` (`whoami`) only needs one
+ * real (non-empty) capability.
+ */
 export function hasCapability(granted: readonly string[], needed: string | null): boolean {
-  if (needed === null) return granted.length > 0;
-  return granted.includes(needed) || granted.includes('payments:*') || granted.includes('*');
+  // Same notion of "a capability" as `capabilityAllows`: empty and non-string grants don't count.
+  if (needed === null) return granted.some((c) => typeof c === 'string' && c !== '');
+  return capabilityAllows(granted, needed);
 }
 
 /** One call, as it travels. */

@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.25
+
+### Patch Changes
+
+- [#271](https://github.com/DavideCarvalho/adonis-agora-payments/pull/271) [`8e5a9cb`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/8e5a9cb4f5629a70b523fb9fac5b545e586bd3bc) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Gateway, invoice-provider and billing-store factories now describe what they use under `Symbol.for('@adonis-agora/stack')`, so telescope's Architecture page shows "payments: gateway → Stripe" and the billing connection without any app code.
+
 ## 1.0.0-rc.24
 
 ### Patch Changes

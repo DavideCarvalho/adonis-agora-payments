@@ -1,5 +1,6 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FederatedNotice } from '../agora-kit/blocks/app-mode';
 import { EmptyState } from '../agora-kit/blocks/empty-state';
 import { ErrorBoundary } from '../agora-kit/blocks/error-boundary';
 import { UsersIcon } from '../agora-kit/icons';
@@ -9,6 +10,7 @@ import { splitHash, subscribeHashUrl } from '../agora-kit/url-state/hash-url';
 import { NuqsHashAdapter } from '../agora-kit/url-state/nuqs-hash-adapter';
 import { CONFIG_ELEMENT_ID, isScopedView } from '../client/payments-client';
 import { Activity } from './Activity';
+import { AppPicker, useFederatedApp, usePageApp } from './AppPicker';
 import { Customers } from './Customers';
 import { Disputes } from './Disputes';
 import {
@@ -144,14 +146,21 @@ function Console() {
   // `?tenant=` (the pick lives in the page URL, not in state; query keys do not carry it).
   const queryClient = useQueryClient();
   const tenant = usePageTenant();
-  const seenTenant = useRef(tenant);
+  // The same for the federated app (`?app=`): another app's data, re-read on every pick.
+  const app = usePageApp();
+  const federated = useFederatedApp();
+  const seenScope = useRef(`${tenant ?? ''}|${app ?? ''}`);
   useEffect(() => {
-    if (seenTenant.current === tenant) return;
-    seenTenant.current = tenant;
-    void queryClient.invalidateQueries({ predicate: (q) => q.queryKey[0] !== 'tenants' });
-  }, [tenant, queryClient]);
-  const scoped = isScopedView(picker);
-  const noOrganization = picker?.mode === 'none';
+    const scope = `${tenant ?? ''}|${app ?? ''}`;
+    if (seenScope.current === scope) return;
+    seenScope.current = scope;
+    void queryClient.invalidateQueries({
+      predicate: (q) => q.queryKey[0] !== 'tenants' && q.queryKey[0] !== 'apps',
+    });
+  }, [tenant, app, queryClient]);
+  // Organizations are this app's: a federated app is shown whole (its own grant decides).
+  const scoped = federated ? false : isScopedView(picker);
+  const noOrganization = !federated && picker?.mode === 'none';
 
   useEffect(() => {
     if (scoped && EVERY_ORGANIZATION_SCREENS.has(route.screen)) navigate({ screen: 'overview' });
@@ -223,9 +232,23 @@ function Console() {
       shell={shell}
       title={TITLES[route.screen]}
       searchPlaceholder="Search payments, subscriptions, customers…"
-      actions={<OrgPicker />}
+      actions={
+        <>
+          <AppPicker />
+          {federated ? null : <OrgPicker />}
+        </>
+      }
     >
-      <ErrorBoundary label={TITLES[route.screen]} resetKeys={[key]}>
+      {federated ? (
+        <div className="px-4 pt-4 md:px-6">
+          <FederatedNotice
+            appLabel={federated.label}
+            mode={federated.mode}
+            actions={federated.actions}
+          />
+        </div>
+      ) : null}
+      <ErrorBoundary label={TITLES[route.screen]} resetKeys={[key, app]}>
         {noOrganization ? (
           <PageBody>
             <EmptyState
@@ -254,7 +277,9 @@ function Console() {
             openedGatewayId={route.paymentId ?? null}
             onOpen={openPayment}
             organizations={
-              picker !== undefined && picker.mode !== 'off' && !scoped ? picker : undefined
+              picker !== undefined && picker.mode !== 'off' && !scoped && !federated
+                ? picker
+                : undefined
             }
           />
         );

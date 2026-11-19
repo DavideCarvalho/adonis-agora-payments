@@ -12,6 +12,7 @@
     "billing",
     "organizations",
     "control-plane",
+    "federated-console",
     "account-console",
     "invoices",
     "---Extending---",

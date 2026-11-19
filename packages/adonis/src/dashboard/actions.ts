@@ -58,6 +58,11 @@ export type RefundAction = (input: {
   amount?: number;
   /** Check that the refund could be sent (driver configured, refunds supported) and stop there. */
   dryRun?: boolean;
+  /**
+   * The console's idempotency key (a federated console sends one with every action). Handed to
+   * the gateway only when it deduplicates refunds on it (see `createRefundAction`'s `idempotency`).
+   */
+  idempotencyKey?: string;
 }) => Promise<RefundOutcome>;
 
 /**
@@ -69,8 +74,15 @@ export type RefundAction = (input: {
  */
 export function createRefundAction(
   resolveDriver: (provider: string) => RefundCapableDriver | Promise<RefundCapableDriver>,
+  options: {
+    /**
+     * Whether the gateway of `provider` deduplicates a refund on an idempotency key (Stripe). Only
+     * then is the console's key passed on: a driver that has no such mechanism refuses a key.
+     */
+    idempotency?: (provider: string) => boolean;
+  } = {},
 ): RefundAction {
-  return async ({ provider, gatewayId, amount, dryRun }) => {
+  return async ({ provider, gatewayId, amount, dryRun, idempotencyKey }) => {
     let driver: RefundCapableDriver;
     try {
       driver = await resolveDriver(provider);
@@ -87,7 +99,14 @@ export function createRefundAction(
     }
     if (dryRun === true) return { kind: 'dry-run' };
     try {
-      const refund = await driver.refund(gatewayId, amount);
+      const key =
+        idempotencyKey !== undefined && options.idempotency?.(driver.provider) === true
+          ? idempotencyKey
+          : undefined;
+      const refund =
+        key !== undefined
+          ? await driver.refund(gatewayId, amount, { idempotencyKey: key })
+          : await driver.refund(gatewayId, amount);
       return {
         kind: 'ok',
         refund: {

@@ -5,6 +5,7 @@ import { PageHeader, Toolbar } from '../agora-kit/blocks/page-header';
 import { PageBody } from '../agora-kit/shell/app-shell';
 import { Button } from '../agora-kit/ui/button';
 import { paymentsClient, type WebhookEventRow } from '../client/payments-client';
+import { useActionsBlocked } from './AppPicker';
 import { PlugIcon } from './icons';
 import { formatCount, formatWhen } from './money';
 import { ListPanel, Mono } from './shell';
@@ -68,6 +69,7 @@ export function WebhookEvents() {
       }),
   });
 
+  const blocked = useActionsBlocked();
   const retry = useMutation({
     mutationFn: (gatewayEventId: string) => paymentsClient.retryWebhookEvent(gatewayEventId),
     onSettled: () => {
@@ -124,7 +126,8 @@ export function WebhookEvents() {
           <Button
             variant="outline"
             size="sm"
-            disabled={retry.isPending}
+            disabled={retry.isPending || blocked !== undefined}
+            title={blocked}
             onClick={() => retry.mutate(row.gatewayEventId)}
           >
             {retry.isPending && retry.variables === row.gatewayEventId ? 'Retrying…' : 'Retry'}

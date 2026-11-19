@@ -252,6 +252,11 @@ export type {
 export type { WooviSubAccount } from './drivers/woovi.js';
 export type { EnsureCustomerOptions } from './ensure_customer.js';
 export { ensureCustomer } from './ensure_customer.js';
+// The federated console, from the owning app's side (`consoleCommands` in config/payments.ts).
+export type { ConsoleCommandsOption, FederatedPaymentsAction } from './federation/console.js';
+export { FEDERATED_ACTIONS } from './federation/console.js';
+export type { ConsoleIdempotencyStore } from './federation/idempotency.js';
+export { memoryIdempotencyStore, redisIdempotencyStore } from './federation/idempotency.js';
 export type { HttpRequestOptions } from './http.js';
 export { headerValue, httpRequest, isNotFound } from './http.js';
 export type { EmitInvoiceContext, EmitInvoiceData } from './invoice/emit_invoice.js';

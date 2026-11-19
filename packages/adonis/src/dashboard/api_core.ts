@@ -107,6 +107,8 @@ export interface ServeConsoleRouteOptions {
   /** What each configured gateway can do. Only called for a route that needs it. */
   capabilities?: () => Promise<Record<string, ProviderCapabilities> | undefined>;
   now?: () => Date;
+  /** The idempotency key the action was sent with (a federated console's command). */
+  idempotencyKey?: string | undefined;
 }
 
 /**
@@ -134,6 +136,7 @@ export async function serveConsoleRoute(options: ServeConsoleRouteOptions): Prom
       currency: options.currency,
       ...(options.actor !== undefined ? { actor: options.actor } : {}),
       ...(options.now !== undefined ? { now: options.now } : {}),
+      ...(options.idempotencyKey !== undefined ? { idempotencyKey: options.idempotencyKey } : {}),
       // Resolved lazily and only for the routes that need it: a console whose payments manager is
       // unreachable must still serve every read.
       ...(route.needsActions === true && options.actions !== undefined
@@ -186,6 +189,8 @@ export function createConsoleActions(deps: {
   store: BillingStore;
   handlers?: Record<string, WebhookHandler> | undefined;
   tenancy: () => ResolvedPaymentsTenancy;
+  /** Whether a gateway deduplicates refunds on an idempotency key (passed on only then). */
+  gatewayIdempotency?: (provider: string) => boolean;
 }): Partial<DashboardActions> {
   const processor = new WebhookProcessor({
     store: deps.store,
@@ -193,7 +198,10 @@ export function createConsoleActions(deps: {
     tenancy: deps.tenancy,
   });
   return {
-    refund: createRefundAction((provider) => deps.manager.driver(provider)),
+    refund: createRefundAction(
+      (provider) => deps.manager.driver(provider),
+      deps.gatewayIdempotency !== undefined ? { idempotency: deps.gatewayIdempotency } : {},
+    ),
     submitEvidence: createEvidenceAction((provider) => deps.manager.driver(provider)),
     // The event is rebuilt from the ledger's own `payload` + `normalized` columns and run
     // straight through the processor — no driver, no `parseWebhook`, so no signature to

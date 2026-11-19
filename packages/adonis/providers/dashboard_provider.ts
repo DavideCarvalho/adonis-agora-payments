@@ -75,6 +75,12 @@ import {
   resolveConsoleTenantScope,
 } from '../src/dashboard/tenant_scope.js';
 import type { PaymentsConfig } from '../src/define_config.js';
+import {
+  consoleRouteName,
+  FederatedPaymentsConsole,
+  idempotencyKeyOf,
+} from '../src/federation/console.js';
+import { type RedisLike, resolveRedisConnection } from '../src/federation/redis_channel.js';
 import { PaymentsManager } from '../src/payments_manager.js';
 import { getBillingStore } from '../src/services/main.js';
 
@@ -159,12 +165,16 @@ export default class PaymentsDashboardProvider {
   /** Each request's resolved organization scope (`null` = tenancy off). */
   private readonly scopes = new WeakMap<HttpContext, ConsoleTenantScope | null>();
 
+  /** The other apps of `apps` (a federated console), when there are any. */
+  private federation: FederatedPaymentsConsole | undefined;
+
   async boot() {
     const config = resolveConfig(
       this.app.config.get<PaymentsDashboardConfig>('payments_dashboard', {}),
     );
     if (!config.enabled) return;
     this.authorizeGuard = await this.resolveGuard(config);
+    if (Object.keys(config.apps).length > 0) this.federation = this.createFederation(config);
 
     // Developer tools on the app's dev MCP endpoint, when `@adonis-agora/agent/mcp_provider` bound
     // its hub (its `register()` ran before any `boot()`). Gated by this console's own `authorize`.
@@ -198,6 +208,13 @@ export default class PaymentsDashboardProvider {
       return async (ctx: HttpContext) => {
         const guard = await this.enforce(config, ctx, 'api');
         if (!guard.allowed) return;
+        const federated = this.federatedPick(ctx);
+        if (federated !== undefined) {
+          // `?app=` names a federated app: read from its tables, or acted on by the app itself.
+          const answer = await this.serveFederated(config, ctx, federated, handler, guard.actor);
+          ctx.response.header('cache-control', 'private, no-store');
+          return ctx.response.status(answer.status).json(answer.body);
+        }
         const result = await this.serveApi(
           config,
           ctx,
@@ -264,6 +281,15 @@ export default class PaymentsDashboardProvider {
     router
       .post(`${apiBase}/disputes/:gatewayId/resolve`, json(resolveDispute))
       .as('payments_dashboard.disputes.resolve');
+
+    // The App picker: this app and the federated apps of `apps` this viewer may see.
+    router
+      .get(`${apiBase}/apps`, async (ctx: HttpContext) => {
+        if (!(await this.enforce(config, ctx, 'api')).allowed) return;
+        ctx.response.header('cache-control', 'private, no-store');
+        return ctx.response.status(200).json(this.appsPicker(config, ctx));
+      })
+      .as('payments_dashboard.apps');
 
     // The console switcher: the other Agora consoles this viewer may open, and a search across them.
     router
@@ -333,6 +359,97 @@ export default class PaymentsDashboardProvider {
       actions: (scoped) => this.actions(scoped),
       capabilities: () => this.capabilities(),
     });
+  }
+
+  /** The federated app `?app=` names, if it names one (else this console's own data). */
+  private federatedPick(ctx: HttpContext): string | undefined {
+    if (!this.federation) return undefined;
+    const raw = ctx.request.qs().app;
+    const app = Array.isArray(raw) ? raw[0] : raw;
+    return typeof app === 'string' && this.federation.has(app) ? app : undefined;
+  }
+
+  /**
+   * The federated apps this viewer may pick: the `apps` grant of `authorize` (`'*'` or omitted =
+   * every one). With tenancy on, a viewer confined to some organizations sees another app only when
+   * `apps` names it explicitly: another app's rows are not partitioned by this app's organizations.
+   */
+  private visibleFederated(ctx: HttpContext): (key: string) => boolean {
+    const decision = this.decisions.get(ctx);
+    if (!decision?.allowed) return () => false;
+    const grant = decision.apps;
+    if (grant === undefined) {
+      const confined = this.tenancy().enabled && decision.tenants !== '*';
+      return () => !confined;
+    }
+    return (key) => grant === '*' || grant.includes(key);
+  }
+
+  /** `GET /api/apps`: what the App picker offers. */
+  private appsPicker(config: ResolvedPaymentsDashboardConfig, ctx: HttpContext) {
+    const apps = this.federation?.list(this.visibleFederated(ctx)) ?? [];
+    const raw = ctx.request.qs().app;
+    const asked = Array.isArray(raw) ? raw[0] : raw;
+    const paymentsConfig = this.app.config.get<PaymentsConfig>('payments', {});
+    const controlPlaneApps = paymentsConfig.controlPlane?.apps;
+    return {
+      local: { id: null, label: config.appLabel ?? 'This app' },
+      topology: paymentsConfig.topology ?? 'standalone',
+      // The apps reporting to this control plane: their rows are in this app's own view.
+      tenants:
+        paymentsConfig.topology === 'control-plane' && controlPlaneApps !== undefined
+          ? (Array.isArray(controlPlaneApps)
+              ? [...controlPlaneApps]
+              : Object.keys(controlPlaneApps)
+            ).map((id) => ({ id, label: id, mode: 'control-plane', actions: 'here' }))
+          : [],
+      apps,
+      selected: typeof asked === 'string' && apps.some((app) => app.id === asked) ? asked : null,
+    };
+  }
+
+  /** Serve one console route for a federated app, after the viewer's `apps` grant. */
+  private async serveFederated(
+    config: ResolvedPaymentsDashboardConfig,
+    ctx: HttpContext,
+    key: string,
+    handler: (d: Deps, req: ApiRequest) => Promise<ApiResponse>,
+    actor: string | undefined,
+  ): Promise<ApiResponse> {
+    if (!this.visibleFederated(ctx)(key)) {
+      return { status: 403, body: { error: `you may not see the app "${key}"` } };
+    }
+    const route = consoleRouteName(handler);
+    if (route === undefined) {
+      return { status: 501, body: { error: 'not available for another app' } };
+    }
+    const decision = this.decisions.get(ctx);
+    const capabilities = decision?.allowed ? decision.capabilities : undefined;
+    const req = toApiRequest(ctx);
+    const idempotencyKey = idempotencyKeyOf(ctx.request.header('idempotency-key'), req.body);
+    return this.federation!.dispatch(key, route, req, {
+      currency: config.currency,
+      meta: {
+        ...(actor !== undefined ? { actor } : {}),
+        ...(capabilities !== undefined ? { capabilities } : {}),
+        via: config.appLabel ?? 'payments console',
+        ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+      },
+    });
+  }
+
+  /** The federated console over `apps`: Lucid and Redis resolved through the container. */
+  private createFederation(config: ResolvedPaymentsDashboardConfig): FederatedPaymentsConsole {
+    const container = this.app.container;
+    return new FederatedPaymentsConsole(config.apps, {
+      redis: async (connection) =>
+        (await resolveRedisConnection(container as never, connection)) as RedisLike,
+    });
+  }
+
+  async shutdown(): Promise<void> {
+    await this.federation?.close();
+    this.federation = undefined;
   }
 
   /** The console gate, remembered for the request so its organization scope reads the same verdict. */
@@ -853,8 +970,9 @@ export function auditActor(ctx: HttpContext): string | undefined {
 
 /** Adapt an AdonisJS `HttpContext` to the framework-light {@link ApiRequest}. */
 function toApiRequest(ctx: HttpContext): ApiRequest {
-  // `tenant` picks the console's organization (see `consoleTenantScope`); it is not a row filter.
-  const { tenant: _tenant, ...query } = ctx.request.qs() as Record<string, unknown>;
+  // `tenant` picks the console's organization (see `consoleTenantScope`) and `app` the federated
+  // app: neither is a row filter.
+  const { tenant: _tenant, app: _app, ...query } = ctx.request.qs() as Record<string, unknown>;
   return {
     params: ctx.params as Record<string, string | undefined>,
     query,

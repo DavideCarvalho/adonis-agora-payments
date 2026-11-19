@@ -1,4 +1,8 @@
 import type { HttpContext } from '@adonisjs/core/http';
+import {
+  type FederatedPaymentsAppConfig,
+  validateFederatedPaymentsApp,
+} from '../federation/console.js';
 import type {
   AccessDeniedOption as GenericAccessDeniedOption,
   AccessDeniedRenderer as GenericAccessDeniedRenderer,
@@ -103,6 +107,15 @@ export interface PaymentsDashboardConfig {
    * announces on the `agora.consoles` registry, when there is one. Same-origin paths only.
    */
   signOut?: SignOutOption;
+  /**
+   * Other apps this console also shows (a federated console): each runs payments standalone, with
+   * its own gateways, webhooks and billing store. The console reads its billing tables (read-only,
+   * masked) and sends its actions to it over Redis. The key travels in the URL (`?app=<key>`).
+   * Each app opts in with `consoleCommands` in its config/payments.ts.
+   */
+  apps?: Record<string, FederatedPaymentsAppConfig>;
+  /** The name of this console's own app in the App picker. Default `'This app'`. */
+  appLabel?: string;
 }
 
 export type { ConsoleViewer, SignOutOption, ViewerHook };
@@ -120,6 +133,9 @@ export interface ResolvedPaymentsDashboardConfig {
   viewer: ViewerHook | null;
   /** The host's `signOut` option, or `null` for the registry's announced one. */
   signOut: SignOutOption | null;
+  /** The federated apps (validated), empty when none. */
+  apps: Record<string, FederatedPaymentsAppConfig>;
+  appLabel: string | null;
 }
 
 /** Apply defaults to a partial config, producing a fully-resolved one. */
@@ -129,6 +145,14 @@ export function resolveConfig(
   const rawPath = config.path ?? '/payments';
   // Normalize: ensure a single leading slash and no trailing slash (root stays '/').
   const trimmed = `/${rawPath.replace(/^\/+/, '').replace(/\/+$/, '')}`;
+  for (const [key, entry] of Object.entries(config.apps ?? {})) {
+    validateFederatedPaymentsApp(key, entry);
+  }
+  if (config.appLabel !== undefined && (typeof config.appLabel !== 'string' || !config.appLabel)) {
+    throw new Error(
+      '[@adonis-agora/payments] payments_dashboard.appLabel must be a non-empty string',
+    );
+  }
   return {
     enabled: config.enabled ?? true,
     path: trimmed === '/' ? '' : trimmed,
@@ -137,6 +161,8 @@ export function resolveConfig(
     accessDenied: config.accessDenied ?? null,
     viewer: config.viewer ?? null,
     signOut: config.signOut ?? null,
+    apps: config.apps ?? {},
+    appLabel: config.appLabel ?? null,
   };
 }
 

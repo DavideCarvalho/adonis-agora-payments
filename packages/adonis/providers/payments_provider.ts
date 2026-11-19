@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import type { HttpContext } from '@adonisjs/core/http';
 import type { ApplicationService, HttpRouterService } from '@adonisjs/core/types';
@@ -23,6 +24,11 @@ import type { DurableEngineLike } from '../src/billing/webhook_dispatcher.js';
 import { WebhookDispatcher } from '../src/billing/webhook_dispatcher.js';
 import type { WebhookHandler } from '../src/billing/webhook_processor.js';
 import { WebhookProcessor } from '../src/billing/webhook_processor.js';
+import {
+  consoleCapabilities,
+  createConsoleActions,
+  resolveAppWebhookHandlers,
+} from '../src/dashboard/api_core.js';
 import type { BillingHandlers, PaymentsConfig } from '../src/define_config.js';
 import {
   newPaymentsTraceId,
@@ -34,6 +40,16 @@ import {
 import { registerDoctorChecks } from '../src/doctor/agora_doctor.js';
 import { paymentsDoctorChecks } from '../src/doctor/checks.js';
 import type { PaymentsDriver } from '../src/driver.js';
+import {
+  answerPaymentsConsoleCommands,
+  resolveConsoleCommands,
+  validateConsoleCommands,
+} from '../src/federation/console.js';
+import { idempotencyClientOf, redisIdempotencyStore } from '../src/federation/idempotency.js';
+import {
+  type RedisConsoleChannel,
+  resolveRedisConnection,
+} from '../src/federation/redis_channel.js';
 import { InvoiceManager, resolveInvoiceProviders } from '../src/invoice/invoice_manager.js';
 import { PaymentsManager, resolveDrivers } from '../src/payments_manager.js';
 import {
@@ -42,7 +58,7 @@ import {
   setPayments,
   setWebhookDispatcher,
 } from '../src/services/main.js';
-import type { PaymentsControlPlane } from '../src/topology/control_plane.js';
+import { GATEWAY_IDEMPOTENCY, type PaymentsControlPlane } from '../src/topology/control_plane.js';
 import { HUB_MESSAGE_VERSION } from '../src/topology/protocol.js';
 import {
   buildControlPlane,
@@ -89,11 +105,15 @@ export default class PaymentsProvider {
   /** `topology: 'control-plane'`. */
   #controlPlane: PaymentsControlPlane | undefined;
   #redisServer: { stop(): Promise<void>; notify(partition: string): Promise<void> } | undefined;
+  /** `consoleCommands`: the channel this app answers another app's payments console on. */
+  #consoleChannel: RedisConsoleChannel | undefined;
 
   constructor(protected app: ApplicationService) {}
 
   register() {
     const config = this.app.config.get<PaymentsConfig>('payments', {});
+    // A typo in an action name (or `consoleCommands` on a tenant) fails the boot, not a refund.
+    validateConsoleCommands(config.consoleCommands, config.topology);
 
     /*
      * String alias for the manager, so `services/payments` can resolve it the way every
@@ -452,10 +472,93 @@ export default class PaymentsProvider {
   async ready() {
     const { registerPaymentsWatcher } = await import('../src/telescope/register.js');
     this.#telescopeWatcher = await registerPaymentsWatcher(this.app);
+    await this.#answerConsoleCommands();
+  }
+
+  /**
+   * `consoleCommands`: answer another app's federated payments console over Redis. Web processes
+   * only (a short-lived `ace` command that won a command's claim could exit before it answers). A
+   * Redis that cannot be reached, or cannot claim a command, is logged, not fatal.
+   */
+  async #answerConsoleCommands(): Promise<void> {
+    const config = this.app.config.get<PaymentsConfig>('payments', {});
+    if (!config.consoleCommands || resolveTopology(config) === 'tenant') return;
+    if (this.app.getEnvironment() !== 'web' || resolveRole(config) === 'worker') return;
+    const logger = await this.app.container.make('logger');
+    try {
+      const option = resolveConsoleCommands(config.consoleCommands, this.#packageName());
+      if (!option) return;
+      const client = await resolveRedisConnection(this.app.container, option.connection);
+      let idempotency = option.idempotency;
+      if (!idempotency) {
+        const kv = idempotencyClientOf(client);
+        if (!kv) throw new Error('its Redis connection cannot GET/SET idempotency records');
+        idempotency = redisIdempotencyStore(kv, option.prefix);
+      }
+      const dashboard = this.app.config.get<{ currency?: string } | undefined>(
+        'payments_dashboard',
+        undefined,
+      );
+      let handlers: Promise<Record<string, WebhookHandler> | undefined> | undefined;
+      this.#consoleChannel = await answerPaymentsConsoleCommands({
+        client,
+        prefix: option.prefix,
+        actions: option.actions,
+        idempotency,
+        runtime: {
+          currency: typeof dashboard?.currency === 'string' ? dashboard.currency : 'BRL',
+          store: () => getBillingStore(),
+          capabilities: async () =>
+            consoleCapabilities((await this.app.container.make(PaymentsManager)).drivers),
+          actions: async (store) => {
+            const manager = await this.app.container.make(PaymentsManager);
+            handlers ??= resolveAppWebhookHandlers(this.app, config.billing?.handlers).catch(
+              (error: unknown) => {
+                handlers = undefined;
+                throw error;
+              },
+            );
+            return createConsoleActions({
+              manager,
+              store,
+              handlers: await handlers,
+              tenancy: () => resolvePaymentsTenancy(config.tenancy),
+              // The console's idempotency key reaches the gateway only where it deduplicates on it.
+              gatewayIdempotency: (provider) =>
+                GATEWAY_IDEMPOTENCY[provider]?.honours.includes('refund') === true,
+            });
+          },
+        },
+        log: (line) => logger.info(line),
+        onError: (error) =>
+          logger.warn(
+            `[@adonis-agora/payments] federated console command failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+      });
+    } catch (error) {
+      logger.warn(
+        `[@adonis-agora/payments] consoleCommands is on, but ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /** The app's package.json name without its scope (`@acme/shop` → `shop`): the default prefix. */
+  #packageName(): string {
+    try {
+      const pkg = JSON.parse(readFileSync(this.app.makePath('package.json'), 'utf8')) as {
+        name?: unknown;
+      };
+      if (typeof pkg.name === 'string' && pkg.name !== '') return pkg.name.replace(/^@[^/]+\//, '');
+    } catch {
+      // No package.json: the caller's `prefix` is then required.
+    }
+    return '';
   }
 
   /** Release the watcher's channel claims and subscriptions on shutdown. */
   async shutdown(): Promise<void> {
+    await this.#consoleChannel?.close();
+    this.#consoleChannel = undefined;
     if (this.#describeTimer) clearTimeout(this.#describeTimer);
     await this.#pump?.stop();
     this.#pump = undefined;

@@ -7,6 +7,7 @@ import { PageBody } from '../agora-kit/shell/app-shell';
 import { Button } from '../agora-kit/ui/button';
 import type { DisputeRow } from '../client/payments-client';
 import { displayCurrency, isCursorMeta, paymentsClient } from '../client/payments-client';
+import { useActionsBlocked } from './AppPicker';
 import {
   DEFAULT_DUE_WITHIN_HOURS,
   type DeadlineTone,
@@ -204,6 +205,8 @@ function DisputeLog() {
   });
 
   const [resolving, setResolving] = useState<DisputeRow | null>(null);
+
+  const blocked = useActionsBlocked();
   const refilter = (change: Partial<{ status: string | null; provider: string | null }>) =>
     void setView({ ...change, after: null });
 
@@ -255,7 +258,13 @@ function DisputeLog() {
       // resolution.
       cell: (row) =>
         disputeIsOpen(row.status) ? (
-          <Button variant="outline" size="sm" onClick={() => setResolving(row)}>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={blocked !== undefined}
+            title={blocked}
+            onClick={() => setResolving(row)}
+          >
             Record outcome
           </Button>
         ) : null,

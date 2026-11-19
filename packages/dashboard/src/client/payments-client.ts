@@ -485,8 +485,62 @@ export function isScopedView(picker: TenantPicker | undefined): boolean {
   return !(picker.all && selectedTenant() === undefined);
 }
 
+/**
+ * The federated app picked in the page URL (`?app=`), or `undefined` for this console's own app.
+ * Every API call carries it, like `?tenant=`.
+ */
+export function selectedApp(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  const value = new URLSearchParams(window.location.search).get('app');
+  return value === null || value === '' ? undefined : value;
+}
+
+/** `path` with the page's organization (`?tenant=`) and federated app (`?app=`). */
+export function withScope(path: string): string {
+  const scoped = withTenant(path);
+  const app = selectedApp();
+  if (app === undefined) return scoped;
+  return `${scoped}${scoped.includes('?') ? '&' : '?'}app=${encodeURIComponent(app)}`;
+}
+
+/** Another app the console shows (`GET /api/apps`). */
+export interface FederatedAppInfo {
+  id: string;
+  label: string;
+  mode?: 'federated' | 'control-plane';
+  /** Who runs actions on it: the app itself (`app`), or nobody from here (`none`). */
+  actions?: 'app' | 'none' | 'here';
+}
+
+/** What the App picker offers: this app, then the federated apps this viewer may see. */
+export interface AppsPicker {
+  local: { label: string };
+  topology: string;
+  /** The apps reporting to this control plane (their rows are in this app's own view). */
+  tenants: FederatedAppInfo[];
+  apps: FederatedAppInfo[];
+  selected: string | null;
+}
+
+const NO_APPS: AppsPicker = {
+  local: { label: 'This app' },
+  topology: 'standalone',
+  tenants: [],
+  apps: [],
+  selected: null,
+};
+
+/** A fresh idempotency key for one action (a federated app runs a key once). */
+function idempotencyKey(): string {
+  const random =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `console-${random}`;
+}
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(apiBase() + withTenant(path), init);
+  const res = await fetch(apiBase() + withScope(path), init);
   if (res.status === 401) {
     redirectToAuthSurface(await readRedirectTo(res));
     throw new Error('Not signed in; redirecting.');
@@ -529,7 +583,13 @@ function csrfHeader(): Record<string, string> {
 async function post<T>(path: string, body?: unknown): Promise<T> {
   return http<T>(path, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', ...csrfHeader() },
+    headers: {
+      'content-type': 'application/json',
+      // Every action carries one: another app (a federated console) runs a key once, so a retry
+      // of the same request never refunds twice. This console's own server ignores it.
+      'idempotency-key': idempotencyKey(),
+      ...csrfHeader(),
+    },
     body: JSON.stringify(body ?? {}),
   });
 }
@@ -672,6 +732,31 @@ export const paymentsClient = {
     };
   },
   /** Record a switch of organization (`'*'` = all) in the audit trail. */
+  /** What the App picker offers; an older server (no route) offers nothing. */
+  async apps(): Promise<AppsPicker> {
+    const res = await fetch(`${apiBase()}/apps`);
+    if (!res.ok) return NO_APPS;
+    const body = (await res.json()) as Partial<AppsPicker>;
+    const list = (value: unknown): FederatedAppInfo[] =>
+      Array.isArray(value)
+        ? value.filter(
+            (a): a is FederatedAppInfo =>
+              !!a && typeof a.id === 'string' && typeof a.label === 'string',
+          )
+        : [];
+    return {
+      local: {
+        label:
+          typeof body.local?.label === 'string' && body.local.label !== ''
+            ? body.local.label
+            : NO_APPS.local.label,
+      },
+      topology: typeof body.topology === 'string' ? body.topology : 'standalone',
+      tenants: list(body.tenants),
+      apps: list(body.apps),
+      selected: typeof body.selected === 'string' ? body.selected : null,
+    };
+  },
   selectTenant(id: string): Promise<{ tenant: string }> {
     return post<{ tenant: string }>(`/tenants/${encodeURIComponent(id)}/select`);
   },

@@ -1,3 +1,29 @@
+// The federated console: other apps' own payments, shown here and operated through them (`apps`).
+export type {
+  ConsoleCommandsOption,
+  FederatedAppInfo,
+  FederatedCallMeta,
+  FederatedPaymentsAction,
+  FederatedPaymentsAppConfig,
+  OwningAppRuntime,
+  PaymentsConsoleProfile,
+} from '../federation/console.js';
+export {
+  answerPaymentsConsoleCommands,
+  FEDERATED_ACTIONS,
+  FEDERATED_READS,
+  FederatedPaymentsConsole,
+  paymentsConsoleCommandHandler,
+} from '../federation/console.js';
+export type { ConsoleIdempotencyStore, IdempotencyState } from '../federation/idempotency.js';
+export { memoryIdempotencyStore, redisIdempotencyStore } from '../federation/idempotency.js';
+export { RedisConsoleChannel } from '../federation/redis_channel.js';
+export {
+  capabilityAllows,
+  federatedSafe,
+  maskDocument,
+  readOnlyBillingStore,
+} from '../federation/safety.js';
 /** Keep in sync with this package's `version` in package.json. */
 export const VERSION = '0.2.0';
 
@@ -47,6 +73,7 @@ export { resolveAuthorizeResult, runAuthorize } from './authorize_decision.js';
 // The console access contract (function, class or lazy import) shared by every Agora console.
 export type {
   AuthorizeByTokenOptions,
+  ConsoleApps,
   ConsoleAuthorize,
   ConsoleAuthorizeDecision,
   ConsoleAuthorizeResult,

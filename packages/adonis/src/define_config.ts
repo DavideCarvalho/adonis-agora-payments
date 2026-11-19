@@ -14,6 +14,7 @@ import type { PayPalDriverConfig } from './drivers/paypal.js';
 import type { PolarDriverConfig } from './drivers/polar.js';
 import type { RazorpayDriverConfig } from './drivers/razorpay.js';
 import type { SquareDriverConfig } from './drivers/square.js';
+import type { ConsoleCommandsOption } from './federation/console.js';
 import type { InvoiceProvider } from './invoice/invoice_provider.js';
 import { describeStackUse } from './stack.js';
 import type { SubscriptionsConfig } from './subscription_mode.js';
@@ -468,6 +469,15 @@ export interface PaymentsConfig {
    * console shows each viewer their own organizations. See the Tenancy docs.
    */
   tenancy?: PaymentsTenancyOption;
+  /**
+   * Let another app's payments console (its `apps` in config/payments_dashboard.ts, typically the
+   * Hub's) show this app and, for the actions listed in `actions`, operate it. Every web instance
+   * listens on Redis (`@adonisjs/redis`); exactly one runs each action, through this app's own
+   * console handlers, gateways and audit trail, with the console's viewer as the actor. `true`
+   * answers reads only (the console reads the billing tables itself), with this app's package
+   * name as the prefix. Every action is off unless listed. Not on a `tenant`. Default: off.
+   */
+  consoleCommands?: ConsoleCommandsOption;
   /**
    * The `billing_customers.owner_type` a signed-in USER's customer is recorded under, for
    * `payments.currentCustomer()` outside an organization. Default `'User'`.

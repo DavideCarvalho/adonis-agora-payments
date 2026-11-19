@@ -7,6 +7,7 @@ import { PageBody } from '../agora-kit/shell/app-shell';
 import { Button } from '../agora-kit/ui/button';
 import type { PaymentRow, TenantPicker } from '../client/payments-client';
 import { paymentsClient } from '../client/payments-client';
+import { useActionsBlocked } from './AppPicker';
 import { CardIcon } from './icons';
 import { formatCents, formatCount, formatWhen } from './money';
 import { PaymentDetail } from './PaymentDetail';
@@ -66,6 +67,7 @@ export function PaymentsList({
   const provider = view.provider ?? undefined;
   const paging = cursorPaging(view.after, (next) => void setView({ after: next }));
   const [refunding, setRefunding] = useState<PaymentRow | null>(null);
+  const blocked = useActionsBlocked();
   // Uncontrolled fallback for a caller that does not route the detail dialog (a test, a host
   // embedding just this screen). `App` always does.
   const [openedLocal, setOpenedLocal] = useState<string | null>(null);
@@ -171,6 +173,7 @@ export function PaymentsList({
           organizations,
           onOpen: (row) => setOpened(row.gatewayId),
           onRefund: setRefunding,
+          blocked,
         })}
       >
         {refunding !== null && (
@@ -187,10 +190,13 @@ function paymentColumns({
   organizations,
   onOpen,
   onRefund,
+  blocked,
 }: {
   organizations: TenantPicker | undefined;
   onOpen: (row: PaymentRow) => void;
   onRefund: (row: PaymentRow) => void;
+  /** Why actions are off for the picked app (a read-only federated app). */
+  blocked?: string | undefined;
 }): Column<PaymentRow>[] {
   const columns: Column<PaymentRow>[] = [
     {
@@ -294,7 +300,13 @@ function paymentColumns({
           {/* `refundable` is the SERVER's rule, not a re-derivation of it: a button that offers
               what the endpoint will refuse is a button that only ever errors. */}
           {row.refundable && (
-            <Button variant="outline" size="sm" onClick={() => onRefund(row)}>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={blocked !== undefined}
+              title={blocked}
+              onClick={() => onRefund(row)}
+            >
               Refund
             </Button>
           )}

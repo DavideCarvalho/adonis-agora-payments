@@ -1,0 +1,287 @@
+---
+title: Federated console
+description: Show and operate an app that runs payments standalone from another app's console, without its gateway credentials ever leaving it.
+icon: Share2
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+
+An app can run payments **standalone** (its own gateways and credentials, its own webhooks, its
+own billing tables) and still appear in another app's [console](/docs/payments/dashboard), next to
+that console's own data. Typically the Hub's console shows the Hub's payments and, in the same
+**App** picker, each app that charges on its own.
+
+Two sides take part:
+
+- **the console app** (the Hub) lists the other apps under `apps` in `config/payments_dashboard.ts`;
+- **each owning app** answers that console with `consoleCommands` in its `config/payments.ts`.
+
+The console reads the owning app's billing tables itself, and asks the owning app to run every
+action. The owning app's gateways are only ever called by the owning app.
+
+## The console app
+
+```ts title="config/payments_dashboard.ts"
+import { defineConfig } from '@adonis-agora/payments/dashboard'
+
+export default defineConfig({
+  appLabel: 'Hub',
+  authorize: async (ctx) => {
+    const user = await ctx.auth.authenticate()
+    if (user.role === 'finance') {
+      return {
+        allowed: true,
+        apps: '*',
+        capabilities: ['payments:refund', 'payments:subscriptions:*', 'payments:disputes:resolve'],
+      }
+    }
+    if (user.role === 'support') return { allowed: true, apps: ['entre-textos'] }
+    return { allowed: false }
+  },
+  apps: {
+    'entre-textos': {
+      label: 'Entre Textos',
+      // A connection in THIS app's config/database.ts that reaches the app's billing tables,
+      // and the app's `billing.schema`.
+      store: { connection: 'entretextos', schema: 'entretextos' },
+      // A connection in THIS app's config/redis.ts, and the app's `consoleCommands.prefix`.
+      controlPlane: { connection: 'main', prefix: 'entretextos' },
+    },
+    eduliberta: {
+      label: 'EduLiberta',
+      store: { connection: 'eduliberta', schema: 'eduliberta' },
+      controlPlane: { connection: 'main', prefix: 'eduliberta' },
+      // Browse only from here.
+      actions: false,
+    },
+  },
+})
+```
+
+| Option | Description |
+| --- | --- |
+| `apps` | The other apps, by a key of 1–64 characters (`A-Z a-z 0-9 _ . -`). The key is what the URL carries: `?app=entre-textos`. |
+| `apps.<key>.label` | The name in the App picker. Defaults to the key. |
+| `apps.<key>.store.connection` | A Lucid connection of this app that reaches the other app's billing tables. Default: the default connection. |
+| `apps.<key>.store.schema` | The other app's `billing.schema`. Omit it when that app has none. |
+| `apps.<key>.controlPlane.connection` | The `@adonisjs/redis` connection to publish on. Both apps must use the same Redis server. Default: the default connection. |
+| `apps.<key>.controlPlane.prefix` | The other app's `consoleCommands.prefix`. |
+| `apps.<key>.actions` | `false` to only browse that app here. Default `true`. |
+| `apps.<key>.timeoutMs` | How long an action waits for the app to answer. Default `15000`. |
+| `appLabel` | The name of this console's own app in the picker. Default `This app`. |
+
+The console app needs `@adonisjs/lucid` and `@adonisjs/redis`. A malformed entry fails the boot.
+
+### Who sees and does what
+
+`authorize` decides it, with two fields:
+
+- `apps`: the other apps this person may pick (`'*'` or a list). An app outside it is not offered,
+  and `?app=` naming it answers `403`. Omitted, every app is offered, except with
+  [organizations](/docs/payments/organizations) on and a person confined to some of them: another
+  app is then offered only when `apps` names it.
+- `capabilities`: the actions this person may send to another app. Without them, every action on
+  another app answers `403`. `payments:*` grants them all.
+
+| Action | Capability |
+| --- | --- |
+| Refund a payment | `payments:refund` |
+| Cancel a subscription | `payments:subscriptions:cancel` |
+| Resume a subscription | `payments:subscriptions:resume` |
+| Re-price a subscription | `payments:subscriptions:reprice` |
+| Retry a failed webhook event | `payments:webhooks:retry` |
+| Record how a dispute ended | `payments:disputes:resolve` |
+
+The owning app must allow the same action too (below): both sides have to say yes.
+
+The subscription actions are the console's `POST <path>/api/subscriptions/:id/cancel`, `/resume`
+and `/reprice` routes (`{ atPeriodEnd }`, nothing, `{ amount, cycle? }`), which the console also
+answers for its own subscriptions.
+
+### Organizations
+
+A federated app is shown **whole**: when the owning app has
+[organizations](/docs/payments/organizations) on, the console sees every one of its organizations'
+rows, and its actions run over the app's whole store, like an operator with `tenants: '*'` in the
+app's own console. The boundary is the console's `apps` grant: give an app only to the people who
+may see all of its billing. The console's own Organization picker does not apply to another app,
+and is hidden while one is picked.
+
+## Each owning app
+
+```ts title="config/payments.ts (the owning app)"
+import { defineConfig, payments } from '@adonis-agora/payments'
+import env from '#start/env'
+
+export default defineConfig({
+  default: 'stripe',
+  providers: {
+    stripe: payments.stripe({
+      apiKey: env.get('PAYMENTS_STRIPE_KEY'),
+      webhookSecret: env.get('PAYMENTS_STRIPE_WEBHOOK_SECRET'),
+      currency: 'brl',
+    }),
+  },
+  billing: { schema: 'entretextos' },
+  consoleCommands: {
+    prefix: 'entretextos',
+    connection: 'main',
+    actions: ['refund', 'cancelSubscription', 'resolveDispute'],
+  },
+})
+```
+
+| Option | Description |
+| --- | --- |
+| `consoleCommands: true` | Answer the console on the default Redis connection, with the app's package name as the prefix, and run no action. The console still reads the tables. |
+| `consoleCommands.prefix` | The prefix the console app names in `controlPlane.prefix`. |
+| `consoleCommands.connection` | The `@adonisjs/redis` connection to listen on. |
+| `consoleCommands.actions` | The actions another console may ask for: `refund`, `cancelSubscription`, `resumeSubscription`, `repriceSubscription`, `retryWebhook`, `resolveDispute`. Every one not listed is refused with `403`. Default: none. |
+| `consoleCommands.idempotency` | Where the app keeps what it already ran. Default: its Redis, for 24 hours. `memoryIdempotencyStore()` keeps it in the process (one instance only). |
+
+Every web instance of the app listens, and exactly one of them runs each action, through the same
+code as the app's own console: its gateway driver, its validation, its webhook handlers and its
+audit trail. The audit row names the console's person and the console:
+
+```
+ops@example.com (via Hub)
+```
+
+The app logs one line per action:
+
+```
+[payments] federated console: refund pay_3Nq… by ops@example.com (via Hub)
+```
+
+`consoleCommands` does not apply to a [tenant](/docs/payments/control-plane): a tenant's payments
+are operated on its control plane.
+
+The app keeps charging as before, from its own code:
+
+```ts title="app/controllers/enrollments_controller.ts"
+import type { HttpContext } from '@adonisjs/core/http'
+import { getPayments } from '@adonis-agora/payments/services/main'
+import Enrollment from '#models/enrollment'
+
+export default class EnrollmentsController {
+  async pay({ params, response }: HttpContext) {
+    const enrollment = await Enrollment.findOrFail(params.id)
+    const payment = await getPayments().driver('pix').charge({
+      customerId: enrollment.customerId,
+      amount: enrollment.price, // integer cents
+      externalReference: enrollment.id,
+    })
+    return response.json({ pixCode: payment.pixCode })
+  }
+}
+```
+
+A refund made from the Hub lands in the same tables and the same webhook flow as one made in the
+app's own console:
+
+```ts title="app/services/refund_report.ts"
+import { getBillingStore } from '@adonis-agora/payments/services/main'
+
+export async function refundsMadeFromTheHub() {
+  const rows = await getBillingStore().listAuditEvents({ action: 'payment.refunded' })
+  return rows.filter((row) => row.actor?.endsWith('(via Hub)'))
+}
+```
+
+## Idempotency
+
+Every action sent to another app carries an `Idempotency-Key` header. The console's page sends a
+new one with each action; an API client must send its own (8–200 characters of
+`A-Z a-z 0-9 _ . : -`), or the action answers `400`. A `dryRun` needs none.
+
+The owning app runs a key once:
+
+- the same key again (a retry after a timeout, a second click that reached the server) answers the
+  first run's answer, and nothing runs twice;
+- the same key with other arguments answers `422`;
+- a key whose run has not answered yet, or was interrupted, answers `409` until it expires
+  (24 hours): check the payment before sending the action again with a new key.
+
+On Stripe, the key also reaches the gateway, which deduplicates the refund itself.
+
+## What the console reads, and what it never sees
+
+The console reads the other app's `billing_*` tables with its own connection and never writes
+there. On Postgres, give that connection's role read access to them, and nothing else:
+
+```sql
+GRANT USAGE ON SCHEMA entretextos TO hub_role;
+GRANT SELECT ON
+  entretextos.billing_customers,
+  entretextos.billing_subscriptions,
+  entretextos.billing_payments,
+  entretextos.billing_webhook_events,
+  entretextos.billing_disputes,
+  entretextos.billing_usage_events,
+  entretextos.billing_audit_events
+TO hub_role;
+```
+
+If the apps live in different databases, declare a Lucid connection to the other database in the
+console app's `config/database.ts` and name it in `store.connection`.
+
+For a picked app, the console shows its overview and health, payments and their detail,
+subscriptions and their detail, customers, disputes, the webhook ledger and the audit trail. Before
+anything is shown:
+
+- a customer's document number is partially masked (`***.456.789-**`, `12.345.678/****-**`);
+- a payment method is reduced to its brand and last 4 digits, and a card number in a message to its
+  last 4;
+- raw gateway payloads, headers, signatures, PIX codes and anything named like a key, secret or
+  token are dropped.
+
+The gateways' credentials and webhook secrets stay in the owning app: the console never has them,
+and no command or answer carries them. What a gateway can do (refunds, disputes, subscription
+changes) comes from the app as yes/no answers.
+
+<Callout type="warn">
+  Anything that can publish on that Redis can send commands to the app. Keep the Redis private to
+  your apps. The capability check and the action allow-list run in the owning app too, but a
+  publisher that forges a command can claim any capability.
+</Callout>
+
+## Using the console
+
+With `apps` set, the topbar's **App** picker lists this app first, then the other apps, each tagged
+**federated**. Picking one puts it in the URL (`?app=entre-textos`), so a link or a reload keeps
+it; picking this app removes it. While another app is picked, a note at the top of every page says
+its data comes from its own store and that actions are sent to it, or that it is read-only here,
+and the Organization picker is hidden. The Refund, Retry and Record outcome buttons are disabled for
+a read-only app.
+
+When the app does not answer (it is down, or `consoleCommands` is off), an action fails at once with
+`503` and a message naming the app. Its tables still read.
+
+## The API
+
+Every console API route takes `?app=<key>`. `GET <path>/api/apps` lists what the picker offers:
+
+```json
+{
+  "local": { "id": null, "label": "Hub" },
+  "topology": "control-plane",
+  "tenants": [{ "id": "agora-shop", "label": "agora-shop", "mode": "control-plane", "actions": "here" }],
+  "apps": [
+    { "id": "entre-textos", "label": "Entre Textos", "mode": "federated", "actions": "app" },
+    { "id": "eduliberta", "label": "EduLiberta", "mode": "federated", "actions": "none" }
+  ],
+  "selected": null
+}
+```
+
+`apps` are the federated apps this person may pick. `actions` says who runs actions on that app's
+data: `app` (they are sent to the app) or `none` (browse only). `tenants` are the apps calling this
+app as their [control plane](/docs/payments/control-plane): their payments are this app's own rows,
+shown without `?app=`. `selected` echoes `?app=` when it names one of `apps`.
+
+```sh
+curl -X POST 'https://hub.example.com/payments/api/payments/pay_3Nq/refund?app=entre-textos' \
+  -H 'Idempotency-Key: refund-pay_3Nq-2026-11-19' \
+  -H 'Content-Type: application/json' \
+  -d '{ "amount": 1000 }'
+```

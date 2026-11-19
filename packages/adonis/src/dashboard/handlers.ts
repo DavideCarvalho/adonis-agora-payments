@@ -86,6 +86,11 @@ export interface Deps {
    * as ações, que é o comportamento anterior e melhor que esconder tudo por falta de dado.
    */
   capabilities?: Record<string, ProviderCapabilities>;
+  /**
+   * The idempotency key an action was sent with (a federated console sends one with every action).
+   * The refund hands it to a gateway that deduplicates on it.
+   */
+  idempotencyKey?: string;
 }
 
 /** O que um gateway sabe fazer, como o console precisa saber. */
@@ -1308,6 +1313,7 @@ export async function refundPayment(deps: Deps, req: ApiRequest): Promise<ApiRes
     gatewayId,
     ...(amount !== undefined ? { amount } : {}),
     ...(dryRun ? { dryRun } : {}),
+    ...(deps.idempotencyKey !== undefined ? { idempotencyKey: deps.idempotencyKey } : {}),
   });
   switch (outcome.kind) {
     case 'dry-run':

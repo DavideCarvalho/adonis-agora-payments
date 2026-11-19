@@ -18,6 +18,17 @@ export type ConsoleAuthorizeResult =
        * rows that belong to none. Omitted = the viewer's own active organization.
        */
       tenants?: ConsoleTenants;
+      /**
+       * Federated console (`apps` in config/payments_dashboard.ts): the other apps this viewer may
+       * pick. `'*'` or omitted = every one.
+       */
+      apps?: ConsoleApps;
+      /**
+       * What this viewer may DO on a federated app (`payments:refund`,
+       * `payments:subscriptions:cancel`, `payments:*`…). Omitted = no action on another app: a
+       * federated action needs both this grant and the owning app's `consoleCommands.actions`.
+       */
+      capabilities?: string[];
     }
   | { allowed: false; reason?: 'unauthenticated' | 'forbidden' }
   | { redirectTo: string };
@@ -25,6 +36,9 @@ export type ConsoleAuthorizeResult =
 /** A class form, for an authorizer in its own file (`@inject()` works). */
 /** The organizations (tenants) a console viewer may see: every one (`'*'`), or these ids. */
 export type ConsoleTenants = '*' | string[];
+
+/** The federated apps a console viewer may pick: every one (`'*'`), or these keys. */
+export type ConsoleApps = '*' | string[];
 
 export interface ConsoleAuthorizer {
   authorize(ctx: HttpContext): ConsoleAuthorizeResult | Promise<ConsoleAuthorizeResult>;
@@ -41,7 +55,7 @@ export type ConsoleAuthorize =
 
 /** A {@link ConsoleAuthorizeResult} normalized to the answer the console writes. */
 export type ConsoleAuthorizeDecision =
-  | { allowed: true; tenants?: ConsoleTenants }
+  | { allowed: true; tenants?: ConsoleTenants; apps?: ConsoleApps; capabilities?: string[] }
   | { allowed: false; status: 401; reason: 'unauthenticated' }
   | { allowed: false; status: 403; reason: 'forbidden'; error?: unknown }
   | { allowed: false; status: 302; redirectTo: string };
@@ -73,7 +87,14 @@ export function normalizeConsoleAuthorizeResult(result: unknown): ConsoleAuthori
   const value = result as { allowed?: unknown; reason?: unknown; redirectTo?: unknown };
   if (value.allowed === true) {
     const tenants = consoleTenantsOf(result);
-    return tenants === undefined ? { allowed: true } : { allowed: true, tenants };
+    const apps = consoleAppsOf(result);
+    const capabilities = consoleCapabilitiesOf(result);
+    return {
+      allowed: true,
+      ...(tenants !== undefined ? { tenants } : {}),
+      ...(apps !== undefined ? { apps } : {}),
+      ...(capabilities !== undefined ? { capabilities } : {}),
+    };
   }
   if (value.allowed === undefined && typeof value.redirectTo === 'string' && value.redirectTo) {
     return { allowed: false, status: 302, redirectTo: value.redirectTo };
@@ -92,6 +113,23 @@ function consoleTenantsOf(result: unknown): ConsoleTenants | undefined {
     return tenants.filter((id): id is string => typeof id === 'string' && id !== '');
   }
   return undefined;
+}
+
+/** The `apps` an allowing result carried (`'*'`, or the non-empty string keys), when valid. */
+function consoleAppsOf(result: unknown): ConsoleApps | undefined {
+  const apps = (result as { apps?: unknown }).apps;
+  if (apps === '*') return '*';
+  if (Array.isArray(apps)) {
+    return apps.filter((id): id is string => typeof id === 'string' && id !== '');
+  }
+  return undefined;
+}
+
+/** The `capabilities` an allowing result carried (non-empty strings), when it carried a list. */
+function consoleCapabilitiesOf(result: unknown): string[] | undefined {
+  const capabilities = (result as { capabilities?: unknown }).capabilities;
+  if (!Array.isArray(capabilities)) return undefined;
+  return capabilities.filter((c): c is string => typeof c === 'string' && c !== '');
 }
 
 async function instantiate(
@@ -208,9 +246,12 @@ export function anyAuthorize(
     for (const authorize of resolved) {
       const decision = await authorize(ctx);
       if (decision.allowed) {
-        return decision.tenants === undefined
-          ? { allowed: true }
-          : { allowed: true, tenants: decision.tenants };
+        return {
+          allowed: true,
+          ...(decision.tenants !== undefined ? { tenants: decision.tenants } : {}),
+          ...(decision.apps !== undefined ? { apps: decision.apps } : {}),
+          ...(decision.capabilities !== undefined ? { capabilities: decision.capabilities } : {}),
+        };
       }
       if (decision.status === 302) {
         redirectTo ??= decision.redirectTo;

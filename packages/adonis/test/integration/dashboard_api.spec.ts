@@ -687,7 +687,14 @@ describe('payments dashboard API (integration)', () => {
       expect(gets).not.toContain(REFUND);
       expect(gets).not.toContain(RETRY);
       const posts = routes.filter((r) => r.method === 'post').map((r) => r.pattern);
-      expect(posts).toEqual([REFUND, RETRY, '/payments/api/disputes/:gatewayId/resolve']);
+      expect(posts).toEqual([
+        REFUND,
+        RETRY,
+        '/payments/api/disputes/:gatewayId/resolve',
+        '/payments/api/subscriptions/:id/cancel',
+        '/payments/api/subscriptions/:id/resume',
+        '/payments/api/subscriptions/:id/reprice',
+      ]);
     });
 
     it('refuses an unauthorized refund before it can read a single row', async () => {

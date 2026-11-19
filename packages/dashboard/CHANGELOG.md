@@ -1,5 +1,11 @@
 # @adonis-agora/payments-dashboard
 
+## 1.0.0-rc.16
+
+### Patch Changes
+
+- [#272](https://github.com/DavideCarvalho/adonis-agora-payments/pull/272) [`65dfff0`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/65dfff022c9a2fc69d1d062d3e3164b769041867) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - The Organization picker is now the kit's shared header picker, the same as telescope's: the noun on the left, a searchable list, and a chip when there is one organization or none. Going to another console keeps `?app=` / `?tenant=`, through the switcher, ⌘K or search. Back/forward to an entry with another `?tenant=` now updates the picker and reads the data again for it.
+
 ## 1.0.0-rc.15
 
 ### Patch Changes

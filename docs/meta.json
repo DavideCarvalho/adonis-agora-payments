@@ -28,8 +28,7 @@
     "doctor",
     "---Reference---",
     "api-reference",
-    "migrating-to-1.0",
-    "roadmap"
+    "migrating-to-1.0"
   ],
   "root": true,
   "description": "Multi-gateway payments and Cashier-style billing for AdonisJS — 18 gateways behind one driver contract, with invoice emission and method-based routing.",

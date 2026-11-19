@@ -418,7 +418,7 @@ export class AbacateWithCardDriver extends AbacateDriver {
 
   override async charge(input: ChargeInput): Promise<Payment> {
     if (input.method === 'credit_card' || input.card) {
-      // Implementa o fluxo de cartão que a lib ainda não cobre nativamente.
+      // Implement the card flow the lib doesn't cover natively yet.
       return this.chargeWithCard(input)
     }
     return super.charge(input)

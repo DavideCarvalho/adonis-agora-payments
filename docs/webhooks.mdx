@@ -375,19 +375,23 @@ blocks retries and times out. And money work must survive crashes. So the handle
 job is to **dispatch a durable workflow**: durable owns retry + exactly-once, and the
 webhook responds in milliseconds.
 
-With durable's event triggers the workflow subscribes itself — no handler file at all:
+A diagnostics listener can start the workflow straight from the `payment.succeeded` event —
+no payment handler file at all:
 
-```ts title="app/workflows/process_payment_workflow.ts"
-@OnDiagnostic({ lib: 'payments', event: 'payment.succeeded' })
-export class ProcessPaymentWorkflow extends BaseWorkflow {
-  static workflow = { name: 'process-payment' }
-  async run(ctx, input) {
-    // input is the payment.succeeded payload — durable owns retry + exactly-once
+```ts title="app/listeners/diagnostics/process_payment.ts"
+import { OnDiagnostic, type DiagnosticEventOf } from '@adonis-agora/diagnostics'
+import ProcessPaymentWorkflow from '#workflows/process_payment_workflow'
+
+export default class ProcessPayment {
+  @OnDiagnostic('payments', 'payment.succeeded')
+  async handle(event: DiagnosticEventOf<'payments', 'payment.succeeded'>) {
+    // the run input is the payment.succeeded payload; the event id keeps one run per event
+    await ProcessPaymentWorkflow.dispatch(event.payload, { runId: `evt:${event.id}` })
   }
 }
 ```
 
-Without that release, a plain handler dispatches via `engine.start` (fire-and-forget):
+Or a plain payment handler dispatches via `engine.start` (fire-and-forget):
 
 ```ts title="app/payment_handlers/payment_succeeded.ts"
 @inject()

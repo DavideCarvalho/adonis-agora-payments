@@ -1,5 +1,11 @@
 # @adonis-agora/payments-dashboard
 
+## 1.0.0-rc.17
+
+### Patch Changes
+
+- [#273](https://github.com/DavideCarvalho/adonis-agora-payments/pull/273) [`c402d11`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/c402d110d5c26ff67338675a0b3d56594c3bd718) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Scope picker: the button is named "App: Hub" / "Organization: Globex" for screen readers, search also matches the hint, the highlight stays on a real option when the list shrinks, and focus returns to the button after a pick.
+
 ## 1.0.0-rc.16
 
 ### Patch Changes

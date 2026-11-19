@@ -134,7 +134,7 @@ describe('organization picker', () => {
 
     const button = screen.getByRole('button', { name: /^Organization/ });
     expect(button.getAttribute('aria-haspopup')).toBe('listbox');
-    expect(button.textContent).toBe('OrganizationAll organizations');
+    expect(button.getAttribute('aria-label')).toBe('Organization: All organizations');
     fireEvent.click(button);
     const options = screen.getAllByRole('option');
     expect(options.map((o) => o.textContent)).toEqual(['All organizations', 'Acmea', 'Globexb']);
@@ -144,8 +144,8 @@ describe('organization picker', () => {
       expect(calls.some((c) => c.includes('/payments?') && c.includes('tenant=b'))).toBe(true),
     );
     expect(calls.some((c) => c.includes('/tenants/b/select'))).toBe(true);
-    expect(screen.getByRole('button', { name: /^Organization/ }).textContent).toBe(
-      'OrganizationGlobex',
+    expect(screen.getByRole('button', { name: /^Organization/ }).getAttribute('aria-label')).toBe(
+      'Organization: Globex',
     );
   });
 
@@ -156,7 +156,7 @@ describe('organization picker', () => {
     const button = await screen.findByRole('button', { name: /^Organization/ });
     fireEvent.click(button);
     fireEvent.mouseDown(screen.getByRole('option', { name: /Globex/ }));
-    await waitFor(() => expect(button.textContent).toBe('OrganizationGlobex'));
+    await waitFor(() => expect(button.getAttribute('aria-label')).toBe('Organization: Globex'));
     await waitFor(() =>
       expect(calls.some((c) => c.includes('/payments?') && c.includes('tenant=b'))).toBe(true),
     );
@@ -167,7 +167,9 @@ describe('organization picker', () => {
       window.history.replaceState(null, '', '/#/payments');
       window.dispatchEvent(new PopStateEvent('popstate'));
     });
-    await waitFor(() => expect(button.textContent).toBe('OrganizationAll organizations'));
+    await waitFor(() =>
+      expect(button.getAttribute('aria-label')).toBe('Organization: All organizations'),
+    );
     await waitFor(() =>
       expect(calls.some((c) => c.includes('/payments') && !c.includes('tenant='))).toBe(true),
     );

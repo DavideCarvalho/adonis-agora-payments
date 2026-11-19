@@ -1,10 +1,7 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
-import { ChevronDownIcon } from '../agora-kit/icons';
-import { Popover, PopoverContent, PopoverTrigger } from '../agora-kit/ui/popover';
+import { useQuery } from '@tanstack/react-query';
+import { useSyncExternalStore } from 'react';
+import { ScopeChip, ScopeMenu } from '../agora-kit/blocks/scope-menu';
 import { paymentsClient, selectedTenant, type TenantPicker } from '../client/payments-client';
-import { BuildingIcon } from './icons';
-import { CONTROL_CLASS } from './ui/field';
 
 /** Put the picked organization in the page URL (`?tenant=`, absent = all), keeping the hash. */
 function writeTenantToUrl(tenant: string | undefined): void {
@@ -12,6 +9,23 @@ function writeTenantToUrl(tenant: string | undefined): void {
   if (tenant === undefined) url.searchParams.delete('tenant');
   else url.searchParams.set('tenant', tenant);
   window.history.pushState(null, '', url.toString());
+  // A pushState fires nothing: say the URL moved (usePageTenant follows it).
+  window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+}
+
+/**
+ * `?tenant=` as the page URL has it now, following a pick and back/forward (`popstate`), so the
+ * picker and the data it scopes never disagree.
+ */
+export function usePageTenant(): string | undefined {
+  return useSyncExternalStore(
+    (onChange) => {
+      window.addEventListener('popstate', onChange);
+      return () => window.removeEventListener('popstate', onChange);
+    },
+    selectedTenant,
+    () => undefined,
+  );
 }
 
 /** The label of an organization id (or "All organizations"). */
@@ -31,114 +45,43 @@ export function useTenantPicker(): TenantPicker | undefined {
   return data;
 }
 
-const CHIP =
-  'flex h-[30px] items-center gap-1.5 rounded-md border border-border bg-panel-2 px-2.5 text-[11.5px] text-fg-2 [&_svg]:size-3.5 [&_svg]:text-faint';
+const TEXT = {
+  noun: 'Organization',
+  all: 'All organizations',
+  some: 'Every organization you can see',
+  search: 'Search organizations',
+  empty: 'No organizations.',
+};
 
 /**
- * The topbar's "Organization" control (tenancy on): a fixed chip for one organization, a searchable
- * list for several ("All organizations" first when the viewer may see every one). Nothing when
- * tenancy is off.
+ * The topbar's "Organization" control (tenancy on), the kit's header picker as in every console:
+ * a fixed chip for one organization (or none), a searchable list for several ("All
+ * organizations" first when the viewer may see every one). Nothing when tenancy is off. A pick
+ * goes to the page URL (`?tenant=`, a history entry); the console re-reads whenever it moves.
  */
-export function OrgPicker({ onChange }: { onChange?: () => void }) {
+export function OrgPicker() {
   const picker = useTenantPicker();
-  const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState('');
-  const [current, setCurrent] = useState(selectedTenant());
+  const current = usePageTenant();
 
   if (!picker || picker.mode === 'off') return null;
 
-  if (picker.mode === 'none') {
-    return (
-      <span className={CHIP} data-org-picker="none">
-        <BuildingIcon />
-        <span className="hidden text-faint sm:inline">Organization</span> none
-      </span>
-    );
+  if (picker.mode === 'none' || picker.mode === 'fixed') {
+    const only = picker.mode === 'fixed' ? picker.tenants[0] : undefined;
+    return <ScopeChip noun={TEXT.noun} label={only ? only.label : 'none'} kind="tenant" />;
   }
-  if (picker.mode === 'fixed') {
-    return (
-      <span className={CHIP} data-org-picker="fixed">
-        <BuildingIcon />
-        <span className="hidden text-faint sm:inline">Organization</span>
-        <span className="max-w-40 truncate">
-          {picker.tenants[0]?.label ?? picker.tenants[0]?.id}
-        </span>
-      </span>
-    );
-  }
-
-  const choose = async (tenant: string | undefined) => {
-    setOpen(false);
-    setSearch('');
-    await paymentsClient.selectTenant(tenant ?? '*').catch(() => undefined);
-    writeTenantToUrl(tenant);
-    setCurrent(tenant);
-    onChange?.();
-    await queryClient.invalidateQueries({ predicate: (q) => q.queryKey[0] !== 'tenants' });
-  };
-  const needle = search.trim().toLowerCase();
-  const shown = picker.tenants.filter(
-    (t) =>
-      needle === '' ||
-      t.label.toLowerCase().includes(needle) ||
-      t.id.toLowerCase().includes(needle),
-  );
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger
-        className={`${CHIP} transition-colors hover:border-line-strong hover:text-fg`}
-        aria-label="Organization"
-        data-org-picker="pick"
-      >
-        <BuildingIcon />
-        <span className="max-w-40 truncate">{tenantLabel(picker, current)}</span>
-        <ChevronDownIcon />
-      </PopoverTrigger>
-      <PopoverContent align="end" className="w-64 max-w-[calc(100vw-2rem)] gap-1 p-1">
-        <input
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search organizations…"
-          aria-label="search organizations"
-          className={`mb-1 h-7 w-full ${CONTROL_CLASS}`}
-        />
-        <div role="listbox" aria-label="Organizations" className="max-h-72 overflow-y-auto">
-          {picker.all && (
-            <button
-              type="button"
-              role="option"
-              aria-selected={current === undefined}
-              onClick={() => void choose(undefined)}
-              className={OPTION}
-            >
-              All organizations
-            </button>
-          )}
-          {shown.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              role="option"
-              aria-selected={current === t.id}
-              onClick={() => void choose(t.id)}
-              className={`flex flex-col ${OPTION}`}
-            >
-              <span className="truncate">{t.label}</span>
-              {t.label !== t.id && (
-                <span className="mono truncate text-[10px] text-faint">{t.id}</span>
-              )}
-            </button>
-          ))}
-          {shown.length === 0 && (
-            <p className="px-2 py-1.5 text-xs text-dim">No organization matches.</p>
-          )}
-        </div>
-      </PopoverContent>
-    </Popover>
+    <ScopeMenu
+      items={picker.tenants}
+      all={picker.all}
+      current={current}
+      text={TEXT}
+      labelOf={(id) => tenantLabel(picker, id)}
+      onChoose={(tenant) => {
+        // Recorded server-side (audit); the URL is what every request reads.
+        void paymentsClient.selectTenant(tenant ?? '*').catch(() => undefined);
+        writeTenantToUrl(tenant);
+      }}
+    />
   );
 }
-
-const OPTION =
-  'w-full rounded-md px-2 py-1.5 text-left text-xs text-fg hover:bg-hover aria-selected:bg-brand-soft';

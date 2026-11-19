@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TenantPicker } from '../client/payments-client';
 import { clearConfig, injectConfig } from '../client/test-config.test-helper';
@@ -94,7 +94,8 @@ describe('organization picker', () => {
     stubApi(null);
     renderApp();
     await waitFor(() => expect(calls.some((c) => c.endsWith('/tenants'))).toBe(true));
-    expect(document.querySelector('[data-org-picker]')).toBeNull();
+    expect(document.querySelector('[data-tenant-chip]')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Organization/ })).toBeNull();
     expect(screen.getByRole('link', { name: 'Webhook events' })).toBeTruthy();
   });
 
@@ -102,17 +103,18 @@ describe('organization picker', () => {
     stubApi({ ...PICK, mode: 'none', all: false, tenants: [] });
     renderApp();
     expect(await screen.findByText('Choose an organization to see its data.')).toBeTruthy();
+    expect(document.querySelector('[data-tenant-chip]')?.textContent).toBe('Organizationnone');
   });
 
   it('one organization is a fixed chip, and the views over every one are hidden', async () => {
     stubApi({ ...PICK, mode: 'fixed', all: false, tenants: [{ id: 'a', label: 'Acme' }] });
     renderApp();
     const chip = await waitFor(() => {
-      const element = document.querySelector('[data-org-picker="fixed"]');
+      const element = document.querySelector('[data-tenant-chip]');
       expect(element).not.toBeNull();
       return element as HTMLElement;
     });
-    expect(chip.textContent).toContain('Acme');
+    expect(chip.textContent).toBe('OrganizationAcme');
     await waitFor(() => expect(screen.queryByRole('link', { name: 'Webhook events' })).toBeNull());
     expect(screen.queryByRole('link', { name: 'Activity' })).toBeNull();
     expect(screen.getByRole('link', { name: 'Payments' })).toBeTruthy();
@@ -130,14 +132,44 @@ describe('organization picker', () => {
     });
     expect(cell.textContent).toBe('Acme');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Organization' }));
+    const button = screen.getByRole('button', { name: /^Organization/ });
+    expect(button.getAttribute('aria-haspopup')).toBe('listbox');
+    expect(button.textContent).toBe('OrganizationAll organizations');
+    fireEvent.click(button);
     const options = screen.getAllByRole('option');
     expect(options.map((o) => o.textContent)).toEqual(['All organizations', 'Acmea', 'Globexb']);
-    fireEvent.click(options[2] as HTMLElement);
+    fireEvent.mouseDown(options[2] as HTMLElement);
     await waitFor(() => expect(window.location.search).toBe('?tenant=b'));
     await waitFor(() =>
       expect(calls.some((c) => c.includes('/payments?') && c.includes('tenant=b'))).toBe(true),
     );
     expect(calls.some((c) => c.includes('/tenants/b/select'))).toBe(true);
+    expect(screen.getByRole('button', { name: /^Organization/ }).textContent).toBe(
+      'OrganizationGlobex',
+    );
+  });
+
+  it('back/forward to another ?tenant= moves the picker and reads the data again', async () => {
+    stubApi(PICK);
+    window.location.hash = '#/payments';
+    renderApp();
+    const button = await screen.findByRole('button', { name: /^Organization/ });
+    fireEvent.click(button);
+    fireEvent.mouseDown(screen.getByRole('option', { name: /Globex/ }));
+    await waitFor(() => expect(button.textContent).toBe('OrganizationGlobex'));
+    await waitFor(() =>
+      expect(calls.some((c) => c.includes('/payments?') && c.includes('tenant=b'))).toBe(true),
+    );
+
+    // "Back" to the entry before the pick (no ?tenant=).
+    calls = [];
+    act(() => {
+      window.history.replaceState(null, '', '/#/payments');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await waitFor(() => expect(button.textContent).toBe('OrganizationAll organizations'));
+    await waitFor(() =>
+      expect(calls.some((c) => c.includes('/payments') && !c.includes('tenant='))).toBe(true),
+    );
   });
 });

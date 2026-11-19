@@ -1,4 +1,5 @@
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EmptyState } from '../agora-kit/blocks/empty-state';
 import { ErrorBoundary } from '../agora-kit/blocks/error-boundary';
 import { UsersIcon } from '../agora-kit/icons';
@@ -20,7 +21,7 @@ import {
   RepeatIcon,
   ShieldIcon,
 } from './icons';
-import { OrgPicker, useTenantPicker } from './OrgPicker';
+import { OrgPicker, usePageTenant, useTenantPicker } from './OrgPicker';
 import { Overview } from './Overview';
 import { PaymentsList } from './PaymentsList';
 import {
@@ -139,8 +140,16 @@ function Console() {
   const [route, navigate] = useHashRoute();
   const key = screenKey(route);
   const picker = useTenantPicker();
-  // Re-read on a switch of organization (the pick lives in the page URL, not in state).
-  const [, setPickVersion] = useState(0);
+  // Re-read when the URL's organization moves: a pick, or back/forward to an entry with another
+  // `?tenant=` (the pick lives in the page URL, not in state; query keys do not carry it).
+  const queryClient = useQueryClient();
+  const tenant = usePageTenant();
+  const seenTenant = useRef(tenant);
+  useEffect(() => {
+    if (seenTenant.current === tenant) return;
+    seenTenant.current = tenant;
+    void queryClient.invalidateQueries({ predicate: (q) => q.queryKey[0] !== 'tenants' });
+  }, [tenant, queryClient]);
   const scoped = isScopedView(picker);
   const noOrganization = picker?.mode === 'none';
 
@@ -214,7 +223,7 @@ function Console() {
       shell={shell}
       title={TITLES[route.screen]}
       searchPlaceholder="Search payments, subscriptions, customers…"
-      actions={<OrgPicker onChange={() => setPickVersion((version) => version + 1)} />}
+      actions={<OrgPicker />}
     >
       <ErrorBoundary label={TITLES[route.screen]} resetKeys={[key]}>
         {noOrganization ? (

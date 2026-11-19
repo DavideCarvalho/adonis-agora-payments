@@ -880,6 +880,15 @@ export const paymentsClient = {
    * dispute that was lost sits `open` forever and the health check stays red until nobody
    * reads it. `status` must be a finished one (`lost` | `won` | `expired` | `canceled`).
    */
+  cancelSubscription(id: string, input: { atPeriodEnd?: boolean } = {}): Promise<unknown> {
+    return post<unknown>(`/subscriptions/${encodeURIComponent(id)}/cancel`, input);
+  },
+  resumeSubscription(id: string): Promise<unknown> {
+    return post<unknown>(`/subscriptions/${encodeURIComponent(id)}/resume`);
+  },
+  repriceSubscription(id: string, input: { amount: number; cycle?: string }): Promise<unknown> {
+    return post<unknown>(`/subscriptions/${encodeURIComponent(id)}/reprice`, input);
+  },
   resolveDispute(
     gatewayId: string,
     input: { status: string; outcome?: string; note?: string },

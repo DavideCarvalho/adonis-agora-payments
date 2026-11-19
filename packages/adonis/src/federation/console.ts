@@ -75,7 +75,6 @@ export const FEDERATED_ACTIONS = {
   },
   retryWebhook: { route: 'retry', capability: 'payments:webhooks:retry' },
   resolveDispute: { route: 'resolve', capability: 'payments:disputes:resolve' },
-  submitEvidence: { route: 'evidence', capability: 'payments:disputes:evidence' },
 } as const satisfies Record<string, { route: keyof typeof CONSOLE_ROUTES; capability: string }>;
 
 /** An action a federated console may send (a key of {@link FEDERATED_ACTIONS}). */
@@ -380,7 +379,9 @@ export function paymentsConsoleCommandHandler(options: {
       // Whether the gateway was reached is unknown: the key keeps this answer, it is not re-run.
       reply = {
         status: 500,
-        body: { error: error instanceof Error ? error.message : 'the action failed' },
+        body: federatedSafe({
+          error: error instanceof Error ? error.message : 'the action failed',
+        }),
       };
     }
     await options.idempotency.finish(key, fingerprint, reply);

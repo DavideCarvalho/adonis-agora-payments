@@ -147,7 +147,11 @@ describe('federated console routes', () => {
       authorize: (ctx) => {
         const user = (ctx as unknown as { auth?: { user?: { role?: string } } }).auth?.user;
         if (user?.role === 'admin') {
-          return { allowed: true, apps: '*', capabilities: ['payments:refund'] };
+          return {
+            allowed: true,
+            apps: '*',
+            capabilities: ['payments:refund', 'payments:subscriptions:cancel'],
+          };
         }
         if (user?.role === 'viewer') return { allowed: true, apps: ['et'] };
         return { allowed: true, apps: [] };
@@ -252,6 +256,17 @@ describe('federated console routes', () => {
     expect(refunds).toEqual(['pay_1']);
     const [audit] = await etStore.listAuditEvents({ action: 'payment.refunded' });
     expect(audit?.actor).toBe('ops@hub.example (via Hub)');
+  });
+
+  it('a subscription cancel reaches the owning app, which refuses what it did not allow-list', async () => {
+    const answer = await call('post', '/payments/api/subscriptions/:id/cancel', {
+      user: { role: 'admin' },
+      qs: { app: 'et' },
+      params: { id: 'sub_1' },
+      headers: { 'idempotency-key': 'console-key-0004' },
+    });
+    expect(answer.status).toBe(403);
+    expect((answer.body as { error: string }).error).toMatch(/consoleCommands\.actions/);
   });
 
   it('a browse-only app refuses actions', async () => {

@@ -91,9 +91,21 @@ The console app needs `@adonisjs/lucid` and `@adonisjs/redis`. A malformed entry
 | Re-price a subscription | `payments:subscriptions:reprice` |
 | Retry a failed webhook event | `payments:webhooks:retry` |
 | Record how a dispute ended | `payments:disputes:resolve` |
-| Submit dispute evidence | `payments:disputes:evidence` |
 
 The owning app must allow the same action too (below): both sides have to say yes.
+
+The subscription actions are the console's `POST <path>/api/subscriptions/:id/cancel`, `/resume`
+and `/reprice` routes (`{ atPeriodEnd }`, nothing, `{ amount, cycle? }`), which the console also
+answers for its own subscriptions.
+
+### Organizations
+
+A federated app is shown **whole**: when the owning app has
+[organizations](/docs/payments/organizations) on, the console sees every one of its organizations'
+rows, and its actions run over the app's whole store, like an operator with `tenants: '*'` in the
+app's own console. The boundary is the console's `apps` grant: give an app only to the people who
+may see all of its billing. The console's own Organization picker does not apply to another app,
+and is hidden while one is picked.
 
 ## Each owning app
 
@@ -124,7 +136,7 @@ export default defineConfig({
 | `consoleCommands: true` | Answer the console on the default Redis connection, with the app's package name as the prefix, and run no action. The console still reads the tables. |
 | `consoleCommands.prefix` | The prefix the console app names in `controlPlane.prefix`. |
 | `consoleCommands.connection` | The `@adonisjs/redis` connection to listen on. |
-| `consoleCommands.actions` | The actions another console may ask for: `refund`, `cancelSubscription`, `resumeSubscription`, `repriceSubscription`, `retryWebhook`, `resolveDispute`, `submitEvidence`. Every one not listed is refused with `403`. Default: none. |
+| `consoleCommands.actions` | The actions another console may ask for: `refund`, `cancelSubscription`, `resumeSubscription`, `repriceSubscription`, `retryWebhook`, `resolveDispute`. Every one not listed is refused with `403`. Default: none. |
 | `consoleCommands.idempotency` | Where the app keeps what it already ran. Default: its Redis, for 24 hours. `memoryIdempotencyStore()` keeps it in the process (one instance only). |
 
 Every web instance of the app listens, and exactly one of them runs each action, through the same

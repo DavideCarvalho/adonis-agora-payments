@@ -52,6 +52,7 @@ import {
   type ApiRequest,
   type ApiResponse,
   auditEvents,
+  cancelSubscription,
   customers,
   type DashboardActions,
   type Deps,
@@ -62,7 +63,9 @@ import {
   payments,
   providers,
   refundPayment,
+  repriceSubscription,
   resolveDispute,
+  resumeSubscription,
   retryWebhookEvent,
   subscriptionDetail,
   subscriptions,
@@ -281,6 +284,17 @@ export default class PaymentsDashboardProvider {
     router
       .post(`${apiBase}/disputes/:gatewayId/resolve`, json(resolveDispute))
       .as('payments_dashboard.disputes.resolve');
+    // The subscription operations, through `manager.subscriptions()` (the gateway's, or the managed
+    // recurrence's). `POST` for the same reason as the refund.
+    router
+      .post(`${apiBase}/subscriptions/:id/cancel`, json(cancelSubscription, true, true))
+      .as('payments_dashboard.subscriptions.cancel');
+    router
+      .post(`${apiBase}/subscriptions/:id/resume`, json(resumeSubscription, true))
+      .as('payments_dashboard.subscriptions.resume');
+    router
+      .post(`${apiBase}/subscriptions/:id/reprice`, json(repriceSubscription, true, true))
+      .as('payments_dashboard.subscriptions.reprice');
 
     // The App picker: this app and the federated apps of `apps` this viewer may see.
     router

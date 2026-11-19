@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.26
+
+### Patch Changes
+
+- [#274](https://github.com/DavideCarvalho/adonis-agora-payments/pull/274) [`6ef4ece`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/6ef4ece643813ddd47994e3b00337e08f8ad2661) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Ship the console with the shared App/Organization picker: the dashboard is bundled into this package at build time, and the picker changesets only bumped the dashboard package, so this release carries it to apps.
+
 ## 1.0.0-rc.25
 
 ### Patch Changes

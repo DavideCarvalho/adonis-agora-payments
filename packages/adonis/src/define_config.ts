@@ -15,6 +15,7 @@ import type { PolarDriverConfig } from './drivers/polar.js';
 import type { RazorpayDriverConfig } from './drivers/razorpay.js';
 import type { SquareDriverConfig } from './drivers/square.js';
 import type { InvoiceProvider } from './invoice/invoice_provider.js';
+import { describeStackUse } from './stack.js';
 import type { SubscriptionsConfig } from './subscription_mode.js';
 import type {
   PaymentsControlPlaneOptions,
@@ -616,7 +617,23 @@ export interface PaymentsConfig {
  * Identity helper giving `config/payments.ts` full type-checking (media/durable pattern).
  */
 export function defineConfig<const T extends PaymentsConfig>(config: T): T {
+  // Telescope's Architecture page: the billing tables live on `billing.connection`. Without one
+  // they sit on the app's default connection, which telescope already shows as the app's.
+  const billing = config.billing;
+  if (billing && typeof billing === 'object' && typeof billing.connection === 'string') {
+    describeStackUse(billing, { tech: 'sql', connection: billing.connection, purpose: 'billing' });
+  }
   return config;
+}
+
+/** A gateway factory, described for telescope (`stripe`, `asaas`…: the API it calls). */
+function gateway(tech: string, factory: PaymentsDriverFactory): PaymentsDriverFactory {
+  return describeStackUse(factory, { tech, purpose: 'gateway' });
+}
+
+/** An invoice provider factory, described for telescope. */
+function invoicing(tech: string, factory: InvoiceProviderFactory): InvoiceProviderFactory {
+  return describeStackUse(factory, { tech, purpose: 'invoices' });
 }
 
 /** Built-in driver factories. Each lazily imports its gateway SDK. */
@@ -646,112 +663,112 @@ export const payments = {
     return condition ? build() : undefined;
   },
   stripe(config: StripeDriverConfig): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('stripe', async (ctx) => {
       const { StripeDriver } = await import('./drivers/stripe.js');
       return new StripeDriver(ctx, config);
-    };
+    });
   },
   abacate(config: AbacateDriverConfig = {}): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('abacatepay', async (ctx) => {
       const { AbacateDriver } = await import('./drivers/abacate.js');
       return new AbacateDriver(ctx, config);
-    };
+    });
   },
   asaas(config: AsaasDriverConfig = {}): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('asaas', async (ctx) => {
       const { AsaasDriver } = await import('./drivers/asaas.js');
       return new AsaasDriver(ctx, config);
-    };
+    });
   },
   woovi(config: WooviDriverConfig = {}): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('woovi', async (ctx) => {
       const { WooviDriver } = await import('./drivers/woovi.js');
       return new WooviDriver(ctx, config);
-    };
+    });
   },
   pagarme(config: PagarmeDriverConfig = {}): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('pagarme', async (ctx) => {
       const { PagarmeDriver } = await import('./drivers/pagarme.js');
       return new PagarmeDriver(ctx, config);
-    };
+    });
   },
   infinitepay(config: InfinitePayDriverConfig = {}): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('infinitepay', async (ctx) => {
       const { InfinitePayDriver } = await import('./drivers/infinitepay.js');
       return new InfinitePayDriver(ctx, config);
-    };
+    });
   },
   pagbank(config: PagBankDriverConfig = {}): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('pagbank', async (ctx) => {
       const { PagBankDriver } = await import('./drivers/pagbank.js');
       return new PagBankDriver(ctx, config);
-    };
+    });
   },
   efi(config: EfiDriverConfig = {}): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('efi', async (ctx) => {
       const { EfiDriver } = await import('./drivers/efi.js');
       return new EfiDriver(ctx, config);
-    };
+    });
   },
   adyen(config: AdyenDriverConfig): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('adyen', async (ctx) => {
       const { AdyenDriver } = await import('./drivers/adyen.js');
       return new AdyenDriver(ctx, config);
-    };
+    });
   },
   dodo(config: DodoDriverConfig): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('dodo', async (ctx) => {
       const { DodoDriver } = await import('./drivers/dodo.js');
       return new DodoDriver(ctx, config);
-    };
+    });
   },
   lemonsqueezy(config: LemonSqueezyDriverConfig): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('lemonsqueezy', async (ctx) => {
       const { LemonSqueezyDriver } = await import('./drivers/lemonsqueezy.js');
       return new LemonSqueezyDriver(ctx, config);
-    };
+    });
   },
   mercadopago(config: MercadoPagoDriverConfig): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('mercadopago', async (ctx) => {
       const { MercadoPagoDriver } = await import('./drivers/mercadopago.js');
       return new MercadoPagoDriver(ctx, config);
-    };
+    });
   },
   mollie(config: MollieDriverConfig): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('mollie', async (ctx) => {
       const { MollieDriver } = await import('./drivers/mollie.js');
       return new MollieDriver(ctx, config);
-    };
+    });
   },
   paddle(config: PaddleDriverConfig): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('paddle', async (ctx) => {
       const { PaddleDriver } = await import('./drivers/paddle.js');
       return new PaddleDriver(ctx, config);
-    };
+    });
   },
   paypal(config: PayPalDriverConfig): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('paypal', async (ctx) => {
       const { PayPalDriver } = await import('./drivers/paypal.js');
       return new PayPalDriver(ctx, config);
-    };
+    });
   },
   polar(config: PolarDriverConfig): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('polar', async (ctx) => {
       const { PolarDriver } = await import('./drivers/polar.js');
       return new PolarDriver(ctx, config);
-    };
+    });
   },
   razorpay(config: RazorpayDriverConfig): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('razorpay', async (ctx) => {
       const { RazorpayDriver } = await import('./drivers/razorpay.js');
       return new RazorpayDriver(ctx, config);
-    };
+    });
   },
   square(config: SquareDriverConfig): PaymentsDriverFactory {
-    return async (ctx) => {
+    return gateway('square', async (ctx) => {
       const { SquareDriver } = await import('./drivers/square.js');
       return new SquareDriver(ctx, config);
-    };
+    });
   },
 };
 
@@ -787,7 +804,7 @@ export const billingStores = {
   lucid(
     config: { models?: BillingModels; connection?: string; schema?: string } = {},
   ): BillingStoreFactory {
-    return async (ctx) => {
+    const factory: BillingStoreFactory = async (ctx) => {
       const { LucidBillingStore } = await import('./billing/lucid_billing_store.js');
       const billing = ctx?.config?.().billing;
       const connection = config.connection ?? billing?.connection;
@@ -797,40 +814,49 @@ export const billingStores = {
         ...(schema !== undefined ? { schema } : {}),
       });
     };
+    // The connection is only known here when passed; otherwise `billing.connection` (described
+    // by `defineConfig`) or the app's default connection.
+    return config.connection !== undefined
+      ? describeStackUse(factory, {
+          tech: 'sql',
+          connection: config.connection,
+          purpose: 'billing',
+        })
+      : factory;
   },
 };
 
 /** Built-in invoice provider factories. Each lazily imports its provider module. */
 export const invoice = {
   focus(config: FocusInvoiceConfig = {}): InvoiceProviderFactory {
-    return async (ctx) => {
+    return invoicing('focusnfe', async (ctx) => {
       const { FocusInvoiceProvider } = await import('./invoice/drivers/focus.js');
       return new FocusInvoiceProvider(ctx, config);
-    };
+    });
   },
   enotas(config: ENotasInvoiceConfig = {}): InvoiceProviderFactory {
-    return async (ctx) => {
+    return invoicing('enotas', async (ctx) => {
       const { ENotasInvoiceProvider } = await import('./invoice/drivers/enotas.js');
       return new ENotasInvoiceProvider(ctx, config);
-    };
+    });
   },
   plugnotas(config: PlugNotasInvoiceConfig = {}): InvoiceProviderFactory {
-    return async (ctx) => {
+    return invoicing('plugnotas', async (ctx) => {
       const { PlugNotasInvoiceProvider } = await import('./invoice/drivers/plugnotas.js');
       return new PlugNotasInvoiceProvider(ctx, config);
-    };
+    });
   },
   asaas(config: AsaasInvoiceConfig = {}): InvoiceProviderFactory {
-    return async (ctx) => {
+    return invoicing('asaas', async (ctx) => {
       const { AsaasInvoiceProvider } = await import('./invoice/drivers/asaas.js');
       return new AsaasInvoiceProvider(ctx, config);
-    };
+    });
   },
   tecnospeed(config: TecnospeedInvoiceConfig = {}): InvoiceProviderFactory {
-    return async (ctx) => {
+    return invoicing('tecnospeed', async (ctx) => {
       const { TecnospeedInvoiceProvider } = await import('./invoice/drivers/tecnospeed.js');
       return new TecnospeedInvoiceProvider(ctx, config);
-    };
+    });
   },
 };
 

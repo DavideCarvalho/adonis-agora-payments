@@ -210,8 +210,8 @@ function firstQuery(value: unknown): string | undefined {
 }
 
 /** `Date | null` -> ISO string | null, so every timestamp crosses the wire the same way. */
-function iso(value: Date | null): string | null {
-  return value === null ? null : value.toISOString();
+function iso(value: Date | null | undefined): string | null {
+  return value === null || value === undefined ? null : value.toISOString();
 }
 
 /** The newest-first order every listing here has (`?sort=-createdAt`, or no `sort`). */
@@ -345,6 +345,7 @@ function disputeJson(row: DisputeListItem) {
     openedAt: iso(row.openedAt),
     closedAt: iso(row.closedAt),
     createdAt: iso(row.createdAt),
+    updatedAt: iso(row.updatedAt),
   };
 }
 
@@ -447,6 +448,7 @@ function paymentJson(
     owner,
     paidAt: iso(row.paidAt),
     createdAt: iso(row.createdAt),
+    updatedAt: iso(row.updatedAt),
     /**
      * Whether the Refund button is offered for this row. The SPA must not have to re-derive
      * the server's rule, because the two disagreeing means a button that always errors.
@@ -645,6 +647,7 @@ function subscriptionJson(row: SubscriptionListItem) {
     trialEndsAt: iso(row.trialEndsAt),
     endsAt: iso(row.endsAt),
     createdAt: iso(row.createdAt),
+    updatedAt: iso(row.updatedAt),
     // Numa linha GERENCIADA não há `gatewayId` para abrir no painel do gateway, então isto
     // é a única descrição da assinatura que existe. Sem estes campos a tela mostrava um id
     // nulo e nada sobre quanto cobra ou quando.
@@ -846,6 +849,7 @@ function customerJson(row: CustomerListItem) {
     name: row.name,
     taxId: row.taxId,
     createdAt: iso(row.createdAt),
+    updatedAt: iso(row.updatedAt),
   };
 }
 

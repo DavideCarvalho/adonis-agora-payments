@@ -9,6 +9,7 @@ import { errorStatus } from '../agora-kit/blocks/query-boundary';
 import { ChevronLeftIcon, ChevronRightIcon } from '../agora-kit/icons';
 import { Button } from '../agora-kit/ui/button';
 import { type CursorListMeta, isCursorMeta, type ListMeta } from '../client/payments-client';
+import { formatWhen } from './money';
 import type { CursorPaging } from './url-state';
 
 /**
@@ -187,6 +188,31 @@ export function ListError({
 }
 
 /** A mono id or timestamp cell, in the table's dim ink. */
-export function Mono({ children, className }: { children: ReactNode; className?: string }) {
-  return <span className={`mono text-[12px] ${className ?? 'text-dim'}`}>{children}</span>;
+export function Mono({
+  children,
+  className,
+  title,
+}: {
+  children: ReactNode;
+  className?: string;
+  /** Hover text — the full ISO instant behind a formatted date. */
+  title?: string | undefined;
+}) {
+  return (
+    <span className={`mono text-[12px] ${className ?? 'text-dim'}`} title={title}>
+      {children}
+    </span>
+  );
+}
+
+/**
+ * A row's creation or last-write instant, the way every list here shows one: the short local
+ * timestamp, the exact ISO instant on hover, and `—` when the row predates the column.
+ */
+export function Stamp({ iso }: { iso: string | null | undefined }) {
+  return (
+    <Mono className="text-faint" title={iso ?? undefined}>
+      {formatWhen(iso ?? null)}
+    </Mono>
+  );
 }

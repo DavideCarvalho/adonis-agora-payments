@@ -70,6 +70,8 @@ export interface PaymentRow {
   owner: PaymentOwner | null;
   paidAt: string | null;
   createdAt: string | null;
+  /** Last write to the row. `null` when unknown; absent from an instance on an older version. */
+  updatedAt?: string | null;
   /** Whether the server will accept a refund for this row (only a `paid` payment). Taken from the
    *  server rather than re-derived, so the button and the endpoint can never disagree. */
   refundable: boolean;
@@ -87,6 +89,8 @@ export interface CustomerRow {
   name: string | null;
   taxId: string | null;
   createdAt: string | null;
+  /** Last write to the row. `null` when unknown; absent from an instance on an older version. */
+  updatedAt?: string | null;
 }
 
 /** One audit row — who did what, and when. `actor: null` means unattributed, not "the system". */
@@ -118,6 +122,8 @@ export interface SubscriptionRow {
   trialEndsAt: string | null;
   endsAt: string | null;
   createdAt: string | null;
+  /** Last write to the row. `null` when unknown; absent from an instance on an older version. */
+  updatedAt?: string | null;
   /** `true` quando a recorrência é da biblioteca — não há assinatura no gateway. */
   managed: boolean;
   amount: number | null;
@@ -176,6 +182,8 @@ export interface DisputeRow {
   openedAt: string | null;
   closedAt: string | null;
   createdAt: string | null;
+  /** Last write to the row. `null` when unknown; absent from an instance on an older version. */
+  updatedAt?: string | null;
 }
 
 /** One `billingHealth()` check. Every one is a "should be zero" check, so `count > 0` IS the alarm. */

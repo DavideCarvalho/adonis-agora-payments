@@ -283,7 +283,12 @@ function paymentColumns({
       hideBelow: 'lg',
       cell: (row) => (
         <span className="flex flex-col">
-          <Mono className="text-fg-2">{formatWhen(row.paidAt ?? row.createdAt)}</Mono>
+          <Mono
+            className="text-fg-2"
+            title={`Created ${row.createdAt ?? '—'} · Updated ${row.updatedAt ?? '—'}`}
+          >
+            {formatWhen(row.paidAt ?? row.createdAt)}
+          </Mono>
           <span className="text-[10px] text-faint">{row.paidAt !== null ? 'paid' : 'created'}</span>
         </span>
       ),

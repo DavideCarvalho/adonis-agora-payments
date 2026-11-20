@@ -6,9 +6,9 @@ import { PageHeader, Toolbar } from '../agora-kit/blocks/page-header';
 import { PageBody } from '../agora-kit/shell/app-shell';
 import { paymentsClient, type SubscriptionRow } from '../client/payments-client';
 import { RepeatIcon } from './icons';
-import { formatCents, formatCount, formatDay, formatDaysUntil, formatWhen } from './money';
+import { formatCents, formatCount, formatDay, formatDaysUntil } from './money';
 import { SubscriptionDetail } from './SubscriptionDetail';
-import { ListPanel, Mono } from './shell';
+import { ListPanel, Mono, Stamp } from './shell';
 import {
   subscriptionIsBilling,
   subscriptionNeedsAttention,
@@ -267,9 +267,9 @@ function subscriptionColumns(onOpen: (id: string) => void): Column<SubscriptionR
     },
     {
       id: 'started',
-      header: 'Started',
+      header: 'Created',
       hideBelow: 'lg',
-      cell: (row) => <Mono className="text-faint">{formatWhen(row.createdAt)}</Mono>,
+      cell: (row) => <Stamp iso={row.createdAt} />,
     },
   ];
 }

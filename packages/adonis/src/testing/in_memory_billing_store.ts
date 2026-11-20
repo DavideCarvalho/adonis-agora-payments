@@ -54,6 +54,7 @@ function disputeItem(row: InMemoryDisputeRow): DisputeListItem {
     openedAt: row.openedAt,
     closedAt: row.closedAt,
     createdAt: row.createdAt,
+    updatedAt: row.updatedAt ?? null,
   };
 }
 
@@ -100,6 +101,7 @@ function customerItem(row: InMemoryCustomerRow): CustomerListItem {
     name: row.name,
     taxId: row.taxId,
     createdAt: row.createdAt,
+    updatedAt: row.updatedAt ?? null,
   };
 }
 
@@ -116,6 +118,8 @@ export interface InMemoryCustomerRow {
   metadata: Record<string, unknown> | null;
   /** Insertion timestamp — the Lucid rows have one, and the list query orders by it. */
   createdAt: Date;
+  /** Last-write timestamp, set on insert and moved on every write. Optional so hand-built rows compile. */
+  updatedAt?: Date;
 }
 
 /** A minimal in-memory row shape (mirrors the Lucid models' columns). */
@@ -132,6 +136,8 @@ export interface InMemorySubscriptionRow {
   payload: Record<string, unknown>;
   /** Insertion timestamp — the Lucid row has one, and the list query orders by it. */
   createdAt: Date;
+  /** Last-write timestamp, set on insert and moved on every write. Optional so hand-built rows compile. */
+  updatedAt?: Date;
   // Managed-subscription fields. Null on a gateway-mode row.
   managed?: boolean | null;
   amount?: number | null;
@@ -167,6 +173,8 @@ export interface InMemoryPaymentRow {
   payload: Record<string, unknown>;
   /** Insertion timestamp — the Lucid rows have one, and the list queries order by it. */
   createdAt: Date;
+  /** Last-write timestamp, set on insert and moved on every write. Optional so hand-built rows compile. */
+  updatedAt?: Date;
 }
 
 export interface InMemoryWebhookEventRow {
@@ -210,6 +218,8 @@ export interface InMemoryDisputeRow {
   payload: Record<string, unknown>;
   /** Insertion timestamp — the Lucid row has one, and the list query orders by it. */
   createdAt: Date;
+  /** Last-write timestamp, set on insert and moved on every write. Optional so hand-built rows compile. */
+  updatedAt?: Date;
 }
 
 /** A plain in-memory audit row (mirrors `billing_audit_events`). */
@@ -373,6 +383,7 @@ export class InMemoryBillingStore
     if (customer.name !== undefined) row.name = customer.name;
     if (customer.taxId !== undefined) row.taxId = customer.taxId;
     if (customer.metadata !== undefined) row.metadata = customer.metadata;
+    row.updatedAt = existing === undefined ? row.createdAt : this.#now();
     this.customers.set(customer.gatewayId, row);
     return row;
   }
@@ -462,6 +473,7 @@ export class InMemoryBillingStore
       // recorded, not when its status last changed, or every update would reorder the list.
       createdAt: existing?.createdAt ?? this.#now(),
     };
+    row.updatedAt = existing === undefined ? row.createdAt : this.#now();
     this.subscriptions.set(sub.gatewayId, row);
     return row;
   }
@@ -497,6 +509,7 @@ export class InMemoryBillingStore
       trialEndsAt: row.trialEndsAt,
       endsAt: row.endsAt,
       createdAt: row.createdAt,
+      updatedAt: row.updatedAt ?? null,
       managed: row.managed === true,
       amount: row.amount ?? null,
       currency: row.currency ?? null,
@@ -597,6 +610,7 @@ export class InMemoryBillingStore
       cancelAtPeriodEnd: false,
       paymentMethodId: sub.paymentMethodId ?? null,
     };
+    row.updatedAt = row.createdAt;
     this.managedSubscriptions.set(row.id, row);
     return row;
   }
@@ -636,6 +650,7 @@ export class InMemoryBillingStore
     if (patch.renewalFailureCount !== undefined) {
       row.renewalFailureCount = patch.renewalFailureCount;
     }
+    row.updatedAt = this.#now();
     return row;
   }
 
@@ -695,6 +710,7 @@ export class InMemoryBillingStore
       payload: payment.payload ?? {},
       createdAt: existing?.createdAt ?? this.#now(),
     };
+    row.updatedAt = existing === undefined ? row.createdAt : this.#now();
     this.payments.set(payment.gatewayId, row);
     return row;
   }
@@ -730,6 +746,7 @@ export class InMemoryBillingStore
       refundedAmount: row.refundedAmount,
       paidAt: row.paidAt,
       createdAt: row.createdAt,
+      updatedAt: row.updatedAt ?? null,
     }));
   }
 
@@ -805,6 +822,7 @@ export class InMemoryBillingStore
       row.openedAt = dispute.openedAt ?? this.#now();
     }
     if (dispute.payload !== undefined) row.payload = dispute.payload;
+    row.updatedAt = existing === undefined ? row.createdAt : this.#now();
     this.disputes.set(dispute.gatewayId, row);
     return row;
   }

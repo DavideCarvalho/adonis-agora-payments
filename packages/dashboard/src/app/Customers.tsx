@@ -6,8 +6,8 @@ import { UsersIcon } from '../agora-kit/icons';
 import { PageBody } from '../agora-kit/shell/app-shell';
 import { Button } from '../agora-kit/ui/button';
 import { type CustomerRow, paymentsClient } from '../client/payments-client';
-import { formatCount, formatWhen } from './money';
-import { ListPanel, Mono } from './shell';
+import { formatCount } from './money';
+import { ListPanel, Mono, Stamp } from './shell';
 import { Badge } from './ui/badge';
 import { CONTROL_CLASS, FieldLabel } from './ui/field';
 import { ProviderFilter } from './ui/provider-filter';
@@ -141,9 +141,9 @@ function customerColumns({
     },
     {
       id: 'recorded',
-      header: 'Recorded',
+      header: 'Created',
       hideBelow: 'lg',
-      cell: (row) => <Mono className="text-faint">{formatWhen(row.createdAt)}</Mono>,
+      cell: (row) => <Stamp iso={row.createdAt} />,
     },
     {
       id: 'action',

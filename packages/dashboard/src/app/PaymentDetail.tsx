@@ -63,6 +63,14 @@ export function PaymentDetail({ gatewayId, onClose }: { gatewayId: string; onClo
               <dd className="mono text-fg-2">{ownerLabel(query.data.payment.owner)}</dd>
               <dt className="text-[11px] text-faint">Paid at</dt>
               <dd className="mono text-dim">{formatWhen(query.data.payment.paidAt)}</dd>
+              <dt className="text-[11px] text-faint">Created</dt>
+              <dd className="mono text-dim" title={query.data.payment.createdAt ?? undefined}>
+                {formatWhen(query.data.payment.createdAt)}
+              </dd>
+              <dt className="text-[11px] text-faint">Updated</dt>
+              <dd className="mono text-dim" title={query.data.payment.updatedAt ?? undefined}>
+                {formatWhen(query.data.payment.updatedAt ?? null)}
+              </dd>
             </dl>
           </section>
 

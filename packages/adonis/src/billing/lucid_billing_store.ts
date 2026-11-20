@@ -173,6 +173,7 @@ function disputeItem(row: {
   openedAt: DateTime | null;
   closedAt: DateTime | null;
   createdAt: DateTime;
+  updatedAt?: DateTime | null;
 }): DisputeListItem {
   return {
     id: String(row.id),
@@ -189,6 +190,7 @@ function disputeItem(row: {
     openedAt: toDate(row.openedAt),
     closedAt: toDate(row.closedAt),
     createdAt: toDate(row.createdAt),
+    updatedAt: toDate(row.updatedAt),
   };
 }
 
@@ -300,6 +302,7 @@ function customerItem(row: CustomerInstance): CustomerListItem {
     name: row.name ?? null,
     taxId: row.taxId ?? null,
     createdAt: toDate(row.createdAt),
+    updatedAt: toDate(row.updatedAt),
   };
 }
 
@@ -975,6 +978,7 @@ export class LucidBillingStore
       trialEndsAt: toDate(row.trialEndsAt),
       endsAt: toDate(row.endsAt),
       createdAt: toDate(row.createdAt),
+      updatedAt: toDate(row.updatedAt),
       // Sem estes campos o console não sabe dizer quanto uma assinatura GERENCIADA cobra nem
       // quando vem a próxima — e numa linha gerenciada não há `gatewayId` para abrir no painel
       // do gateway e descobrir. Era a lista inteira mostrando um id nulo e nada mais.
@@ -1159,6 +1163,7 @@ export class LucidBillingStore
           : Number(row.refundedAmount),
       paidAt: toDate(row.paidAt),
       createdAt: toDate(row.createdAt),
+      updatedAt: toDate(row.updatedAt),
     }));
   }
 

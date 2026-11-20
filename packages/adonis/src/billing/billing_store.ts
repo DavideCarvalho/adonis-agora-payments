@@ -48,6 +48,11 @@ export interface PaymentListItem {
   refundedAmount: number | null;
   paidAt: Date | null;
   createdAt: Date | null;
+  /**
+   * When this row was last written (`updated_at`). Optional so a custom store keeps compiling;
+   * the built-in stores always fill it. `null` when unknown.
+   */
+  updatedAt?: Date | null;
 }
 
 /** One `billing_customers` row, normalized for reading. See {@link PaymentListItem}. */
@@ -61,6 +66,11 @@ export interface CustomerListItem {
   name: string | null;
   taxId: string | null;
   createdAt: Date | null;
+  /**
+   * When this row was last written (`updated_at`). Optional so a custom store keeps compiling;
+   * the built-in stores always fill it. `null` when unknown.
+   */
+  updatedAt?: Date | null;
 }
 
 /**
@@ -136,6 +146,11 @@ export interface SubscriptionListItem {
   endsAt: Date | null;
   createdAt: Date | null;
   /**
+   * When this row was last written (`updated_at`). Optional so a custom store keeps compiling;
+   * the built-in stores always fill it. `null` when unknown.
+   */
+  updatedAt?: Date | null;
+  /**
    * Whether the library drives this recurrence. `true` means there is NO gateway subscription
    * to open in a gateway dashboard — everything below is the only description of it there is.
    */
@@ -202,6 +217,11 @@ export interface DisputeListItem {
   openedAt: Date | null;
   closedAt: Date | null;
   createdAt: Date | null;
+  /**
+   * When this row was last written (`updated_at`). Optional so a custom store keeps compiling;
+   * the built-in stores always fill it. `null` when unknown.
+   */
+  updatedAt?: Date | null;
 }
 
 /**

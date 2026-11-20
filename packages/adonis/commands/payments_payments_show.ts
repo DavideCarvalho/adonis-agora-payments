@@ -29,6 +29,7 @@ export default class PaymentsPaymentsShow extends PaymentsConsoleCommand {
       ['subscription', p.subscriptionId],
       ['paid at', p.paidAt],
       ['created', p.createdAt],
+      ['updated', p.updatedAt],
     ]);
     const disputes = body.disputes as Record<string, unknown>[];
     if (disputes.length > 0) {

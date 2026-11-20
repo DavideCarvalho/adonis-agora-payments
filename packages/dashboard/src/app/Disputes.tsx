@@ -23,7 +23,7 @@ import {
 import { ShieldIcon } from './icons';
 import { formatDay, formatWhen } from './money';
 import { ResolveDisputeDialog } from './ResolveDisputeDialog';
-import { ListPanel, Mono } from './shell';
+import { ListPanel, Mono, Stamp } from './shell';
 import { disputeIsChargeback, disputeIsOpen, disputeStatusClass } from './status';
 import { Badge, Qualifier, StatusBadge } from './ui/badge';
 import { ProviderFilter } from './ui/provider-filter';
@@ -248,6 +248,13 @@ function DisputeLog() {
       header: 'Closed',
       hideBelow: 'lg',
       cell: (row) => <Mono className="text-faint">{formatWhen(row.closedAt)}</Mono>,
+    },
+    {
+      // The last time the row changed — a status move, a deadline, a resolution.
+      id: 'updated',
+      header: 'Updated',
+      hideBelow: 'lg',
+      cell: (row) => <Stamp iso={row.updatedAt} />,
     },
     {
       id: 'action',

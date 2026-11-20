@@ -32,6 +32,8 @@ export default class PaymentsSubscriptionsShow extends PaymentsConsoleCommand {
       ['cancels at period end', s.cancelAtPeriodEnd],
       ['renewal failures', s.renewalFailureCount],
       ['last renewal error', s.lastRenewalError],
+      ['created', s.createdAt],
+      ['updated', s.updatedAt],
       [
         'customer',
         customer === null

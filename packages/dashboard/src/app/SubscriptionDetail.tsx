@@ -92,7 +92,6 @@ export function SubscriptionDetail({
                   <dd className="mono break-all text-fg">{sub.externalReference}</dd>
                 </>
               ) : null}
-              <Dated label="Started" value={sub.createdAt} />
               <Dated label="Trial ends" value={sub.trialEndsAt} />
               <Dated label="Period ends" value={sub.currentPeriodEnd} />
               <Dated label="Next charge" value={sub.nextChargeAt} />
@@ -109,6 +108,14 @@ export function SubscriptionDetail({
                   </dd>
                 </>
               )}
+              <dt className="text-[11px] text-faint">Created</dt>
+              <dd className="mono text-dim" title={sub.createdAt ?? undefined}>
+                {formatWhen(sub.createdAt)}
+              </dd>
+              <dt className="text-[11px] text-faint">Updated</dt>
+              <dd className="mono text-dim" title={sub.updatedAt ?? undefined}>
+                {formatWhen(sub.updatedAt ?? null)}
+              </dd>
             </dl>
           </section>
 

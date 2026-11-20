@@ -678,11 +678,11 @@ The count reads take `BillingCountQuery` — `{ status?, createdBefore?, created
 plain shape — `CustomerListItem`, `PaymentListItem`, `SubscriptionListItem`, `DisputeListItem`,
 `WebhookEventListItem` — never the implementation's row type, so a reader never depends on Lucid.
 
-Every item carries `createdAt: Date | null` (when the row was first recorded) and, on the rows that
-change — customers, payments, subscriptions, disputes and webhook events — `updatedAt: Date | null`
-(the last write). `updatedAt` is optional on the item types, so a custom store that does not fill it
-still compiles; the built-in stores always do. The audit trail is append-only and has `createdAt`
-only.
+Every item carries `createdAt: Date | null` (when the row was first recorded). `CustomerListItem`,
+`PaymentListItem`, `SubscriptionListItem` and `DisputeListItem` also carry an optional
+`updatedAt?: Date | null` (the last write) — optional so a custom store that does not fill it still
+compiles; the built-in stores always do. `WebhookEventListItem.updatedAt` is required
+(`Date | null`), as it always was. The audit trail is append-only and has `createdAt` only.
 
 The deadline reads are separate from `BillingListQuery` on purpose: they filter on a **deadline**,
 not on a creation time, and they are what an alert is built on.

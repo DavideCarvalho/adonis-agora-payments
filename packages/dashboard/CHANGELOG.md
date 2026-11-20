@@ -1,5 +1,11 @@
 # @adonis-agora/payments-dashboard
 
+## 1.0.0-rc.19
+
+### Minor Changes
+
+- [#276](https://github.com/DavideCarvalho/adonis-agora-payments/pull/276) [`fad3326`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/fad332634e85407ddeb447680a3fac167561db67) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - Console timestamps: the Customers and Subscriptions lists show a **Created** column and the Disputes log an **Updated** column (full instant on hover, `—` when unknown); the payment and subscription details show both Created and Updated.
+
 ## 1.0.0-rc.18
 
 ### Minor Changes

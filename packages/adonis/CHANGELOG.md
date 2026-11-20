@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.0.0-rc.28
+
+### Minor Changes
+
+- [#276](https://github.com/DavideCarvalho/adonis-agora-payments/pull/276) [`fad3326`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/fad332634e85407ddeb447680a3fac167561db67) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - `createdAt` + `updatedAt` on every mutable billing entity. `PaymentListItem`, `CustomerListItem`, `SubscriptionListItem` and `DisputeListItem` gain an optional `updatedAt: Date | null` (the built-in Lucid and in-memory stores fill it; the in-memory store now stamps it on every write), and the console API's payment, customer, subscription and dispute rows — lists and details — expose `updatedAt` as an ISO string or `null`. `payments:payments:show` and `payments:subscriptions:show` print both timestamps, and the bundled console shows them (Created column on Customers and Subscriptions, Updated on the Disputes log, both on the payment and subscription details). No schema change: the tables already had both columns.
+
 ## 1.0.0-rc.27
 
 ### Minor Changes

@@ -78,10 +78,13 @@ import {
   resolveConsoleTenantScope,
 } from '../src/dashboard/tenant_scope.js';
 import type { PaymentsConfig } from '../src/define_config.js';
+import { detectAuthkitClient, detectCryptoRuntime } from '../src/federation/auto_auth.js';
 import {
   consoleRouteName,
   FederatedPaymentsConsole,
   idempotencyKeyOf,
+  viewerLocalActions,
+  viewerLocalRefusal,
 } from '../src/federation/console.js';
 import { type RedisLike, resolveRedisConnection } from '../src/federation/redis_channel.js';
 import { PaymentsManager } from '../src/payments_manager.js';
@@ -193,7 +196,26 @@ export default class PaymentsDashboardProvider {
     await this.app.booted(async () => {
       const router = await this.app.container.make('router');
       this.registerRoutes(router, config);
+      await this.prepareFederation();
     });
+  }
+
+  /**
+   * How this console authenticates to each federated app, resolved where requests are served (the
+   * web environment): an app it may act on with no way to authenticate fails the boot, the
+   * automatic crypto keys are created, and each app's mode is logged once.
+   */
+  private async prepareFederation(): Promise<void> {
+    if (!this.federation) return;
+    const environment = (this.app as { getEnvironment?: () => string }).getEnvironment?.();
+    if (environment !== 'web') return;
+    const lines = await this.federation.prepare();
+    try {
+      const logger = await this.app.container.make('logger');
+      for (const { level, line } of lines) logger[level](line);
+    } catch {
+      /* logging never breaks the console */
+    }
   }
 
   private registerRoutes(router: HttpRouterService, config: ResolvedPaymentsDashboardConfig): void {
@@ -345,6 +367,14 @@ export default class PaymentsDashboardProvider {
     actor: string | undefined,
     tenant?: string,
   ): Promise<ApiResponse> {
+    // A write needs the viewer's capability, by the same rule as on another app (the JSON API and
+    // the dev tools both come through here).
+    const decision = this.decisions.get(ctx);
+    const routeName = consoleRouteName(route.handler);
+    if (routeName !== undefined && decision?.allowed) {
+      const refusal = viewerLocalRefusal(routeName, decision.capabilities, decision.access);
+      if (refusal !== undefined) return { status: 403, body: { error: refusal } };
+    }
     let store: BillingStore;
     try {
       store = getBillingStore();
@@ -439,6 +469,7 @@ export default class PaymentsDashboardProvider {
     }
     const decision = this.decisions.get(ctx);
     const capabilities = decision?.allowed ? decision.capabilities : undefined;
+    const access = decision?.allowed ? decision.access : undefined;
     const req = toApiRequest(ctx);
     const idempotencyKey = idempotencyKeyOf(ctx.request.header('idempotency-key'), req.body);
     return this.federation!.dispatch(key, route, req, {
@@ -446,6 +477,7 @@ export default class PaymentsDashboardProvider {
       meta: {
         ...(actor !== undefined ? { actor } : {}),
         ...(capabilities !== undefined ? { capabilities } : {}),
+        ...(access !== undefined ? { access } : {}),
         via: config.appLabel ?? 'payments console',
         ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
       },
@@ -455,9 +487,30 @@ export default class PaymentsDashboardProvider {
   /** The federated console over `apps`: Lucid and Redis resolved through the container. */
   private createFederation(config: ResolvedPaymentsDashboardConfig): FederatedPaymentsConsole {
     const container = this.app.container;
+    const bindings = container as unknown as {
+      hasBinding?(binding: string): boolean;
+      make(binding: string): Promise<unknown>;
+    };
     return new FederatedPaymentsConsole(config.apps, {
       redis: async (connection) =>
         (await resolveRedisConnection(container as never, connection)) as RedisLike,
+      // The sibling libs, read by binding name: crypto seals commands, authkit's calls between
+      // apps provide a token, with nothing to configure here.
+      crypto: () => detectCryptoRuntime(bindings),
+      authkit: () => detectAuthkitClient(bindings),
+      log: (note) => {
+        void (async () => {
+          try {
+            const logger = (await container.make('logger')) as Record<
+              'info' | 'warn',
+              (line: string) => void
+            >;
+            logger[note.level](note.line);
+          } catch {
+            /* logging never breaks a command */
+          }
+        })();
+      },
     });
   }
 
@@ -769,7 +822,12 @@ export default class PaymentsDashboardProvider {
     const registry = await readAgoraConsoles(this.app.container as never);
     const viewer = await resolveViewer(ctx, config.viewer);
     const signOut = resolveSignOut(ctx, config.signOut, registry);
+    const decision = this.decisions.get(ctx);
+    const actions = decision?.allowed
+      ? viewerLocalActions(decision.capabilities, decision.access)
+      : undefined;
     return {
+      ...(actions !== undefined ? { actions } : {}),
       switcher: { endpoint: `${apiBase}/consoles`, others: otherConsoles(registry, CONSOLE_ID) },
       ...(registry ? { search: { endpoint: `${apiBase}/consoles/search` } } : {}),
       ...(viewer ? { viewer } : {}),

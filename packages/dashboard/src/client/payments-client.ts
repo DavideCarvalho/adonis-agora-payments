@@ -383,6 +383,7 @@ interface InjectedConfig {
   base?: unknown;
   api?: unknown;
   currency?: unknown;
+  actions?: unknown;
 }
 
 /**
@@ -422,6 +423,17 @@ export function apiBase(): string {
   const injected = readConfig().api;
   if (typeof injected === 'string') return injected;
   return `${uiBase()}/api`;
+}
+
+/**
+ * Whether this viewer may run the write route `action` (`refund`, `retry`, `resolve`, …): the
+ * page says which ones when the console's `authorize` narrowed them; absent, every one. The
+ * server checks it again either way.
+ */
+export function viewerMayRun(action: string): boolean {
+  const actions = readConfig().actions;
+  if (!Array.isArray(actions)) return true;
+  return actions.includes(action);
 }
 
 /** The display currency the server was configured with; `'BRL'` when the page was not injected. */

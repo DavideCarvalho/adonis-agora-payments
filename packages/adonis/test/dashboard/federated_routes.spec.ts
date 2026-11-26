@@ -70,6 +70,9 @@ function fakeCtx(
   };
 }
 
+/** The secret the Hub and Entre Textos share (shared-secret mode of the console channel). */
+const SECRET = 'et-console-secret-0123456789';
+
 describe('federated console routes', () => {
   const bus = new RedisBus();
   const etStore = new InMemoryBillingStore();
@@ -127,6 +130,7 @@ describe('federated console routes', () => {
     owning = await answerPaymentsConsoleCommands({
       client: bus.connection(),
       prefix: 'et',
+      secret: SECRET,
       actions: new Set(['refund']),
       idempotency: memoryIdempotencyStore(),
       runtime: {
@@ -153,14 +157,22 @@ describe('federated console routes', () => {
             capabilities: ['payments:refund', 'payments:subscriptions:cancel'],
           };
         }
-        if (user?.role === 'viewer') return { allowed: true, apps: ['et'] };
+        if (user?.role === 'viewer') {
+          return { allowed: true, apps: ['et'], capabilities: ['payments:console:read'] };
+        }
+        // An authorize that does not narrow: the console sends its whole console set.
+        if (user?.role === 'owner') return { allowed: true, apps: '*' };
         return { allowed: true, apps: [] };
       },
       apps: {
         et: {
           label: 'Entre Textos',
           store: etStore,
-          controlPlane: new RedisConsoleChannel({ client: bus.connection(), prefix: 'et' }),
+          controlPlane: new RedisConsoleChannel({
+            client: bus.connection(),
+            prefix: 'et',
+            secret: SECRET,
+          }),
         },
         other: {
           store: new InMemoryBillingStore(),
@@ -267,6 +279,16 @@ describe('federated console routes', () => {
     });
     expect(answer.status).toBe(403);
     expect((answer.body as { error: string }).error).toMatch(/consoleCommands\.actions/);
+  });
+
+  it('an authorize that does not narrow capabilities lets the viewer act (the app still allow-lists)', async () => {
+    const answer = await call('post', '/payments/api/payments/:gatewayId/refund', {
+      user: { role: 'owner', email: 'owner@hub.example' },
+      qs: { app: 'et' },
+      params: { gatewayId: 'pay_1' },
+      headers: { 'idempotency-key': 'console-key-owner-0001' },
+    });
+    expect(answer.status, JSON.stringify(answer.body)).toBe(200);
   });
 
   it('a browse-only app refuses actions', async () => {

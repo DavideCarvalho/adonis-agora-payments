@@ -191,10 +191,12 @@ export class PagBankDriver implements PaymentsDriver {
       // Accept either id: the driver hands out order ids, but a charge id (`CHAR_…`) read
       // off a payload should not be a dead end.
       if (gatewayId.startsWith('CHAR_')) {
-        const charge = await this.#request<PagBankCharge>(`/charges/${gatewayId}`);
+        const charge = await this.#request<PagBankCharge>(
+          `/charges/${encodeURIComponent(gatewayId)}`,
+        );
         return this.#mapOrder({ id: gatewayId, charges: [charge] });
       }
-      const order = await this.#request<PagBankOrder>(`/orders/${gatewayId}`);
+      const order = await this.#request<PagBankOrder>(`/orders/${encodeURIComponent(gatewayId)}`);
       return this.#mapOrder(order);
     } catch (error) {
       if (isNotFound(error)) return null;
@@ -211,13 +213,18 @@ export class PagBankDriver implements PaymentsDriver {
     // PagBank wants the amount on every cancel, so a "full refund" is spelled out as the
     // amount actually paid rather than left to a default this driver cannot see.
     const value = amount ?? charge.amount.summary?.paid ?? charge.amount.value;
-    const data = await this.#request<PagBankCharge>(`/charges/${charge.id}/cancel`, {
-      method: 'POST',
-      body: { amount: { value } },
-      // Same `x-idempotency-key` the charge uses: a retried cancel with the key returns
-      // the original refund instead of taking the money out a second time.
-      ...(options?.idempotencyKey !== undefined ? { idempotencyKey: options.idempotencyKey } : {}),
-    });
+    const data = await this.#request<PagBankCharge>(
+      `/charges/${encodeURIComponent(charge.id)}/cancel`,
+      {
+        method: 'POST',
+        body: { amount: { value } },
+        // Same `x-idempotency-key` the charge uses: a retried cancel with the key returns
+        // the original refund instead of taking the money out a second time.
+        ...(options?.idempotencyKey !== undefined
+          ? { idempotencyKey: options.idempotencyKey }
+          : {}),
+      },
+    );
     const refund: Refund = {
       id: data.id,
       gatewayId: data.id,
@@ -625,9 +632,9 @@ export class PagBankDriver implements PaymentsDriver {
   /** The `CHAR_…` behind an id that may be an order id or a charge id. */
   async #resolveCharge(gatewayId: string): Promise<PagBankCharge> {
     if (gatewayId.startsWith('CHAR_')) {
-      return this.#request<PagBankCharge>(`/charges/${gatewayId}`);
+      return this.#request<PagBankCharge>(`/charges/${encodeURIComponent(gatewayId)}`);
     }
-    const order = await this.#request<PagBankOrder>(`/orders/${gatewayId}`);
+    const order = await this.#request<PagBankOrder>(`/orders/${encodeURIComponent(gatewayId)}`);
     const charge = order.charges?.[0];
     if (charge === undefined) {
       throw new Error(

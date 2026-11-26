@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { WebhookProcessor } from '../src/billing/webhook_processor.js';
 import { EfiDriver } from '../src/drivers/efi.js';
+import { InMemoryBillingStore } from '../src/testing/in_memory_billing_store.js';
 import type { WebhookEvent } from '../src/types.js';
 
 interface Call {
@@ -43,6 +45,25 @@ function fakeFetch(handlers: Array<[RegExp, (call: Call) => { status?: number; b
 }
 
 const TOKEN_BODY = { access_token: 'tok_1', token_type: 'Bearer', expires_in: 3600 };
+
+/**
+ * An Efí that knows every Pix the notification `raw` names, exactly as notified: the webhook
+ * driver reads each one back (`GET /v2/pix/:e2eid`) before it emits anything.
+ */
+function efiKnows(raw: string): typeof globalThis.fetch {
+  const entries = (JSON.parse(raw) as { pix: Array<{ endToEndId: string }> }).pix;
+  return fakeFetch([
+    [/oauth\/token/, () => ({ body: TOKEN_BODY })],
+    [
+      /\/v2\/pix\/[^/]+$/,
+      (call) => {
+        const id = decodeURIComponent(call.url.split('/').pop()!);
+        const entry = entries.find((pix) => pix.endToEndId === id);
+        return entry ? { body: entry } : { status: 404, body: { nome: 'not_found' } };
+      },
+    ],
+  ]).fn;
+}
 
 const COB = {
   txid: 'abc123def456ghi789jkl012mn',
@@ -441,8 +462,7 @@ describe('EfiDriver refunds', () => {
 describe('EfiDriver webhooks', () => {
   const { fn } = fakeFetch([]);
 
-  it('maps a received Pix to payment.succeeded, keyed by its endToEndId', () => {
-    const driver = makeDriver(fn);
+  it('maps a received Pix to payment.succeeded, keyed by its endToEndId', async () => {
     const raw = JSON.stringify({
       pix: [
         {
@@ -454,7 +474,7 @@ describe('EfiDriver webhooks', () => {
         },
       ],
     });
-    const event = driver.parseWebhook(raw, {});
+    const event = (await makeDriver(efiKnows(raw)).parseWebhook(raw, {})) as WebhookEvent;
     expect(event.type).toBe('payment.succeeded');
     expect(event.id).toBe('E00038166201907261559y6j6mt1u0f6');
     const data = event.data as { gatewayId: string; amount: number; externalReference?: string };
@@ -464,7 +484,7 @@ describe('EfiDriver webhooks', () => {
     expect(data.externalReference).toBe(COB.txid);
   });
 
-  it('maps a completed devolução to payment.refunded under its own event id', () => {
+  it('maps a completed devolução to payment.refunded under its own event id', async () => {
     const raw = JSON.stringify({
       pix: [
         {
@@ -475,12 +495,12 @@ describe('EfiDriver webhooks', () => {
         },
       ],
     });
-    const event = makeDriver(fn).parseWebhook(raw, {});
+    const event = (await makeDriver(efiKnows(raw)).parseWebhook(raw, {})) as WebhookEvent;
     expect(event.type).toBe('payment.refunded');
     expect(event.id).toBe('E1:devolvido');
   });
 
-  it('maps a MED return to payment.disputed, not to payment.refunded', () => {
+  it('maps a MED return to payment.disputed, not to payment.refunded', async () => {
     // A Pix cannot be charged back, but it can be taken back: BACEN's MED returns money to
     // a payer who reported fraud, and it arrives as an ordinary `devolução` marked
     // `natureza: MED_FRAUDE`. Calling it a refund said the merchant chose to give the money
@@ -495,7 +515,7 @@ describe('EfiDriver webhooks', () => {
         },
       ],
     });
-    const event = makeDriver(fn).parseWebhook(raw, {});
+    const event = (await makeDriver(efiKnows(raw)).parseWebhook(raw, {})) as WebhookEvent;
     expect(event.type).toBe('payment.disputed');
     expect(event.id).toBe('E1:med:d1:DEVOLVIDO');
     expect(event.data).toMatchObject({
@@ -507,7 +527,7 @@ describe('EfiDriver webhooks', () => {
     });
   });
 
-  it('warns on a MED return that is still executing, and never calls it a chargeback', () => {
+  it('warns on a MED return that is still executing, and never calls it a chargeback', async () => {
     // `EM_PROCESSAMENTO` is the return being executed: nothing has left the account yet, so
     // the payment row is still telling the truth when it says `paid`. It gets its own event
     // id so the `DEVOLVIDO` that follows is not skipped as a redelivery.
@@ -523,7 +543,7 @@ describe('EfiDriver webhooks', () => {
         },
       ],
     });
-    const event = makeDriver(fn).parseWebhook(raw, {});
+    const event = (await makeDriver(efiKnows(raw)).parseWebhook(raw, {})) as WebhookEvent;
     expect(event.type).toBe('payment.dispute_warning');
     expect(event.type).not.toBe('payment.disputed');
     expect(event.id).toBe('E1:med:d1:EM_PROCESSAMENTO');
@@ -532,7 +552,7 @@ describe('EfiDriver webhooks', () => {
     expect(event.data).not.toHaveProperty('actionableUntil');
   });
 
-  it('does not treat a MED that was never executed as money leaving', () => {
+  it('does not treat a MED that was never executed as money leaving', async () => {
     // `NAO_REALIZADO` is Efí's own example of a return that did not happen (insufficient
     // balance). Nothing was taken, so nothing is disputed.
     const raw = JSON.stringify({
@@ -553,12 +573,12 @@ describe('EfiDriver webhooks', () => {
         },
       ],
     });
-    const event = makeDriver(fn).parseWebhook(raw, {});
+    const event = (await makeDriver(efiKnows(raw)).parseWebhook(raw, {})) as WebhookEvent;
     expect(event.type).not.toBe('payment.disputed');
     expect(event.type).not.toBe('payment.dispute_warning');
   });
 
-  it('still calls a merchant-initiated devolução a refund', () => {
+  it('still calls a merchant-initiated devolução a refund', async () => {
     // `ORIGINAL` (and an absent `natureza`, which the API Pix spec says means `ORIGINAL`)
     // is the refund the merchant asked for. Nothing about that changed.
     const raw = JSON.stringify({
@@ -571,12 +591,12 @@ describe('EfiDriver webhooks', () => {
         },
       ],
     });
-    const event = makeDriver(fn).parseWebhook(raw, {});
+    const event = (await makeDriver(efiKnows(raw)).parseWebhook(raw, {})) as WebhookEvent;
     expect(event.type).toBe('payment.refunded');
     expect(event.id).toBe('E1:devolvido');
   });
 
-  it('returns one event per Pix in a batched notification', () => {
+  it('returns one event per Pix in a batched notification', async () => {
     // Efí sends one entry in practice, but `pix` is an array in the schema — and a Pix that
     // arrived is money that arrived, so none of them may be dropped.
     const raw = JSON.stringify({
@@ -585,7 +605,7 @@ describe('EfiDriver webhooks', () => {
         { endToEndId: 'E2', txid: 'tx2', valor: '2.00' },
       ],
     });
-    const events = makeDriver(fn).parseWebhook(raw, {}) as WebhookEvent[];
+    const events = (await makeDriver(efiKnows(raw)).parseWebhook(raw, {})) as WebhookEvent[];
     expect(Array.isArray(events)).toBe(true);
     expect(events.map((event) => event.id)).toEqual(['E1', 'E2']);
     expect(events.map((event) => event.type)).toEqual(['payment.succeeded', 'payment.succeeded']);
@@ -597,21 +617,91 @@ describe('EfiDriver webhooks', () => {
     expect(events.map((event) => (event.raw as { pix: unknown[] }).pix.length)).toEqual([1, 1]);
   });
 
-  it('still returns a single event, not an array of one, for a one-Pix notification', () => {
+  it('still returns a single event, not an array of one, for a one-Pix notification', async () => {
     const raw = JSON.stringify({ pix: [{ endToEndId: 'E1', txid: 'tx1', valor: '1.00' }] });
-    const event = makeDriver(fn).parseWebhook(raw, {});
+    const event = (await makeDriver(efiKnows(raw)).parseWebhook(raw, {})) as WebhookEvent;
     expect(Array.isArray(event)).toBe(false);
     expect((event as WebhookEvent).id).toBe('E1');
   });
 
-  it('answers the registration probe with an inert event instead of throwing', () => {
-    const event = makeDriver(fn).parseWebhook(JSON.stringify({ evento: 'teste_webhook' }), {});
+  it('answers the registration probe with an inert event instead of throwing', async () => {
+    const event = (await makeDriver(fn).parseWebhook(
+      JSON.stringify({ evento: 'teste_webhook' }),
+      {},
+    )) as WebhookEvent;
     expect(event.type).toBe('efi.teste_webhook');
     expect(event.id).toMatch(/^efi-teste_webhook-/);
   });
 
-  it('rejects a body that is not JSON', () => {
-    expect(() => makeDriver(fn).parseWebhook('not json', {})).toThrow(/not JSON/);
+  it('rejects a body that is not JSON', async () => {
+    await expect(makeDriver(fn).parseWebhook('not json', {})).rejects.toThrow(/not JSON/);
+  });
+
+  it('builds the event from what Efí confirms, not from the body', async () => {
+    const genuine = { endToEndId: 'E1', txid: COB.txid, valor: '19.90' };
+    const forged = JSON.stringify({ pix: [{ ...genuine, valor: '9999.00', txid: 'other' }] });
+    const { fn: gateway, calls } = fakeFetch([
+      [/oauth\/token/, () => ({ body: TOKEN_BODY })],
+      [/\/v2\/pix\/E1$/, () => ({ body: genuine })],
+    ]);
+    const event = (await makeDriver(gateway).parseWebhook(forged, {})) as WebhookEvent;
+    expect(calls.some((call) => call.method === 'GET' && call.url.endsWith('/v2/pix/E1'))).toBe(
+      true,
+    );
+    expect(event.data).toMatchObject({ gatewayId: COB.txid, amount: 1990 });
+    expect((event.raw as { pix: unknown[] }).pix).toEqual([genuine]);
+  });
+
+  it('refuses a Pix Efí does not know, and emits nothing for the batch', async () => {
+    const { fn: gateway } = fakeFetch([
+      [/oauth\/token/, () => ({ body: TOKEN_BODY })],
+      [/\/v2\/pix\/E1$/, () => ({ body: { endToEndId: 'E1', txid: 'tx1', valor: '1.00' } })],
+      [/\/v2\/pix\//, () => ({ status: 404, body: { nome: 'not_found' } })],
+    ]);
+    const raw = JSON.stringify({
+      pix: [
+        { endToEndId: 'E1', txid: 'tx1', valor: '1.00' },
+        { endToEndId: 'EFORGED', txid: 'tx2', valor: '500.00' },
+      ],
+    });
+    await expect(makeDriver(gateway).parseWebhook(raw, {})).rejects.toThrow(
+      /refused: Efí does not know the Pix "EFORGED"/,
+    );
+  });
+
+  it('refuses an entry without a usable endToEndId before calling Efí', async () => {
+    const { fn: gateway, calls } = fakeFetch([[/oauth\/token/, () => ({ body: TOKEN_BODY })]]);
+    for (const entry of [
+      { txid: 'tx1', valor: '1.00' },
+      { endToEndId: '../cob/x', valor: '1' },
+    ]) {
+      await expect(
+        makeDriver(gateway).parseWebhook(JSON.stringify({ pix: [entry] }), {}),
+      ).rejects.toThrow(/no valid `endToEndId`/);
+    }
+    expect(calls.filter((call) => call.url.includes('/v2/pix'))).toEqual([]);
+  });
+
+  it('a forged delivery marks nothing paid and leaves the event id to the genuine one', async () => {
+    const store = new InMemoryBillingStore();
+    const { fn: unknownToEfi } = fakeFetch([
+      [/oauth\/token/, () => ({ body: TOKEN_BODY })],
+      [/\/v2\/pix\//, () => ({ status: 404, body: { nome: 'not_found' } })],
+    ]);
+    const raw = JSON.stringify({ pix: [{ endToEndId: 'E1', txid: COB.txid, valor: '19.90' }] });
+    await expect(makeDriver(unknownToEfi).parseWebhook(raw, {})).rejects.toThrow(/refused/);
+    expect(await store.findWebhookEventByGatewayEventId('E1')).toBeNull();
+    expect(await store.findPaymentByGatewayId(COB.txid)).toBeNull();
+
+    const driver = makeDriver(efiKnows(raw));
+    await new WebhookProcessor({ store, driver }).process(
+      (await driver.parseWebhook(raw, {})) as WebhookEvent,
+    );
+    expect((await store.findPaymentByGatewayId(COB.txid))?.status).toBe('paid');
+  });
+
+  it('declares its deliveries confirmed with the gateway, so the boot check passes', () => {
+    expect(makeDriver(fn).webhookVerification).toBe('confirmed');
   });
 
   it('registers the webhook with the skip-mTLS header when asked', async () => {
@@ -738,10 +828,13 @@ describe('EfiDriver checkout', () => {
     expect(session.gatewayId).toBe(reference);
     expect(session.url).toBe('');
 
-    const event = driver.parseWebhook(
-      JSON.stringify({ pix: [{ endToEndId: 'E1', txid: reference, valor: '19.90' }] }),
+    const notification = JSON.stringify({
+      pix: [{ endToEndId: 'E1', txid: reference, valor: '19.90' }],
+    });
+    const event = (await makeDriver(efiKnows(notification)).parseWebhook(
+      notification,
       {},
-    );
+    )) as WebhookEvent;
     expect((event.data as { externalReference?: string }).externalReference).toBe(reference);
     expect((event.data as { gatewayId: string }).gatewayId).toBe(session.gatewayId);
   });

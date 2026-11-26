@@ -235,8 +235,9 @@ That last row is the one to read carefully. `unreported` means one of three thin
 deliberately does not guess which:
 
 1. the driver verified inside its own SDK (Stripe's `constructEvent` does),
-2. the gateway signs nothing at all and there is nothing to verify — Efí and InfinitePay, which
-   declare `webhookVerification: 'unsupported'`, or
+2. the driver does not authenticate deliveries itself (`webhookVerification: 'unsupported'`; Efí,
+   InfinitePay and Mollie's classic flow confirm each delivery with the gateway and report the
+   scheme `gateway-lookup`), or
 3. **no webhook credential is configured**, which requires the provider to be named in
    `allowUnverifiedWebhooks` — an app that has not said that refuses to boot.
 

@@ -12,23 +12,72 @@ const MAX_PER_TICKET = 5;
 /** Attempts per customer, and per IP, in a window: fresh tickets do not reset these. */
 const MAX_PER_WINDOW = 10;
 const WINDOW_MS = 60 * 60_000;
-const attempts = new Map<string, { count: number; expiresAt: number }>();
 
 /**
- * Counts one attempt against the ticket, the customer and the IP. Counters live in this process:
- * behind several instances each one keeps its own.
+ * Attempt counters, in this process (behind several instances each one keeps its own).
+ *
+ * - The counts are checked BEFORE anything is recorded: a refused attempt costs nothing and
+ *   grows nothing, so hammering a spent ticket neither inflates the customer's and the IP's
+ *   counters nor the map.
+ * - Expired entries are swept at most once per `sweepEveryMs` (and when the map is full), not
+ *   on every request; an expired entry still in the map reads as absent.
+ * - The map holds at most `maxEntries` counters. When it is full of live ones, a NEW key is
+ *   refused (fail closed: this guards a card-testing endpoint), never let through uncounted.
  */
-function spend(keys: Array<[string, number, number]>, now: number): boolean {
-  for (const [key, entry] of attempts) if (entry.expiresAt < now) attempts.delete(key);
-  let allowed = true;
-  for (const [key, max, expiresAt] of keys) {
-    const entry = attempts.get(key) ?? { count: 0, expiresAt };
-    entry.count += 1;
-    attempts.set(key, entry);
-    if (entry.count > max) allowed = false;
+export class AttemptLimiter {
+  readonly #entries = new Map<string, { count: number; expiresAt: number }>();
+  readonly #maxEntries: number;
+  readonly #sweepEveryMs: number;
+  #nextSweep = 0;
+
+  constructor(options: { maxEntries?: number; sweepEveryMs?: number } = {}) {
+    this.#maxEntries = options.maxEntries ?? 50_000;
+    this.#sweepEveryMs = options.sweepEveryMs ?? 60_000;
   }
-  return allowed;
+
+  get size(): number {
+    return this.#entries.size;
+  }
+
+  #sweep(now: number): void {
+    for (const [key, entry] of this.#entries) if (entry.expiresAt <= now) this.#entries.delete(key);
+    this.#nextSweep = now + this.#sweepEveryMs;
+  }
+
+  #live(key: string, now: number): { count: number; expiresAt: number } | undefined {
+    const entry = this.#entries.get(key);
+    return entry !== undefined && entry.expiresAt > now ? entry : undefined;
+  }
+
+  /**
+   * Records one attempt against every `[key, max, expiresAt]` when none of them is spent;
+   * answers `false` (recording nothing) when one is, or when there is no room to count it.
+   */
+  spend(keys: ReadonlyArray<readonly [string, number, number]>, now: number): boolean {
+    if (now >= this.#nextSweep) this.#sweep(now);
+    for (const [key, max] of keys) {
+      if ((this.#live(key, now)?.count ?? 0) >= max) return false;
+    }
+    const fresh = keys.filter(([key]) => this.#live(key, now) === undefined).length;
+    if (this.#entries.size + fresh > this.#maxEntries) {
+      this.#sweep(now);
+      if (this.#entries.size + fresh > this.#maxEntries) return false;
+    }
+    for (const [key, , expiresAt] of keys) {
+      const entry = this.#live(key, now);
+      if (entry) entry.count += 1;
+      else this.#entries.set(key, { count: 1, expiresAt });
+    }
+    return true;
+  }
+
+  clear(): void {
+    this.#entries.clear();
+    this.#nextSweep = 0;
+  }
 }
+
+const attempts = new AttemptLimiter();
 
 const text = (value: unknown, max: number) =>
   typeof value === 'string' && value.trim() !== '' && value.length <= max ? value.trim() : null;
@@ -58,7 +107,7 @@ export async function handleCardTokenize(
   if (ticket === null || typeof raw !== 'string') {
     return { status: 401, body: { error: 'invalid or expired ticket' } };
   }
-  const allowed = spend(
+  const allowed = attempts.spend(
     [
       [`ticket:${raw}`, MAX_PER_TICKET, ticket.expiresAt],
       [`customer:${ticket.provider}:${ticket.customerId}`, MAX_PER_WINDOW, now + WINDOW_MS],

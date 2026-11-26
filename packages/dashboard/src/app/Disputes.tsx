@@ -206,7 +206,7 @@ function DisputeLog() {
 
   const [resolving, setResolving] = useState<DisputeRow | null>(null);
 
-  const blocked = useActionsBlocked();
+  const blocked = useActionsBlocked('resolve');
   const refilter = (change: Partial<{ status: string | null; provider: string | null }>) =>
     void setView({ ...change, after: null });
 

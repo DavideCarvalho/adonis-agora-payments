@@ -9,6 +9,7 @@ import type { PaymentsConfig } from '../define_config.js';
 import type { WebhookVerificationState } from '../driver.js';
 import { PaymentsManager, resolveDrivers } from '../payments_manager.js';
 import type { AgoraDoctorCheck, AgoraDoctorResult } from './agora_doctor.js';
+import { consoleCommandsDoctorChecks } from './console_commands.js';
 
 const DOCS = 'https://davidecarvalho.github.io/agora/docs/payments';
 
@@ -171,7 +172,82 @@ interface LucidLike {
       withSchema?(schema: string): { hasTable(table: string): Promise<boolean> };
     };
     rawQuery?(sql: string, bindings?: unknown[]): Promise<unknown>;
+    /** A transaction of its own (Lucid's `transaction()`): the write probe runs and rolls back in it. */
+    transaction?(): Promise<{
+      rawQuery(sql: string, bindings?: unknown[]): Promise<unknown>;
+      rollback(): Promise<unknown>;
+    }>;
   };
+}
+
+/** A database error as one line: its message, with the driver's code when it has one. */
+function dbErrorText(error: unknown): string {
+  const { code, errno, sqlState } = (error ?? {}) as {
+    code?: unknown;
+    errno?: unknown;
+    sqlState?: unknown;
+  };
+  const message = error instanceof Error ? error.message : String(error);
+  const id = [code, sqlState ?? errno].filter((v) => v !== undefined && v !== null).join('/');
+  return id ? `${message} [${id}]` : message;
+}
+
+/** Whether a database error says the table is not there (pg 42P01, mysql 1146). */
+function isMissingTableError(error: unknown): boolean {
+  const { code, errno } = (error ?? {}) as { code?: unknown; errno?: unknown };
+  const text = error instanceof Error ? error.message : String(error);
+  return (
+    code === '42P01' ||
+    errno === 1146 ||
+    code === 'ER_NO_SUCH_TABLE' ||
+    /relation .* does not exist|doesn't exist|no such table/i.test(text)
+  );
+}
+
+/** Whether a database error is a privilege refusal (pg 42501, mysql ER_*ACCESS_DENIED*). */
+function isPermissionError(error: unknown): boolean {
+  const { code, errno } = (error ?? {}) as { code?: unknown; errno?: unknown };
+  const text = error instanceof Error ? error.message : String(error);
+  return (
+    code === '42501' ||
+    errno === 1142 ||
+    errno === 1044 ||
+    (typeof code === 'string' && /ACCESS_DENIED/.test(code)) ||
+    /permission denied|access denied|command denied/i.test(text)
+  );
+}
+
+/**
+ * Whether this connection may INSERT into `ref`: a zero-row insert, inside a transaction of its
+ * own that is always rolled back (so concurrent doctors, or a concurrent migration, cannot see or
+ * break each other), retried once when the failure is not a privilege refusal (a pool or lock
+ * blip). Answers the error when it fails.
+ */
+async function probeInsert(
+  client: ReturnType<LucidLike['connection']>,
+  sql: string,
+): Promise<unknown | undefined> {
+  const attempt = async (): Promise<unknown | undefined> => {
+    try {
+      if (typeof client.transaction === 'function') {
+        const trx = await client.transaction();
+        try {
+          await trx.rawQuery(sql);
+        } finally {
+          await trx.rollback().catch(() => undefined);
+        }
+      } else {
+        await client.rawQuery!(sql);
+      }
+      return undefined;
+    } catch (error) {
+      return error ?? new Error('unknown database error');
+    }
+  };
+  const first = await attempt();
+  if (first === undefined || isPermissionError(first)) return first;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  return attempt();
 }
 
 /** The rows of a `rawQuery`, on either driver shape (`{ rows }` on pg, `[rows, fields]` on mysql). */
@@ -267,9 +343,28 @@ async function checkSchemaTables(
       docs,
     };
   }
-  const builder = client.schema.withSchema.bind(client.schema);
-  const present = await Promise.all(BILLING_TABLES.map((table) => builder(schema).hasTable(table)));
-  const missing = BILLING_TABLES.filter((_, index) => !present[index]);
+  // The catalog, asked for exactly this schema: `withSchema().hasTable()` can answer from the
+  // search path (or another database on MySQL) and call a table present that the write probe then
+  // cannot find.
+  const listed = new Set(
+    rowsOf(
+      await client.rawQuery(
+        `SELECT table_name AS name FROM information_schema.tables WHERE table_schema = ? AND table_name IN (${BILLING_TABLES.map(() => '?').join(', ')})`,
+        [schema, ...BILLING_TABLES],
+      ),
+    )
+      .map((row) => {
+        const value = row as {
+          name?: unknown;
+          NAME?: unknown;
+          table_name?: unknown;
+          TABLE_NAME?: unknown;
+        };
+        return value.name ?? value.NAME ?? value.table_name ?? value.TABLE_NAME;
+      })
+      .filter((name): name is string => typeof name === 'string'),
+  );
+  const missing = BILLING_TABLES.filter((table) => !listed.has(table));
   if (missing.length > 0) {
     return {
       status: autoCreate ? 'warn' : 'error',
@@ -283,20 +378,36 @@ async function checkSchemaTables(
   // Zero rows, so nothing is written — but the database still checks the INSERT privilege.
   const from = /mysql|mariadb/i.test(dialect ?? '') ? ' FROM DUAL' : '';
   const denied: string[] = [];
+  const failed: string[] = [];
   for (const table of BILLING_TABLES) {
-    try {
-      await client.rawQuery(
-        `INSERT INTO ${billingTableRef(dialect, schema, table)} (id) SELECT NULL${from} WHERE 1 = 0`,
+    const error = await probeInsert(
+      client,
+      `INSERT INTO ${billingTableRef(dialect, schema, table)} (id) SELECT NULL${from} WHERE 1 = 0`,
+    );
+    if (error === undefined) continue;
+    if (isMissingTableError(error)) {
+      // The catalog listed it, the INSERT did not find it (created or dropped meanwhile).
+      failed.push(
+        `${table} (${dbErrorText(error)}; it is created on first use when autoCreateSchema is on)`,
       );
-    } catch {
-      denied.push(table);
+      continue;
     }
+    (isPermissionError(error) ? denied : failed).push(`${table} (${dbErrorText(error)})`);
   }
   if (denied.length > 0) {
     return {
       status: 'error',
       message: `This connection cannot write to ${denied.join(', ')} in schema "${schema}".`,
       fix: `Grant the connection's role USAGE on schema "${schema}" and SELECT, INSERT, UPDATE, DELETE on its billing tables.`,
+      docs,
+    };
+  }
+  if (failed.length > 0) {
+    // Not a privilege refusal: the database answered something else (busy, a concurrent DDL).
+    return {
+      status: 'warn',
+      message: `Could not confirm writes to ${failed.join(', ')} in schema "${schema}".`,
+      fix: 'Run `node ace agora:doctor` again; if it persists, the error above says what the database refused.',
       docs,
     };
   }
@@ -420,5 +531,6 @@ export function paymentsDoctorChecks(
         return checkHealth(await billingHealth(store));
       },
     },
+    ...consoleCommandsDoctorChecks(),
   ];
 }

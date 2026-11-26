@@ -16,8 +16,14 @@ name the fix in the message.
 **`The "asaas" driver can verify webhook deliveries but has no credential configured`** — with an
 empty slot there is nothing to check against, so `POST /payments/webhook/asaas` would accept any
 body anyone posted, including one that marks a payment paid. Set the credential, or, only when verification
-genuinely happens upstream, `allowUnverifiedWebhooks: ['asaas']`. Efí and InfinitePay never trip
-this: their gateways sign nothing, so they report `'unsupported'`.
+genuinely happens upstream, `allowUnverifiedWebhooks: ['asaas']`. Efí, InfinitePay and Mollie (classic) never trip
+this: their gateways sign nothing, so the drivers confirm each delivery with the gateway and report
+`'confirmed'`.
+
+**`InfinitePay webhook refused: \`payment_check\` does not confirm …`** / **`Efí webhook refused:
+Efí does not know the Pix …`** — the delivery named a payment the gateway does not confirm (a
+forged body, or ids from another account). Nothing was recorded. If it was genuine, check the
+driver's `handle` (InfinitePay) or credentials (Efí) are the account the payment went to.
 
 **`Webhook handler (…) is registered for "payment.suceeded", which is not a normalized event
 type`** — a typo in an `eventType` or a `billing.handlers` key. Unchecked it registers a handler

@@ -64,8 +64,8 @@ the provider and the route it would have mounted. Two ways out, in order of pref
    allowUnverifiedWebhooks: ['efi'],   // or `true` for all, which is almost never right
    ```
 
-Efí and InfinitePay never trip it: their gateways sign nothing, so they report `'unsupported'` and
-there is no credential to forget. Deploy the credentials **before** the version that requires them.
+Efí, InfinitePay and Mollie (classic) never trip it: their gateways sign nothing, so the drivers confirm every
+delivery with the gateway (`'confirmed'`) and there is no credential to forget. Deploy the credentials **before** the version that requires them.
 </Callout>
 
 ## Turn off sandbox deliberately

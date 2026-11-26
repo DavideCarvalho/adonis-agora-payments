@@ -20,12 +20,13 @@ export type HubTokenSource =
   | (() => Promise<string>)
   | { get(): Promise<string>; reset?(): void; invalidate?(): void };
 
-interface ResolvedToken {
+export interface ResolvedToken {
   get(): Promise<string>;
   reset?(): void;
 }
 
-function resolveToken(source: HubTokenSource): ResolvedToken {
+/** Normalizes every accepted token source (a string, a function with an optional `reset`, an object with `get()`). */
+export function resolveToken(source: HubTokenSource): ResolvedToken {
   if (typeof source === 'string') {
     if (source === '') throw new Error('[payments] the tenant token is empty');
     return { get: async () => source };

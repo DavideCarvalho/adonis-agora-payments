@@ -250,7 +250,9 @@ export class AsaasDriver implements PaymentsDriver {
 
   async findCustomer(customerId: string): Promise<Customer | null> {
     try {
-      const data = await this.#request<AsaasCustomerResponse>(`/customers/${customerId}`);
+      const data = await this.#request<AsaasCustomerResponse>(
+        `/customers/${encodeURIComponent(customerId)}`,
+      );
       return this.#mapCustomer(data);
     } catch (error) {
       if (isNotFound(error)) return null;
@@ -264,10 +266,13 @@ export class AsaasDriver implements PaymentsDriver {
       ...(input.email !== undefined ? { email: input.email } : {}),
       ...(input.taxId !== undefined ? { cpfCnpj: input.taxId.replace(/\D/g, '') } : {}),
     };
-    const data = await this.#request<AsaasCustomerResponse>(`/customers/${customerId}`, {
-      method: 'POST',
-      body,
-    });
+    const data = await this.#request<AsaasCustomerResponse>(
+      `/customers/${encodeURIComponent(customerId)}`,
+      {
+        method: 'POST',
+        body,
+      },
+    );
     return this.#mapCustomer(data);
   }
 
@@ -378,14 +383,17 @@ export class AsaasDriver implements PaymentsDriver {
       throw new Error('[payments] Asaas expects the creditCardToken returned by tokenizeCard.');
     }
     for (const subscription of input.subscriptionGatewayIds ?? []) {
-      await this.#request<AsaasSubscriptionResponse>(`/subscriptions/${subscription}/creditCard`, {
-        method: 'PUT',
-        body: {
-          creditCardToken: input.token,
-          // Antifraude do Asaas: o IP do pagador vai quando se sabe qual é.
-          ...(input.remoteIp !== undefined ? { remoteIp: input.remoteIp } : {}),
+      await this.#request<AsaasSubscriptionResponse>(
+        `/subscriptions/${encodeURIComponent(subscription)}/creditCard`,
+        {
+          method: 'PUT',
+          body: {
+            creditCardToken: input.token,
+            // Antifraude do Asaas: o IP do pagador vai quando se sabe qual é.
+            ...(input.remoteIp !== undefined ? { remoteIp: input.remoteIp } : {}),
+          },
         },
-      });
+      );
     }
     return { paymentMethodId: input.token };
   }
@@ -490,7 +498,7 @@ export class AsaasDriver implements PaymentsDriver {
         encodedImage?: string | null;
         payload?: string | null;
         expirationDate?: string | null;
-      }>(`/payments/${payment.gatewayId}/pixQrCode`);
+      }>(`/payments/${encodeURIComponent(payment.gatewayId)}/pixQrCode`);
       if (qr.payload) {
         payment.pixCode = qr.payload;
       }
@@ -504,7 +512,9 @@ export class AsaasDriver implements PaymentsDriver {
 
   async findPayment(gatewayId: string): Promise<Payment | null> {
     try {
-      const data = await this.#request<AsaasPaymentResponse>(`/payments/${gatewayId}`);
+      const data = await this.#request<AsaasPaymentResponse>(
+        `/payments/${encodeURIComponent(gatewayId)}`,
+      );
       return this.#mapPayment(data);
     } catch (error) {
       if (isNotFound(error)) return null;
@@ -521,10 +531,13 @@ export class AsaasDriver implements PaymentsDriver {
     const body: Record<string, unknown> = {
       ...(amount !== undefined ? { value: toDecimal(amount) } : {}),
     };
-    const data = await this.#request<AsaasPaymentResponse>(`/payments/${paymentGatewayId}/refund`, {
-      method: 'POST',
-      body,
-    });
+    const data = await this.#request<AsaasPaymentResponse>(
+      `/payments/${encodeURIComponent(paymentGatewayId)}/refund`,
+      {
+        method: 'POST',
+        body,
+      },
+    );
     const refund: Refund = {
       id: data.id,
       gatewayId: data.id,
@@ -608,7 +621,7 @@ export class AsaasDriver implements PaymentsDriver {
   ): Promise<Subscription> {
     // Asaas cancels immediately (no period-end flag).
     const data = await this.#request<AsaasSubscriptionResponse>(
-      `/subscriptions/${subscriptionGatewayId}`,
+      `/subscriptions/${encodeURIComponent(subscriptionGatewayId)}`,
       {
         method: 'DELETE',
       },
@@ -630,7 +643,7 @@ export class AsaasDriver implements PaymentsDriver {
       updatePendingPayments: true,
     };
     const data = await this.#request<AsaasSubscriptionResponse>(
-      `/subscriptions/${subscriptionGatewayId}`,
+      `/subscriptions/${encodeURIComponent(subscriptionGatewayId)}`,
       {
         method: 'POST',
         body,
@@ -641,7 +654,9 @@ export class AsaasDriver implements PaymentsDriver {
 
   async findSubscription(gatewayId: string): Promise<Subscription | null> {
     try {
-      const data = await this.#request<AsaasSubscriptionResponse>(`/subscriptions/${gatewayId}`);
+      const data = await this.#request<AsaasSubscriptionResponse>(
+        `/subscriptions/${encodeURIComponent(gatewayId)}`,
+      );
       return this.#mapSubscription(data);
     } catch (error) {
       if (isNotFound(error)) return null;

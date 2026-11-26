@@ -240,6 +240,22 @@ Three things can be changed from the console. All are `POST` (a refund reachable
 a crawler can trigger) and all run through the same [`authorize`](#authorization) guard as every
 read.
 
+Each action also needs the viewer's capability when `authorize` returns `capabilities` or
+`access: 'read'`, by the same rule as on a [federated app](/docs/payments/federated-console#the-capabilities-a-command-needs):
+
+| Action | Capability (any one) |
+| --- | --- |
+| Refund a payment | `payments:refund`, `payments:console:refund` |
+| Retry a failed webhook event | `payments:webhooks:retry`, `payments:console:webhooks:retry` |
+| Record how a dispute ended | `payments:disputes:resolve`, `payments:console:disputes:resolve` |
+| Cancel / resume / re-price a subscription | `payments:subscriptions:cancel` / `:resume` / `:reprice`, or their `payments:console:…` names |
+| Submit dispute evidence (dev tools) | `payments:disputes:evidence`, `payments:console:disputes:evidence` |
+
+`payments:console:write`, `payments:console:*`, `payments:*` and `*` grant every action, and
+`access: 'read'` none. When `authorize` returns neither, every action is open, as before. A refused
+action answers `403` with `{ "error": "the viewer lacks \"payments:refund\" (or …)" }`, and the
+page disables the buttons the viewer cannot use, saying why.
+
 They also carry a CSRF token. `@adonisjs/shield` guards every state-changing route of the host app,
 and the SPA sent none — so both POSTs were refused before they ever reached the console's own guard,
 and the button did nothing with nothing on screen saying why. Shield publishes the token as an
@@ -415,7 +431,13 @@ Whatever the form, the answer is one of:
 ```ts
 type ConsoleAuthorizeResult =
   | boolean
-  | { allowed: true }
+  | {
+      allowed: true
+      apps?: '*' | string[] // federated apps this viewer may pick
+      tenants?: '*' | string[] // organizations, with tenancy on
+      capabilities?: string[] // what this viewer may do; omitted = everything
+      access?: 'read' | 'write' // 'read' = no action at all
+    }
   | { allowed: false; reason?: 'unauthenticated' | 'forbidden' }
   | { redirectTo: string }
 ```

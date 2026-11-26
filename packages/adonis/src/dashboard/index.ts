@@ -1,8 +1,12 @@
 // The federated console: other apps' own payments, shown here and operated through them (`apps`).
+
+export type { AuthkitClientLike, CryptoRuntimeLike } from '../federation/auto_auth.js';
+export { CONSOLE_AUTH_DOCS, ConsoleAuthConfigError } from '../federation/auto_auth.js';
 export type {
   ConsoleCommandsOption,
   FederatedAppInfo,
   FederatedCallMeta,
+  FederatedControlPlane,
   FederatedPaymentsAction,
   FederatedPaymentsAppConfig,
   OwningAppRuntime,
@@ -10,14 +14,39 @@ export type {
 } from '../federation/console.js';
 export {
   answerPaymentsConsoleCommands,
+  CAPABILITIES_REQUIRED,
+  CONSOLE_CAPABILITIES,
+  CONSOLE_READ_CAPABILITY,
+  CONSOLE_WRITE_CAPABILITY,
+  consoleCommandKeys,
+  consoleTokenAllows,
+  consoleViewerAllows,
   FEDERATED_ACTIONS,
   FEDERATED_READS,
   FederatedPaymentsConsole,
+  LOCAL_ACTIONS,
+  PAYMENTS_CONSOLE_CAPABILITIES,
   paymentsConsoleCommandHandler,
+  viewerConsoleCapabilities,
+  viewerLocalActions,
+  viewerLocalRefusal,
 } from '../federation/console.js';
+export type { OkpJwk } from '../federation/console_key.js';
 export type { ConsoleIdempotencyStore, IdempotencyState } from '../federation/idempotency.js';
 export { memoryIdempotencyStore, redisIdempotencyStore } from '../federation/idempotency.js';
-export { RedisConsoleChannel } from '../federation/redis_channel.js';
+export type {
+  ChannelSecret,
+  ConsoleChannelAuthOptions,
+  ConsoleCipher,
+  ConsoleCipherSource,
+  ConsoleCryptoOption,
+} from '../federation/redis_channel.js';
+export {
+  CONSOLE_CRYPTO_KEY,
+  RedisConsoleChannel,
+  UNAUTHORIZED_CONSOLE,
+  UNSIGNED_CHANNEL,
+} from '../federation/redis_channel.js';
 export {
   capabilityAllows,
   federatedSafe,
@@ -73,13 +102,12 @@ export { resolveAuthorizeResult, runAuthorize } from './authorize_decision.js';
 // The console access contract (function, class or lazy import) shared by every Agora console.
 export type {
   AuthorizeByTokenOptions,
-  ConsoleApps,
+  ConsoleAccess,
   ConsoleAuthorize,
   ConsoleAuthorizeDecision,
   ConsoleAuthorizeResult,
   ConsoleAuthorizer,
   ConsoleAuthorizerClass,
-  ConsoleTenants,
 } from './console_authorize.js';
 export {
   anyAuthorize,
@@ -87,6 +115,10 @@ export {
   normalizeConsoleAuthorizeResult,
   resolveConsoleAuthorize,
 } from './console_authorize.js';
+// The console-capability matcher shared (by copy) with every Agora console.
+export type { ConsoleCapabilityKind, ConsoleCapabilityTable } from './console_capabilities.js';
+export { consoleCapabilityAllows, consoleCapabilityKind } from './console_capabilities.js';
+export type { ConsoleApps, ConsoleTenants } from './console_scope.js';
 // The console shell's data-block fields: who is signed in, and how to sign out.
 export type {
   ConsoleSignOut,

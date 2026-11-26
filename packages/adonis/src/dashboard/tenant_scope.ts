@@ -1,5 +1,5 @@
 import type { BillingOwnerScope } from '../billing/owner_scope.js';
-import type { ConsoleTenants } from './console_authorize.js';
+import type { ConsoleTenants } from './console_scope.js';
 
 /**
  * Which organizations (tenants) the console shows a viewer, once tenancy is on:

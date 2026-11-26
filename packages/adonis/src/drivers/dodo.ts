@@ -564,7 +564,7 @@ export class DodoDriver implements PaymentsDriver {
     if (productId !== undefined) {
       // change-plan answers with the payment link for the difference, not the subscription,
       // so the updated subscription is read back to satisfy the contract.
-      await this.#request<unknown>(`/subscriptions/${id}/change-plan`, {
+      await this.#request<unknown>(`/subscriptions/${encodeURIComponent(id)}/change-plan`, {
         method: 'POST',
         body: {
           product_id: productId,
@@ -574,7 +574,9 @@ export class DodoDriver implements PaymentsDriver {
           ...(effectiveAt !== undefined ? { effective_at: effectiveAt } : {}),
         },
       });
-      return this.#mapSubscription(await this.#request<DodoSubscription>(`/subscriptions/${id}`));
+      return this.#mapSubscription(
+        await this.#request<DodoSubscription>(`/subscriptions/${encodeURIComponent(id)}`),
+      );
     }
     if (Object.keys(metadata).length === 0) {
       throw new Error(
@@ -582,7 +584,7 @@ export class DodoDriver implements PaymentsDriver {
           'or other `metadata` keys to store your own data on it.',
       );
     }
-    const data = await this.#request<DodoSubscription>(`/subscriptions/${id}`, {
+    const data = await this.#request<DodoSubscription>(`/subscriptions/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       body: { metadata },
     });

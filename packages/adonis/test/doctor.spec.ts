@@ -171,6 +171,114 @@ describe('payments.tables', () => {
   });
 });
 
+describe('payments.tables write probe (billing.schema)', () => {
+  /** A pg-like connection whose zero-row INSERT probe behaves as `insert` says. */
+  function schemaDb(
+    insert: (sql: string, attempt: number) => void,
+    catalog: readonly string[] = BILLING_TABLES,
+  ) {
+    const attempts = new Map<string, number>();
+    const transactions: Array<{ rolledBack: boolean }> = [];
+    const client = {
+      dialect: { name: 'postgres' },
+      schema: {
+        hasTable: async () => true,
+        withSchema: () => ({ hasTable: async () => true }),
+      },
+      rawQuery: async (sql: string) =>
+        sql.includes('information_schema.tables')
+          ? { rows: catalog.map((name) => ({ name })) }
+          : sql.includes('information_schema')
+            ? { rows: [{}] }
+            : {},
+      transaction: async () => {
+        const trx = { rolledBack: false };
+        transactions.push(trx);
+        return {
+          rawQuery: async (sql: string) => {
+            const n = (attempts.get(sql) ?? 0) + 1;
+            attempts.set(sql, n);
+            insert(sql, n);
+            return {};
+          },
+          rollback: async () => {
+            trx.rolledBack = true;
+          },
+        };
+      },
+    };
+    return { db: { connection: () => client } as never, transactions };
+  }
+  const config = { billing: { schema: 'billing' } };
+
+  it('reads existence from the catalog of exactly this schema, not hasTable', async () => {
+    // hasTable says yes for everything (the search path); the schema's catalog lacks one.
+    const { db } = schemaDb(
+      () => undefined,
+      BILLING_TABLES.filter((t) => t !== 'billing_disputes'),
+    );
+    const result = await checkTables(config, db);
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('Missing billing_disputes in schema "billing"');
+  });
+
+  it('a table the INSERT cannot find is not reported as "cannot write"', async () => {
+    const { db } = schemaDb((sql) => {
+      if (sql.includes('billing_audit_events')) {
+        throw Object.assign(new Error('relation "billing.billing_audit_events" does not exist'), {
+          code: '42P01',
+        });
+      }
+    });
+    const result = await checkTables(config, db);
+    expect(result.status).toBe('warn');
+    expect(result.message).not.toContain('cannot write');
+    expect(result.message).toContain('does not exist [42P01]');
+  });
+
+  it('probes each table in its own rolled-back transaction', async () => {
+    const { db, transactions } = schemaDb(() => undefined);
+    expect((await checkTables(config, db)).status).toBe('ok');
+    expect(transactions.length).toBe(BILLING_TABLES.length);
+    expect(transactions.every((t) => t.rolledBack)).toBe(true);
+  });
+
+  it('reports a privilege refusal as an error, with the database message and code', async () => {
+    const { db } = schemaDb((sql) => {
+      if (sql.includes('billing_payments')) {
+        throw Object.assign(new Error('permission denied for table billing_payments'), {
+          code: '42501',
+        });
+      }
+    });
+    const result = await checkTables(config, db);
+    expect(result.status).toBe('error');
+    expect(result.message).toContain(
+      'billing_payments (permission denied for table billing_payments [42501])',
+    );
+  });
+
+  it('retries a transient failure (concurrent doctors) instead of reporting no write access', async () => {
+    const { db } = schemaDb((_sql, attempt) => {
+      if (attempt === 1)
+        throw Object.assign(new Error('too many clients already'), { code: '53300' });
+    });
+    expect((await checkTables(config, db)).status).toBe('ok');
+  });
+
+  it('a persistent non-privilege failure is a warning that shows the error, not "cannot write"', async () => {
+    const { db } = schemaDb((sql) => {
+      if (sql.includes('billing_disputes')) {
+        throw Object.assign(new Error('could not obtain lock on relation'), { code: '55P03' });
+      }
+    });
+    const result = await checkTables(config, db);
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('could not obtain lock on relation [55P03]');
+    expect(result.message).not.toContain('cannot write');
+  });
+});
+
 describe('payments.health', () => {
   const report = (counts: number[]): BillingHealth => ({
     healthy: counts.every((count) => count === 0),
@@ -202,6 +310,8 @@ describe('registration', () => {
     'payments.console-gate',
     'payments.tables',
     'payments.health',
+    'payments.console-commands',
+    'payments.console-commands-key',
   ];
 
   it('exposes the frozen ids, deep ones marked', () => {
@@ -210,6 +320,7 @@ describe('registration', () => {
     expect(checks.filter((check) => check.cost === 'deep').map((check) => check.id)).toEqual([
       'payments.tables',
       'payments.health',
+      'payments.console-commands-key',
     ]);
     expect(checks.every((check) => check.lib === 'payments')).toBe(true);
     expect(agoraDoctorChecks.map((check) => check.id)).toEqual(ids);

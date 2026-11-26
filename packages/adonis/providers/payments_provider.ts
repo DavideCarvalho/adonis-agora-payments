@@ -41,12 +41,23 @@ import { registerDoctorChecks } from '../src/doctor/agora_doctor.js';
 import { paymentsDoctorChecks } from '../src/doctor/checks.js';
 import type { PaymentsDriver } from '../src/driver.js';
 import {
+  answeringAuthError,
+  CONSOLE_KEY_PURPOSE,
+  detectAuthkitClient,
+  detectCryptoRuntime,
+  publishesAppKey,
+  resolveAnsweringAuth,
+} from '../src/federation/auto_auth.js';
+import {
   answerPaymentsConsoleCommands,
+  appKeyOf,
+  consoleCommandKeys,
   resolveConsoleCommands,
   validateConsoleCommands,
 } from '../src/federation/console.js';
 import { idempotencyClientOf, redisIdempotencyStore } from '../src/federation/idempotency.js';
 import {
+  ConsoleCommandRefused,
   type RedisConsoleChannel,
   resolveRedisConnection,
 } from '../src/federation/redis_channel.js';
@@ -107,6 +118,13 @@ export default class PaymentsProvider {
   #redisServer: { stop(): Promise<void>; notify(partition: string): Promise<void> } | undefined;
   /** `consoleCommands`: the channel this app answers another app's payments console on. */
   #consoleChannel: RedisConsoleChannel | undefined;
+  /** `consoleCommands` resolved at boot (with its authentication), started in `ready()`. */
+  #consoleCommands:
+    | {
+        option: NonNullable<ReturnType<typeof resolveConsoleCommands>>;
+        auth: ReturnType<typeof resolveAnsweringAuth>;
+      }
+    | undefined;
 
   constructor(protected app: ApplicationService) {}
 
@@ -211,6 +229,8 @@ export default class PaymentsProvider {
       }
       if (topology === 'control-plane') await this.#startControlPlane(config);
       if (topology === 'tenant') await this.#startTenant(config);
+      // Before the HTTP server listens: an app that cannot authenticate the console fails here.
+      await this.#resolveConsoleCommands();
     });
   }
 
@@ -271,7 +291,7 @@ export default class PaymentsProvider {
   async #startControlPlane(config: PaymentsConfig): Promise<void> {
     const plane = this.#controlPlaneFor(config);
     const redis = config.controlPlane?.redis;
-    if (redis && resolveRole(config) !== 'api' && !this.app.inTest) {
+    if (redis && resolveRole(config) !== 'api' && !this.app.inTest && this.#serves(config)) {
       this.#redisServer = serveRedisHub((message) => plane.handle(message), {
         connection: redis.connection,
         ...(redis.writer !== undefined ? { writer: redis.writer } : {}),
@@ -280,6 +300,12 @@ export default class PaymentsProvider {
         logger: { warn: (message) => void this.#warn(message) },
       });
     }
+  }
+
+  /** Whether this process serves: the web server, or a process explicitly in the worker role. */
+  #serves(config: PaymentsConfig): boolean {
+    const environment = (this.app as { getEnvironment?: () => string }).getEnvironment?.();
+    return environment === 'web' || resolveRole(config) === 'worker';
   }
 
   /** A pump that is never started, for `hub().drain()` where the loop does not run. */
@@ -330,7 +356,10 @@ export default class PaymentsProvider {
     };
     void describe();
     const events = config.tenant?.events;
+    // §12: the long-lived pull loop runs only in a process that serves (web, or a billing worker),
+    // never in a plain ace/repl process, which must be able to exit.
     if (events === false || resolveRole(config) === 'api' || this.app.inTest) return;
+    if (!this.#serves(config)) return;
     const dispatcher = this.#webhook;
     if (!dispatcher) {
       void this.#warn(
@@ -477,17 +506,89 @@ export default class PaymentsProvider {
 
   /**
    * `consoleCommands`: answer another app's federated payments console over Redis. Web processes
-   * only (a short-lived `ace` command that won a command's claim could exit before it answers). A
-   * Redis that cannot be reached, or cannot claim a command, is logged, not fatal.
+   * only (a short-lived `ace` command that won a command's claim could exit before it answers).
+   *
+   * Authentication is resolved first, and its absence fails the boot: `consoleCommands`' own
+   * `secret` / `crypto` / `verifyTenant`, else `@adonis-agora/crypto` booted in this app (commands
+   * sealed with its `console-payments` key), authkit's verifier of calls between apps, and on a
+   * control plane its own `verifyTenant`. A Redis that cannot be reached, or cannot claim a command,
+   * is logged, not fatal.
    */
-  async #answerConsoleCommands(): Promise<void> {
+  async #resolveConsoleCommands(): Promise<void> {
     const config = this.app.config.get<PaymentsConfig>('payments', {});
     if (!config.consoleCommands || resolveTopology(config) === 'tenant') return;
     if (this.app.getEnvironment() !== 'web' || resolveRole(config) === 'worker') return;
     const logger = await this.app.container.make('logger');
+    const option = resolveConsoleCommands(config.consoleCommands, this.#packageName());
+    if (!option) return;
+    const container = this.app.container as unknown as {
+      hasBinding(binding: string): boolean;
+      make(binding: string): Promise<unknown>;
+    };
+    const appKey = await appKeyOf(this.app);
+    const authkit = await detectAuthkitClient(container);
+    const auth = resolveAnsweringAuth({
+      option,
+      crypto: await detectCryptoRuntime(container),
+      authkit,
+      controlPlaneVerifyTenant:
+        resolveTopology(config) === 'control-plane' ? config.controlPlane?.verifyTenant : undefined,
+      keys: () =>
+        appKey !== undefined && appKey.length >= 16
+          ? consoleCommandKeys(appKey, option.prefix)
+          : undefined,
+      logKey: (note) => logger[note.level](note.line),
+    });
+    // Redis is not a trust boundary: an app that cannot tell the real console from anyone who can
+    // publish there does not start.
+    if (auth.modes.length === 0) throw answeringAuthError(auth.notes);
+    const actions =
+      option.actions.size > 0
+        ? 'actions on'
+        : 'actions off (set consoleCommands.actions to let the console act)';
+    logger.info(`[@adonis-agora/payments] console commands: ${auth.modes.join(' + ')}; ${actions}`);
+    // §2e.B / §13a: the app publishes its command key only when token mode is how it is reached
+    // (no crypto): a published key is what tells the console to use a token. With crypto, crypto
+    // is enough: nothing is published and nothing is logged (§13e).
+    if (auth.keys && publishesAppKey(auth)) {
+      if (typeof authkit?.publishAppKey === 'function') {
+        // Only the public half; the call never rejects and retries in the background.
+        const { d: _private, ...jwk } = auth.keys.publicKey;
+        try {
+          void authkit.publishAppKey({ purpose: CONSOLE_KEY_PURPOSE, jwk }).catch(() => undefined);
+        } catch {
+          /* never fails the boot */
+        }
+      } else if (authkit !== undefined) {
+        logger.warn(
+          "[@adonis-agora/payments] console commands: this app is reached by token only, but authkit-client cannot publish its key (configure authkit-client's `service`), so the console needs `controlPlane.publicKey` (`node ace payments:console-key`)",
+        );
+      }
+    }
+    if (auth.ensureKey) {
+      try {
+        const done = await auth.ensureKey();
+        if (done) logger.info(`[@adonis-agora/payments] console commands: ${done}`);
+      } catch (error) {
+        // Never fails the boot: one actionable line, and the first command tries again.
+        logger.warn(
+          `[@adonis-agora/payments] console commands: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    // A crypto tenant's key: checked once (never fails the boot; one line when it needs action).
+    await auth.checkKey?.();
+    this.#consoleCommands = { option, auth };
+  }
+
+  async #answerConsoleCommands(): Promise<void> {
+    const resolved = this.#consoleCommands;
+    if (!resolved) return;
+    const config = this.app.config.get<PaymentsConfig>('payments', {});
+    const logger = await this.app.container.make('logger');
+    const { option, auth } = resolved;
+    const keys = auth.keys;
     try {
-      const option = resolveConsoleCommands(config.consoleCommands, this.#packageName());
-      if (!option) return;
       const client = await resolveRedisConnection(this.app.container, option.connection);
       let idempotency = option.idempotency;
       if (!idempotency) {
@@ -503,8 +604,14 @@ export default class PaymentsProvider {
       this.#consoleChannel = await answerPaymentsConsoleCommands({
         client,
         prefix: option.prefix,
+        partition: option.partition,
         actions: option.actions,
         idempotency,
+        ...(auth.secret !== undefined ? { secret: auth.secret } : {}),
+        ...(auth.crypto !== undefined ? { crypto: auth.crypto } : {}),
+        ...(auth.verifyTenant !== undefined ? { verifyTenant: auth.verifyTenant } : {}),
+        ...(auth.cryptoTokenOptional ? { cryptoTokenOptional: true } : {}),
+        ...(keys ? { keys } : {}),
         runtime: {
           currency: typeof dashboard?.currency === 'string' ? dashboard.currency : 'BRL',
           store: () => getBillingStore(),
@@ -530,10 +637,15 @@ export default class PaymentsProvider {
           },
         },
         log: (line) => logger.info(line),
-        onError: (error) =>
+        // A rejected or garbage message is dropped and logged once per reason: anyone who can
+        // publish on Redis must not be able to flood the log, nor crash the process.
+        onError: oncePerReason((error: unknown) =>
           logger.warn(
-            `[@adonis-agora/payments] federated console command failed: ${error instanceof Error ? error.message : String(error)}`,
+            error instanceof ConsoleCommandRefused
+              ? `[@adonis-agora/payments] console commands: refused a command (${error.reason})`
+              : `[@adonis-agora/payments] console commands: ${error instanceof Error ? error.message : String(error)}`,
           ),
+        ),
       });
     } catch (error) {
       logger.warn(
@@ -913,4 +1025,22 @@ export async function handleWebhookDelivery(
       return ctx.response.status(400).json({ error: message });
     }
   });
+}
+
+/**
+ * An error reporter that logs each distinct reason once (the first 200 distinct reasons), so a
+ * stream of bad messages costs one line per kind. Never throws.
+ */
+function oncePerReason(log: (error: unknown) => void): (error: unknown) => void {
+  const seen = new Set<string>();
+  return (error) => {
+    try {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (seen.has(reason) || seen.size >= 200) return;
+      seen.add(reason);
+      log(error);
+    } catch {
+      /* logging never breaks the channel */
+    }
+  };
 }

@@ -161,4 +161,22 @@ describe('federated console', () => {
       'Read-only here',
     );
   });
+
+  it('a viewer whose access does not include refunds sees Refund disabled on this app', async () => {
+    window.history.replaceState(null, '', '/#/payments');
+    injectConfig({ actions: ['retry'] });
+    stubApi(APPS);
+    renderApp();
+    const refund = await screen.findByRole('button', { name: 'Refund' });
+    await waitFor(() => expect(refund.hasAttribute('disabled')).toBe(true));
+    expect(refund.getAttribute('title')).toContain('does not include this action');
+  });
+
+  it('a viewer authorize did not narrow keeps Refund enabled', async () => {
+    window.history.replaceState(null, '', '/#/payments');
+    stubApi(APPS);
+    renderApp();
+    const refund = await screen.findByRole('button', { name: 'Refund' });
+    await waitFor(() => expect(refund.hasAttribute('disabled')).toBe(false));
+  });
 });

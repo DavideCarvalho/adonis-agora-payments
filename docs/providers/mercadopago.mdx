@@ -88,8 +88,8 @@ the resource afterwards, and there is no webhook variant that carries the paymen
 
 So `parseWebhook` verifies the `x-signature` HMAC and then **fetches the resource**:
 `GET /v1/payments/{id}` for the `payment` topic, `GET /preapproval/{id}` for
-`subscription_preapproval`, and for `topic_chargebacks_wh` the payment named by
-`data.payment_id` plus the case itself (see [Chargebacks](#chargebacks-and-mediations)).
+`subscription_preapproval`, and for `topic_chargebacks_wh` the case itself and then the payment
+the case names (see [Chargebacks](#chargebacks-and-mediations).
 What you get back is a fully populated event — status, amount, currency and your
 `externalReference`:
 
@@ -99,17 +99,50 @@ What you get back is a fully populated event — status, amount, currency and yo
 ```
 
 One extra API call per notification is Mercado Pago's design, not an inefficiency of the
-driver; the mounted `/payments/webhook/mercadopago` route pays it for you. With `webhookSecret`
-configured, a **redelivery** skips it: the route reads the notification's id from the signed body
-and, when the ledger already holds that event as `received` or `processed`, answers `200` without
-fetching. A failed or unseen event, and every delivery without a secret, is fetched as above. **A failed fetch
-throws**, so the route answers 400 and Mercado Pago retries — reporting a status the
-gateway did not confirm would be worse than a retry.
+driver; the mounted `/payments/webhook/mercadopago` route pays it for you, redeliveries included.
+**A failed fetch throws**, so the route answers 400 and Mercado Pago retries — reporting a status
+the gateway did not confirm would be worse than a retry.
 
-The one exception is `subscription_authorized_payment`, a subscription's recurring charge.
-It is read from `/authorized_payments/{id}`, whose response shape this driver has not
-verified against the reference, so it is left as `payment.updated` carrying the id rather
-than mapped from guessed field names. Fetch it yourself if you need the charge's status.
+### What the signature covers, and the ledger id
+
+The signature covers `data.id`, the `x-request-id` and `ts`, and nothing else in the body. So the
+driver believes nothing else in it:
+
+- **The ledger id** is built from the signed `data.id` and the state Mercado Pago returns for it:
+  `mercadopago:payment:<id>:<status>:<status_detail>`,
+  `mercadopago:chargeback:<case>:<payment>:<status>:<status_detail>`,
+  `mercadopago:preapproval:<id>:<status>`. It is never the body's own `id`. A captured signed
+  request replayed with a rewritten `id` lands on the same ledger row as the genuine one and is
+  skipped; it cannot claim the id of a later delivery. Two notifications about a payment in the
+  same state are one row (the second is a redelivery).
+- **Freshness:** a `ts` more than 5 minutes from the server's clock (either way) is refused, so a
+  captured request cannot be replayed later. Keep the server's clock in sync (NTP).
+- **Chargebacks:** the payment comes from the case Mercado Pago returns, never from the body's
+  `data.payment_id`.
+
+Because the ledger id depends on the fetched state, no id is known before the fetch: a redelivery
+is fetched again and the ledger runs it once.
+
+<Callout title="Upgrading: ledger ids changed">
+Earlier releases used the body's `id` (else `<action>-<data.id>`) as the ledger id. Each event now
+also carries that old id in `legacyIds`, and the processor treats a ledger row under it (`received`
+or `processed`) as this event, so a delivery recorded before the upgrade and redelivered after it
+does not run twice. The compatibility check is kept through 1.x and removed in 2.0, long after
+Mercado Pago has stopped redelivering anything recorded before your upgrade. Code that looked up
+ledger rows by Mercado Pago's notification id should look up the new ids.
+</Callout>
+
+`subscription_authorized_payment`, a subscription's recurring charge, is read from
+`GET /authorized_payments/{id}`. Only two of its fields are used: `payment.id`, the payment it
+made, which is then fetched and mapped like any other payment (ledger id
+`mercadopago:authorized_payment:<id>:<payment>:<status>:<status_detail>`), and `preapproval_id`,
+carried as `subscriptionId`. A charge with no payment yet (scheduled, retrying) is acknowledged
+without an event; Mercado Pago notifies again once it is processed.
+
+**Any other topic** (`merchant_order`, `topic_claims_integration_wh`, …) is acknowledged with `200`
+and nothing else: no ledger row, no event, one `console.debug` line. The notification's `type` is
+not signed, so an event built from it would let a replayed request mint ledger rows of any type.
+A signed request replayed under a looked-up type is refused by the lookup itself (`404`).
 
 <Callout type="warn" title="The signature is computed over the query string">
 Mercado Pago builds the manifest from the `data.id` **query parameter**, and the driver
@@ -155,16 +188,17 @@ driver handles:
 ```
 
 `data.id` there is the **chargeback case** id (`GET /v1/chargebacks/{id}`), *not* a payment
-id — so the driver fetches the payment named by `data.payment_id` and files the dispute
-against that. A notification with no `payment_id` stays `payment.updated` rather than
-writing a row under a case id nothing reconciles. Mercado Pago sends one action string for
+id. The driver reads the case first and files the dispute against the payment(s) the case lists
+(`payments`), one event each; the body's `data.payment_id` is not signed and is not used. A case
+Mercado Pago does not return, or one with no payment, is refused (400, and Mercado Pago retries)
+rather than writing a row under a case id nothing reconciles. Mercado Pago sends one action string for
 opening *and* for every later status change, so what the event means is decided by the
 payment's status, not by the notification.
 
 ### The deadline is on the case, so the chargeback topic fetches it
 
 On `topic_chargebacks_wh` — and only there, because it is the only notification that names a
-case — the driver makes a **second** call, `GET /v1/chargebacks/{data.id}`, for the one field
+case — the case the driver reads (`GET /v1/chargebacks/{data.id}`) also carries the one field
 that makes a Mercado Pago dispute actionable:
 
 | Chargeback field | Normalized |
@@ -176,10 +210,8 @@ that makes a Mercado Pago dispute actionable:
 `date_documentation_deadline` is `null` whenever `documentation_required` is false: there is
 nothing to defend, so there is no clock, and the event carries no `actionableUntil`.
 
-That second call **fails soft**, unlike the payment fetch. By the time it runs the money
-question is already answered by the payment's status; throwing would turn a chargeback the
-driver read correctly into a 400 and a redelivery. A missing deadline costs an operator
-context, a dropped chargeback costs the row.
+The case is where the payment comes from, so a failed case lookup **throws** like the payment
+fetch: the route answers 400 and Mercado Pago retries.
 
 ### No pre-dispute warning exists here
 
@@ -189,7 +221,7 @@ is nothing for this driver to map onto `payment.dispute_warning`, and it does no
 
 The nearest thing is `topic_claims_integration_wh` ("creation of refunds and claims"), whose
 `data.id` is a **claim** id with no payment beside it — nothing to file a warning against —
-so it is left unmapped and reaches your handlers under its own name.
+so it is acknowledged without an event (see above): no handler runs for it.
 
 ## Authorized, not captured
 

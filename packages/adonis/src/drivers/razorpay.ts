@@ -303,7 +303,9 @@ export class RazorpayDriver implements PaymentsDriver {
 
   async findCustomer(customerId: string): Promise<Customer | null> {
     try {
-      const data = await this.#request<RazorpayCustomerResponse>(`/customers/${customerId}`);
+      const data = await this.#request<RazorpayCustomerResponse>(
+        `/customers/${encodeURIComponent(customerId)}`,
+      );
       return this.#mapCustomer(data);
     } catch (error) {
       if (isNotFound(error)) return null;
@@ -317,10 +319,13 @@ export class RazorpayDriver implements PaymentsDriver {
       ...(input.email !== undefined ? { email: input.email } : {}),
       ...(typeof input.metadata?.contact === 'string' ? { contact: input.metadata.contact } : {}),
     };
-    const data = await this.#request<RazorpayCustomerResponse>(`/customers/${customerId}`, {
-      method: 'PUT',
-      body,
-    });
+    const data = await this.#request<RazorpayCustomerResponse>(
+      `/customers/${encodeURIComponent(customerId)}`,
+      {
+        method: 'PUT',
+        body,
+      },
+    );
     return this.#mapCustomer(data);
   }
 
@@ -378,15 +383,19 @@ export class RazorpayDriver implements PaymentsDriver {
   async findPayment(gatewayId: string): Promise<Payment | null> {
     try {
       if (gatewayId.startsWith(ORDER_PREFIX)) {
-        return this.#mapOrder(await this.#request<RazorpayOrderResponse>(`/orders/${gatewayId}`));
+        return this.#mapOrder(
+          await this.#request<RazorpayOrderResponse>(`/orders/${encodeURIComponent(gatewayId)}`),
+        );
       }
       if (gatewayId.startsWith(PAYMENT_LINK_PREFIX)) {
         return this.#mapPaymentLink(
-          await this.#request<RazorpayPaymentLinkResponse>(`/payment_links/${gatewayId}`),
+          await this.#request<RazorpayPaymentLinkResponse>(
+            `/payment_links/${encodeURIComponent(gatewayId)}`,
+          ),
         );
       }
       return this.#mapPayment(
-        await this.#request<RazorpayPaymentResponse>(`/payments/${gatewayId}`),
+        await this.#request<RazorpayPaymentResponse>(`/payments/${encodeURIComponent(gatewayId)}`),
       );
     } catch (error) {
       if (isNotFound(error)) return null;
@@ -408,7 +417,7 @@ export class RazorpayDriver implements PaymentsDriver {
       ...(amount !== undefined ? { amount } : {}),
     };
     const data = await this.#request<RazorpayRefundResponse>(
-      `/payments/${paymentGatewayId}/refund`,
+      `/payments/${encodeURIComponent(paymentGatewayId)}/refund`,
       {
         method: 'POST',
         body,
@@ -449,7 +458,7 @@ export class RazorpayDriver implements PaymentsDriver {
     currency?: string,
   ): Promise<Payment> {
     const data = await this.#request<RazorpayPaymentResponse>(
-      `/payments/${paymentGatewayId}/capture`,
+      `/payments/${encodeURIComponent(paymentGatewayId)}/capture`,
       {
         method: 'POST',
         body: { amount, currency: (currency ?? this.#currency).toUpperCase() },
@@ -598,7 +607,7 @@ export class RazorpayDriver implements PaymentsDriver {
     options?: { atPeriodEnd?: boolean },
   ): Promise<Subscription> {
     const data = await this.#request<RazorpaySubscriptionResponse>(
-      `/subscriptions/${subscriptionGatewayId}/cancel`,
+      `/subscriptions/${encodeURIComponent(subscriptionGatewayId)}/cancel`,
       { method: 'POST', body: { cancel_at_cycle_end: options?.atPeriodEnd === true } },
     );
     const subscription = this.#mapSubscription(data);
@@ -648,7 +657,7 @@ export class RazorpayDriver implements PaymentsDriver {
           : 'now',
     };
     const data = await this.#request<RazorpaySubscriptionResponse>(
-      `/subscriptions/${subscriptionGatewayId}`,
+      `/subscriptions/${encodeURIComponent(subscriptionGatewayId)}`,
       { method: 'PATCH', body },
     );
     // No diagnostics event here: `publishSubscriptionDiagnostics` only knows
@@ -659,7 +668,9 @@ export class RazorpayDriver implements PaymentsDriver {
 
   async findSubscription(gatewayId: string): Promise<Subscription | null> {
     try {
-      const data = await this.#request<RazorpaySubscriptionResponse>(`/subscriptions/${gatewayId}`);
+      const data = await this.#request<RazorpaySubscriptionResponse>(
+        `/subscriptions/${encodeURIComponent(gatewayId)}`,
+      );
       return this.#mapSubscription(data);
     } catch (error) {
       if (isNotFound(error)) return null;

@@ -48,9 +48,15 @@ and answers as a redelivery. Re-claiming a `failed` row is a single `UPDATE … 
 'failed'`, so of two concurrent retries only one gets it.
 
 Mercado Pago and Mollie have to fetch the resource a notification names before they can build the
-event. With a webhook secret configured, the mounted route reads the event id from the signed body
-first and answers a redelivery of an event already `received` or `processed` without that fetch.
-Without a secret the fetch is what authenticates the call, so the delivery is parsed in full.
+event. For Mollie's signed events, the mounted route reads the event id from the signed body first
+and answers a redelivery of an event already `received` or `processed` without that fetch. Mercado
+Pago's signature does not cover the body's `id`, so its ledger id is built from the signed `data.id`
+and the fetched state, and a redelivery is fetched again (the ledger still runs it once). Without a
+secret the fetch is what authenticates the call, so the delivery is parsed in full.
+
+An event may also carry `legacyIds`: ids an earlier release gave the same delivery. A ledger row
+under one of them (`received` or `processed`) makes the event a redelivery. Mercado Pago sets it
+through 1.x, since its ledger ids changed.
 
 ## A failed event is claimable again
 

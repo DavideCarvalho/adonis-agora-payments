@@ -93,11 +93,11 @@ describe('driver webhook-verification state', () => {
  * safe configuration stopped booting, and the only way out was `allowUnverifiedWebhooks`,
  * which would ALSO have silenced a genuinely missing next-gen secret.
  */
-describe('Mollie declares the classic flow as unsupported, not unconfigured', () => {
+describe('Mollie declares the classic flow as confirmed, not unconfigured', () => {
   it('boots on the classic flow with no webhook secret', async () => {
     const { MollieDriver } = await import('../src/drivers/mollie.js');
     const driver = new MollieDriver({} as never, { apiKey: 'test_key', currency: 'eur' });
-    expect(driver.webhookVerification).toBe('unsupported');
+    expect(driver.webhookVerification).toBe('confirmed');
   });
 
   it('still demands the secret once next-gen webhooks are in use', async () => {

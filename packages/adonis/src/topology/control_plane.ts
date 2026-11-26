@@ -576,13 +576,52 @@ export function createPaymentsControlPlane(
     // Any customer or subscription an input names must be this app's too.
     const first = args[0];
     if (isRecord(first)) {
-      const customerId = str(first.customerId);
-      if (customerId !== undefined) {
+      if (first.customerId !== undefined && first.customerId !== null) {
+        const customerId = str(first.customerId);
+        if (customerId === undefined) {
+          throw new PaymentsHubError(
+            'bad_request',
+            `${call}: \`customerId\` must be a non-empty string`,
+          );
+        }
         await assertOwns(tenant.partition, 'customer', customerId, driver.provider);
       }
-      const subscriptionId = str(first.subscriptionId);
-      if (subscriptionId !== undefined) {
-        await assertOwns(tenant.partition, 'subscription', subscriptionId, driver.provider);
+      // Every subscription it names, however it names it: the card calls carry them as
+      // `subscriptionGatewayIds[]` (cardSetup, saveCard) or `subscriptionGatewayId`
+      // (cardUpdateUrl), and the driver moves each one's card.
+      const subscriptionIds: string[] = [];
+      for (const key of ['subscriptionId', 'subscriptionGatewayId'] as const) {
+        if (first[key] === undefined || first[key] === null) continue;
+        const id = str(first[key]);
+        if (id === undefined) {
+          throw new PaymentsHubError(
+            'bad_request',
+            `${call}: \`${key}\` must be a non-empty string`,
+          );
+        }
+        subscriptionIds.push(id);
+      }
+      const many = first.subscriptionGatewayIds;
+      if (many !== undefined && many !== null) {
+        if (!Array.isArray(many)) {
+          throw new PaymentsHubError(
+            'bad_request',
+            `${call}: \`subscriptionGatewayIds\` must be a list of subscription ids`,
+          );
+        }
+        for (const entry of many) {
+          const id = str(entry);
+          if (id === undefined) {
+            throw new PaymentsHubError(
+              'bad_request',
+              `${call}: every \`subscriptionGatewayIds\` entry must be a non-empty string`,
+            );
+          }
+          subscriptionIds.push(id);
+        }
+      }
+      for (const id of new Set(subscriptionIds)) {
+        await assertOwns(tenant.partition, 'subscription', id, driver.provider);
       }
     }
 

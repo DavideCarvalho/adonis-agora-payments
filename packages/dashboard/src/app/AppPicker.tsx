@@ -7,6 +7,7 @@ import {
   type FederatedAppInfo,
   paymentsClient,
   selectedApp,
+  viewerMayRun,
 } from '../client/payments-client';
 
 /** The picker's id for this console's own app (never a valid federated key: `~` is refused). */
@@ -54,9 +55,15 @@ export function useFederatedApp(): FederatedAppInfo | undefined {
   return picker?.apps.find((a) => a.id === app);
 }
 
-/** Why the console's actions are off for the picked app (read-only federated), else undefined. */
-export function useActionsBlocked(): string | undefined {
+/**
+ * Why the console's action `action` is off: the viewer's access does not include it (this
+ * console's `authorize`), or the picked app is read-only here. `undefined` when it can run.
+ */
+export function useActionsBlocked(action?: string): string | undefined {
   const federated = useFederatedApp();
+  if (action !== undefined && !viewerMayRun(action)) {
+    return 'Your access to this console does not include this action.';
+  }
   if (!federated) return undefined;
   return actionsUnavailableReason(federated.label, federated);
 }

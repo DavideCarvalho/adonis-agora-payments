@@ -372,7 +372,7 @@ export class SquareDriver implements PaymentsDriver {
   async findCustomer(customerId: string): Promise<Customer | null> {
     try {
       const data = await this.#request<{ customer: SquareCustomerResponse }>(
-        `/customers/${customerId}`,
+        `/customers/${encodeURIComponent(customerId)}`,
       );
       return this.#mapCustomer(data.customer);
     } catch (error) {
@@ -392,7 +392,7 @@ export class SquareDriver implements PaymentsDriver {
       ...this.#taxIds(input.taxId, input.metadata),
     };
     const data = await this.#request<{ customer: SquareCustomerResponse }>(
-      `/customers/${customerId}`,
+      `/customers/${encodeURIComponent(customerId)}`,
       { method: 'PUT', body },
     );
     return this.#mapCustomer(data.customer);
@@ -465,7 +465,7 @@ export class SquareDriver implements PaymentsDriver {
   async findPayment(gatewayId: string): Promise<Payment | null> {
     try {
       const data = await this.#request<{ payment: SquarePaymentResponse }>(
-        `/payments/${gatewayId}`,
+        `/payments/${encodeURIComponent(gatewayId)}`,
       );
       return this.#mapPayment(data.payment);
     } catch (error) {
@@ -530,7 +530,7 @@ export class SquareDriver implements PaymentsDriver {
    */
   async completePayment(paymentGatewayId: string): Promise<Payment> {
     const data = await this.#request<{ payment: SquarePaymentResponse }>(
-      `/payments/${paymentGatewayId}/complete`,
+      `/payments/${encodeURIComponent(paymentGatewayId)}/complete`,
       { method: 'POST', body: {} },
     );
     const payment = this.#mapPayment(data.payment);
@@ -667,7 +667,7 @@ export class SquareDriver implements PaymentsDriver {
       );
     }
     const data = await this.#request<{ subscription: SquareSubscriptionResponse }>(
-      `/subscriptions/${subscriptionGatewayId}/cancel`,
+      `/subscriptions/${encodeURIComponent(subscriptionGatewayId)}/cancel`,
       { method: 'POST', body: {} },
     );
     const subscription = this.#mapSubscription(data.subscription);
@@ -703,13 +703,13 @@ export class SquareDriver implements PaymentsDriver {
     }
     if (typeof planVariationId === 'string') {
       const swapped = await this.#request<{ subscription: SquareSubscriptionResponse }>(
-        `/subscriptions/${subscriptionGatewayId}/swap-plan`,
+        `/subscriptions/${encodeURIComponent(subscriptionGatewayId)}/swap-plan`,
         { method: 'POST', body: { new_plan_variation_id: planVariationId } },
       );
       return this.#mapSubscription(swapped.subscription);
     }
     const data = await this.#request<{ subscription: SquareSubscriptionResponse }>(
-      `/subscriptions/${subscriptionGatewayId}`,
+      `/subscriptions/${encodeURIComponent(subscriptionGatewayId)}`,
       { method: 'PUT', body: { subscription: { card_id: cardId } } },
     );
     return this.#mapSubscription(data.subscription);
@@ -718,7 +718,7 @@ export class SquareDriver implements PaymentsDriver {
   async findSubscription(gatewayId: string): Promise<Subscription | null> {
     try {
       const data = await this.#request<{ subscription: SquareSubscriptionResponse }>(
-        `/subscriptions/${gatewayId}`,
+        `/subscriptions/${encodeURIComponent(gatewayId)}`,
       );
       return this.#mapSubscription(data.subscription);
     } catch (error) {
@@ -768,7 +768,7 @@ export class SquareDriver implements PaymentsDriver {
     const card = data.card;
     for (const subscription of input.subscriptionGatewayIds ?? []) {
       await this.#request<{ subscription: SquareSubscriptionResponse }>(
-        `/subscriptions/${subscription}`,
+        `/subscriptions/${encodeURIComponent(subscription)}`,
         { method: 'PUT', body: { subscription: { card_id: card.id } } },
       );
     }
@@ -1289,7 +1289,7 @@ export class SquareDriver implements PaymentsDriver {
 
   async #paymentAmount(paymentGatewayId: string): Promise<{ amount: number; currency: string }> {
     const data = await this.#request<{ payment: SquarePaymentResponse }>(
-      `/payments/${paymentGatewayId}`,
+      `/payments/${encodeURIComponent(paymentGatewayId)}`,
     );
     const amount = data.payment.amount_money?.amount;
     if (amount === undefined) {

@@ -20,6 +20,8 @@ export interface VerifiedTenant {
   clientId?: string;
   /** Epoch ms after which calls with this token must stop. */
   expiresAt?: number;
+  /** The calling app, for an authkit app-call token (its audience already names this app). */
+  app?: string;
 }
 
 /** What a verifier receives. Only `token` is trusted, once verified. */

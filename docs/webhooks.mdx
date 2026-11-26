@@ -75,13 +75,14 @@ export default defineConfig({
 
 ### Enforcement policy
 
-Every driver declares one of three states, and the app **refuses to boot** on the middle one:
+Every driver declares one of four states, and the app **refuses to boot** on `'unconfigured'`:
 
 | `webhookVerification` | Meaning | At boot |
 | --- | --- | --- |
 | `'configured'` | it can verify, and the credential is set | mounts the route, strict |
 | `'unconfigured'` | it *can* verify and nothing was configured | **throws** |
-| `'unsupported'` | the gateway signs nothing at all — Efí and InfinitePay | mounts the route |
+| `'confirmed'` | the gateway signs nothing, so the driver reads every payment back from the gateway before emitting anything — Efí, InfinitePay, and Mollie's classic flow | mounts the route |
+| `'unsupported'` | the driver does not authenticate deliveries itself (a custom driver that never said) | mounts the route |
 
 Strict means what it says: requests missing the header, with a wrong signature, or with a
 tampered body are rejected, and all comparisons are timing-safe.
@@ -109,8 +110,9 @@ export default defineConfig({
 ```
 
 `allowUnverifiedWebhooks: true` opts every provider out at once, which is almost never what you
-want. Efí and InfinitePay never trip this: they report `'unsupported'`, because their gateways sign
-nothing and there is no credential to forget.
+want. Efí, InfinitePay and Mollie (classic) never trip this: they report `'confirmed'` — their gateways sign
+nothing, so each delivery is confirmed with the gateway before anything is emitted, and there is
+no credential to forget.
 </Callout>
 
 ## The lifecycle of a webhook

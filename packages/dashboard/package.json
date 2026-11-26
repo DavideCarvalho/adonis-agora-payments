@@ -1,6 +1,6 @@
 {
   "name": "@adonis-agora/payments-dashboard",
-  "version": "1.0.0-rc.20",
+  "version": "1.0.0",
   "description": "Billing console (revenue/subscription/usage overview, payment history, webhook-event ledger) for @adonis-agora/payments — a React SPA served by a thin AdonisJS provider. Part of the Agora ecosystem.",
   "license": "MIT",
   "repository": {
@@ -41,7 +41,7 @@
     "typecheck": "tsc -p tsconfig.spa.json --noEmit"
   },
   "devDependencies": {
-    "@adonis-agora/filter-client": "1.0.0-rc.1",
+    "@adonis-agora/filter-client": "1.0.0",
     "@base-ui/react": "1.9.0",
     "@fontsource/jetbrains-mono": "5.3.0",
     "@fontsource/sora": "5.3.0",

@@ -2,7 +2,7 @@
 '@adonis-agora/payments': minor
 ---
 
-Security: federated console commands are authenticated, and webhook deliveries that gateways do not sign are confirmed with the gateway (reported privately).
+Security: federated console commands are authenticated, and webhook deliveries that gateways do not sign are confirmed with the gateway (found in an internal security audit).
 
 Before, anything that could publish on the owning app's Redis could send a console command with any actor and any capabilities (`{"verb":"refund","capabilities":["*"]}` refunded through the gateway), and forge the answer.
 

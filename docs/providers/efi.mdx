@@ -115,17 +115,18 @@ billing tables. Refunds take it too — the driver resolves the settled Pix behi
 refunds against that `endToEndId`, because a Pix refund is made against the payment, not
 against the charge.
 
-## Webhooks are not authenticated by this driver
+## Webhooks are confirmed with Efí before anything is emitted
 
-Say it plainly: **`parseWebhook` verifies nothing for Efí, and there is nothing for it to
-verify.** The notification carries no signature header. Efí offers two other mechanisms,
-and both live outside what a driver can see:
+The notification carries no signature header, so **the driver does not trust its body.** Every
+Pix it names is read back from Efí (`GET /v2/pix/:e2eid`, over the driver's own mutual-TLS
+credentials) and the event — amount, txid, devoluções, MED — is built from that answer. A Pix Efí
+does not know refuses the whole delivery: the route answers `400`, files the refusal, and writes
+no ledger row, so a forged body can neither credit a payment nor take a genuine Pix's event id.
+A lookup that fails (network, 5xx) answers non-2xx and Efí redelivers. The driver declares
+`webhookVerification: 'confirmed'`; there is nothing to configure and `allowUnverifiedWebhooks`
+is not needed.
 
-This driver therefore declares `webhookVerification: 'unsupported'`, not `'unconfigured'`. The
-boot-time refusal that stops an app whose driver *can* verify and was given no credential does not
-apply here: there is no credential to forget, so `allowUnverifiedWebhooks` is not needed for Efí
-either. What the boot check cannot do is tell you whether the two mechanisms below are actually in
-place — that part is still yours.
+Efí's own mechanisms are still worth having in front of the route, as a second layer:
 
 - **Mutual TLS in reverse** — Efí presents *its* certificate to your endpoint and expects
   your server to validate it. That is a decision your TLS terminator makes, before the
@@ -136,9 +137,8 @@ place — that part is still yours.
   `request.qs().hmac` against your secret.
 
 Efí also documents that notifications currently originate from a single IP
-(`34.193.116.226`), which is worth an allow-list at the edge but is not authentication on
-its own. Treat the notification as a hint if you want belt and braces: `findPayment(txid)`
-re-reads the charge from Efí over mutual TLS, and that answer cannot be forged.
+(`34.193.116.226`), which is worth an allow-list at the edge. Without these, anyone can still
+make your app call `GET /v2/pix/:e2eid` once per request (rate-limit the route if that matters).
 
 Registering the URL is a call, not a dashboard toggle, so the driver exposes it:
 

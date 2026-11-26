@@ -2,7 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import type { EfiDriverConfig } from '../define_config.js';
-import { publishPaymentDiagnostics, publishRefundDiagnostics } from '../diagnostics.js';
+import {
+  publishPaymentDiagnostics,
+  publishRefundDiagnostics,
+  reportWebhookVerification,
+} from '../diagnostics.js';
 import type {
   ChargeInput,
   CheckoutInput,
@@ -234,7 +238,10 @@ export class EfiDriver implements PaymentsDriver {
     const reference = input.externalReference ?? input.idempotencyKey;
     const cob =
       reference !== undefined && isValidTxid(reference)
-        ? await this.#request<EfiCob>(`/v2/cob/${reference}`, { method: 'PUT', body })
+        ? await this.#request<EfiCob>(`/v2/cob/${encodeURIComponent(reference)}`, {
+            method: 'PUT',
+            body,
+          })
         : await this.#request<EfiCob>('/v2/cob', { method: 'POST', body });
 
     const payment = this.#mapCob(cob);
@@ -246,7 +253,7 @@ export class EfiDriver implements PaymentsDriver {
 
   async findPayment(gatewayId: string): Promise<Payment | null> {
     try {
-      const cob = await this.#request<EfiCob>(`/v2/cob/${gatewayId}`);
+      const cob = await this.#request<EfiCob>(`/v2/cob/${encodeURIComponent(gatewayId)}`);
       return this.#mapCob(cob);
     } catch (error) {
       if (isNotFound(error)) return null;
@@ -274,10 +281,13 @@ export class EfiDriver implements PaymentsDriver {
     // the idempotency key on their side, so a retry with the same id is not a second refund.
     const refundId =
       idempotencyKeyAsRefundId(options?.idempotencyKey) ?? randomUUID().replace(/-/g, '');
-    const data = await this.#request<EfiDevolucao>(`/v2/pix/${endToEndId}/devolucao/${refundId}`, {
-      method: 'PUT',
-      body: { valor: value },
-    });
+    const data = await this.#request<EfiDevolucao>(
+      `/v2/pix/${encodeURIComponent(endToEndId)}/devolucao/${encodeURIComponent(refundId)}`,
+      {
+        method: 'PUT',
+        body: { valor: value },
+      },
+    );
     const refund: Refund = {
       id: data.id ?? refundId,
       gatewayId: data.rtrId ?? data.id ?? refundId,
@@ -313,7 +323,10 @@ export class EfiDriver implements PaymentsDriver {
     const reference = input.externalReference ?? input.idempotencyKey;
     const cob =
       reference !== undefined && isValidTxid(reference)
-        ? await this.#request<EfiCob>(`/v2/cob/${reference}`, { method: 'PUT', body })
+        ? await this.#request<EfiCob>(`/v2/cob/${encodeURIComponent(reference)}`, {
+            method: 'PUT',
+            body,
+          })
         : await this.#request<EfiCob>('/v2/cob', { method: 'POST', body });
     return {
       id: cob.txid,
@@ -408,32 +421,35 @@ export class EfiDriver implements PaymentsDriver {
   /**
    * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
    *
-   * Efí's Pix callback carries no signature at all: authenticity comes from the mutual-TLS
-   * handshake at your edge, or from an `hmac` QUERY parameter this method never sees. There is
-   * nothing to configure, so there is nothing for the boot check to demand.
+   * Efí's Pix callback carries no signature at all (authenticity is meant to come from the
+   * mutual-TLS handshake at your edge, or from an `hmac` QUERY parameter this method never
+   * sees). So the driver does not trust the body: every Pix it names is read back from Efí
+   * (`GET /v2/pix/:e2eid`, over the driver's own mTLS credentials) and the event is built from
+   * that answer. Nothing to configure; mTLS at the edge stays a good second layer.
    */
   get webhookVerification(): WebhookVerificationState {
-    return 'unsupported';
+    return 'confirmed';
   }
 
-  parseWebhook(
+  async parseWebhook(
     rawBody: string,
     _headers: Record<string, string | string[] | undefined>,
-  ): WebhookEvent | WebhookEvent[] {
-    // NOTHING IS VERIFIED HERE, and that is not an oversight. Efí's Pix notification
-    // carries no signature header: authenticity is meant to come from the mutual TLS
-    // handshake at your edge, or from an `hmac` query parameter — and a query parameter is
-    // part of the URL, which this method never sees (the route hands it the body and the
-    // headers only). See the Efí provider docs for where to enforce it instead.
+  ): Promise<WebhookEvent | WebhookEvent[]> {
+    // The body is unsigned: it is read only for the endToEndIds it names. Each one is
+    // confirmed with Efí (`GET /v2/pix/:e2eid`) and the event — amount, txid, devoluções, MED —
+    // is built from the gateway's answer, so a forged body can neither invent a payment nor
+    // take the event id of a genuine one with made-up data.
     //
-    // Note what this means for a batch: with nothing signing the body, there is no per-entry
-    // signature to check either, so unlike Adyen there is no per-item verification to get
-    // right — the whole delivery is as trusted as the transport that carried it, and no more.
+    // Note what this means for a batch: every entry is looked up on its own, and one that Efí
+    // does not know refuses the whole delivery (nothing is emitted, so nothing is ledgered).
     let payload: { pix?: unknown; evento?: unknown };
     try {
       payload = JSON.parse(rawBody) as { pix?: unknown; evento?: unknown };
     } catch {
       throw new Error('[payments] Efí webhook body is not JSON.');
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new Error('[payments] Efí webhook body is not a JSON object.');
     }
 
     if (!('pix' in payload)) {
@@ -459,22 +475,55 @@ export class EfiDriver implements PaymentsDriver {
     // One event per Pix, each keyed on its own endToEndId, so the ledger gives each one its
     // own row: a redelivery of the batch re-runs only the entries that have not been
     // processed, and a batch where one entry fails does not re-grant the ones that did not.
-    const events = (list as EfiPixNotification[]).map((pix) =>
-      this.#mapPixNotification(pix, payload),
-    );
+    let confirmed: EfiPixNotification[];
+    try {
+      confirmed = await Promise.all(list.map((entry) => this.#confirmPix(entry)));
+    } catch (error) {
+      reportWebhookVerification('gateway-lookup', false);
+      throw error;
+    }
+    reportWebhookVerification('gateway-lookup', true);
+    const events = confirmed.map((pix) => this.#mapPixNotification(pix));
     return events.length === 1 ? events[0]! : events;
   }
 
-  /** One entry of the `pix` array → one normalized event. */
-  #mapPixNotification(
-    pix: EfiPixNotification,
-    payload: { pix?: unknown; evento?: unknown },
-  ): WebhookEvent {
-    // The envelope narrowed to THIS Pix rather than the whole delivery: the ledger stores
-    // `raw` per event, and a row holding the whole batch could not say which entry it is
-    // about. Still a valid Efí notification body, and identical to the delivery for a
-    // single entry.
-    const raw = { ...payload, pix: [pix] } as Record<string, unknown>;
+  /**
+   * The Pix an unsigned notification entry names, as Efí itself reports it. Refuses (throws)
+   * when the entry names no endToEndId, or Efí does not know it: the route then answers `400`
+   * and files the delivery as refused, without a ledger row.
+   */
+  async #confirmPix(entry: unknown): Promise<EfiPixNotification> {
+    const endToEndId = (entry as { endToEndId?: unknown } | null)?.endToEndId;
+    if (typeof endToEndId !== 'string' || !/^[A-Za-z0-9]{1,64}$/.test(endToEndId)) {
+      throw new Error(
+        '[payments] Efí webhook refused: a `pix` entry has no valid `endToEndId` to confirm it with.',
+      );
+    }
+    let pix: EfiPixNotification;
+    try {
+      pix = await this.#request<EfiPixNotification>(`/v2/pix/${encodeURIComponent(endToEndId)}`);
+    } catch (error) {
+      if (isNotFound(error)) {
+        throw new Error(
+          `[payments] Efí webhook refused: Efí does not know the Pix "${endToEndId}" (a forged delivery, or one for another account's credentials).`,
+        );
+      }
+      // A lookup that failed proves nothing: non-2xx, and Efí redelivers.
+      throw error;
+    }
+    if (pix?.endToEndId !== endToEndId || typeof pix.valor !== 'string') {
+      throw new Error(
+        `[payments] Efí webhook refused: \`GET /v2/pix/${endToEndId}\` did not answer with that Pix.`,
+      );
+    }
+    return pix;
+  }
+
+  /** One confirmed Pix (as `GET /v2/pix/:e2eid` returned it) → one normalized event. */
+  #mapPixNotification(pix: EfiPixNotification): WebhookEvent {
+    // A notification-shaped envelope around the Pix Efí confirmed — never the unsigned body —
+    // narrowed to this one Pix: the ledger stores `raw` per event.
+    const raw = { pix: [pix] } as Record<string, unknown>;
     const devolucoes = pix.devolucoes ?? [];
     // A Pix cannot be charged back — but it CAN be taken back. The Banco Central's MED
     // returns money to a payer who reported fraud or an operational failure, and it reaches
@@ -576,7 +625,7 @@ export class EfiDriver implements PaymentsDriver {
     const locId = cob.loc?.id;
     if (locId === undefined) return;
     try {
-      const qr = await this.#request<EfiLocQrCode>(`/v2/loc/${locId}/qrcode`);
+      const qr = await this.#request<EfiLocQrCode>(`/v2/loc/${encodeURIComponent(locId)}/qrcode`);
       if (qr.qrcode !== undefined && payment.pixCode === undefined) {
         payment.pixCode = qr.qrcode;
         payment.pixCopiaECola = qr.qrcode;
@@ -608,10 +657,12 @@ export class EfiDriver implements PaymentsDriver {
   /** The settled Pix behind a txid (or an endToEndId passed straight through). */
   async #resolveSettledPix(gatewayId: string): Promise<{ endToEndId: string; paidValue: string }> {
     if (isEndToEndId(gatewayId)) {
-      const value = await this.#request<{ valor?: string }>(`/v2/pix/${gatewayId}`);
+      const value = await this.#request<{ valor?: string }>(
+        `/v2/pix/${encodeURIComponent(gatewayId)}`,
+      );
       return { endToEndId: gatewayId, paidValue: value.valor ?? '0.00' };
     }
-    const cob = await this.#request<EfiCob>(`/v2/cob/${gatewayId}`);
+    const cob = await this.#request<EfiCob>(`/v2/cob/${encodeURIComponent(gatewayId)}`);
     const settled = cob.pix?.[0];
     if (settled === undefined) {
       throw new Error(

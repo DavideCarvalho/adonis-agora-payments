@@ -119,12 +119,22 @@ sha256=<hex>` — an HMAC-SHA256 over the raw body under a signing secret you ch
 `webhookSecret` and the driver switches to fail-closed: a request with no signature, or a
 wrong one, is rejected before anything is fetched.
 
-Leaving it unset is the classic flow, where the callback is a bare payment id and the authenticated
-fetch of that payment is what proves the call is genuine. The driver cannot tell the two apart from
-its credential slot, so it reports `'unconfigured'` and the app refuses to boot. **On the classic
-flow that refusal is a false positive** — name `mollie` in `allowUnverifiedWebhooks` and say in a
-comment that the fetch is the authentication. Note that Mollie's *payment* event types are still beta
-and enabled on request; the classic `webhookUrl` remains the supported path.
+Leaving it unset is the classic flow, and the driver reports `webhookVerification: 'confirmed'`:
+nothing to configure, and nothing in the unsigned request is believed. The id it names is only a
+lookup key:
+
+- `tr_…` is read back as `GET /payments/{id}`; the event type, amounts and ledger id
+  (`mollie:<id>:<status>`) come from Mollie's answer. Extra body fields (`status=paid`) are ignored.
+- `chb_…` (an unsigned next-gen chargeback snapshot) is read back as
+  `GET /payments/{paymentId}/chargebacks/{id}`; Mollie answers only when that chargeback belongs to
+  that payment, and the event is built from its answer (ledger id `mollie:<chb>:received|reversed`).
+- Anything else (a payment link, a malformed id), or a payment or chargeback Mollie does not
+  confirm, is refused: the route answers `400` and writes no ledger row, so a forged call can
+  neither change a payment nor take the event id of the real delivery. Set `webhookSecret` to
+  receive signed next-gen events for other resources.
+
+Note that Mollie's *payment* event types are still beta and enabled on request; the classic
+`webhookUrl` remains the supported path.
 
 A signed event still gets fetched. The signature proves who sent the event; it does not
 say what the payment is worth, and the built-in billing sync needs the amount. Signed

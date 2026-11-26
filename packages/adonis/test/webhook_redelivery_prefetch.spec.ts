@@ -22,7 +22,7 @@ import { InMemoryBillingStore } from '../src/testing/in_memory_billing_store.js'
 
 const MP_SECRET = 'whsec-mercadopago';
 const MP_REQUEST_ID = '2066ca19-c6f1-498a-be75-1923005edd06';
-const MP_TS = '1704908010';
+const MP_TS = String(Math.floor(Date.now() / 1000));
 
 function mpSignature(dataId: string): string {
   return createHmac('sha256', MP_SECRET)
@@ -127,25 +127,28 @@ afterEach(() => {
 });
 
 describe('Mercado Pago redeliveries', () => {
-  it('answer a signed redelivery from the ledger without fetching the payment again', async () => {
+  // The signature covers only `data.id`, the request id and `ts`, so the ledger id is built from
+  // the signed id and the FETCHED state: no id is known before the fetch, and a redelivery is
+  // fetched again. The ledger still runs it once.
+  const LEDGER_ID = 'mercadopago:payment:999999999:approved:';
+
+  it('run a signed redelivery once (fetched again, deduped by the ledger)', async () => {
     const fetchMock = gateway(MP_PAYMENT);
-    const { store, deliver } = route(mpDriver(MP_SECRET));
+    let runs = 0;
+    const { store, deliver } = route(mpDriver(MP_SECRET), {
+      'payment.succeeded': () => {
+        runs += 1;
+      },
+    });
 
     expect(await deliver(mpNotification('999999999'), mpHeaders('999999999'))).toBe(200);
     expect(await deliver(mpNotification('999999999'), mpHeaders('999999999'))).toBe(200);
+    // A new notification about the same, unchanged payment is the same ledger row too.
+    expect(await deliver(mpNotification('999999999', 2), mpHeaders('999999999'))).toBe(200);
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect((await store.findWebhookEventByGatewayEventId('12345'))?.status).toBe('processed');
-  });
-
-  it('still fetch for a NEW notification about the same payment', async () => {
-    const fetchMock = gateway(MP_PAYMENT);
-    const { deliver } = route(mpDriver(MP_SECRET));
-
-    await deliver(mpNotification('999999999', 1), mpHeaders('999999999'));
-    await deliver(mpNotification('999999999', 2), mpHeaders('999999999'));
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(runs).toBe(1);
+    expect((await store.findWebhookEventByGatewayEventId(LEDGER_ID))?.status).toBe('processed');
   });
 
   it('re-fetch and re-run an event whose previous attempt failed', async () => {
@@ -163,7 +166,7 @@ describe('Mercado Pago redeliveries', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(attempts).toBe(2);
-    expect((await store.findWebhookEventByGatewayEventId('12345'))?.status).toBe('processed');
+    expect((await store.findWebhookEventByGatewayEventId(LEDGER_ID))?.status).toBe('processed');
   });
 
   it('fetch every time when no webhook secret vouches for the body', async () => {
@@ -176,7 +179,7 @@ describe('Mercado Pago redeliveries', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('still refuse a forged signature naming an id the ledger has', async () => {
+  it('still refuse a forged signature', async () => {
     gateway(MP_PAYMENT);
     const { deliver } = route(mpDriver(MP_SECRET));
     await deliver(mpNotification('999999999'), mpHeaders('999999999'));
@@ -186,14 +189,23 @@ describe('Mercado Pago redeliveries', () => {
     );
   });
 
-  it('name the same ids parseWebhook gives the events', async () => {
-    gateway(MP_PAYMENT);
-    const driver = mpDriver(MP_SECRET);
-    for (const body of [mpNotification('999999999'), mpNotification('999999999', undefined)]) {
-      const headers = mpHeaders('999999999');
-      const event = await driver.parseWebhook(body, headers);
-      expect(driver.webhookEventIds(body, headers)).toEqual([event.id]);
-    }
+  it('acknowledge a topic it does not look up with 200 and no ledger row', async () => {
+    const fetchMock = gateway(MP_PAYMENT);
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    const { store, deliver } = route(mpDriver(MP_SECRET));
+    const body = JSON.stringify({
+      ...JSON.parse(mpNotification('999999999')),
+      type: 'merchant_order',
+    });
+    expect(await deliver(body, mpHeaders('999999999'))).toBe(200);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await store.listWebhookEvents({})).toEqual([]);
+    debug.mockRestore();
+  });
+
+  it('name no id before the fetch', () => {
+    const driver = mpDriver(MP_SECRET) as PaymentsDriver;
+    expect(driver.webhookEventIds).toBeUndefined();
   });
 });
 

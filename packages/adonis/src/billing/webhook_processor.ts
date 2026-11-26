@@ -68,6 +68,13 @@ export class WebhookProcessor {
    * (idempotent replay). Throws when the event handler throws.
    */
   async process(event: WebhookEvent): Promise<boolean> {
+    // A delivery the ledger already took under the id an earlier release gave it (a driver that
+    // changed how it builds ids): a replay, unless that attempt failed.
+    for (const legacy of event.legacyIds ?? []) {
+      if (legacy === event.id || legacy === '') continue;
+      const row = await this.#store.findWebhookEventByGatewayEventId(legacy);
+      if (row !== null && row.provider === event.provider && row.status !== 'failed') return false;
+    }
     const ledger = await this.#store.recordWebhookEvent({
       gatewayEventId: event.id,
       provider: event.provider,

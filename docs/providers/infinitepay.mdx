@@ -84,45 +84,27 @@ for `order_nsu` when no `externalReference` was given — calling `createCheckou
 same key creates two links, not one.
 </Callout>
 
-## Webhooks — unauthenticated, so confirm before you credit
+## Webhooks — unsigned, so the driver confirms each one
 
 InfinitePay POSTs a webhook to the link's `webhook_url` **only when a payment is approved**.
-There is no failure event and no refund event, so `parseWebhook` always normalizes to
-`payment.succeeded`.
+There is no failure event and no refund event, so a delivery normalizes to
+`payment.succeeded` — once the gateway confirms it.
 
-**It verifies nothing, because there is nothing to verify.** InfinitePay documents no
-signature, no HMAC and no shared token for the checkout webhook — its own security advice is
-to re-check the payment instead. So this driver declares
-`webhookVerification: 'unsupported'`: the boot-time refusal that stops an app whose driver *can*
-verify and was given no credential does not apply, because there is nothing to configure — and
-`allowUnverifiedWebhooks` is not needed for InfinitePay either. An event out of `parseWebhook` therefore means *somebody
-claimed a payment happened*, not *a payment happened*.
+InfinitePay documents no signature, no HMAC and no shared token for the checkout webhook; its
+own security advice is to re-check the payment. **The driver does exactly that, on every
+delivery, with nothing to configure:** `parseWebhook` reads only the three ids from the body
+(`order_nsu`, `transaction_nsu`, `invoice_slug`), calls `payment_check` with your `handle`, and
+builds the event from the gateway's answer — the amount, the method and "paid" come from
+InfinitePay, never from the body. So the driver declares `webhookVerification: 'confirmed'`.
 
-Two things to do about that:
+A delivery `payment_check` does not confirm as paid (unknown ids, a forged body, a payment not
+paid) is **refused**: the route answers `400`, files the refusal in the audit trail, and writes no
+ledger row — so a forged `transaction_nsu` cannot take the event id the genuine delivery arrives
+with. A `payment_check` that fails (network, 5xx) answers non-2xx too, and InfinitePay retries.
 
-1. **Confirm with `checkPayment()`** before you credit anything. `event.raw` carries the three
-   ids it needs.
-2. **Put an unguessable segment in `webhookUrl`**, so the endpoint is at least not trivially
-   discoverable. `webhook_url` is sent **per link** — there is no global webhook registration
-   in the dashboard — so without `webhookUrl` (or `INFINITEPAY_WEBHOOK_URL`) configured, no
-   webhook ever arrives.
-
-```ts title="app/payments/handlers/payment_succeeded.ts"
-export default async function onPaymentSucceeded(event) {
-  if (event.provider !== 'infinitepay') return
-
-  const raw = event.raw as { order_nsu: string; transaction_nsu: string; invoice_slug: string }
-  const driver = payments.driver('infinitepay') as InfinitePayDriver
-  const confirmed = await driver.checkPayment({
-    orderNsu: raw.order_nsu,
-    transactionNsu: raw.transaction_nsu,
-    slug: raw.invoice_slug,
-  })
-
-  if (confirmed?.status !== 'paid') return // the webhook lied, or the payment moved
-  await fulfil(raw.order_nsu)
-}
-```
+`webhook_url` is sent **per link** — there is no global webhook registration in the dashboard —
+so without `webhookUrl` (or `INFINITEPAY_WEBHOOK_URL`) configured, no webhook ever arrives.
+`event.raw` is what `payment_check` answered, with the three ids it was asked about.
 
 ## Disputes: there is no dispute vocabulary here at all
 

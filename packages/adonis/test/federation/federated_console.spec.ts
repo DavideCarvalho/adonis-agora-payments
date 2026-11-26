@@ -26,6 +26,8 @@ import { RedisBus } from './redis_bus.js';
  */
 
 const SECRET_API_KEY = 'sk_live_51SECRETkeyDoNotLeak';
+/** The secret the Hub and Entre Textos share (shared-secret mode of the console channel). */
+const CHANNEL_SECRET = 'et-console-secret-0123456789';
 const WEBHOOK_SECRET = 'whsec_TOPsecretWebhookSigning';
 const CPF = '123.456.789-09';
 const CARD = '4242424242424242';
@@ -84,6 +86,7 @@ describe('federated payments console (in process)', () => {
       await answerPaymentsConsoleCommands({
         client,
         prefix: 'et',
+        secret: CHANNEL_SECRET,
         actions: new Set(ALL_ACTIONS),
         idempotency: redisIdempotencyStore(client, 'et'),
         runtime: {
@@ -195,17 +198,17 @@ describe('federated payments console (in process)', () => {
         et: {
           label: 'Entre Textos',
           store: { connection: 'et' },
-          controlPlane: { prefix: 'et' },
+          controlPlane: { prefix: 'et', secret: CHANNEL_SECRET },
         },
         down: {
           label: 'Down app',
           store: { connection: 'et' },
-          controlPlane: { prefix: 'nobody-listens' },
+          controlPlane: { prefix: 'nobody-listens', secret: CHANNEL_SECRET },
         },
         browse: {
           label: 'Browse only',
           store: { connection: 'et' },
-          controlPlane: { prefix: 'et' },
+          controlPlane: { prefix: 'et', secret: CHANNEL_SECRET },
           actions: false,
         },
       },
@@ -264,7 +267,8 @@ describe('federated payments console (in process)', () => {
     const noCapability = await dispatch(
       'refund',
       { params: { gatewayId: 'pay_et' }, body: {} },
-      { idempotencyKey: 'key-no-capability' },
+      // The console's authorize granted this viewer something else (not refunds).
+      { idempotencyKey: 'key-no-capability', capabilities: ['payments:disputes:resolve'] },
     );
     expect(noCapability.status).toBe(403);
     const noKey = await dispatch('refund', { params: { gatewayId: 'pay_et' }, body: {} }, ADMIN);
@@ -292,7 +296,11 @@ describe('federated payments console (in process)', () => {
     const again = await dispatch('refund', request, meta);
     expect(again).toEqual(first);
     // Even as a raw command with a new command id, straight on the bus.
-    const channel = new RedisConsoleChannel({ client: bus.connection(), prefix: 'et' });
+    const channel = new RedisConsoleChannel({
+      client: bus.connection(),
+      prefix: 'et',
+      secret: CHANNEL_SECRET,
+    });
     const raw = await channel.send({
       id: 'retry-by-hand',
       verb: 'refund',

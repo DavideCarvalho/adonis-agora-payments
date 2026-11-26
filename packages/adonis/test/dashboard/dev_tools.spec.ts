@@ -479,10 +479,10 @@ describe('anyAuthorize', () => {
     const throwing = () => {
       throw new Error('boom');
     };
-    expect(await anyAuthorize(throwing, () => false)(ctx())).toEqual({
-      allowed: false,
-      reason: 'forbidden',
-    });
+    // Refused by all with one that threw: the error is rethrown so the console logs it, and the
+    // console's guard answers a throw with 403.
+    await expect(anyAuthorize(throwing, () => false)(ctx())).rejects.toThrow('boom');
+    expect(await anyAuthorize(throwing, () => true)(ctx())).toEqual({ allowed: true });
   });
 
   it('needs at least one authorizer', () => {

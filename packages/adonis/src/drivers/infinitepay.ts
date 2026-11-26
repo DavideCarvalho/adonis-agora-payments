@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { InfinitePayDriverConfig } from '../define_config.js';
-import { publishPaymentDiagnostics } from '../diagnostics.js';
+import { publishPaymentDiagnostics, reportWebhookVerification } from '../diagnostics.js';
 import type {
   ChargeInput,
   CheckoutInput,
@@ -106,10 +106,10 @@ interface InfinitePayWebhookPayload {
  *   unauthenticated; the `handle` (your InfiniteTag) is what identifies the merchant. Enable
  *   *Vendas → Checkout → Configurações → Habilitar Checkout Integrado* in the app first, or
  *   link creation is refused.
- * - **The webhook is unauthenticated.** No signature, no HMAC, no shared token — InfinitePay
- *   documents none. `parseWebhook` therefore cannot verify anything; treat the payload as a
- *   hint that something happened and confirm it with {@link InfinitePayDriver.checkPayment}
- *   before you credit an order.
+ * - **The webhook is unsigned, so the driver confirms it.** No signature, no HMAC, no shared
+ *   token — InfinitePay documents none. `parseWebhook` therefore confirms every delivery with
+ *   {@link InfinitePayDriver.checkPayment} before emitting anything, and builds the event from
+ *   the gateway's answer; a delivery the gateway does not confirm as paid is refused.
  * - **`webhook_url` is per link.** There is no global endpoint to register, so the driver
  *   sends one on every link it creates — configure `webhookUrl` (or `INFINITEPAY_WEBHOOK_URL`)
  *   or no webhook will ever arrive.
@@ -229,7 +229,18 @@ export class InfinitePayDriver implements PaymentsDriver {
       ...(data.installments !== undefined ? { installments: data.installments } : {}),
       ...(data.capture_method !== undefined ? { capture_method: data.capture_method } : {}),
     });
-    if (data.paid !== true) payment.status = 'pending';
+    // The gateway's own answer next to the ids it was asked about: what a confirmed webhook
+    // stores as its raw event.
+    payment.payload = {
+      ...data,
+      order_nsu: input.orderNsu,
+      transaction_nsu: input.transactionNsu,
+      invoice_slug: input.slug,
+    } as unknown as Record<string, unknown>;
+    if (data.paid !== true) {
+      payment.status = 'pending';
+      delete payment.paidAt;
+    }
     publishPaymentDiagnostics(payment);
     return payment;
   }
@@ -237,35 +248,83 @@ export class InfinitePayDriver implements PaymentsDriver {
   // ── Webhooks ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * Normalizes the per-link webhook InfinitePay POSTs when a payment is approved.
-   *
-   * **It verifies nothing, because there is nothing to verify.** InfinitePay documents no
-   * signature, no HMAC and no shared token for the checkout webhook — the security advice in
-   * its own docs is to re-check the payment instead. So an event out of this method means
-   * "somebody claimed a payment happened", not "a payment happened": confirm it with
-   * {@link InfinitePayDriver.checkPayment} (`event.raw` carries the three ids it needs)
-   * before you credit anything, and put an unguessable segment in the `webhookUrl` you
-   * configure so the endpoint is at least not trivially discoverable.
-   */
-  /**
    * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
    *
    * InfinitePay's checkout notification is unsigned — the reference documents no signature
-   * header and no shared secret — so there is nothing to verify with.
+   * header and no shared secret. So the driver authenticates it the way InfinitePay's own docs
+   * say to: every delivery is confirmed with `payment_check` before anything is emitted (see
+   * {@link InfinitePayDriver.parseWebhook}). Nothing to configure, nothing a forger can skip.
    */
   get webhookVerification(): WebhookVerificationState {
-    return 'unsupported';
+    return 'confirmed';
   }
 
-  parseWebhook(
+  /**
+   * Normalizes the per-link webhook InfinitePay POSTs when a payment is approved — after
+   * confirming it with the gateway.
+   *
+   * The body is unsigned, so it is read only for the three ids `payment_check` needs
+   * (`order_nsu`, `transaction_nsu`, `invoice_slug`). The driver asks InfinitePay about them with
+   * its own `handle`, and the event is built from the gateway's answer: the amount, the method
+   * and "paid" all come from `payment_check`, never from the body. A delivery the gateway does
+   * not confirm as paid (unknown ids, a forged triple, a payment not paid) is refused — the route
+   * answers `400`, files it as refused, and no ledger row is written, so a forged
+   * `transaction_nsu` cannot take the event id the genuine delivery will arrive with.
+   *
+   * A `payment_check` that fails (network, 5xx) also throws: the route answers non-2xx and
+   * InfinitePay retries, which is the right outcome for a payment nobody could confirm.
+   */
+  async parseWebhook(
     rawBody: string,
     _headers: Record<string, string | string[] | undefined>,
-  ): WebhookEvent {
-    const payload = JSON.parse(rawBody) as InfinitePayWebhookPayload;
-    const payment = this.#mapPayment(payload);
+  ): Promise<WebhookEvent> {
+    let payload: InfinitePayWebhookPayload;
+    try {
+      payload = JSON.parse(rawBody) as InfinitePayWebhookPayload;
+    } catch {
+      throw new Error('[payments] InfinitePay webhook body is not JSON.');
+    }
+    const ids = {
+      orderNsu: payload?.order_nsu,
+      transactionNsu: payload?.transaction_nsu,
+      slug: payload?.invoice_slug,
+    };
+    if (
+      typeof ids.orderNsu !== 'string' ||
+      ids.orderNsu === '' ||
+      typeof ids.transactionNsu !== 'string' ||
+      ids.transactionNsu === '' ||
+      typeof ids.slug !== 'string' ||
+      ids.slug === ''
+    ) {
+      throw new Error(
+        '[payments] InfinitePay webhook refused: it must carry `order_nsu`, `transaction_nsu` and `invoice_slug` (strings), the ids `payment_check` confirms it with.',
+      );
+    }
+    const confirmed = await this.checkPayment({
+      orderNsu: ids.orderNsu,
+      transactionNsu: ids.transactionNsu,
+      slug: ids.slug,
+    });
+    if (confirmed === null || confirmed.status !== 'paid') {
+      reportWebhookVerification('gateway-lookup', false);
+      throw new Error(
+        `[payments] InfinitePay webhook refused: \`payment_check\` does not confirm order "${ids.orderNsu}" / transaction "${ids.transactionNsu}" as paid (unknown ids, a forged delivery, or a payment not paid yet).`,
+      );
+    }
+    const answer = confirmed.payload as InfinitePayCheckResponse & InfinitePayWebhookPayload;
+    if (typeof answer.paid_amount !== 'number' && typeof answer.amount !== 'number') {
+      throw new Error(
+        `[payments] InfinitePay webhook refused: \`payment_check\` confirmed transaction "${ids.transactionNsu}" but returned no amount, so there is nothing safe to credit.`,
+      );
+    }
+    reportWebhookVerification('gateway-lookup', true);
+    // The receipt is the one body field kept: it is a link for the payer, not money or status.
+    if (typeof payload.receipt_url === 'string') confirmed.hostedUrl = payload.receipt_url;
     return {
-      // The webhook has no event id of its own; the transaction is the stable, idempotent key.
-      id: payload.transaction_nsu ?? payload.invoice_slug ?? `infinitepay-${randomUUID()}`,
+      // The webhook has no event id of its own; the transaction — now confirmed by the gateway
+      // together with the order and the slug — is the stable, idempotent key.
+      id: ids.transactionNsu,
       provider: this.provider,
       // The webhook fires on approved payments only. InfinitePay's checkout reference
       // documents exactly one notification — "quando o pagamento for aprovado" — and two
@@ -273,17 +332,18 @@ export class InfinitePayDriver implements PaymentsDriver {
       // refund event and **no dispute vocabulary at all**: no chargeback webhook, no
       // pre-dispute alert, no dispute resource. A contested sale is handled inside the
       // InfinitePay app, which is also the only place defense documents can be uploaded,
-      // and the first the integration hears of one is the debit on the statement. So this
-      // is unconditionally `payment.succeeded` — there is nothing else it could be.
+      // and the first the integration hears of one is the debit on the statement. So a
+      // confirmed delivery is `payment.succeeded` — there is nothing else it could be.
       type: 'payment.succeeded',
       createdAt: new Date().toISOString(),
       data: {
-        gatewayId: payment.gatewayId,
-        amount: payment.amount.amount,
-        currency: payment.amount.currency,
-        ...(payload.order_nsu !== undefined ? { externalReference: payload.order_nsu } : {}),
+        gatewayId: confirmed.gatewayId,
+        amount: confirmed.amount.amount,
+        currency: confirmed.amount.currency,
+        externalReference: ids.orderNsu,
       },
-      raw: payload as unknown as Record<string, unknown>,
+      // What the gateway confirmed, with the ids it was asked about: never the unsigned body.
+      raw: answer as unknown as Record<string, unknown>,
     };
   }
 

@@ -195,3 +195,46 @@ describe('PaymentsProvider with topology control-plane + tenant', () => {
     return expect(tenant.app.container.make(PaymentsManager)).rejects.toThrow(/control plane/);
   });
 });
+
+describe('§12: a tenant opens no long-lived connection in a plain ace process', () => {
+  async function bootTenant(environment: string) {
+    const operations: string[] = [];
+    const transport: HubTransport = {
+      name: 'recording',
+      request: async (message) => {
+        operations.push(message.operation);
+        return { v: message.v, id: message.id, ok: true, result: { events: [] } } as never;
+      },
+      wait: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return false;
+      },
+    };
+    const { app } = fakeApp({
+      topology: 'tenant',
+      tenant: { partition: 'entre-textos', token: 'et-secret', providers: ['asaas'], transport },
+      billing: { store: () => new InMemoryBillingStore(), dispatcher: 'in-process' },
+    });
+    Object.assign(app, { inTest: false, getEnvironment: () => environment });
+    const provider = new PaymentsProvider(app);
+    provider.register();
+    await provider.boot();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return { operations, provider };
+  }
+
+  it('does not start the event pump under ace (console), so the process can exit', async () => {
+    const { operations, provider } = await bootTenant('console');
+    expect(operations).not.toContain('events.pull');
+    await provider.shutdown();
+  });
+
+  it('starts it in the web server, and stops it at shutdown', async () => {
+    const { operations, provider } = await bootTenant('web');
+    expect(operations).toContain('events.pull');
+    await provider.shutdown();
+    const pulls = operations.filter((op) => op === 'events.pull').length;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(operations.filter((op) => op === 'events.pull').length).toBe(pulls);
+  });
+});

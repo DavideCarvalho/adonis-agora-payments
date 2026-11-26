@@ -52,10 +52,16 @@ export interface InjectedConfig {
   viewer?: ConsoleViewer;
   /** How the footer signs out. Absent → no sign-out control. */
   signOut?: ConsoleSignOut;
+  /**
+   * The write routes this viewer may run (`refund`, `retry`, `resolve`, …), when `authorize`
+   * narrowed them. Absent → every one; the server enforces it either way.
+   */
+  actions?: string[];
 }
 
 /** The console-shell fields of the data block, all optional. */
 export interface ShellFields {
+  actions?: string[];
   switcher?: SwitcherConfig;
   search?: { endpoint: string };
   viewer?: ConsoleViewer;
@@ -111,6 +117,7 @@ export function renderIndexHtml(
     ...(extra.search ? { search: extra.search } : {}),
     ...(extra.viewer ? { viewer: extra.viewer } : {}),
     ...(extra.signOut ? { signOut: extra.signOut } : {}),
+    ...(extra.actions ? { actions: extra.actions } : {}),
   };
   // `<` escaped as `\u003c` inside the JSON: a data block ends at the first `</script`, and a
   // config value must not be able to close it early. Valid JSON either way.

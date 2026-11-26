@@ -3,6 +3,7 @@ import AgoraDoctor from './agora_doctor.js';
 import MakeBillable from './make_billable.js';
 import MakeWebhookHandler from './make_webhook_handler.js';
 import PaymentsAuditList from './payments_audit_list.js';
+import PaymentsConsoleKey from './payments_console_key.js';
 import PaymentsCustomersList from './payments_customers_list.js';
 import PaymentsDisputesEvidence from './payments_disputes_evidence.js';
 import PaymentsDisputesList from './payments_disputes_list.js';
@@ -44,6 +45,7 @@ const loader = new ListLoader([
   PaymentsHealth,
   AgoraDoctor,
   PaymentsDoctor,
+  PaymentsConsoleKey,
   PaymentsOverview,
   PaymentsPaymentsList,
   PaymentsPaymentsShow,

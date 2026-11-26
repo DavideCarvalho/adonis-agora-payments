@@ -96,10 +96,10 @@ describe('capabilities', () => {
     expect(
       normalizeConsoleAuthorizeResult({
         allowed: true,
-        apps: ['et', 1],
+        apps: ['et', 1, null],
         capabilities: ['payments:refund', ''],
       }),
-    ).toEqual({ allowed: true, apps: ['et'], capabilities: ['payments:refund'] });
+    ).toEqual({ allowed: true, apps: ['et', '1'], capabilities: ['payments:refund'] });
     expect(normalizeConsoleAuthorizeResult({ allowed: true, apps: '*' })).toEqual({
       allowed: true,
       apps: '*',
@@ -196,7 +196,26 @@ describe('the owning app’s command handler', () => {
     });
 
   it('answers its profile with booleans and the allowed actions', async () => {
-    expect(await handler(['refund'])({ id: '1', verb: 'profile', args: [] })).toEqual({
+    // Reads need their capability too, and a command without capabilities is refused.
+    await expect(handler(['refund'])({ id: '0', verb: 'profile', args: [] })).rejects.toMatchObject(
+      { status: 403 },
+    );
+    await expect(
+      handler(['refund'])({
+        id: '0b',
+        verb: 'profile',
+        args: [],
+        capabilities: ['payments:refund'],
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(
+      await handler(['refund'])({
+        id: '1',
+        verb: 'profile',
+        args: [],
+        capabilities: ['payments:console:read'],
+      }),
+    ).toEqual({
       capabilities: {
         stripe: {
           refunds: true,
@@ -228,5 +247,228 @@ describe('the owning app’s command handler', () => {
     await expect(handler(['refund'])({ id: '4', verb: 'payout', args })).rejects.toMatchObject({
       code: 'unsupported-request',
     });
+  });
+});
+
+describe('viewer capabilities (§10)', () => {
+  it('keeps only what reaches the payments console; the full set when authorize said none', async () => {
+    const { viewerConsoleCapabilities, CONSOLE_CAPABILITIES } = await import(
+      '../../src/federation/console.js'
+    );
+    expect(viewerConsoleCapabilities(undefined)).toEqual([...CONSOLE_CAPABILITIES]);
+    expect(
+      viewerConsoleCapabilities([
+        'flags:console:*',
+        'payments:refund',
+        'payments:console:read',
+        'config:write',
+        '*',
+      ]),
+    ).toEqual(['payments:refund', 'payments:console:read', '*']);
+    expect(viewerConsoleCapabilities([])).toEqual([]);
+    // access: 'read' keeps reads only, whatever was granted.
+    expect(viewerConsoleCapabilities(['*'], 'read')).toEqual(['payments:console:read']);
+    expect(viewerConsoleCapabilities(undefined, 'read')).toEqual(['payments:console:read']);
+    expect(viewerConsoleCapabilities(['flags:*'], 'read')).toEqual([]);
+  });
+
+  it('normalizes authorize: malformed capabilities grant nothing, access read is kept', () => {
+    expect(normalizeConsoleAuthorizeResult({ allowed: true, capabilities: 'payments:*' })).toEqual({
+      allowed: true,
+      capabilities: [],
+    });
+    expect(normalizeConsoleAuthorizeResult({ allowed: true })).toEqual({ allowed: true });
+    expect(normalizeConsoleAuthorizeResult({ allowed: true, access: 'read' })).toEqual({
+      allowed: true,
+      access: 'read',
+    });
+    // Only 'read' and 'write' are kept (the shared contract).
+    expect(normalizeConsoleAuthorizeResult({ allowed: true, access: 'write' })).toEqual({
+      allowed: true,
+      access: 'write',
+    });
+    expect(normalizeConsoleAuthorizeResult({ allowed: true, access: 'bogus' })).toEqual({
+      allowed: true,
+    });
+  });
+
+  it('anyAuthorize keeps the deciding authorizer’s apps, tenants, capabilities and access', async () => {
+    const { anyAuthorize } = await import('../../src/dashboard/console_authorize.js');
+    const decide = anyAuthorize(
+      () => false,
+      () => ({
+        allowed: true,
+        apps: ['et'],
+        tenants: '*',
+        capabilities: ['payments:console:read'],
+        access: 'read',
+      }),
+    );
+    expect(await decide({} as never)).toEqual({
+      allowed: true,
+      apps: ['et'],
+      tenants: '*',
+      capabilities: ['payments:console:read'],
+      access: 'read',
+    });
+  });
+
+  it('a command without capabilities is refused with code capabilities-required', async () => {
+    const { paymentsConsoleCommandHandler, CAPABILITIES_REQUIRED } = await import(
+      '../../src/federation/console.js'
+    );
+    const run = paymentsConsoleCommandHandler({
+      actions: new Set(),
+      idempotency: memoryIdempotencyStore(),
+      runtime: {
+        currency: 'BRL',
+        store: () => new InMemoryBillingStore(),
+        actions: async () => ({}),
+        capabilities: async () => ({}),
+      },
+    });
+    await expect(run({ id: '1', verb: 'profile', args: [] })).rejects.toMatchObject({
+      status: 403,
+      code: CAPABILITIES_REQUIRED,
+    });
+    expect(CAPABILITIES_REQUIRED).toBe('capabilities-required');
+    await expect(
+      run({ id: '2', verb: 'profile', args: [], capabilities: ['flags:console:read'] }),
+    ).rejects.toThrow(/the viewer lacks "payments:console:read"/);
+  });
+});
+
+describe('the console on its own app (§10.13)', () => {
+  it('runs writes by the same capabilities as on another app', async () => {
+    const { viewerLocalRefusal, viewerLocalActions } = await import(
+      '../../src/federation/console.js'
+    );
+    // No capabilities from authorize: full access.
+    expect(viewerLocalRefusal('refund', undefined)).toBeUndefined();
+    expect(viewerLocalActions(undefined)).toBeUndefined();
+    // Reads are never refused.
+    expect(viewerLocalRefusal('payments', [])).toBeUndefined();
+    expect(viewerLocalRefusal('refund', ['payments:refund'])).toBeUndefined();
+    expect(viewerLocalRefusal('refund', ['payments:console:refund'])).toBeUndefined();
+    expect(viewerLocalRefusal('evidence', ['payments:console:write'])).toBeUndefined();
+    expect(viewerLocalRefusal('refund', ['payments:console:read'])).toMatch(
+      /^the viewer lacks "payments:refund"/,
+    );
+    expect(viewerLocalRefusal('refund', ['*'], 'read')).toMatch(/read access only/);
+    expect(viewerLocalActions(['payments:refund', 'payments:disputes:resolve'])).toEqual([
+      'refund',
+      'resolve',
+    ]);
+    expect(viewerLocalActions(['*'], 'read')).toEqual([]);
+  });
+});
+
+describe('order of the checks (§10.18)', () => {
+  it('verb → capabilities → token → viewer → partition → actions', async () => {
+    const { paymentsConsoleCommandHandler, CAPABILITIES_REQUIRED, UNSUPPORTED } = await import(
+      '../../src/federation/console.js'
+    );
+    const run = paymentsConsoleCommandHandler({
+      actions: new Set(),
+      partition: 'et',
+      idempotency: memoryIdempotencyStore(),
+      runtime: {
+        currency: 'BRL',
+        store: () => new InMemoryBillingStore(),
+        actions: async () => ({}),
+        capabilities: async () => ({}),
+      },
+    });
+    const wrongApp = { partition: 'other', capabilities: ['payments:console:*'] };
+    const reader = { partition: 'other', capabilities: ['payments:console:read'] };
+    // Unknown verb first, whatever else is wrong.
+    await expect(
+      run({ id: '1', verb: 'payout', args: [], verified: wrongApp }),
+    ).rejects.toMatchObject({ code: UNSUPPORTED });
+    // Then capabilities present, before the token's partition.
+    await expect(
+      run({ id: '2', verb: 'refund', args: [], verified: wrongApp }),
+    ).rejects.toMatchObject({ code: CAPABILITIES_REQUIRED });
+    // Then the token's capabilities, then the viewer's, before the partition.
+    await expect(
+      run({ id: '3', verb: 'refund', args: [], capabilities: ['*'], verified: reader }),
+    ).rejects.toThrow(/console's token lacks/);
+    await expect(
+      run({
+        id: '4',
+        verb: 'refund',
+        args: [],
+        capabilities: ['payments:console:read'],
+        verified: wrongApp,
+      }),
+    ).rejects.toThrow(/the viewer lacks/);
+    await expect(
+      run({ id: '5', verb: 'refund', args: [], capabilities: ['*'], verified: wrongApp }),
+    ).rejects.toThrow(/token is for "other"/);
+    // Last, the app's own allow-list.
+    await expect(
+      run({
+        id: '6',
+        verb: 'refund',
+        args: [],
+        capabilities: ['*'],
+        verified: { partition: 'et', capabilities: ['payments:console:*'] },
+      }),
+    ).rejects.toThrow(/consoleCommands\.actions/);
+  });
+});
+
+describe('capability look-alikes (§10.16)', () => {
+  it('a `*` anywhere but at the end of a payments name grants nothing extra', async () => {
+    const { consoleTokenAllows, consoleViewerAllows, viewerLocalRefusal } = await import(
+      '../../src/federation/console.js'
+    );
+    for (const lookAlike of [
+      'payments:*:refund',
+      'payments:console:r*',
+      '*:console:*',
+      'payments:console*',
+      '*payments',
+      'payments:conso*',
+    ]) {
+      expect(consoleTokenAllows([lookAlike], 'refund')).toBe(false);
+      expect(consoleTokenAllows([lookAlike], 'profile')).toBe(false);
+      expect(consoleViewerAllows([lookAlike], 'refund')).toBe(false);
+      expect(viewerLocalRefusal('refund', [lookAlike])).toMatch(/the viewer lacks/);
+    }
+    // The five aliases, literally, and payments' own trailing-`*` hierarchy.
+    for (const alias of ['*', 'payments:*', 'payments:console:*', 'payments:console:write']) {
+      expect(consoleTokenAllows([alias], 'refund')).toBe(true);
+    }
+    expect(consoleTokenAllows(['payments:console:read'], 'profile')).toBe(true);
+    expect(consoleTokenAllows(['payments:console:read'], 'refund')).toBe(false);
+    expect(consoleTokenAllows(['payments:console:subscriptions:*'], 'cancelSubscription')).toBe(
+      true,
+    );
+    expect(consoleTokenAllows(['payments:console:subscriptions:*'], 'refund')).toBe(false);
+  });
+});
+
+describe('the shared matcher (§10.16b)', () => {
+  it('routes payments console checks through consoleCapabilityAllows with payments’ table', async () => {
+    const { consoleTokenAllows, consoleViewerAllows, PAYMENTS_CONSOLE_CAPABILITIES } = await import(
+      '../../src/federation/console.js'
+    );
+    const { consoleCapabilityAllows } = await import('../../src/dashboard/console_capabilities.js');
+    // Write implies read.
+    expect(consoleTokenAllows(['payments:console:write'], 'profile')).toBe(true);
+    // A tenant's data-operation names never make a token a console.
+    expect(consoleTokenAllows(['payments:refund', 'payments:read'], 'refund')).toBe(false);
+    // Viewer names keep their trailing-`*` hierarchy under `payments:`.
+    expect(consoleViewerAllows(['payments:subscriptions:*'], 'cancelSubscription')).toBe(true);
+    expect(consoleViewerAllows(['payments:subscriptions:*'], 'refund')).toBe(false);
+    // Another namespace never reaches payments.
+    expect(
+      consoleCapabilityAllows(
+        ['flags:*'],
+        'payments:console:refund',
+        PAYMENTS_CONSOLE_CAPABILITIES,
+      ),
+    ).toBe(false);
   });
 });

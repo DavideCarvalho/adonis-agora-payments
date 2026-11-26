@@ -65,6 +65,18 @@ describe('Asaas card update', () => {
     ]);
   });
 
+  it('saveCard keeps a subscription id inside its path segment', async () => {
+    const fetchMock = routeFetch([['PUT', '/creditCard', { id: 'x' }]]);
+    await makeDriver().saveCard({
+      customerId: 'cus_1',
+      token: 't',
+      subscriptionGatewayIds: ['../customers/cus_2?x=1#'],
+    });
+    const url = String(fetchMock.mock.calls[0]![0]);
+    expect(url).toContain('/subscriptions/..%2Fcustomers%2Fcus_2%3Fx%3D1%23/creditCard');
+    expect(url).not.toContain('/customers/cus_2');
+  });
+
   it('saveCard without subscriptions sends nothing', async () => {
     const fetchMock = routeFetch([]);
     expect(await makeDriver().saveCard({ customerId: 'cus_1', token: 'tok-uuid' })).toEqual({

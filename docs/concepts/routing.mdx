@@ -107,7 +107,7 @@ interface PaymentsDriver {
   }
   // Whether this driver can authenticate a webhook delivery, and whether it was given what
   // it needs to. 'unconfigured' refuses the boot; absent reads as 'unsupported'.
-  readonly webhookVerification?: 'configured' | 'unconfigured' | 'unsupported'
+  readonly webhookVerification?: 'configured' | 'confirmed' | 'unconfigured' | 'unsupported'
 
   createCustomer(input): Promise<Customer>
   findCustomer(customerId): Promise<Customer | null>

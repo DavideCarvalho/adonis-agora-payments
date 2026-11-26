@@ -320,16 +320,19 @@ export class AdyenDriver implements PaymentsDriver {
           'payment back to infer a full refund. Pass the amount explicitly.',
       );
     }
-    const data = await this.#request<AdyenRefundResponse>(`/payments/${paymentGatewayId}/refunds`, {
-      method: 'POST',
-      body: {
-        merchantAccount: this.#merchantAccount,
-        amount: this.#amount(amount, undefined),
+    const data = await this.#request<AdyenRefundResponse>(
+      `/payments/${encodeURIComponent(paymentGatewayId)}/refunds`,
+      {
+        method: 'POST',
+        body: {
+          merchantAccount: this.#merchantAccount,
+          amount: this.#amount(amount, undefined),
+        },
+        // The refunds endpoint takes the same `Idempotency-Key` header the payments one does,
+        // and it is the only thing standing between a retried job and a second refund.
+        ...this.#idempotency(options?.idempotencyKey),
       },
-      // The refunds endpoint takes the same `Idempotency-Key` header the payments one does,
-      // and it is the only thing standing between a retried job and a second refund.
-      ...this.#idempotency(options?.idempotencyKey),
-    });
+    );
     const status = data.status.toLowerCase();
     const refund: Refund = {
       id: data.pspReference,

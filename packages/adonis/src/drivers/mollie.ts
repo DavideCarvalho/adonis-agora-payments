@@ -3,6 +3,7 @@ import {
   publishPaymentDiagnostics,
   publishRefundDiagnostics,
   publishSubscriptionDiagnostics,
+  reportWebhookVerification,
 } from '../diagnostics.js';
 import type {
   ChargeInput,
@@ -271,7 +272,7 @@ export class MollieDriver implements PaymentsDriver {
   async findCustomer(customerId: string): Promise<Customer | null> {
     try {
       return this.#mapCustomer(
-        await this.#request<MollieCustomerResponse>(`/customers/${customerId}`),
+        await this.#request<MollieCustomerResponse>(`/customers/${encodeURIComponent(customerId)}`),
       );
     } catch (error) {
       if (isNotFound(error)) return null;
@@ -280,14 +281,17 @@ export class MollieDriver implements PaymentsDriver {
   }
 
   async updateCustomer(customerId: string, input: UpdateCustomerInput): Promise<Customer> {
-    const data = await this.#request<MollieCustomerResponse>(`/customers/${customerId}`, {
-      method: 'PATCH',
-      body: {
-        ...(input.name !== undefined ? { name: input.name } : {}),
-        ...(input.email !== undefined ? { email: input.email } : {}),
-        ...this.#customerMetadata(input),
+    const data = await this.#request<MollieCustomerResponse>(
+      `/customers/${encodeURIComponent(customerId)}`,
+      {
+        method: 'PATCH',
+        body: {
+          ...(input.name !== undefined ? { name: input.name } : {}),
+          ...(input.email !== undefined ? { email: input.email } : {}),
+          ...this.#customerMetadata(input),
+        },
       },
-    });
+    );
     return this.#mapCustomer(data);
   }
 
@@ -349,7 +353,9 @@ export class MollieDriver implements PaymentsDriver {
 
   async findPayment(gatewayId: string): Promise<Payment | null> {
     try {
-      return this.#mapPayment(await this.#request<MolliePaymentResponse>(`/payments/${gatewayId}`));
+      return this.#mapPayment(
+        await this.#request<MolliePaymentResponse>(`/payments/${encodeURIComponent(gatewayId)}`),
+      );
     } catch (error) {
       if (isNotFound(error)) return null;
       throw error;
@@ -369,7 +375,9 @@ export class MollieDriver implements PaymentsDriver {
     // Mollie makes `amount` mandatory on a refund and the amount must carry the *payment's*
     // currency, which a charge may have overridden — so read it off the payment rather than
     // assuming the driver's configured one.
-    const payment = await this.#request<MolliePaymentResponse>(`/payments/${paymentGatewayId}`);
+    const payment = await this.#request<MolliePaymentResponse>(
+      `/payments/${encodeURIComponent(paymentGatewayId)}`,
+    );
     const value =
       amount !== undefined
         ? {
@@ -379,7 +387,7 @@ export class MollieDriver implements PaymentsDriver {
         : payment.amount;
 
     const data = await this.#request<MollieRefundResponse>(
-      `/payments/${paymentGatewayId}/refunds`,
+      `/payments/${encodeURIComponent(paymentGatewayId)}/refunds`,
       { method: 'POST', body: { amount: value }, ...this.#idempotency(options?.idempotencyKey) },
     );
     const refund: Refund = {
@@ -471,7 +479,7 @@ export class MollieDriver implements PaymentsDriver {
     };
 
     const data = await this.#request<MollieSubscriptionResponse>(
-      `/customers/${input.customerId}/subscriptions`,
+      `/customers/${encodeURIComponent(input.customerId)}/subscriptions`,
       { method: 'POST', body, ...this.#idempotency(input.idempotencyKey) },
     );
     const subscription = this.#mapSubscription(data);
@@ -486,7 +494,7 @@ export class MollieDriver implements PaymentsDriver {
     // Mollie cancels the schedule outright; there is no period-end flag to honor.
     const { customerId, subscriptionId } = await this.#resolveSubscription(subscriptionGatewayId);
     const data = await this.#request<MollieSubscriptionResponse>(
-      `/customers/${customerId}/subscriptions/${subscriptionId}`,
+      `/customers/${encodeURIComponent(customerId)}/subscriptions/${encodeURIComponent(subscriptionId)}`,
       { method: 'DELETE' },
     );
     const subscription = this.#mapSubscription(data);
@@ -515,7 +523,7 @@ export class MollieDriver implements PaymentsDriver {
     }
     const { customerId, subscriptionId } = await this.#resolveSubscription(subscriptionGatewayId);
     const data = await this.#request<MollieSubscriptionResponse>(
-      `/customers/${customerId}/subscriptions/${subscriptionId}`,
+      `/customers/${encodeURIComponent(customerId)}/subscriptions/${encodeURIComponent(subscriptionId)}`,
       {
         method: 'PATCH',
         body: {
@@ -535,7 +543,7 @@ export class MollieDriver implements PaymentsDriver {
       const { customerId, subscriptionId } = await this.#resolveSubscription(gatewayId);
       return this.#mapSubscription(
         await this.#request<MollieSubscriptionResponse>(
-          `/customers/${customerId}/subscriptions/${subscriptionId}`,
+          `/customers/${encodeURIComponent(customerId)}/subscriptions/${encodeURIComponent(subscriptionId)}`,
         ),
       );
     } catch (error) {
@@ -580,18 +588,13 @@ export class MollieDriver implements PaymentsDriver {
    * Whether a delivery to `POST /payments/webhook/:provider` can be authenticated.
    *
    * Next-gen webhooks are signed, so a configured secret is `'configured'`. Without one the
-   * driver is on the CLASSIC flow, and that flow is `'unsupported'` rather than
-   * `'unconfigured'` — the distinction matters, because `'unconfigured'` refuses to boot.
-   *
-   * There is no credential to configure on the classic flow and nothing insecure about not
-   * having one: the request carries only `id=tr_xxx`, and the driver authenticates by
-   * reading that payment back with your API key (see `parseWebhook` below). Reporting it as
-   * a missing credential would make the supported, safe configuration fail at boot and push
-   * apps into `allowUnverifiedWebhooks`, which would then also silence a genuinely missing
-   * next-gen secret.
+   * driver is on the CLASSIC flow, which is `'confirmed'`: the request is unsigned, so no field
+   * of it is believed. The id it names is only a lookup key; the payment (or the chargeback) is
+   * read back from Mollie with your API key, and the event, its amounts and its ledger id come
+   * from that answer. A delivery Mollie does not confirm is refused (400, no ledger row).
    */
   get webhookVerification(): WebhookVerificationState {
-    return this.#webhookSecret !== undefined ? 'configured' : 'unsupported';
+    return this.#webhookSecret !== undefined ? 'configured' : 'confirmed';
   }
 
   /**
@@ -624,10 +627,24 @@ export class MollieDriver implements PaymentsDriver {
       this.#verifySignature(rawBody, headerValue(headers, 'x-mollie-signature'));
     }
 
+    const signed = this.#webhookSecret !== undefined;
     const envelope = this.#parseEventPayload(rawBody);
     const entityId = envelope !== null ? envelope.entityId : this.#classicId(rawBody);
     if (entityId === undefined || entityId === '') {
       throw new Error('[payments] Mollie webhook body carried no resource id.');
+    }
+
+    // Unsigned (the classic flow): nothing in the body is believed. The id is a lookup key,
+    // and everything else, the ledger id included, comes from what Mollie answers.
+    if (!signed) {
+      try {
+        const event = await this.#confirmedEvent(envelope, entityId);
+        reportWebhookVerification('gateway-lookup', true);
+        return event;
+      } catch (error) {
+        reportWebhookVerification('gateway-lookup', false);
+        throw error;
+      }
     }
 
     if (entityId.startsWith('chb_')) {
@@ -648,7 +665,71 @@ export class MollieDriver implements PaymentsDriver {
       };
     }
 
-    const data = await this.#request<MolliePaymentResponse>(`/payments/${entityId}`);
+    return this.#paymentEvent(entityId, envelope?.id);
+  }
+
+  /**
+   * An unsigned delivery, confirmed with Mollie. A `tr_` id is read back as a payment. A `chb_`
+   * id (an unsigned next-gen event) is read back as `GET /payments/{paymentId}/chargebacks/{id}`
+   * with the payment id the body names: Mollie answers only when that chargeback really belongs
+   * to that payment, and the event is built from its answer. Anything else is refused, with what
+   * to change.
+   */
+  async #confirmedEvent(
+    envelope: MollieEventPayload | null,
+    entityId: string,
+  ): Promise<WebhookEvent> {
+    if (!/^[A-Za-z0-9_]{1,64}$/.test(entityId)) {
+      throw new Error(`[payments] Mollie webhook named a malformed resource id; refused.`);
+    }
+    if (entityId.startsWith('tr_')) return this.#paymentEvent(entityId, undefined);
+    if (entityId.startsWith('chb_')) {
+      const claimed = (envelope?._embedded?.entity as { paymentId?: unknown } | undefined)
+        ?.paymentId;
+      if (typeof claimed !== 'string' || !/^tr_[A-Za-z0-9]{1,60}$/.test(claimed)) {
+        throw new Error(
+          `[payments] Mollie sent chargeback ${entityId} unsigned and without the payment it belongs to, so it cannot be confirmed. Set \`webhookSecret\` (MOLLIE_WEBHOOK_SECRET) for next-gen webhooks, or use the classic payment webhook.`,
+        );
+      }
+      const chargeback = await this.#request<MollieChargeback>(
+        `/payments/${encodeURIComponent(claimed)}/chargebacks/${encodeURIComponent(entityId)}`,
+      );
+      if (chargeback?.id !== entityId || chargeback.paymentId !== claimed || !chargeback.amount) {
+        throw new Error(
+          `[payments] Mollie did not confirm chargeback ${entityId} on payment ${claimed}; refused.`,
+        );
+      }
+      const amount = this.#fromMollieAmount(chargeback.amount);
+      const reversed = typeof chargeback.reversedAt === 'string';
+      return {
+        id: `mollie:${chargeback.id}:${reversed ? 'reversed' : 'received'}`,
+        provider: this.provider,
+        type: reversed ? 'payment.dispute_closed' : 'payment.disputed',
+        ...(chargeback.createdAt !== undefined ? { createdAt: chargeback.createdAt } : {}),
+        data: {
+          gatewayId: chargeback.paymentId,
+          amount: amount.amount,
+          currency: amount.currency,
+          disputeId: chargeback.id,
+          ...(reversed ? { outcome: 'won' } : {}),
+          ...(chargeback.reason?.code !== undefined ? { reason: chargeback.reason.code } : {}),
+        },
+        raw: chargeback as unknown as Record<string, unknown>,
+      };
+    }
+    throw new Error(
+      `[payments] Mollie webhook for ${entityId.split('_')[0]}_… arrived unsigned, and this driver confirms only payments (tr_) and chargebacks (chb_) with Mollie. Set \`webhookSecret\` (MOLLIE_WEBHOOK_SECRET) to receive signed next-gen events for other resources.`,
+    );
+  }
+
+  /** A payment read back from Mollie, as the event for whatever happened to it. */
+  async #paymentEvent(entityId: string, signedEventId: string | undefined): Promise<WebhookEvent> {
+    const data = await this.#request<MolliePaymentResponse>(
+      `/payments/${encodeURIComponent(entityId)}`,
+    );
+    if (data?.id !== entityId || data.amount === undefined) {
+      throw new Error(`[payments] Mollie did not confirm payment ${entityId}; refused.`);
+    }
     const payment = this.#mapPayment(data);
     return {
       // Stable per *transition*, so a redelivery of the same status dedupes in the ledger
@@ -658,7 +739,8 @@ export class MollieDriver implements PaymentsDriver {
       // the derived id needs the mapped outcome too — without it the chargeback's event id
       // is byte-identical to the earlier `payment.succeeded` one and the ledger discards
       // the webhook that takes the money away as a replay.
-      id: envelope?.id ?? `mollie:${data.id}:${this.#transition(data.status, payment.status)}`,
+      // Only a SIGNED event's own id is used; an unsigned body never names the ledger row.
+      id: signedEventId ?? `mollie:${data.id}:${this.#transition(data.status, payment.status)}`,
       provider: this.provider,
       type:
         payment.status === 'disputed'

@@ -587,7 +587,7 @@ with nothing configured **refuses to boot** — the alternative is accepting any
 `/payments/webhook/<provider>`, including a body that marks a payment paid.
 
 Set the credential, or, only if verification really happens upstream, say so:
-`allowUnverifiedWebhooks: ['asaas']`. Efí and InfinitePay are exempt: their gateways sign nothing,
+`allowUnverifiedWebhooks: ['asaas']`. Efí, InfinitePay and Mollie (classic) are exempt: their gateways sign nothing,
 so there is no credential to forget. See
 [Configuration → allowUnverifiedWebhooks](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal).
 </Callout>

@@ -483,9 +483,15 @@ describe('console organization scope', () => {
       allowed: true,
       tenants: '*',
     });
-    expect(normalizeConsoleAuthorizeResult({ allowed: true, tenants: ['a', '', 3] })).toEqual({
+    expect(normalizeConsoleAuthorizeResult({ allowed: true, tenants: ['a', '', 3, {}] })).toEqual({
       allowed: true,
-      tenants: ['a'],
+      // The shared contract keeps numeric ids as strings and drops anything else.
+      tenants: ['a', '3'],
+    });
+    // A malformed value narrows to none, never wider.
+    expect(normalizeConsoleAuthorizeResult({ allowed: true, tenants: 'a' })).toEqual({
+      allowed: true,
+      tenants: [],
     });
     expect(normalizeConsoleAuthorizeResult(true)).toEqual({ allowed: true });
   });

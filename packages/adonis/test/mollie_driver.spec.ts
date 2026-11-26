@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MollieDriverConfig } from '../src/drivers/mollie.js';
 import { MollieDriver } from '../src/drivers/mollie.js';
@@ -37,6 +38,13 @@ const SIGNED_EVENT_SIGNATURE =
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+/** A next-gen event as Mollie signs it (`X-Mollie-Signature`), with the driver that checks it. */
+const SECRET = 'mollie_secret';
+const signedHeaders = (body: string) => ({
+  'x-mollie-signature': `sha256=${createHmac('sha256', SECRET).update(body, 'utf8').digest('hex')}`,
+});
+const signedDriver = () => makeDriver({ webhookSecret: SECRET });
 
 describe('MollieDriver — boot', () => {
   it('refuses to boot without an API key', () => {
@@ -557,9 +565,144 @@ describe('MollieDriver — webhooks', () => {
     vi.stubGlobal('fetch', fetchMock);
     const body =
       '{"resource":"event","id":"event_link","type":"payment-link.paid","entityId":"pl_1"}';
-    const event = await makeDriver().parseWebhook(body, {});
+    const event = await signedDriver().parseWebhook(body, signedHeaders(body));
     expect(event.id).toBe('event_link');
     expect((event.data as { gatewayId: string }).gatewayId).toBe('pl_1');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('MollieDriver — unsigned (classic) deliveries are confirmed with Mollie', () => {
+  it("reports 'confirmed' without a secret, 'configured' with one", () => {
+    expect(makeDriver().webhookVerification).toBe('confirmed');
+    expect(signedDriver().webhookVerification).toBe('configured');
+  });
+
+  it('a forged unsigned chargeback snapshot is refused when Mollie does not confirm it', async () => {
+    const body = JSON.stringify({
+      resource: 'event',
+      id: 'event_forged',
+      type: 'chargeback.received',
+      entityId: 'chb_forged',
+      _embedded: {
+        entity: {
+          id: 'chb_forged',
+          paymentId: 'tr_victim',
+          amount: { currency: 'EUR', value: '9999.00' },
+        },
+      },
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 404, text: async () => 'not found' });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(makeDriver().parseWebhook(body, {})).rejects.toThrow(/404/);
+    // The body was a lookup key, nothing more.
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(
+      'https://api.mollie.com/v2/payments/tr_victim/chargebacks/chb_forged',
+    );
+  });
+
+  it('a real chargeback is built from what Mollie answers, never from the body', async () => {
+    const body = JSON.stringify({
+      resource: 'event',
+      id: 'event_claims_this_ledger_id',
+      type: 'chargeback.reversed',
+      entityId: 'chb_1',
+      _embedded: {
+        entity: {
+          id: 'chb_1',
+          paymentId: 'tr_1',
+          amount: { currency: 'EUR', value: '9999.00' },
+          reversedAt: '2026-08-28T09:13:37+00:00',
+        },
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: 'chb_1',
+          paymentId: 'tr_1',
+          amount: { currency: 'EUR', value: '19.90' },
+        }),
+      ),
+    );
+    const event = await makeDriver().parseWebhook(body, {});
+    // Mollie says received, not reversed, and 19.90, not 9999.
+    expect(event.type).toBe('payment.disputed');
+    expect(event.data).toMatchObject({ gatewayId: 'tr_1', amount: 1990, disputeId: 'chb_1' });
+    expect(event.data).not.toHaveProperty('outcome');
+    // The unsigned body does not name the ledger row.
+    expect(event.id).toBe('mollie:chb_1:received');
+  });
+
+  it('a chargeback Mollie files under another payment is refused', async () => {
+    const body = JSON.stringify({
+      resource: 'event',
+      entityId: 'chb_1',
+      _embedded: { entity: { id: 'chb_1', paymentId: 'tr_victim' } },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: 'chb_1',
+          paymentId: 'tr_other',
+          amount: { currency: 'EUR', value: '1.00' },
+        }),
+      ),
+    );
+    await expect(makeDriver().parseWebhook(body, {})).rejects.toThrow(/did not confirm/);
+  });
+
+  it('an unsigned chargeback with no payment id is refused without a fetch, saying what to set', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const body = '{"resource":"event","id":"e","type":"chargeback.received","entityId":"chb_1"}';
+    await expect(makeDriver().parseWebhook(body, {})).rejects.toThrow(/webhookSecret/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('an unsigned envelope cannot claim the ledger id of a payment event', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(paidPayment)));
+    const body = JSON.stringify({ resource: 'event', id: 'mollie:tr_1:paid', entityId: 'tr_1' });
+    const forged = await makeDriver().parseWebhook(
+      JSON.stringify({ resource: 'event', id: 'event_attacker', entityId: 'tr_1' }),
+      {},
+    );
+    expect(forged.id).toBe('mollie:tr_1:paid');
+    expect((await makeDriver().parseWebhook(body, {})).id).toBe('mollie:tr_1:paid');
+  });
+
+  it('a forged classic id for a payment that is not paid at Mollie reports what Mollie says', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(jsonResponse({ ...paidPayment, status: 'open', paidAt: undefined })),
+    );
+    const event = await makeDriver().parseWebhook('id=tr_1&status=paid&amount=9999', {});
+    expect(event.type).toBe('payment.updated');
+    expect(event.id).toBe('mollie:tr_1:open');
+  });
+
+  it('a payment Mollie answers for another id is refused', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ ...paidPayment, id: 'tr_2' })));
+    await expect(makeDriver().parseWebhook('id=tr_1', {})).rejects.toThrow(/did not confirm/);
+  });
+
+  it('unsigned deliveries for other resources, or malformed ids, are refused without a fetch', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(makeDriver().parseWebhook('id=pl_1', {})).rejects.toThrow(/webhookSecret/);
+    await expect(
+      makeDriver().parseWebhook(
+        '{"resource":"event","id":"event_link","type":"payment-link.paid","entityId":"pl_1"}',
+        {},
+      ),
+    ).rejects.toThrow(/webhookSecret/);
+    await expect(makeDriver().parseWebhook('id=tr_1%2F..%2Fx', {})).rejects.toThrow(/malformed/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -645,7 +788,7 @@ describe('MollieDriver — the widened contract', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
-    const event = await makeDriver().parseWebhook(body, {});
+    const event = await signedDriver().parseWebhook(body, signedHeaders(body));
 
     expect(event.type).toBe('payment.disputed');
     expect(event.data).toMatchObject({
@@ -679,7 +822,7 @@ describe('MollieDriver — the widened contract', () => {
       },
     });
 
-    const event = await makeDriver().parseWebhook(body, {});
+    const event = await signedDriver().parseWebhook(body, signedHeaders(body));
 
     // The money came back. Reporting this as a plain update left the row stuck at
     // `disputed` and the revenue written off.
@@ -704,7 +847,7 @@ describe('MollieDriver — the widened contract', () => {
         },
       },
     });
-    const event = await makeDriver().parseWebhook(body, {});
+    const event = await signedDriver().parseWebhook(body, signedHeaders(body));
     expect(event.type).toBe('payment.dispute_closed');
     expect(event.data).toMatchObject({ outcome: 'won' });
   });
@@ -718,7 +861,7 @@ describe('MollieDriver — the widened contract', () => {
     });
     // Mollie has no lookup by chargeback id, so this one cannot be resolved. Passing it
     // through as an inert event is exactly the silent shape `payment.disputed` removes.
-    await expect(makeDriver().parseWebhook(body, {})).rejects.toThrow(
+    await expect(signedDriver().parseWebhook(body, signedHeaders(body))).rejects.toThrow(
       /no embedded entity.*snapshot payload/s,
     );
   });

@@ -293,6 +293,37 @@ describe('action routes are guarded', () => {
       expect(recorded.body).toEqual({ error: 'unauthenticated' });
     });
 
+    it(`403s the ${name} action for a read-only viewer, like on another app`, async () => {
+      for (const decision of [
+        { allowed: true, access: 'read' },
+        { allowed: true, capabilities: ['payments:console:read'] },
+        { allowed: true, capabilities: ['flags:console:*'] },
+      ] as const) {
+        const recorded: Recorded = {};
+        const handler = await routeHandler({ authorize: () => decision as never }, pattern);
+        await handler(fakeCtx(recorded));
+        expect(recorded.status).toBe(403);
+        expect((recorded.body as { error: string }).error).toMatch(/^the viewer lacks "payments:/);
+      }
+    });
+
+    it(`lets the ${name} action through for a viewer granted it (or the console write set)`, async () => {
+      for (const capabilities of [
+        [name === 'refund' ? 'payments:refund' : 'payments:webhooks:retry'],
+        ['payments:console:write'],
+        ['payments:console:*'],
+      ]) {
+        const recorded: Recorded = {};
+        const handler = await routeHandler(
+          { authorize: () => ({ allowed: true, capabilities }) },
+          pattern,
+        );
+        await handler(fakeCtx(recorded));
+        // Past the capability check, stopped by the store this test app does not have.
+        expect(recorded.status).toBe(503);
+      }
+    });
+
     it(`lets the ${name} action past the guard only to hit the missing billing store`, async () => {
       // Proves the ordering: the guard runs FIRST, and what stops an authorized request here is
       // the store being absent in this test app — a 503, not a 403.

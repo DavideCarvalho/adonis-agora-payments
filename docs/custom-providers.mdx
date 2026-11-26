@@ -35,7 +35,7 @@ readonly capabilities?: {
   invoices?: boolean
   subscriptions?: boolean
 }
-readonly webhookVerification?: 'configured' | 'unconfigured' | 'unsupported'
+readonly webhookVerification?: 'configured' | 'confirmed' | 'unconfigured' | 'unsupported'
 ```
 
 `capabilities` is what the manager checks **before** delegating, so an app discovers a
@@ -61,7 +61,8 @@ get webhookVerification(): WebhookVerificationState {
 | --- | --- | --- |
 | `'configured'` | it can verify and it has the credential | route mounts |
 | `'unconfigured'` | it *can* verify and nothing was configured | **throws**, unless the provider is in `allowUnverifiedWebhooks` |
-| `'unsupported'` | the gateway signs nothing — there is nothing to configure | route mounts |
+| `'confirmed'` | the gateway signs nothing, so `parseWebhook` reads each payment back from the gateway with the driver's credentials and builds the event from that answer (refusing what the gateway does not confirm) | route mounts |
+| `'unsupported'` | the driver does not authenticate deliveries itself — there is nothing to configure | route mounts |
 
 It is **optional**, so a driver written against an older version keeps compiling — and **absent is
 read as `'unsupported'`**, because a driver that never opted in cannot be assumed to verify.

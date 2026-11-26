@@ -19,7 +19,7 @@ export function resolveTopology(config: PaymentsConfig): PaymentsTopology {
   if (topology === 'control-plane') {
     if (!config.controlPlane?.verifyTenant) {
       throw new Error(
-        "[payments] topology 'control-plane' needs `controlPlane.verifyTenant` (e.g. authkitTenantVerifier({ audience: 'urn:agora:payments' })).",
+        "[@adonis-agora/payments] topology 'control-plane' needs `controlPlane.verifyTenant` (e.g. authkitTenantVerifier({ audience: 'urn:agora:payments' })).",
       );
     }
     return topology;
@@ -28,17 +28,21 @@ export function resolveTopology(config: PaymentsConfig): PaymentsTopology {
     const tenant = config.tenant;
     if (!tenant?.partition || !tenant.token || !tenant.providers) {
       throw new Error(
-        "[payments] topology 'tenant' needs `tenant.partition`, `tenant.token` and `tenant.providers`.",
+        "[@adonis-agora/payments] topology 'tenant' needs `tenant.partition`, `tenant.token` and `tenant.providers`.",
       );
     }
     if (tenant.url === undefined && tenant.transport === undefined) {
-      throw new Error("[payments] topology 'tenant' needs `tenant.url` or `tenant.transport`.");
+      throw new Error(
+        "[@adonis-agora/payments] topology 'tenant' needs `tenant.url` or `tenant.transport`.",
+      );
     }
     const names = Array.isArray(tenant.providers)
       ? tenant.providers
       : Object.keys(tenant.providers);
     if (names.length === 0) {
-      throw new Error('[payments] `tenant.providers` lists no control plane provider.');
+      throw new Error(
+        '[@adonis-agora/payments] `tenant.providers` lists no control plane provider.',
+      );
     }
     // Credentials on a tenant mean someone forgot to remove them, or forgot to flip the topology.
     const local = Object.entries(config.providers ?? {}).filter(
@@ -46,7 +50,7 @@ export function resolveTopology(config: PaymentsConfig): PaymentsTopology {
     );
     if (local.length > 0) {
       throw new Error(
-        `[payments] topology 'tenant' runs every gateway call on the control plane, but config.providers still builds ${local
+        `[@adonis-agora/payments] topology 'tenant' runs every gateway call on the control plane, but config.providers still builds ${local
           .map(([name]) => `"${name}"`)
           .join(', ')}. Remove them (the credentials belong to the control plane).`,
       );
@@ -54,7 +58,7 @@ export function resolveTopology(config: PaymentsConfig): PaymentsTopology {
     return topology;
   }
   if (topology !== 'standalone') {
-    throw new Error(`[payments] unknown topology "${String(topology)}"`);
+    throw new Error(`[@adonis-agora/payments] unknown topology "${String(topology)}"`);
   }
   return topology;
 }
@@ -85,7 +89,7 @@ export interface TenantRuntime {
 /** The tenant's client and its remote drivers (no network yet: `describe` runs later). */
 export function buildTenantRuntime(config: PaymentsConfig): TenantRuntime {
   const tenant = config.tenant;
-  if (!tenant) throw new Error('[payments] topology tenant without `tenant`');
+  if (!tenant) throw new Error('[@adonis-agora/payments] topology tenant without `tenant`');
   const http = tenant.url !== undefined ? httpHubTransport({ url: tenant.url }) : undefined;
   const transport =
     tenant.transport && http
@@ -121,7 +125,8 @@ export function buildControlPlane(
   },
 ): PaymentsControlPlane {
   const options = config.controlPlane;
-  if (!options) throw new Error('[payments] topology control-plane without `controlPlane`');
+  if (!options)
+    throw new Error('[@adonis-agora/payments] topology control-plane without `controlPlane`');
   return createPaymentsControlPlane({
     manager: deps.manager,
     store: deps.store,

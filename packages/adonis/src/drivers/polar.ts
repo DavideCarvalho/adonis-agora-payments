@@ -436,8 +436,10 @@ export class PolarDriver implements PaymentsDriver {
     // the end of the paid period; DELETE revokes access immediately.
     const data =
       options?.atPeriodEnd === false
-        ? await this.#request<PolarSubscription>(`/v1/subscriptions/${id}`, { method: 'DELETE' })
-        : await this.#request<PolarSubscription>(`/v1/subscriptions/${id}`, {
+        ? await this.#request<PolarSubscription>(`/v1/subscriptions/${encodeURIComponent(id)}`, {
+            method: 'DELETE',
+          })
+        : await this.#request<PolarSubscription>(`/v1/subscriptions/${encodeURIComponent(id)}`, {
             method: 'PATCH',
             body: { cancel_at_period_end: true },
           });

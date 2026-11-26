@@ -101,9 +101,9 @@ export default defineConfig({
 | `true` | every provider may. Almost never what you want |
 
 Set it only when verification genuinely happens upstream — mutual TLS at the edge, or an API
-gateway that checks the signature before forwarding. Efí and InfinitePay never trip the check:
-their gateways sign nothing, so they report `'unsupported'` rather than `'unconfigured'` and there
-is no credential to forget.
+gateway that checks the signature before forwarding. Efí, InfinitePay and Mollie (classic) never trip the check:
+their gateways sign nothing, so the drivers confirm every delivery with the gateway and report
+`'confirmed'`; there is no credential to forget.
 
 <Callout type="warn" title="This is a breaking change for an existing app">
 An app that has been running with, say, `ASAAS_WEBHOOK_ACCESS_TOKEN` unset will not boot after

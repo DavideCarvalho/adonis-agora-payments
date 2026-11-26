@@ -192,7 +192,7 @@ interface PaymentsDriver {
   readonly capabilities?: {
     refunds?: boolean; invoices?: boolean; subscriptions?: boolean; disputes?: boolean
   }
-  /** 'configured' | 'unconfigured' | 'unsupported'. Absent reads as 'unsupported'. */
+  /** 'configured' | 'confirmed' | 'unconfigured' | 'unsupported'. Absent reads as 'unsupported'. */
   readonly webhookVerification?: WebhookVerificationState
 
   createCustomer(input: CreateCustomerInput): Promise<Customer>
@@ -238,8 +238,8 @@ event is still the normal answer and a driver whose gateway sends one should kee
 And a driver returning N events must have **verified all N** — Adyen's HMAC lives in each item, so
 checking the first and trusting the rest is a forgery hole.
 
-`webhookEventIds` is for a driver whose `parseWebhook` has to call the gateway (Mercado Pago, and
-Mollie's signed events, implement it). The mounted route asks it first; when every id it names is
+`webhookEventIds` is for a driver whose `parseWebhook` has to call the gateway (Mollie's signed events
+implement it; Mercado Pago does not, since its ledger id depends on the fetched state). The mounted route asks it first; when every id it names is
 already in the ledger as `received` or `processed`, the delivery is answered `200` without calling
 `parseWebhook` at all. It must answer `undefined` whenever the ids cannot be both known and
 authenticated locally — no signing secret, an id that only the fetched resource reveals, a body that
@@ -253,8 +253,9 @@ economics, and no library has the standing to make it. See
 
 `webhookVerification` is what the provider's boot check reads. `'unconfigured'` — the driver can
 authenticate a delivery and was given no credential — **throws at boot** unless the provider is
-named in `allowUnverifiedWebhooks`. `'unsupported'` is for a gateway that signs nothing (Efí,
-InfinitePay). It is optional so a custom driver outside this package keeps compiling, and **absent
+named in `allowUnverifiedWebhooks`. `'confirmed'` is for a gateway that signs nothing and a driver
+that reads every payment back from it before emitting an event (Efí, InfinitePay, Mollie without `webhookSecret`); `'unsupported'`
+for a driver that does not authenticate deliveries itself. It is optional so a custom driver outside this package keeps compiling, and **absent
 is read as `'unsupported'`**: a driver that never opted in cannot be assumed to verify.
 
 ### `ChargeInput`

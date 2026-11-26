@@ -496,3 +496,95 @@ describe('payments control plane: return URLs go back to the calling app only', 
     ).toThrow(/not an http\(s\) origin/);
   });
 });
+
+describe('payments control plane: card calls only touch the calling app’s subscriptions', () => {
+  /** The fake gateway, taught the three card calls (recording what reached it). */
+  function withCardCalls(gateway: FakePaymentsDriver) {
+    const reached: Array<{ call: string; input: unknown }> = [];
+    const target = gateway as unknown as Record<string, unknown>;
+    target.cardSetup = async (input: unknown) => {
+      reached.push({ call: 'cardSetup', input });
+      return { scripts: [], props: {} };
+    };
+    target.saveCard = async (input: unknown) => {
+      reached.push({ call: 'saveCard', input });
+      return { paymentMethodId: 'pm_1' };
+    };
+    target.cardUpdateUrl = async (input: unknown) => {
+      reached.push({ call: 'cardUpdateUrl', input });
+      return 'https://gateway.example/card';
+    };
+    return reached;
+  }
+
+  async function twoApps() {
+    const ctx = setup();
+    const reached = withCardCalls(ctx.gateway);
+    const etCustomer = (await ctx.et.driver.createCustomer({ name: 'Ana' })).id;
+    const etSub = (
+      await ctx.et.driver.createSubscription({ customerId: etCustomer, planId: 'p', amount: 100 })
+    ).gatewayId;
+    const elCustomer = (await ctx.el.driver.createCustomer({ name: 'Bia' })).id;
+    const elSub = (
+      await ctx.el.driver.createSubscription({ customerId: elCustomer, planId: 'p', amount: 100 })
+    ).gatewayId;
+    return { ...ctx, reached, etCustomer, etSub, elSub };
+  }
+
+  it.each([
+    ['cardSetup', 'subscriptionGatewayIds'],
+    ['saveCard', 'subscriptionGatewayIds'],
+  ])('%s refuses another app’s subscription anywhere in %s', async (name) => {
+    const { call, reached, etCustomer, etSub, elSub } = await twoApps();
+    const answer = await call(`c-${name}`, {
+      provider: 'main',
+      call: name,
+      args: [{ customerId: etCustomer, token: 'tok', subscriptionGatewayIds: [etSub, elSub] }],
+    });
+    expect(answer.error?.code).toBe('not_found');
+    expect(answer.error?.message).toContain(elSub);
+    expect(reached).toEqual([]);
+  });
+
+  it('cardUpdateUrl refuses another app’s subscriptionGatewayId', async () => {
+    const { call, reached, etCustomer, elSub } = await twoApps();
+    const answer = await call('c-url', {
+      provider: 'main',
+      call: 'cardUpdateUrl',
+      args: [{ customerId: etCustomer, subscriptionGatewayId: elSub }],
+    });
+    expect(answer.error?.code).toBe('not_found');
+    expect(reached).toEqual([]);
+  });
+
+  it('refuses malformed subscription ids instead of skipping their check', async () => {
+    const { call, reached, etCustomer, etSub } = await twoApps();
+    for (const [id, input] of [
+      ['b1', { customerId: etCustomer, token: 't', subscriptionGatewayIds: etSub }],
+      ['b2', { customerId: etCustomer, token: 't', subscriptionGatewayIds: [etSub, 42] }],
+      ['b3', { customerId: etCustomer, token: 't', subscriptionGatewayIds: [''] }],
+      ['b4', { customerId: 42, token: 't' }],
+    ] as const) {
+      const answer = await call(id, { provider: 'main', call: 'saveCard', args: [input] });
+      expect(answer.error?.code).toBe('bad_request');
+    }
+    const url = await call('b5', {
+      provider: 'main',
+      call: 'cardUpdateUrl',
+      args: [{ customerId: etCustomer, subscriptionGatewayId: { $ne: 1 } }],
+    });
+    expect(url.error?.code).toBe('bad_request');
+    expect(reached).toEqual([]);
+  });
+
+  it('lets the app move the card of its own subscriptions', async () => {
+    const { et, reached, etCustomer, etSub } = await twoApps();
+    await et.driver.saveCard!({
+      customerId: etCustomer,
+      token: 'tok',
+      subscriptionGatewayIds: [etSub],
+    });
+    await et.driver.cardUpdateUrl!({ customerId: etCustomer, subscriptionGatewayId: etSub });
+    expect(reached.map((entry) => entry.call)).toEqual(['saveCard', 'cardUpdateUrl']);
+  });
+});

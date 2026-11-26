@@ -67,7 +67,7 @@ export function PaymentsList({
   const provider = view.provider ?? undefined;
   const paging = cursorPaging(view.after, (next) => void setView({ after: next }));
   const [refunding, setRefunding] = useState<PaymentRow | null>(null);
-  const blocked = useActionsBlocked();
+  const blocked = useActionsBlocked('refund');
   // Uncontrolled fallback for a caller that does not route the detail dialog (a test, a host
   // embedding just this screen). `App` always does.
   const [openedLocal, setOpenedLocal] = useState<string | null>(null);

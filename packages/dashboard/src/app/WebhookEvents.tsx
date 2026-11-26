@@ -69,7 +69,7 @@ export function WebhookEvents() {
       }),
   });
 
-  const blocked = useActionsBlocked();
+  const blocked = useActionsBlocked('retry');
   const retry = useMutation({
     mutationFn: (gatewayEventId: string) => paymentsClient.retryWebhookEvent(gatewayEventId),
     onSettled: () => {

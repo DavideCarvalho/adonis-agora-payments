@@ -74,7 +74,7 @@ that marks a payment paid. The app refuses to start instead. See [Configuration]
 token has expired. That is a real operational property of the mounted
 `/payments/webhook/paypal` route, not a detail: at a thousand events an hour it is a
 thousand extra calls to PayPal. There is no offline HMAC to substitute for it — and so, unlike
-Mercado Pago and Mollie, a redelivery is not answered from the ledger first: skipping the call for a
+Mollie's signed events, a redelivery is not answered from the ledger first: skipping the call for a
 known id would answer a forged request `200` instead of `400`.
 
 ```ts

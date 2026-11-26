@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebhookProcessor } from '../src/billing/webhook_processor.js';
 import { InfinitePayDriver } from '../src/drivers/infinitepay.js';
 import { InMemoryBillingStore } from '../src/testing/in_memory_billing_store.js';
@@ -34,8 +34,21 @@ const webhookBody = {
   receipt_url: 'https://comprovante.example/123',
 };
 
+/** What `payment_check` answers for the payment {@link webhookBody} names. */
+const CONFIRMED = {
+  success: true,
+  paid: true,
+  amount: 1000,
+  paid_amount: 1010,
+  installments: 1,
+  capture_method: 'pix',
+};
+
 describe('InfinitePayDriver', () => {
   beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+  afterEach(() => {
     vi.unstubAllGlobals();
   });
 
@@ -108,10 +121,12 @@ describe('InfinitePayDriver', () => {
     expect(session.gatewayId).toBe('order:42');
 
     // Out: order_nsu is the only field InfinitePay echoes, and it lands on externalReference.
-    const event = makeDriver().parseWebhook(
+    stubFetch(CONFIRMED);
+    const event = await makeDriver().parseWebhook(
       JSON.stringify({ ...webhookBody, order_nsu: 'order:42' }),
       {},
     );
+    vi.unstubAllGlobals();
     expect((event.data as { externalReference?: string }).externalReference).toBe('order:42');
   });
 
@@ -231,28 +246,78 @@ describe('InfinitePayDriver', () => {
     }
   });
 
-  it('normalizes the approval webhook, keying on the transaction and echoing order_nsu', () => {
-    const event = makeDriver().parseWebhook(JSON.stringify(webhookBody), {});
+  it('confirms the webhook with payment_check and builds the event from its answer', async () => {
+    const fetchMock = stubFetch(CONFIRMED);
+    const event = await makeDriver().parseWebhook(
+      // The body claims ten times the money: only the gateway's answer counts.
+      JSON.stringify({ ...webhookBody, amount: 100_000, paid_amount: 100_000 }),
+      {},
+    );
+    const { url, body } = lastCall(fetchMock);
+    expect(url).toBe('https://api.checkout.infinitepay.io/payment_check');
+    expect(body).toEqual({
+      handle: 'minha_loja',
+      order_nsu: 'order_local_1',
+      transaction_nsu: 'tx-uuid',
+      slug: 'abc123',
+    });
     expect(event.type).toBe('payment.succeeded');
-    // No event id exists in the payload; the transaction is the idempotency key.
+    // No event id exists in the payload; the confirmed transaction is the idempotency key.
     expect(event.id).toBe('tx-uuid');
     const data = event.data as { gatewayId: string; amount: number; externalReference?: string };
     expect(data.gatewayId).toBe('tx-uuid');
-    // paid_amount wins over amount, and both are already centavos.
+    // paid_amount wins over amount, both centavos — from payment_check, not the body.
     expect(data.amount).toBe(1010);
     expect(data.externalReference).toBe('order_local_1');
+    expect((event.raw as { paid_amount: number }).paid_amount).toBe(1010);
   });
 
-  it('has no dispute vocabulary at all: nothing it can send is a chargeback', () => {
+  it('refuses a forged webhook payment_check does not know', async () => {
+    stubFetch({ success: false, message: 'Not found' });
+    await expect(makeDriver().parseWebhook(JSON.stringify(webhookBody), {})).rejects.toThrow(
+      /refused.*does not confirm order "order_local_1"/,
+    );
+  });
+
+  it('refuses a webhook for a payment the gateway says is not paid', async () => {
+    stubFetch({ success: true, paid: false, amount: 1000 });
+    await expect(makeDriver().parseWebhook(JSON.stringify(webhookBody), {})).rejects.toThrow(
+      /does not confirm/,
+    );
+  });
+
+  it('refuses a confirmed payment whose check carries no amount', async () => {
+    stubFetch({ success: true, paid: true });
+    await expect(makeDriver().parseWebhook(JSON.stringify(webhookBody), {})).rejects.toThrow(
+      /returned no amount/,
+    );
+  });
+
+  it('refuses a body without the three ids, without calling the gateway', async () => {
+    const fetchMock = stubFetch(CONFIRMED);
+    const { invoice_slug: _slug, ...withoutSlug } = webhookBody;
+    await expect(makeDriver().parseWebhook(JSON.stringify(withoutSlug), {})).rejects.toThrow(
+      /must carry `order_nsu`, `transaction_nsu` and `invoice_slug`/,
+    );
+    await expect(makeDriver().parseWebhook('not json', {})).rejects.toThrow(/not JSON/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('declares its deliveries confirmed with the gateway, so the boot check passes', () => {
+    expect(makeDriver().webhookVerification).toBe('confirmed');
+  });
+
+  it('has no dispute vocabulary at all: nothing it can send is a chargeback', async () => {
     // InfinitePay documents ONE notification — "quando o pagamento for aprovado" — and no
     // chargeback event, no pre-dispute alert and no dispute resource. Contested sales are
     // handled in the app, where the defense documents are uploaded too. Pinned so that
     // teaching this driver to emit a dispute type has to be a deliberate act with a
     // reference behind it, not a copy of a neighbour.
+    stubFetch(CONFIRMED);
     const driver = makeDriver();
     const disputeShaped = { ...webhookBody, status: 'chargeback', chargeback: true };
     for (const body of [webhookBody, disputeShaped]) {
-      const event = driver.parseWebhook(JSON.stringify(body), {});
+      const event = await driver.parseWebhook(JSON.stringify(body), {});
       expect(event.type).toBe('payment.succeeded');
       expect([
         'payment.disputed',
@@ -262,21 +327,10 @@ describe('InfinitePayDriver', () => {
     }
   });
 
-  it('accepts an unsigned webhook — there is nothing to verify — whatever headers arrive', () => {
-    // Documented reality, pinned deliberately: InfinitePay sends no signature header, so an
-    // event out of parseWebhook is a claim, not proof. Confirm it with checkPayment().
-    const driver = makeDriver();
-    const withoutHeaders = driver.parseWebhook(JSON.stringify(webhookBody), {});
-    const withGarbage = driver.parseWebhook(JSON.stringify(webhookBody), {
-      'x-webhook-signature': 'nonsense',
-    });
-    expect(withoutHeaders.type).toBe('payment.succeeded');
-    expect(withGarbage.type).toBe('payment.succeeded');
-  });
-
   it('feeds the processor a row the billing store can save (driver → processor contract)', async () => {
+    stubFetch(CONFIRMED);
     const driver = makeDriver();
-    const event = driver.parseWebhook(JSON.stringify(webhookBody), {});
+    const event = await driver.parseWebhook(JSON.stringify(webhookBody), {});
     const store = new InMemoryBillingStore();
     await new WebhookProcessor({ store, driver }).process(event);
 
@@ -284,5 +338,26 @@ describe('InfinitePayDriver', () => {
     expect(row?.status).toBe('paid');
     expect(row?.amount).toBe(1010);
     expect(row?.currency).toBe('brl');
+  });
+
+  it('a forged delivery marks nothing paid and leaves the event id to the genuine one', async () => {
+    const store = new InMemoryBillingStore();
+    const driver = makeDriver();
+    const processor = new WebhookProcessor({ store, driver });
+
+    // The forger knows the order and guesses ids: the gateway does not confirm them.
+    stubFetch({ success: false, message: 'Not found' });
+    await expect(
+      driver.parseWebhook(JSON.stringify({ ...webhookBody, paid_amount: 1 }), {}),
+    ).rejects.toThrow(/refused/);
+    expect(await store.findPaymentByGatewayId('tx-uuid')).toBeNull();
+    expect(await store.findWebhookEventByGatewayEventId('tx-uuid')).toBeNull();
+
+    // The genuine delivery with the same transaction id is still processed in full.
+    stubFetch(CONFIRMED);
+    await processor.process(await driver.parseWebhook(JSON.stringify(webhookBody), {}));
+    const row = await store.findPaymentByGatewayId('tx-uuid');
+    expect(row?.status).toBe('paid');
+    expect(row?.amount).toBe(1010);
   });
 });

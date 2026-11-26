@@ -3,10 +3,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebhookProcessor } from '../src/billing/webhook_processor.js';
 import { MercadoPagoDriver } from '../src/drivers/mercadopago.js';
 import { InMemoryBillingStore } from '../src/testing/in_memory_billing_store.js';
+import type { WebhookEvent } from '../src/types.js';
 
 const SECRET = 'whsec-mercadopago';
 const REQUEST_ID = '2066ca19-c6f1-498a-be75-1923005edd06';
-const TS = '1704908010';
+// Signed timestamps are checked for freshness (5 minutes), so the fixtures sign "now".
+const TS = String(Math.floor(Date.now() / 1000));
 
 function makeDriver(config: { currency?: string; webhookSecret?: string } = {}) {
   return new MercadoPagoDriver(
@@ -254,11 +256,14 @@ describe('MercadoPagoDriver', () => {
   it('signs the lowercased data.id, as the docs require for alphanumeric ids', async () => {
     vi.stubGlobal(
       'fetch',
-      vi
-        .fn()
-        .mockResolvedValue(
-          jsonResponse({ id: 1, status: 'approved', transaction_amount: 1, currency_id: 'BRL' }),
-        ),
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: 'ORD01JQ4S4KY8HWQ6NA5PXB65B3D3',
+          status: 'approved',
+          transaction_amount: 1,
+          currency_id: 'BRL',
+        }),
+      ),
     );
     const driver = makeDriver({ webhookSecret: SECRET });
     const event = await driver.parseWebhook(notification('ORD01JQ4S4KY8HWQ6NA5PXB65B3D3'), {
@@ -284,19 +289,90 @@ describe('MercadoPagoDriver', () => {
     ).rejects.toThrow(/HTTP request failed \(500\)/);
   });
 
-  it('leaves a subscription charge as payment.updated instead of guessing an unverified shape', async () => {
-    const fetchMock = fetchMustNotBeCalled();
-    const driver = makeDriver({ webhookSecret: SECRET });
-    const event = await driver.parseWebhook(
-      notification('999999999', 'subscription_authorized_payment'),
-      {
-        'x-signature': `ts=${TS},v1=${sign('999999999')}`,
-        'x-request-id': REQUEST_ID,
-      },
-    );
-    expect(event.type).toBe('payment.updated');
-    expect(event.data).toEqual({ gatewayId: '999999999' });
-    expect(fetchMock).not.toHaveBeenCalled();
+  describe('subscription charges and topics it does not look up', () => {
+    const headers = (dataId: string) => ({
+      'x-signature': `ts=${TS},v1=${sign(dataId)}`,
+      'x-request-id': REQUEST_ID,
+    });
+    const approved = { id: 555, status: 'approved', transaction_amount: 49.9, currency_id: 'BRL' };
+
+    it('looks a subscription charge up, then maps the PAYMENT it made', async () => {
+      const fetchMock = stubRoutes([
+        [
+          /\/authorized_payments\/7001/,
+          { id: 7001, preapproval_id: 'pre_1', status: 'processed', payment: { id: 555 } },
+        ],
+        [/\/v1\/payments\/555/, approved],
+      ]);
+      const event = (await makeDriver({ webhookSecret: SECRET }).parseWebhook(
+        notification('7001', 'subscription_authorized_payment'),
+        headers('7001'),
+      )) as WebhookEvent;
+      expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+        'https://api.mercadopago.com/authorized_payments/7001',
+        'https://api.mercadopago.com/v1/payments/555',
+      ]);
+      expect(event.type).toBe('payment.succeeded');
+      expect(event.id).toBe('mercadopago:authorized_payment:7001:555:approved:');
+      expect(event.data).toMatchObject({
+        gatewayId: '555',
+        amount: 4990,
+        subscriptionId: 'pre_1',
+      });
+    });
+
+    it('acknowledges a subscription charge with no payment yet, recording nothing', async () => {
+      stubRoutes([[/\/authorized_payments\//, { id: 7001, status: 'scheduled', payment: null }]]);
+      const events = await makeDriver({ webhookSecret: SECRET }).parseWebhook(
+        notification('7001', 'subscription_authorized_payment'),
+        headers('7001'),
+      );
+      expect(events).toEqual([]);
+    });
+
+    it('refuses a subscription charge Mercado Pago does not confirm', async () => {
+      stubRoutes([[/\/authorized_payments\//, { id: 9999, payment: { id: 555 } }]]);
+      await expect(
+        makeDriver({ webhookSecret: SECRET }).parseWebhook(
+          notification('7001', 'subscription_authorized_payment'),
+          headers('7001'),
+        ),
+      ).rejects.toThrow(/did not confirm subscription charge/);
+    });
+
+    it('a signed request replayed under another, unchecked type records nothing', async () => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+      const driver = makeDriver({ webhookSecret: SECRET });
+      const store = new InMemoryBillingStore();
+      const processor = new WebhookProcessor({ store, driver });
+      for (const type of ['merchant_order', 'anything_at_all', 'topic_claims_integration_wh']) {
+        const events = await driver.parseWebhook(
+          notification('999999999', type),
+          headers('999999999'),
+        );
+        expect(events).toEqual([]);
+        for (const event of [events].flat()) await processor.process(event);
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(await store.listWebhookEvents({})).toEqual([]);
+      expect(debug).toHaveBeenCalled();
+      debug.mockRestore();
+    });
+
+    it('a signed payment replayed as another looked-up type is refused by the lookup', async () => {
+      stubRoutes([
+        [/\/preapproval\//, new Error('404 not found')],
+        [/\/v1\/chargebacks\//, new Error('404 not found')],
+      ]);
+      const driver = makeDriver({ webhookSecret: SECRET });
+      for (const type of ['subscription_preapproval', 'topic_chargebacks_wh']) {
+        await expect(
+          driver.parseWebhook(notification('999999999', type), headers('999999999')),
+        ).rejects.toThrow(/404/);
+      }
+    });
   });
 
   it('fetches the payment to produce payment.succeeded with the externalReference', async () => {
@@ -323,7 +399,10 @@ describe('MercadoPagoDriver', () => {
     expect(String(fetchMock.mock.calls[0]![0])).toBe(
       'https://api.mercadopago.com/v1/payments/999999999',
     );
-    expect(event.id).toBe('12345');
+    // Built from the signed data.id and the fetched state, never from the body's own `id`; the
+    // id the previous release gave this delivery rides along for the ledger's dedupe.
+    expect(event.id).toBe('mercadopago:payment:999999999:approved:');
+    expect(event.legacyIds).toEqual(['12345']);
     expect(event.type).toBe('payment.succeeded');
     expect(event.data).toMatchObject({
       gatewayId: '999999999',
@@ -449,9 +528,12 @@ describe('MercadoPagoDriver', () => {
       chargebackHeaders('233000061680860000'),
     );
 
-    // The case id (`233…`) is not a payment id; the fetch and the row both key off
-    // `data.payment_id`, or the dispute would be filed under something nothing reconciles.
+    // The case id (`233…`) is not a payment id. The case is read first, and the payment comes
+    // from it (`payments`), never from the unsigned `data.payment_id`.
     expect(String(fetchMock.mock.calls[0]![0])).toBe(
+      'https://api.mercadopago.com/v1/chargebacks/233000061680860000',
+    );
+    expect(String(fetchMock.mock.calls[1]![0])).toBe(
       'https://api.mercadopago.com/v1/payments/999999999',
     );
     // `in_process` is the dispute still open — awaiting the issuer's decision, no outcome
@@ -478,7 +560,7 @@ describe('MercadoPagoDriver', () => {
       chargebackHeaders('233000061680860000'),
     );
 
-    expect(String(fetchMock.mock.calls[1]![0])).toBe(
+    expect(String(fetchMock.mock.calls[0]![0])).toBe(
       'https://api.mercadopago.com/v1/chargebacks/233000061680860000',
     );
     expect(event.data).toMatchObject({
@@ -488,20 +570,138 @@ describe('MercadoPagoDriver', () => {
     });
   });
 
-  it('keeps the chargeback when only the case lookup fails', async () => {
-    // The money question is already answered by the payment. Throwing here would turn a
-    // chargeback the driver read correctly into a 400 and a redelivery.
+  it('refuses the chargeback when the case lookup fails (it is where the payment comes from)', async () => {
+    // The route answers 400 and Mercado Pago retries; nothing is filed under a guess.
     stubRoutes([
       [/\/v1\/payments\//, chargedBackPayment('in_process')],
       [/\/v1\/chargebacks\//, new Error('500 from Mercado Pago')],
     ]);
+    await expect(
+      makeDriver({ webhookSecret: SECRET }).parseWebhook(
+        chargebackNotification('233000061680860000', '999999999'),
+        chargebackHeaders('233000061680860000'),
+      ),
+    ).rejects.toThrow(/500 from Mercado Pago/);
+  });
+
+  it("takes the chargeback's payment from the case, not from the body's data.payment_id", async () => {
+    const fetchMock = stubRoutes([
+      [/\/v1\/payments\/999999999/, chargedBackPayment('in_process')],
+      [/\/v1\/chargebacks\//, chargebackCase()],
+    ]);
+    // A signed case id with a body naming another payment (the body is not signed).
     const event = await makeDriver({ webhookSecret: SECRET }).parseWebhook(
-      chargebackNotification('233000061680860000', '999999999'),
+      chargebackNotification('233000061680860000', '111111111'),
       chargebackHeaders('233000061680860000'),
     );
-    expect(event.type).toBe('payment.disputed');
-    expect(event.data).toMatchObject({ gatewayId: '999999999', disputeId: '233000061680860000' });
-    expect(event.data).not.toHaveProperty('actionableUntil');
+    expect(event.data).toMatchObject({ gatewayId: '999999999' });
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).not.toContain(
+      'https://api.mercadopago.com/v1/payments/111111111',
+    );
+    expect(event.id).toBe(
+      'mercadopago:chargeback:233000061680860000:999999999:charged_back:in_process',
+    );
+  });
+
+  it('refuses a case Mercado Pago returns with no payment', async () => {
+    stubRoutes([[/\/v1\/chargebacks\//, chargebackCase({ payments: [] })]]);
+    await expect(
+      makeDriver({ webhookSecret: SECRET }).parseWebhook(
+        chargebackNotification('233000061680860000', '999999999'),
+        chargebackHeaders('233000061680860000'),
+      ),
+    ).rejects.toThrow(/did not confirm chargeback case/);
+  });
+
+  describe('replays and freshness', () => {
+    const PAID = {
+      id: 999999999,
+      status: 'approved',
+      transaction_amount: 19.9,
+      currency_id: 'BRL',
+    };
+
+    it('refuses a signed request whose ts is more than 5 minutes old (or ahead)', async () => {
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      const driver = makeDriver({ webhookSecret: SECRET });
+      for (const offset of [-301, 301]) {
+        const ts = String(Math.floor(Date.now() / 1000) + offset);
+        await expect(
+          driver.parseWebhook(notification('999999999'), {
+            'x-signature': `ts=${ts},v1=${sign('999999999', REQUEST_ID, ts)}`,
+            'x-request-id': REQUEST_ID,
+          }),
+        ).rejects.toThrow(/more than 5 minutes/);
+      }
+      // Small skew is fine.
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(PAID)));
+      const ts = String(Math.floor(Date.now() / 1000) + 30);
+      await expect(
+        driver.parseWebhook(notification('999999999'), {
+          'x-signature': `ts=${ts},v1=${sign('999999999', REQUEST_ID, ts)}`,
+          'x-request-id': REQUEST_ID,
+        }),
+      ).resolves.toMatchObject({ type: 'payment.succeeded' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('a genuinely signed request replayed with a chosen body id lands on the same ledger row', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(PAID)));
+      const driver = makeDriver({ webhookSecret: SECRET });
+      const store = new InMemoryBillingStore();
+      const processor = new WebhookProcessor({ store, driver });
+      const headers = {
+        'x-signature': `ts=${TS},v1=${sign('999999999')}`,
+        'x-request-id': REQUEST_ID,
+      };
+      const genuine = await driver.parseWebhook(notification('999999999'), headers);
+      expect(await processor.process(genuine)).toBe(true);
+      // The attacker keeps the signature and rewrites the unsigned `id` (and `type`/`action`).
+      const replayed = await driver.parseWebhook(
+        JSON.stringify({ ...JSON.parse(notification('999999999')), id: 'future-genuine-id' }),
+        headers,
+      );
+      expect(replayed.id).toBe(genuine.id);
+      expect(await processor.process(replayed)).toBe(false);
+      // The chosen id was never written to the ledger, so it cannot shadow a later delivery.
+      expect(await store.findWebhookEventByGatewayEventId('future-genuine-id')).toBeNull();
+    });
+
+    it('dedupes a delivery the ledger took under the legacy id, across the upgrade', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(PAID)));
+      const driver = makeDriver({ webhookSecret: SECRET });
+      const store = new InMemoryBillingStore();
+      // What the previous release recorded for this delivery: the body's own id.
+      const old = await store.recordWebhookEvent({
+        gatewayEventId: '12345',
+        provider: 'mercadopago',
+        type: 'payment.succeeded',
+        payload: {},
+      });
+      await store.markWebhookProcessed(old!.id);
+      const processor = new WebhookProcessor({ store, driver });
+      const redelivered = await driver.parseWebhook(notification('999999999'), {
+        'x-signature': `ts=${TS},v1=${sign('999999999')}`,
+        'x-request-id': REQUEST_ID,
+      });
+      expect(redelivered.legacyIds).toEqual(['12345']);
+      expect(await processor.process(redelivered)).toBe(false);
+      expect(await store.findWebhookEventByGatewayEventId(redelivered.id)).toBeNull();
+
+      // A legacy row that FAILED is not a reason to skip: the delivery runs (and is recorded).
+      const failedStore = new InMemoryBillingStore();
+      const failed = await failedStore.recordWebhookEvent({
+        gatewayEventId: '12345',
+        provider: 'mercadopago',
+        type: 'payment.succeeded',
+        payload: {},
+      });
+      await failedStore.markWebhookFailed(failed!.id, 'boom');
+      expect(await new WebhookProcessor({ store: failedStore, driver }).process(redelivered)).toBe(
+        true,
+      );
+    });
   });
 
   it('closes the dispute as lost on status_detail settled', async () => {
@@ -554,24 +754,28 @@ describe('MercadoPagoDriver', () => {
     // payment beside it, so it is left unmapped rather than filed against a guess.
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
-    const event = await makeDriver({ webhookSecret: SECRET }).parseWebhook(
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+    const events = await makeDriver({ webhookSecret: SECRET }).parseWebhook(
       notification('5500000000', 'topic_claims_integration_wh'),
       { 'x-signature': `ts=${TS},v1=${sign('5500000000')}`, 'x-request-id': REQUEST_ID },
     );
-    expect(event.type).toBe('topic_claims_integration_wh');
+    // Acknowledged without a ledger event: its `type` is not signed.
+    expect(events).toEqual([]);
     expect(fetchMock).not.toHaveBeenCalled();
+    debug.mockRestore();
   });
 
-  it('does not invent a payment when the chargeback names no payment id', async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
-    const driver = makeDriver({ webhookSecret: SECRET });
-    const event = await driver.parseWebhook(chargebackNotification('233000061680860000'), {
-      'x-signature': `ts=${TS},v1=${sign('233000061680860000')}`,
-      'x-request-id': REQUEST_ID,
-    });
-    expect(event.type).toBe('payment.updated');
-    expect(fetchMock).not.toHaveBeenCalled();
+  it('finds the payment on the case even when the body names none', async () => {
+    stubRoutes([
+      [/\/v1\/payments\//, chargedBackPayment('in_process')],
+      [/\/v1\/chargebacks\//, chargebackCase()],
+    ]);
+    const event = await makeDriver({ webhookSecret: SECRET }).parseWebhook(
+      chargebackNotification('233000061680860000'),
+      chargebackHeaders('233000061680860000'),
+    );
+    expect(event.type).toBe('payment.disputed');
+    expect(event.data).toMatchObject({ gatewayId: '999999999' });
   });
 
   it('reports a charged-back payment as disputed, not as a refund', async () => {

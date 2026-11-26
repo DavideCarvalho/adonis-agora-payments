@@ -71,7 +71,7 @@ driver, and the error the driver throws names it — these are the same routes, 
 | **Subscriptions** | Adyen, Efí, InfinitePay, PagBank | `createSubscription()` throws, naming that gateway's reason | Charge each cycle from your own scheduler — Adyen tokenizes (`storePaymentMethod: true`, then `charge({ paymentMethodId })`); or name a different provider for that one call. See [Subscriptions](/docs/payments/patterns/subscriptions) |
 | **Invoices** | Adyen, Efí, InfinitePay, Mercado Pago, Mollie, PagBank, PayPal, Woovi | listing the gateway's invoices throws — most have no invoice resource at all, and Mollie's *is* one, for the fees it bills **you** | Nothing to work around — this column is about the gateway's own invoice resource, not about emitting one. `invoice: true` on a charge goes through the configured **invoice provider**, and works on every gateway that charges server-side — dash in this column included. See [Invoices](/docs/payments/invoices) |
 | **Disputes** | every gateway but Stripe | `findDispute` / `submitDisputeEvidence` are omitted from the driver — so the call site writes `?.` — except Adyen, which defines both and throws with the reason | No dispute events will arrive — a chargeback reaches you as an email from the gateway. Reconcile from its console, and keep the money-out path (revoke, refund) independent of the dispute one. See [Disputes](/docs/payments/patterns/disputes) |
-| **Webhook auth** | Efí, InfinitePay | nothing — these gateways sign nothing, so the driver declares `'unsupported'` and there is no boot refusal to satisfy | Put the authenticity in front of the app: an IP allowlist, mTLS, or a secret in the path. The endpoint is otherwise open to anyone who knows the URL. See [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal) |
+| **Webhook auth** | Efí, InfinitePay | nothing to configure — these gateways sign nothing, so the driver reads every payment a delivery names back from the gateway before emitting anything (`'confirmed'`); an unconfirmed delivery is refused | Optional second layer at the edge: an IP allowlist, mTLS, or a secret in the path |
 
 <Callout title="The gateway is a per-call argument, not a deployment decision">
 `getPayments().driver('stripe')` names a provider for one call, and the routing map binds a
@@ -117,8 +117,8 @@ Sixteen of the eighteen can authenticate a webhook delivery, and each declares w
 what it needs to. A driver that **can** verify and has nothing configured refuses the boot: with nothing to check
 against, `POST /payments/webhook/<provider>` would accept any body anyone posted to it.
 
-Efí and InfinitePay are the two exceptions — their gateways sign nothing at all, so they declare
-`'unsupported'` and there is no credential to forget. Each page names the config key and the env
+Efí and InfinitePay are the two exceptions — their gateways sign nothing at all, so the drivers
+confirm every delivery with the gateway (`'confirmed'`) and there is no credential to forget. Each page names the config key and the env
 fallback; [Configuration](/docs/payments/configuration#allowunverifiedwebhooks--the-opt-out-for-a-boot-refusal)
 has the opt-out for a deployment that terminates verification upstream.
 </Callout>

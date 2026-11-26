@@ -121,6 +121,13 @@ interface MercadoPagoChargebackResponse {
   date_last_updated?: string;
 }
 
+/** `GET /authorized_payments/{id}`: only the fields this driver reads. */
+interface MercadoPagoAuthorizedPaymentResponse {
+  id?: number | string;
+  preapproval_id?: string;
+  payment?: { id?: number | string | null } | null;
+}
+
 interface MercadoPagoPreferenceResponse {
   id: string;
   init_point?: string;
@@ -165,6 +172,9 @@ interface MercadoPagoNotification {
    */
   data?: { id?: string | number; payment_id?: string | number };
 }
+
+/** How far a signed `ts` may be from this clock (either way, for small skew). */
+const SIGNATURE_MAX_AGE_MS = 5 * 60_000;
 
 /** Mercado Pago rejects an `external_reference` outside this shape (max 64 chars). */
 const EXTERNAL_REFERENCE_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -240,7 +250,9 @@ export class MercadoPagoDriver implements PaymentsDriver {
 
   async findCustomer(customerId: string): Promise<Customer | null> {
     try {
-      const data = await this.#request<MercadoPagoCustomerResponse>(`/v1/customers/${customerId}`);
+      const data = await this.#request<MercadoPagoCustomerResponse>(
+        `/v1/customers/${encodeURIComponent(customerId)}`,
+      );
       return this.#mapCustomer(data);
     } catch (error) {
       if (isNotFound(error)) return null;
@@ -259,10 +271,13 @@ export class MercadoPagoDriver implements PaymentsDriver {
       ...(input.taxId !== undefined ? { identification: this.#identification(input.taxId) } : {}),
       ...(input.metadata !== undefined ? input.metadata : {}),
     };
-    const data = await this.#request<MercadoPagoCustomerResponse>(`/v1/customers/${customerId}`, {
-      method: 'PUT',
-      body,
-    });
+    const data = await this.#request<MercadoPagoCustomerResponse>(
+      `/v1/customers/${encodeURIComponent(customerId)}`,
+      {
+        method: 'PUT',
+        body,
+      },
+    );
     return this.#mapCustomer(data);
   }
 
@@ -317,7 +332,9 @@ export class MercadoPagoDriver implements PaymentsDriver {
 
   async findPayment(gatewayId: string): Promise<Payment | null> {
     try {
-      const data = await this.#request<MercadoPagoPaymentResponse>(`/v1/payments/${gatewayId}`);
+      const data = await this.#request<MercadoPagoPaymentResponse>(
+        `/v1/payments/${encodeURIComponent(gatewayId)}`,
+      );
       return this.#mapPayment(data, this.#currency);
     } catch (error) {
       if (isNotFound(error)) return null;
@@ -335,7 +352,7 @@ export class MercadoPagoDriver implements PaymentsDriver {
     const body: Record<string, unknown> =
       amount !== undefined ? { amount: this.#toAmount(amount, currency) } : {};
     const data = await this.#request<MercadoPagoRefundResponse>(
-      `/v1/payments/${paymentGatewayId}/refunds`,
+      `/v1/payments/${encodeURIComponent(paymentGatewayId)}/refunds`,
       {
         method: 'POST',
         body,
@@ -488,7 +505,7 @@ export class MercadoPagoDriver implements PaymentsDriver {
       );
     }
     const data = await this.#request<MercadoPagoPreapprovalResponse>(
-      `/preapproval/${subscriptionGatewayId}`,
+      `/preapproval/${encodeURIComponent(subscriptionGatewayId)}`,
       // Preapproval spells it `canceled` with one L, unlike a payment's `cancelled`.
       { method: 'PUT', body: { status: 'canceled' } },
     );
@@ -516,7 +533,7 @@ export class MercadoPagoDriver implements PaymentsDriver {
       ...(input.description !== undefined ? { reason: input.description } : {}),
     };
     const data = await this.#request<MercadoPagoPreapprovalResponse>(
-      `/preapproval/${subscriptionGatewayId}`,
+      `/preapproval/${encodeURIComponent(subscriptionGatewayId)}`,
       { method: 'PUT', body },
     );
     return this.#mapSubscription(data);
@@ -524,7 +541,9 @@ export class MercadoPagoDriver implements PaymentsDriver {
 
   async findSubscription(gatewayId: string): Promise<Subscription | null> {
     try {
-      const data = await this.#request<MercadoPagoPreapprovalResponse>(`/preapproval/${gatewayId}`);
+      const data = await this.#request<MercadoPagoPreapprovalResponse>(
+        `/preapproval/${encodeURIComponent(gatewayId)}`,
+      );
       return this.#mapSubscription(data);
     } catch (error) {
       if (isNotFound(error)) return null;
@@ -567,10 +586,13 @@ export class MercadoPagoDriver implements PaymentsDriver {
       );
     }
     for (const subscription of subscriptions) {
-      await this.#request<MercadoPagoPreapprovalResponse>(`/preapproval/${subscription}`, {
-        method: 'PUT',
-        body: { card_token_id: input.token },
-      });
+      await this.#request<MercadoPagoPreapprovalResponse>(
+        `/preapproval/${encodeURIComponent(subscription)}`,
+        {
+          method: 'PUT',
+          body: { card_token_id: input.token },
+        },
+      );
     }
     return { paymentMethodId: input.token };
   }
@@ -609,71 +631,73 @@ export class MercadoPagoDriver implements PaymentsDriver {
     return this.#webhookSecret !== undefined ? 'configured' : 'unconfigured';
   }
 
-  /**
-   * The notification's ledger id, read without fetching the resource it names — but only once
-   * the `x-signature` check has passed. With no `webhookSecret` the fetch is all that vouches for
-   * the call, so the delivery is parsed in full.
-   */
-  webhookEventIds(
-    rawBody: string,
-    headers: Record<string, string | string[] | undefined>,
-  ): readonly string[] | undefined {
-    if (this.#webhookSecret === undefined) return undefined;
-    try {
-      return [this.#eventId(this.#verified(rawBody, headers))];
-    } catch {
-      return undefined;
-    }
-  }
+  // No `webhookEventIds`: the ledger id is built from the signed `data.id` and what Mercado
+  // Pago answers for it, never from the body's own `id` (which the signature does not cover), so
+  // no id is known before the fetch. A redelivery is fetched again, and the ledger runs it once.
 
-  /** The ledger id `parseWebhook` gives a notification. */
-  #eventId(payload: MercadoPagoNotification): string {
+  /**
+   * The ledger id this driver gave a notification before ledger ids were built from signed data
+   * (the body's `id`, else `<action|type>-<data.id>`). Carried as {@link WebhookEvent.legacyIds}
+   * so a delivery the ledger took under the old id is not run twice across the upgrade.
+   * Kept through 1.x; to be removed in 2.0, long after Mercado Pago stops redelivering anything
+   * recorded before the upgrade.
+   */
+  #legacyEventId(payload: MercadoPagoNotification): string {
     if (payload.id !== undefined) return String(payload.id);
     const resourceId = payload.data?.id === undefined ? '' : String(payload.data.id);
     return `${payload.action ?? payload.type ?? ''}-${resourceId}`;
   }
 
+  /**
+   * Verify the `x-signature` HMAC and its freshness, then fetch what the notification names.
+   *
+   * The signature covers only `data.id`, the request id and `ts`. So everything else in the body
+   * (`id`, `type`, `action`, `data.payment_id`) is treated as unsigned: the ledger id is built
+   * from the signed `data.id` and the fetched resource's state, a chargeback's payment comes
+   * from the case Mercado Pago returns, and a captured signed request replayed with another body
+   * `id` lands on the same ledger row (and is refused once `ts` is over 5 minutes old).
+   */
   async parseWebhook(
     rawBody: string,
     headers: Record<string, string | string[] | undefined>,
-  ): Promise<WebhookEvent> {
+  ): Promise<WebhookEvent | WebhookEvent[]> {
     const payload = this.#verified(rawBody, headers);
     const type = payload.type ?? '';
     const resourceId = payload.data?.id === undefined ? '' : String(payload.data.id);
+    const legacyIds = [this.#legacyEventId(payload)];
     const event: WebhookEvent = {
-      id: this.#eventId(payload),
+      id: `mercadopago:${type}:${resourceId}`,
+      legacyIds,
       provider: this.provider,
       type: this.#mapWebhookType(type),
       createdAt: payload.date_created ?? new Date().toISOString(),
       data: { gatewayId: resourceId },
       raw: payload as unknown as Record<string, unknown>,
     };
-    if (resourceId === '') return event;
+    if (resourceId === '') {
+      throw new Error('[payments] Mercado Pago webhook carried no `data.id`; refused.');
+    }
 
     if (type === 'payment') {
-      return this.#paymentEvent(event, resourceId);
+      return this.#paymentEvent(event, resourceId, `mercadopago:payment:${resourceId}`);
     }
-    // A chargeback case: opened, or its status changed. Mercado Pago sends one action for
-    // both (`actions: ["changed_case_status"]`), so the notification itself cannot say
-    // whether this is the opening — the payment can, and it is the payment this library
-    // has a row for. `data.id` here is the CASE id (`GET /v1/chargebacks/{id}`), so the
-    // payment is read from `data.payment_id`; without it there is no payment to dispute
-    // and the event stays the `payment.updated` above rather than filing one under a case
-    // id that matches nothing.
-    if (type === 'topic_chargebacks_wh') {
-      const paymentId = payload.data?.payment_id;
-      if (paymentId === undefined) return event;
-      return this.#withChargebackDetails(await this.#paymentEvent(event, String(paymentId)), {
-        caseId: resourceId,
-      });
-    }
+    // A chargeback case: opened, or its status changed. `data.id` is the CASE id (the signed
+    // part). The payment is taken from the case Mercado Pago returns for it, never from the
+    // body's `data.payment_id`, which the signature does not cover.
+    if (type === 'topic_chargebacks_wh') return this.#chargebackEvents(event, resourceId);
     if (type === 'subscription_preapproval') {
       const preapproval = await this.#request<MercadoPagoPreapprovalResponse>(
-        `/preapproval/${resourceId}`,
+        `/preapproval/${encodeURIComponent(resourceId)}`,
       );
+      if (preapproval?.id === undefined || String(preapproval.id) !== resourceId) {
+        throw new Error(
+          `[payments] Mercado Pago did not confirm subscription ${resourceId}; refused.`,
+        );
+      }
       const subscription = this.#mapSubscription(preapproval);
       return {
         ...event,
+        id: `mercadopago:preapproval:${resourceId}:${preapproval.status ?? 'unknown'}`,
         type: preapproval.status === 'canceled' ? 'subscription.canceled' : 'subscription.updated',
         data: {
           gatewayId: subscription.gatewayId,
@@ -686,28 +710,72 @@ export class MercadoPagoDriver implements PaymentsDriver {
         },
       };
     }
-    // `subscription_authorized_payment` (a subscription's recurring charge) is left as
-    // `payment.updated` with its id: it is read from `/authorized_payments/{id}`, whose
-    // response shape this driver has not verified against the reference. Guessing the
-    // field names of a settled charge is exactly the mistake that ships wrong money.
-    return event;
+    if (type === 'subscription_authorized_payment') {
+      return this.#authorizedPaymentEvent(event, resourceId);
+    }
+    // A topic this driver does not look up: acknowledged (200) and nothing else. Its `type` is
+    // not signed, so an event built from it would let a replayed request mint ledger rows of any
+    // type; nothing is recorded or emitted.
+    console.debug(
+      `[payments] Mercado Pago notification of type ${JSON.stringify(type.slice(0, 64))} acknowledged without a ledger event (this driver does not look that resource up).`,
+    );
+    return [];
   }
 
   /**
-   * Fetch a payment and turn it into the webhook event for whatever happened to it.
-   *
-   * Shared by the `payment` topic (where the notification names the payment) and the
-   * chargeback topic (where it names the case and the payment separately), so a dispute
-   * is normalized through exactly the same status mapping as everything else.
+   * A subscription's recurring charge. `GET /authorized_payments/{id}` names the payment it made
+   * (`payment.id`) and the subscription (`preapproval_id`); only those two fields are read from
+   * it, and the event is the PAYMENT's, fetched and mapped like any other. A charge with no
+   * payment yet (scheduled, retrying) is acknowledged without an event: Mercado Pago notifies
+   * again once it is processed.
    */
-  async #paymentEvent(event: WebhookEvent, paymentId: string): Promise<WebhookEvent> {
-    const payment = await this.#request<MercadoPagoPaymentResponse>(`/v1/payments/${paymentId}`);
+  async #authorizedPaymentEvent(
+    event: WebhookEvent,
+    authorizedId: string,
+  ): Promise<WebhookEvent | WebhookEvent[]> {
+    const authorized = await this.#request<MercadoPagoAuthorizedPaymentResponse>(
+      `/authorized_payments/${encodeURIComponent(authorizedId)}`,
+    );
+    if (authorized?.id === undefined || String(authorized.id) !== authorizedId) {
+      throw new Error(
+        `[payments] Mercado Pago did not confirm subscription charge ${authorizedId}; refused.`,
+      );
+    }
+    const paymentId =
+      authorized.payment?.id === undefined || authorized.payment.id === null
+        ? undefined
+        : String(authorized.payment.id);
+    if (paymentId === undefined || !/^[A-Za-z0-9_-]{1,64}$/.test(paymentId)) return [];
+    const paid = await this.#paymentEvent(
+      event,
+      paymentId,
+      `mercadopago:authorized_payment:${authorizedId}:${paymentId}`,
+    );
+    const subscriptionId = authorized.preapproval_id;
+    return typeof subscriptionId === 'string' && subscriptionId !== ''
+      ? { ...paid, data: { ...(paid.data as Record<string, unknown>), subscriptionId } }
+      : paid;
+  }
+
+  /**
+   * Fetch a payment and turn it into the webhook event for whatever happened to it. The ledger
+   * id is `<base>:<status>:<status_detail>`: one row per state the payment reaches, whatever the
+   * notification's body says.
+   */
+  async #paymentEvent(event: WebhookEvent, paymentId: string, base: string): Promise<WebhookEvent> {
+    const payment = await this.#request<MercadoPagoPaymentResponse>(
+      `/v1/payments/${encodeURIComponent(paymentId)}`,
+    );
+    if (payment?.id === undefined || String(payment.id) !== paymentId) {
+      throw new Error(`[payments] Mercado Pago did not confirm payment ${paymentId}; refused.`);
+    }
     const currency = payment.currency_id?.toLowerCase() ?? this.#currency;
     const type = this.#paymentEventType(payment.status, payment.status_detail);
     const outcome =
       type === 'payment.dispute_closed' ? this.#disputeOutcome(payment.status_detail) : undefined;
     return {
       ...event,
+      id: `${base}:${payment.status ?? 'unknown'}:${payment.status_detail ?? ''}`,
       type,
       data: {
         gatewayId: String(payment.id),
@@ -725,43 +793,52 @@ export class MercadoPagoDriver implements PaymentsDriver {
   }
 
   /**
-   * Add the chargeback CASE's own fields to a dispute event.
-   *
-   * Only `topic_chargebacks_wh` reaches this, because only that notification names a case
-   * (`data.id`). The extra `GET /v1/chargebacks/{id}` buys `date_documentation_deadline` —
-   * the evidence deadline, and the single field that makes a Mercado Pago dispute
-   * actionable — plus the case's `reason`.
-   *
-   * It **fails soft**, unlike the payment fetch. By the time this runs the money question
-   * is already answered from the payment, and throwing here would turn a chargeback the
-   * driver read correctly into a 400 and a redelivery. A missing deadline costs an
-   * operator context; a dropped chargeback costs the row.
+   * A chargeback notification: `GET /v1/chargebacks/{case}` first (the case says which payments
+   * it is about, its evidence deadline and reason), then each of its payments. A case Mercado
+   * Pago does not return, or one with no payment, is refused (400, retried).
    */
-  async #withChargebackDetails(
+  async #chargebackEvents(
     event: WebhookEvent,
-    { caseId }: { caseId: string },
-  ): Promise<WebhookEvent> {
-    if (event.type !== 'payment.disputed' && event.type !== 'payment.dispute_closed') return event;
-    const data = { ...(event.data as Record<string, unknown>), disputeId: caseId };
-    let chargeback: MercadoPagoChargebackResponse;
-    try {
-      chargeback = await this.#request<MercadoPagoChargebackResponse>(`/v1/chargebacks/${caseId}`);
-    } catch {
-      return { ...event, data };
+    caseId: string,
+  ): Promise<WebhookEvent | WebhookEvent[]> {
+    const chargeback = await this.#request<MercadoPagoChargebackResponse>(
+      `/v1/chargebacks/${encodeURIComponent(caseId)}`,
+    );
+    const payments = (chargeback?.payments ?? [])
+      .map((id) => String(id))
+      .filter((id) => /^[A-Za-z0-9_-]{1,64}$/.test(id));
+    if (chargeback?.id === undefined || String(chargeback.id) !== caseId || payments.length === 0) {
+      throw new Error(
+        `[payments] Mercado Pago did not confirm chargeback case ${caseId} with a payment; refused.`,
+      );
     }
     const deadline = chargeback.date_documentation_deadline;
-    return {
-      ...event,
-      data: {
-        ...data,
-        ...(typeof chargeback.reason === 'string' && chargeback.reason !== ''
-          ? { reason: chargeback.reason }
-          : {}),
-        // ISO 8601 with an offset, e.g. `2024-10-24T12:48:24.000-04:00`. `null` whenever
-        // `documentation_required` is false — there is nothing to defend, so no clock.
-        ...(typeof deadline === 'string' && deadline !== '' ? { actionableUntil: deadline } : {}),
-      },
-    };
+    const events: WebhookEvent[] = [];
+    for (const paymentId of payments) {
+      const paid = await this.#paymentEvent(
+        event,
+        paymentId,
+        `mercadopago:chargeback:${caseId}:${paymentId}`,
+      );
+      if (paid.type !== 'payment.disputed' && paid.type !== 'payment.dispute_closed') {
+        events.push(paid);
+        continue;
+      }
+      events.push({
+        ...paid,
+        data: {
+          ...(paid.data as Record<string, unknown>),
+          disputeId: caseId,
+          ...(typeof chargeback.reason === 'string' && chargeback.reason !== ''
+            ? { reason: chargeback.reason }
+            : {}),
+          // ISO 8601 with an offset, e.g. `2024-10-24T12:48:24.000-04:00`. `null` whenever
+          // `documentation_required` is false — there is nothing to defend, so no clock.
+          ...(typeof deadline === 'string' && deadline !== '' ? { actionableUntil: deadline } : {}),
+        },
+      });
+    }
+    return events.length === 1 ? events[0]! : events;
   }
 
   // ── Mappers ──────────────────────────────────────────────────────────────────────────
@@ -799,6 +876,14 @@ export class MercadoPagoDriver implements PaymentsDriver {
     }
     if (timestamp === undefined || received === undefined) {
       throw new Error('[payments] Malformed `x-signature` header on Mercado Pago webhook.');
+    }
+    // `ts` is signed, so it bounds how long a captured request can be replayed.
+    const seconds = Number(timestamp);
+    const at = seconds > 1e12 ? seconds : seconds * 1000;
+    if (!Number.isFinite(at) || Math.abs(Date.now() - at) > SIGNATURE_MAX_AGE_MS) {
+      throw new Error(
+        "[payments] Mercado Pago webhook `x-signature` timestamp is more than 5 minutes from this server's clock (a replayed request, or a clock out of sync); refused.",
+      );
     }
 
     const requestId = headerValue(headers, 'x-request-id');

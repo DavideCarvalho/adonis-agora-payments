@@ -201,6 +201,12 @@ describe('driver → processor contract (PagBank, Efí)', () => {
 
   it('Efí pix notification syncs a paid payment row under the txid', async () => {
     const { EfiDriver } = await import('../src/drivers/efi.js');
+    const pix = {
+      endToEndId: 'E00038166201907261559y6j6mt1u0f6',
+      txid: 'abc123def456ghi789jkl012mn',
+      valor: '19.90',
+      horario: '2026-08-01T10:05:00.000Z',
+    };
     const driver = new EfiDriver(
       { config: () => ({}) },
       {
@@ -208,22 +214,20 @@ describe('driver → processor contract (PagBank, Efí)', () => {
         clientSecret: 'secret',
         pixKey: 'key',
         sandbox: true,
-        fetch: (async () => {
-          throw new Error('no network in this test');
-        }) as unknown as typeof globalThis.fetch,
+        // The driver reads the notified Pix back from Efí before emitting anything.
+        fetch: (async (url: unknown) =>
+          new Response(
+            JSON.stringify(
+              String(url).includes('/oauth/token')
+                ? { access_token: 'tok', expires_in: 3600 }
+                : pix,
+            ),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          )) as unknown as typeof globalThis.fetch,
       },
     );
-    const raw = JSON.stringify({
-      pix: [
-        {
-          endToEndId: 'E00038166201907261559y6j6mt1u0f6',
-          txid: 'abc123def456ghi789jkl012mn',
-          valor: '19.90',
-          horario: '2026-08-01T10:05:00.000Z',
-        },
-      ],
-    });
-    const event = driver.parseWebhook(raw, {});
+    const raw = JSON.stringify({ pix: [pix] });
+    const event = await driver.parseWebhook(raw, {});
 
     const store = new InMemoryBillingStore();
     await new WebhookProcessor({ store, driver }).process(event);

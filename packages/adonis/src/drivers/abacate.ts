@@ -122,7 +122,9 @@ export class AbacateDriver implements PaymentsDriver {
 
   async findCustomer(customerId: string): Promise<Customer | null> {
     try {
-      const data = await this.#request<AbacateCustomerResponse>(`/customer/get/${customerId}`);
+      const data = await this.#request<AbacateCustomerResponse>(
+        `/customer/get/${encodeURIComponent(customerId)}`,
+      );
       return this.#mapCustomer(data);
     } catch (error) {
       if (isNotFound(error)) return null;
@@ -131,14 +133,17 @@ export class AbacateDriver implements PaymentsDriver {
   }
 
   async updateCustomer(customerId: string, input: UpdateCustomerInput): Promise<Customer> {
-    const data = await this.#request<AbacateCustomerResponse>(`/customer/update/${customerId}`, {
-      method: 'PATCH',
-      body: {
-        ...(input.name !== undefined ? { name: input.name } : {}),
-        ...(input.email !== undefined ? { email: input.email } : {}),
-        ...(input.taxId !== undefined ? { taxId: input.taxId } : {}),
+    const data = await this.#request<AbacateCustomerResponse>(
+      `/customer/update/${encodeURIComponent(customerId)}`,
+      {
+        method: 'PATCH',
+        body: {
+          ...(input.name !== undefined ? { name: input.name } : {}),
+          ...(input.email !== undefined ? { email: input.email } : {}),
+          ...(input.taxId !== undefined ? { taxId: input.taxId } : {}),
+        },
       },
-    });
+    );
     return this.#mapCustomer(data);
   }
 
@@ -223,7 +228,9 @@ export class AbacateDriver implements PaymentsDriver {
 
   async findPayment(gatewayId: string): Promise<Payment | null> {
     try {
-      const data = await this.#request<AbacateBillingResponse>(`/billing/get/${gatewayId}`);
+      const data = await this.#request<AbacateBillingResponse>(
+        `/billing/get/${encodeURIComponent(gatewayId)}`,
+      );
       return this.#mapPayment(data);
     } catch (error) {
       if (isNotFound(error)) return null;
@@ -238,7 +245,7 @@ export class AbacateDriver implements PaymentsDriver {
   ): Promise<Refund> {
     this.#refuseIdempotencyKey(options?.idempotencyKey, 'refund');
     const data = await this.#request<AbacateBillingResponse>(
-      `/billing/refund/${paymentGatewayId}`,
+      `/billing/refund/${encodeURIComponent(paymentGatewayId)}`,
       {
         method: 'POST',
         body: {},
@@ -321,7 +328,7 @@ export class AbacateDriver implements PaymentsDriver {
     _options?: { atPeriodEnd?: boolean },
   ): Promise<Subscription> {
     const data = await this.#request<AbacateSubscriptionResponse>(
-      `/subscription/cancel/${subscriptionGatewayId}`,
+      `/subscription/cancel/${encodeURIComponent(subscriptionGatewayId)}`,
       { method: 'POST', body: {} },
     );
     const subscription = this.#mapSubscription(data);
@@ -332,7 +339,7 @@ export class AbacateDriver implements PaymentsDriver {
   async findSubscription(gatewayId: string): Promise<Subscription | null> {
     try {
       const data = await this.#request<AbacateSubscriptionResponse>(
-        `/subscription/get/${gatewayId}`,
+        `/subscription/get/${encodeURIComponent(gatewayId)}`,
       );
       return this.#mapSubscription(data);
     } catch (error) {
@@ -347,7 +354,7 @@ export class AbacateDriver implements PaymentsDriver {
   ): Promise<Subscription> {
     this.#refuseIdempotencyKey(input.idempotencyKey, 'updateSubscription');
     const data = await this.#request<AbacateSubscriptionResponse>(
-      `/subscription/update/${subscriptionGatewayId}`,
+      `/subscription/update/${encodeURIComponent(subscriptionGatewayId)}`,
       {
         method: 'PATCH',
         body: {

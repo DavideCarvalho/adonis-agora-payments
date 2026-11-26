@@ -389,6 +389,12 @@ export interface Invoice {
 export interface WebhookEvent<T = unknown> {
   /** Stable event id — used for idempotency. */
   id: string;
+  /**
+   * Ids an earlier release gave this same delivery. The processor treats a ledger row under any
+   * of them as this event (a redelivery is not run twice when a driver changes how it builds
+   * ids). Mercado Pago sets it through 1.x; it goes away in 2.0.
+   */
+  legacyIds?: readonly string[];
   provider: string;
   /** Gateway event type, e.g. `checkout.completed`, `invoice.payment_succeeded`. */
   type: string;

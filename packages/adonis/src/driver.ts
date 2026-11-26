@@ -22,7 +22,7 @@ import type {
  * code depend only on this contract, so swapping gateways is a config change.
  */
 /** See {@link PaymentsDriver.webhookVerification}. */
-export type WebhookVerificationState = 'configured' | 'unconfigured' | 'unsupported';
+export type WebhookVerificationState = 'configured' | 'confirmed' | 'unconfigured' | 'unsupported';
 
 export interface PaymentsDriver {
   /** Stable provider name, e.g. `'stripe'`, `'abacate'`, `'asaas'`, `'woovi'`. */
@@ -112,10 +112,14 @@ export interface PaymentsDriver {
    * ({@link import('./webhook_security.js').assertWebhookVerification}).
    *
    * - `'configured'` — it can verify and it has the credential.
+   * - `'confirmed'` — the gateway signs nothing, so the driver authenticates every delivery by
+   *   reading the payment back from the gateway with its own credentials before emitting
+   *   anything, and builds the event from that answer, not from the body (InfinitePay's
+   *   `payment_check`, Efí's `GET /v2/pix/:e2eid`). Nothing to configure.
    * - `'unconfigured'` — it CAN verify but nothing was configured. Fails the boot check.
-   * - `'unsupported'` — the gateway signs nothing (Efí's Pix callback carries no signature;
-   *   authenticity is the edge's job), so there is nothing to configure and nothing to warn
-   *   about.
+   * - `'unsupported'` — the driver does not authenticate every delivery itself (a tenant's
+   *   remote driver, which serves no webhook; Mollie's classic flow; a custom driver that never
+   *   said). Nothing to configure.
    *
    * Optional so a custom driver outside this package keeps compiling; absent is read as
    * `'unsupported'`, because a driver that never opted in cannot be assumed to verify.

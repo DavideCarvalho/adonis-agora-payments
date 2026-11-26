@@ -326,10 +326,13 @@ export class PayPalDriver implements PaymentsDriver {
     // A vaulted CAPTURE order usually comes back COMPLETED; when PayPal only authorized it,
     // capture explicitly rather than reporting a charge that never took the money.
     if (order.status !== 'COMPLETED') {
-      order = await this.#request<PayPalOrder>(`/v2/checkout/orders/${order.id}/capture`, {
-        method: 'POST',
-        headers: { ...this.#requestId(input.idempotencyKey), Prefer: 'return=representation' },
-      });
+      order = await this.#request<PayPalOrder>(
+        `/v2/checkout/orders/${encodeURIComponent(order.id)}/capture`,
+        {
+          method: 'POST',
+          headers: { ...this.#requestId(input.idempotencyKey), Prefer: 'return=representation' },
+        },
+      );
     }
     const capture = order.purchase_units?.[0]?.payments?.captures?.[0];
     if (capture === undefined) {
@@ -350,7 +353,9 @@ export class PayPalDriver implements PaymentsDriver {
   /** Find a payment by its **capture** id — the id `charge()` and the webhooks return. */
   async findPayment(gatewayId: string): Promise<Payment | null> {
     try {
-      const capture = await this.#request<PayPalCapture>(`/v2/payments/captures/${gatewayId}`);
+      const capture = await this.#request<PayPalCapture>(
+        `/v2/payments/captures/${encodeURIComponent(gatewayId)}`,
+      );
       return this.#mapCapture(capture, this.#currency);
     } catch (error) {
       if (isNotFound(error)) return null;
@@ -375,7 +380,7 @@ export class PayPalDriver implements PaymentsDriver {
           }
         : {};
     const data = await this.#request<PayPalRefund>(
-      `/v2/payments/captures/${paymentGatewayId}/refund`,
+      `/v2/payments/captures/${encodeURIComponent(paymentGatewayId)}/refund`,
       {
         method: 'POST',
         body,
@@ -523,13 +528,16 @@ export class PayPalDriver implements PaymentsDriver {
           '{id}/suspend`) and keep the grace period on your own records.',
       );
     }
-    await this.#requestNoContent(`/v1/billing/subscriptions/${subscriptionGatewayId}/cancel`, {
-      reason: 'Canceled by the merchant.',
-    });
+    await this.#requestNoContent(
+      `/v1/billing/subscriptions/${encodeURIComponent(subscriptionGatewayId)}/cancel`,
+      {
+        reason: 'Canceled by the merchant.',
+      },
+    );
     // The cancel call answers 204 with no body; read the subscription back rather than
     // inventing the post-cancel state.
     const data = await this.#request<PayPalSubscription>(
-      `/v1/billing/subscriptions/${subscriptionGatewayId}`,
+      `/v1/billing/subscriptions/${encodeURIComponent(subscriptionGatewayId)}`,
     );
     const subscription = this.#mapSubscription(data);
     publishSubscriptionDiagnostics(subscription, 'subscription.canceled');
@@ -564,7 +572,7 @@ export class PayPalDriver implements PaymentsDriver {
       );
     }
     const current = await this.#request<PayPalSubscription>(
-      `/v1/billing/subscriptions/${subscriptionGatewayId}?fields=plan`,
+      `/v1/billing/subscriptions/${encodeURIComponent(subscriptionGatewayId)}?fields=plan`,
     );
     const regular = current.plan?.billing_cycles?.find(
       (cycle) => cycle.tenure_type === 'REGULAR' && cycle.sequence !== undefined,
@@ -587,11 +595,15 @@ export class PayPalDriver implements PaymentsDriver {
         },
       },
     ];
-    await this.#requestNoContent(`/v1/billing/subscriptions/${subscriptionGatewayId}`, patch, {
-      method: 'PATCH',
-    });
+    await this.#requestNoContent(
+      `/v1/billing/subscriptions/${encodeURIComponent(subscriptionGatewayId)}`,
+      patch,
+      {
+        method: 'PATCH',
+      },
+    );
     const data = await this.#request<PayPalSubscription>(
-      `/v1/billing/subscriptions/${subscriptionGatewayId}?fields=plan`,
+      `/v1/billing/subscriptions/${encodeURIComponent(subscriptionGatewayId)}?fields=plan`,
     );
     return this.#mapSubscription(data);
   }
@@ -599,7 +611,7 @@ export class PayPalDriver implements PaymentsDriver {
   async findSubscription(gatewayId: string): Promise<Subscription | null> {
     try {
       const data = await this.#request<PayPalSubscription>(
-        `/v1/billing/subscriptions/${gatewayId}?fields=plan`,
+        `/v1/billing/subscriptions/${encodeURIComponent(gatewayId)}?fields=plan`,
       );
       return this.#mapSubscription(data);
     } catch (error) {

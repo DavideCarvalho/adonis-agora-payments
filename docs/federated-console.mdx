@@ -22,6 +22,7 @@ action. The owning app's gateways are only ever called by the owning app.
 ## The console app
 
 ```ts title="config/payments_dashboard.ts"
+import env from '#start/env'
 import { defineConfig } from '@adonis-agora/payments/dashboard'
 
 export default defineConfig({
@@ -32,10 +33,12 @@ export default defineConfig({
       return {
         allowed: true,
         apps: '*',
-        capabilities: ['payments:refund', 'payments:subscriptions:*', 'payments:disputes:resolve'],
+        capabilities: ['payments:console:read', 'payments:console:refund', 'payments:console:subscriptions:*'],
       }
     }
-    if (user.role === 'support') return { allowed: true, apps: ['entre-textos'] }
+    if (user.role === 'support') {
+      return { allowed: true, apps: ['entre-textos'], capabilities: ['payments:console:read'] }
+    }
     return { allowed: false }
   },
   apps: {
@@ -44,13 +47,19 @@ export default defineConfig({
       // A connection in THIS app's config/database.ts that reaches the app's billing tables,
       // and the app's `billing.schema`.
       store: { connection: 'entretextos', schema: 'entretextos' },
-      // A connection in THIS app's config/redis.ts, and the app's `consoleCommands.prefix`.
+      // A connection in THIS app's config/redis.ts and the app's `consoleCommands.prefix`. With
+      // @adonis-agora/crypto in both apps, that is all (see "Authenticating the console").
       controlPlane: { connection: 'main', prefix: 'entretextos' },
     },
     eduliberta: {
       label: 'EduLiberta',
       store: { connection: 'eduliberta', schema: 'eduliberta' },
-      controlPlane: { connection: 'main', prefix: 'eduliberta' },
+      controlPlane: {
+        connection: 'main',
+        prefix: 'eduliberta',
+        // Without @adonis-agora/crypto or authkit: the same secret as the app's.
+        secret: env.get('EDULIBERTA_CONSOLE_SECRET'),
+      },
       // Browse only from here.
       actions: false,
     },
@@ -66,6 +75,11 @@ export default defineConfig({
 | `apps.<key>.store.schema` | The other app's `billing.schema`. Omit it when that app has none. |
 | `apps.<key>.controlPlane.connection` | The `@adonisjs/redis` connection to publish on. Both apps must use the same Redis server. Default: the default connection. |
 | `apps.<key>.controlPlane.prefix` | The other app's `consoleCommands.prefix`. |
+| `apps.<key>.partition` | That app's crypto partition and authkit app name. Default: the key. |
+| `apps.<key>.controlPlane.crypto` | Explicit crypto: `{ cipher, key?, owns? }`. Automatic with `@adonis-agora/crypto` in this app; `false` turns that off. |
+| `apps.<key>.controlPlane.token` | Token mode: this console's token for that app (`authkitTenantToken`, or your function). Automatic with authkit's calls between apps; `false` turns that off. |
+| `apps.<key>.controlPlane.publicKey` | Token mode without `crypto`: the app's console-command key, as `node ace payments:console-key` prints it there. |
+| `apps.<key>.controlPlane.secret` | Shared-secret mode: the same secret as the app's `consoleCommands.secret`. |
 | `apps.<key>.actions` | `false` to only browse that app here. Default `true`. |
 | `apps.<key>.timeoutMs` | How long an action waits for the app to answer. Default `15000`. |
 | `appLabel` | The name of this console's own app in the picker. Default `This app`. |
@@ -80,17 +94,22 @@ The console app needs `@adonisjs/lucid` and `@adonisjs/redis`. A malformed entry
   and `?app=` naming it answers `403`. Omitted, every app is offered, except with
   [organizations](/docs/payments/organizations) on and a person confined to some of them: another
   app is then offered only when `apps` names it.
-- `capabilities`: the actions this person may send to another app. Without them, every action on
-  another app answers `403`. `payments:*` grants them all.
+- `capabilities`: what this person may do on another app. Omitted, the person gets the whole
+  console set (`payments:console:read`, `payments:console:write`) and the owning app's `actions`
+  allow-list decides; a list narrows it (a malformed value grants nothing).
+  `payments:console:*` (or `payments:*`) grants everything.
+- `access: 'read'`: this person may only read other apps, whatever `capabilities` says.
 
 | Action | Capability |
 | --- | --- |
-| Refund a payment | `payments:refund` |
-| Cancel a subscription | `payments:subscriptions:cancel` |
-| Resume a subscription | `payments:subscriptions:resume` |
-| Re-price a subscription | `payments:subscriptions:reprice` |
-| Retry a failed webhook event | `payments:webhooks:retry` |
-| Record how a dispute ended | `payments:disputes:resolve` |
+| Refund a payment | `payments:console:refund` (or `payments:refund`) |
+| Cancel a subscription | `payments:console:subscriptions:cancel` (or `payments:subscriptions:cancel`) |
+| Resume a subscription | `payments:console:subscriptions:resume` (or `payments:subscriptions:resume`) |
+| Re-price a subscription | `payments:console:subscriptions:reprice` (or `payments:subscriptions:reprice`) |
+| Retry a failed webhook event | `payments:console:webhooks:retry` (or `payments:webhooks:retry`) |
+| Record how a dispute ended | `payments:console:disputes:resolve` (or `payments:disputes:resolve`) |
+
+`payments:console:write` grants every action.
 
 The owning app must allow the same action too (below): both sides have to say yes.
 
@@ -127,6 +146,8 @@ export default defineConfig({
     prefix: 'entretextos',
     connection: 'main',
     actions: ['refund', 'cancelSubscription', 'resolveDispute'],
+    // With @adonis-agora/crypto in this app, nothing else (see "Authenticating the console").
+    // Without it: secret: env.get('ENTRETEXTOS_CONSOLE_SECRET'),
   },
 })
 ```
@@ -137,6 +158,10 @@ export default defineConfig({
 | `consoleCommands.prefix` | The prefix the console app names in `controlPlane.prefix`. |
 | `consoleCommands.connection` | The `@adonisjs/redis` connection to listen on. |
 | `consoleCommands.actions` | The actions another console may ask for: `refund`, `cancelSubscription`, `resumeSubscription`, `repriceSubscription`, `retryWebhook`, `resolveDispute`. Every one not listed is refused with `403`. Default: none. |
+| `consoleCommands.verifyTenant` | Token mode: checks the console's token (`authkitTenantVerifier`, or your function). Automatic with authkit's calls between apps, and on a control plane; `false` turns that off. |
+| `consoleCommands.partition` | Token mode: the partition the console's token must be for. Default: the `prefix`. |
+| `consoleCommands.crypto` | Explicit crypto: `{ cipher, key?, owns? }`. Automatic with `@adonis-agora/crypto` in this app; `false` turns that off. |
+| `consoleCommands.secret` | Shared-secret mode: the same secret as the console's `controlPlane.secret` (16+ characters). |
 | `consoleCommands.idempotency` | Where the app keeps what it already ran. Default: its Redis, for 24 hours. `memoryIdempotencyStore()` keeps it in the process (one instance only). |
 
 Every web instance of the app listens, and exactly one of them runs each action, through the same
@@ -239,10 +264,304 @@ The gateways' credentials and webhook secrets stay in the owning app: the consol
 and no command or answer carries them. What a gateway can do (refunds, disputes, subscription
 changes) comes from the app as yes/no answers.
 
+## Authenticating the console
+
+Commands travel over Redis, and Redis is not a trust boundary: whoever can publish on it (another
+app on a shared instance, a leaked password, an SSRF) must not be able to send a refund, claim to
+be any viewer, or forge an answer. So every command is authenticated, and a setup that cannot
+authenticate **does not boot** (below). None of authkit, authz or crypto is required: each mode
+works on its own, and every automatic piece can be replaced by your own function.
+
+| Setup | Lines in `consoleCommands` / `controlPlane` | Grants |
+| --- | --- | --- |
+| Together: the Hub with crypto embedded, apps its crypto tenants | none | none |
+| Crypto as a separate app | none | the console's crypto client: `crypto:seal:console-*` |
+| Authkit without crypto | none (app-call token + key directory) | console app: `payments:console:*` (or narrower) on the owning app, in authkit, once: without crypto the token is mandatory and caps every command |
+| Neither | the same `secret` on both sides | none |
+
+**Mixed Hubs.** A Hub with crypto and authkit can federate crypto apps and authkit-only apps with
+no lines either. It picks the way per app at the first command, and keeps the choice for five
+minutes: an app that published its key in authkit's key directory (an app does so only when no
+crypto reaches it) gets an authkit app-call token sealed to that key; any other app gets crypto.
+The boot log says `auto (authkit key directory if the app publishes one, else crypto (…))`. In crypto
+mode the token is optional: if authkit cannot mint it (no grant, `invalid_target`), the command is
+sent crypto-only and the console warns once, naming the grant to add. An app that does not answer
+makes the console decide again on the next command.
+
+Token mode needs the app's `APP_KEY`: it is read from `config/app.ts` (`appKey`), else from the
+default entry of `config/encryption.ts`, else from the `APP_KEY` environment variable.
+
+### Together with `@adonis-agora/crypto`: nothing to configure
+
+When `@adonis-agora/crypto` is booted in the console app and in the owning app (the usual Agora
+setup: crypto embedded in the Hub, each app a crypto tenant of the Hub), the two find each other.
+Neither `consoleCommands` nor `controlPlane` needs an authentication line:
+
+```ts title="config/payments.ts (the owning app)"
+consoleCommands: {
+  prefix: 'entretextos',
+  actions: ['refund', 'cancelSubscription', 'resolveDispute'],
+},
+```
+
+```ts title="config/payments_dashboard.ts (the Hub)"
+apps: {
+  'entre-textos': {
+    store: { connection: 'entretextos', schema: 'entretextos' },
+    controlPlane: { prefix: 'entretextos' },
+  },
+},
+```
+
+- Commands are sealed with the **`console-payments`** key (`aes256-gcm`) of the owning app's
+  crypto partition. Nothing in them (action, payment, amount, viewer) is readable on Redis; each
+  command is one `encrypt` row and one `decrypt` row in crypto's audit trail.
+- **The partition rule:** the console seals for `apps.<key>.partition`, which defaults to the key.
+  It must be the owning app's crypto partition: set `partition: 'entre-textos'` on the entry when
+  the key differs.
+- **The key is created for you**: by the Hub at boot when crypto is embedded there, by the owning
+  app when its crypto runs in-process, or by the crypto server on the console's first seal. A
+  tenant app that finds no key at boot logs one info line saying so (and, for a crypto server with
+  `sealProvisioning` off, the command to run:
+  `node ace crypto:keys:create console-payments --type aes256-gcm --application entre-textos`).
+- **No grant on the owning app:** a crypto server lets an app decrypt its own `console-*` keys
+  without one (an existing `crypto:decrypt:console-*` grant is harmless).
+- When crypto is a **separate app** (the console is a crypto tenant too), the console seals through
+  the channel its `config/crypto.ts` already has, asking the crypto server to encrypt with the
+  owning app's key. Its crypto client needs the seal-only grant `crypto:seal:console-*` (encrypt
+  for another app, never decrypt). A crypto server too old for it answers an error that says to
+  upgrade `@adonis-agora/crypto` there, or to configure `crypto` explicitly.
+
+Each side logs what it resolved, once at boot:
+
+```
+[@adonis-agora/payments] console commands: crypto (auto, key console-payments); actions on
+[@adonis-agora/payments] console commands to "entre-textos": crypto (auto, key console-payments, partition entre-textos)
+```
+
+`crypto: false` on `consoleCommands` or on `controlPlane` turns the automatic mode off. Any
+explicit `crypto`, `secret`, `token` or `verifyTenant` is used as given, and automatic crypto is
+not added on top.
+
+#### With authkit too: a token from its calls between apps
+
+When `@adonis-agora/authkit-client` is configured for
+[calls between apps](/docs/authkit/calls-between-apps) (`service` + `apps`), the console also asks
+it for a token for the owning app, and the owning app verifies it with authkit, again with no lib
+configuration. With crypto, the command is sealed **and** carries the token: the strongest setup.
+
+- The token's audience is the owning app, so it answers for this app whatever its partition says;
+  the audit row names the calling app: `ops@example.com (via Hub, app hub, client hub-client)`.
+- Its capabilities cap the command, narrowed by the viewer's. Grant the console app, in authkit,
+  `payments:console:*` (or narrower, below) on each app it manages.
+- A command without a token is still accepted when crypto sealed it (the key authenticates it), so
+  apps move over one at a time.
+- Without crypto, the token is sealed to the app's `APP_KEY`-derived key. The app publishes its
+  public half in authkit's **key directory** at boot (purpose `console:payments`), and the console
+  reads it there, over authkit's authenticated API, never from Redis: nothing to copy. An explicit
+  `controlPlane.publicKey` still wins; with neither, the console fails the boot saying so.
+- `token: false` on `controlPlane` and `verifyTenant: false` on `consoleCommands` turn it off.
+
+On a payments [control plane](/docs/payments/control-plane), the owning app also accepts tokens its
+own `controlPlane.verifyTenant` accepts. That is safe: every command needs a
+`payments:console:*` capability, which a tenant's token (`payments:charge`, `payments:refund`, …)
+does not carry.
+
+### The capabilities a command needs
+
+The console always sends the viewer's capabilities: those its `authorize` returned that reach the
+payments console (another lib's, like `flags:console:*`, are dropped), or the whole console set
+(`payments:console:read`, `payments:console:write`) when `authorize` returns none; the owning
+app's `actions` allow-list still decides. `access: 'read'` in the `authorize` answer keeps reads
+only, and a malformed `capabilities` value grants nothing. The owning app refuses a command that
+carries no capabilities (`403`, code `capabilities-required`): missing never means everything. A
+refusal says who lacks the capability: "the console's token lacks …" or "the viewer lacks …".
+
+| Command | Console capability | Also accepted from a viewer |
+| --- | --- | --- |
+| Read the app's profile (what its gateways can do) | `payments:console:read` | `payments:read` |
+| Refund a payment | `payments:console:refund` | `payments:refund` |
+| Cancel a subscription | `payments:console:subscriptions:cancel` | `payments:subscriptions:cancel` |
+| Resume a subscription | `payments:console:subscriptions:resume` | `payments:subscriptions:resume` |
+| Re-price a subscription | `payments:console:subscriptions:reprice` | `payments:subscriptions:reprice` |
+| Retry a failed webhook event | `payments:console:webhooks:retry` | `payments:webhooks:retry` |
+| Record how a dispute ended | `payments:console:disputes:resolve` | `payments:disputes:resolve` |
+
+`payments:console:write` grants every action, and `payments:console:*`, `payments:*` and `*` grant
+everything. A **token** (token mode) must carry the console capability; the right-hand column
+applies only to the viewer capabilities the console's `authorize` returns.
+
+### Misconfiguration fails at boot
+
+Both errors are a `ConsoleAuthConfigError` (exported) and end with "Run `node ace agora:doctor` to
+see every Agora lib's console auth at once." In token mode the boot log names the app's public key
+by a short id only; `node ace payments:console-key` prints the key itself. A console whose command
+gets no answer says `no instance of "<app>" answered within <n>s — the app may have refused the
+command (check its logs, or run \`node ace agora:doctor\` there)`. A garbage or refused message on
+the command channel is dropped and logged once per reason; it never stops the app.
+
+- **Owning app:** `consoleCommands` set, and no mode resolves (no crypto booted, no `secret`, no
+  usable `verifyTenant` + `APP_KEY`): the web process does not start, and the error names the three
+  ways to fix it.
+- **Console:** an entry of `apps` that may send actions (`actions` is not `false`) and has no mode:
+  the console does not start, and the error suggests `actions: false` to browse it only.
+- `ace` commands never fail for this (they do not start the channel).
+
+`node ace agora:doctor` shows the mode each side resolved (`payments.console-commands`), and with
+`--deep` checks that this process can use the crypto key (`payments.console-commands-key`: the app
+encrypts and decrypts a probe, or finds the key when its grant is decrypt only; the console seals
+one for each app).
+
+### Explicit crypto
+
+Set `crypto` yourself to use another key name, a crypto client other than the app's own, or
+another cipher altogether:
+
+```ts title="config/payments.ts (the owning app)"
+import crypto from '@adonis-agora/crypto/services/main'
+
+consoleCommands: {
+  prefix: 'entretextos',
+  crypto: { cipher: () => crypto.client!, key: 'console-payments' },
+  actions: ['refund'],
+},
+```
+
+```ts title="config/payments_dashboard.ts (the console)"
+import crypto from '@adonis-agora/crypto/services/main'
+import { serviceCipher } from '@adonis-agora/crypto'
+
+controlPlane: {
+  prefix: 'entretextos',
+  crypto: { cipher: () => serviceCipher(crypto.service, 'entre-textos') },
+},
+```
+
+`crypto.cipher` is anything with `encrypt({ key, plaintext, aad, context })` and
+`decrypt({ key, ciphertext, aad, context })`; pass a function, since config files are read before
+crypto is ready. The answer carries a MAC under a one-off secret that travelled inside the
+encrypted command, so a forged answer is ignored.
+
+### With authkit (token mode)
+
+1. In authkit, create a **service-tenant client** for the console, for the resource
+   `urn:agora:payments`, with `partition` set to the owning app (`entretextos`, or whatever you set
+   as `consoleCommands.partition`) and the console capabilities it may use there
+   (`payments:console:read`, `payments:console:refund`, … or `payments:console:*`). One client per
+   app the console manages.
+2. In the owning app, set `consoleCommands.verifyTenant` to `authkitTenantVerifier({ issuer,
+   resource: 'urn:agora:payments' })`. The app needs its `APP_KEY`.
+3. In the owning app, run `node ace payments:console-key`. It prints the public half of a key
+   derived from `APP_KEY` and the `prefix` (the app also logs it at boot). It is public: put it
+   in the console app's environment as is.
+4. On the console, set `controlPlane.token` to `authkitTenantToken({ issuer, clientId,
+   clientSecret, resource: 'urn:agora:payments' })` with that client, and `controlPlane.publicKey`
+   to what step 3 printed.
+
+What happens on each command:
+
+- The console seals the whole command, its token included, to the app's key. It takes that key
+  from its own configuration, never from Redis, so nobody on Redis can make it seal to their key.
+- The app opens it, refuses it if it is over a minute old, and verifies the token. The token's
+  `partition` must be this app's (`403` otherwise); its capabilities cap what the command may do,
+  and the viewer capabilities the console sends narrow them.
+- The audit row names the token's client too: `ops@example.com (via Hub, client hub-console)`.
+- A refused token answers `401`; the console drops its cached token and fetches a new one.
+
+A new `APP_KEY` (or `prefix`) makes a new key: run `payments:console-key` again and update the
+console. With `crypto` too, no public key is needed, and each command must carry a valid token.
+
+### Without authkit or crypto (shared secret)
+
+Generate one random secret per pair of apps (16 characters at least; `openssl rand -base64 32`
+prints a good one) and set the same value on both sides:
+
+```ts title="config/payments_dashboard.ts (the console app)"
+controlPlane: {
+  connection: 'main',
+  prefix: 'entretextos',
+  secret: env.get('ENTRETEXTOS_CONSOLE_SECRET'),
+},
+```
+
+```ts title="config/payments.ts (the owning app)"
+consoleCommands: {
+  connection: 'main',
+  prefix: 'entretextos',
+  secret: env.get('ENTRETEXTOS_CONSOLE_SECRET'),
+  actions: ['refund', 'cancelSubscription', 'resolveDispute'],
+},
+```
+
+Every command and every answer carries an HMAC under that secret, bound to the app's `prefix`.
+The command is readable on Redis (not encrypted). In this mode the console is trusted to say who
+the viewer is and what they may do (the app still applies its `actions` allow-list), so treat the
+secret like an admin credential for the actions you allowed, and rotate it on both sides when
+someone who had it leaves.
+
+### Bring your own
+
+Nothing above requires an Agora lib. Each piece is a plain function:
+
+```ts title="Your own token and verifier (any IdP, a JWT library, API keys)"
+// The console
+controlPlane: {
+  prefix: 'entretextos',
+  token: async () => myIdp.clientCredentialsToken({ audience: 'entretextos-payments' }),
+  publicKey: env.get('ENTRETEXTOS_CONSOLE_KEY'),
+},
+
+// The owning app
+consoleCommands: {
+  prefix: 'entretextos',
+  verifyTenant: async ({ token }) => {
+    const claims = await verifyJwt(token, { audience: 'entretextos-payments' })
+    if (!claims) return null
+    return { partition: 'entretextos', capabilities: claims.scope.split(' '), clientId: claims.sub }
+  },
+},
+```
+
+```ts title="Your own KMS, Vault transit or HSM"
+const vault = {
+  encrypt: async ({ key, plaintext, aad }) => ({
+    ciphertext: await vaultTransit.encrypt(key, plaintext, aad),
+  }),
+  decrypt: async ({ key, ciphertext, aad }) => ({
+    plaintext: await vaultTransit.decrypt(key, ciphertext, aad),
+  }),
+}
+
+// Both sides. `owns` tells this cipher's ciphertext apart (default: `agora:ct1:<key>:`).
+crypto: { cipher: vault, key: 'console-payments', owns: (c) => c.startsWith('vault:v1:') },
+```
+
+```ts title="Your own authorization (instead of authz)"
+authorize: async (ctx) => {
+  const user = await ctx.auth.authenticate()
+  const capabilities = {
+    admin: ['payments:console:*'],
+    finance: ['payments:console:read', 'payments:console:refund'],
+    support: ['payments:console:read'],
+  }[user.role]
+  return capabilities ? { allowed: true, apps: '*', capabilities } : { allowed: false }
+},
+```
+
+### Moving from one to the other
+
+An app accepts every mode it has configured at once (`crypto`, `verifyTenant`, `secret`), so it
+can take both the old and the new while its consoles move over; remove the old one once every
+console has switched. An explicit `verifyTenant` together with `crypto` makes the token required
+for crypto commands too.
+
 <Callout type="warn">
-  Anything that can publish on that Redis can send commands to the app. Keep the Redis private to
-  your apps. The capability check and the action allow-list run in the owning app too, but a
-  publisher that forges a command can claim any capability.
+  Upgrading from an earlier release: an app with `consoleCommands` and no way to authenticate now
+  fails its boot (install `@adonis-agora/crypto`, or set `secret` or `verifyTenant`), and so does a
+  console with an app it may act on and no way to authenticate (or set `actions: false`). The
+  default crypto key is now `console-payments` (it was `payments-console`). A console token needs
+  the `payments:console:*` capabilities; `payments:read` / `payments:refund` on a token no longer
+  make it a console.
 </Callout>
 
 ## Using the console
@@ -254,8 +573,9 @@ its data comes from its own store and that actions are sent to it, or that it is
 and the Organization picker is hidden. The Refund, Retry and Record outcome buttons are disabled for
 a read-only app.
 
-When the app does not answer (it is down, or `consoleCommands` is off), an action fails at once with
-`503` and a message naming the app. Its tables still read.
+When the app does not answer (it is down, `consoleCommands` is off, or the two sides share no
+authentication), an action fails at once with `503` and a message naming the app. Its tables still
+read.
 
 ## The API
 

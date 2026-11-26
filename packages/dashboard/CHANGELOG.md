@@ -1,5 +1,11 @@
 # @adonis-agora/payments-dashboard
 
+## 1.0.0-rc.20
+
+### Minor Changes
+
+- [`c31d1a8`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/c31d1a870ecbc16871be77e1d98c1b787145009a) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - The console follows the viewer's capabilities: actions the viewer may not run are disabled with the reason, using the shared console capability rules (write implies read; a `*` counts only as the last segment of a capability). Ships with the federated-console authentication changes.
+
 ## 1.0.0-rc.19
 
 ### Minor Changes

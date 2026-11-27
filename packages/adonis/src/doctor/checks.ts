@@ -122,6 +122,12 @@ export function checkWebhookCsrf(
   if (resolveRole(payments) === 'worker') {
     return { status: 'skip', message: "billing.role is 'worker': no webhook route is mounted." };
   }
+  if (payments.topology === 'tenant') {
+    return {
+      status: 'skip',
+      message: 'A payments tenant mounts no webhook route: gateways deliver to the control plane.',
+    };
+  }
   const provider = Object.keys(payments.providers ?? {})[0] ?? 'stripe';
   const verdict = csrfBlocksRoute(shield, WEBHOOK_ROUTE_PATTERN, `/payments/webhook/${provider}`);
   if (verdict === false) return { status: 'ok', message: 'Webhook deliveries pass CSRF.' };

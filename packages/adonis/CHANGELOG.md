@@ -1,5 +1,13 @@
 # @adonis-agora/payments
 
+## 1.1.1
+
+### Patch Changes
+
+- [#281](https://github.com/DavideCarvalho/adonis-agora-payments/pull/281) [`98ec8f4`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/98ec8f472858920a8e7ae3cdb685e2cef49b4f02) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - `node ace add @adonis-agora/payments` (and `node ace configure @adonis-agora/payments`) now runs the configure hook: the main entry exports `configure`, which Adonis looks for there. Before, it only warned "the module does not export the configure hook" and published nothing.
+
+- [#281](https://github.com/DavideCarvalho/adonis-agora-payments/pull/281) [`98ec8f4`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/98ec8f472858920a8e7ae3cdb685e2cef49b4f02) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - `agora:doctor` no longer reports "Webhook route passes CSRF" as an error on a payments tenant: a tenant mounts no `/payments/webhook/:provider` route (gateways deliver to the control plane), so `payments.webhook-csrf` now skips there.
+
 ## 1.1.0
 
 ### Minor Changes

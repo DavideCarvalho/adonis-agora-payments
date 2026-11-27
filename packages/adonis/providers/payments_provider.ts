@@ -69,6 +69,7 @@ import {
   setPayments,
   setWebhookDispatcher,
 } from '../src/services/main.js';
+import { resolvePaymentsTenant } from '../src/topology/authkit_tenant.js';
 import { GATEWAY_IDEMPOTENCY, type PaymentsControlPlane } from '../src/topology/control_plane.js';
 import { HUB_MESSAGE_VERSION } from '../src/topology/protocol.js';
 import {
@@ -115,6 +116,8 @@ export default class PaymentsProvider {
   #describeTimer: NodeJS.Timeout | undefined;
   /** `topology: 'control-plane'`. */
   #controlPlane: PaymentsControlPlane | undefined;
+  /** See {@link PaymentsProvider.#resolvedConfig}. */
+  #resolvedConfigPromise: Promise<PaymentsConfig> | undefined;
   #redisServer: { stop(): Promise<void>; notify(partition: string): Promise<void> } | undefined;
   /** `consoleCommands`: the channel this app answers another app's payments console on. */
   #consoleChannel: RedisConsoleChannel | undefined;
@@ -143,6 +146,8 @@ export default class PaymentsProvider {
     this.app.container.alias('payments.manager', PaymentsManager);
 
     this.app.container.singleton(PaymentsManager, async () => {
+      // A tenant's url/token/partition: what config/payments.ts sets, else authkit-client's.
+      const config = await this.#resolvedConfig();
       // Build invoice providers first so drivers can resolve them from their ctx (a
       // charge with `invoice: true|'name'` emits through the invoice provider).
       let invoices: InvoiceManager | undefined;
@@ -197,7 +202,18 @@ export default class PaymentsProvider {
     await this.#registerAccountPages();
 
     await this.app.booted(async () => {
-      const config = this.app.config.get<PaymentsConfig>('payments', {});
+      const raw = this.app.config.get<PaymentsConfig>('payments', {});
+      let config: PaymentsConfig;
+      try {
+        config = await this.#resolvedConfig();
+      } catch (error) {
+        // A tenant whose url/token/partition resolve from neither config/payments.ts nor
+        // authkit-client fails the boot of a process that serves (web, or the billing worker),
+        // naming both fixes. An ace command logs it and goes on; using payments there throws it.
+        if (this.#serves(raw)) throw error;
+        void this.#warn((error as Error).message);
+        return;
+      }
       // Build the billing layer here (async — resolves the app emitter + handler
       // factories), so the mounted route can emit `billing:*` and run app handlers.
       if (config.billing?.enabled !== false) {
@@ -232,6 +248,19 @@ export default class PaymentsProvider {
       // Before the HTTP server listens: an app that cannot authenticate the console fails here.
       await this.#resolveConsoleCommands();
     });
+  }
+
+  /**
+   * `config/payments.ts`, with a tenant's missing `url`/`token`/`partition` filled in from
+   * `@adonis-agora/authkit-client` (`tenantOf`, detected by shape). Resolved once; throws, naming
+   * both fixes, when a field resolves from neither.
+   */
+  #resolvedConfig(): Promise<PaymentsConfig> {
+    this.#resolvedConfigPromise ??= resolvePaymentsTenant(
+      this.app.config.get<PaymentsConfig>('payments', {}),
+      this.app.container as never,
+    ).then((resolved) => resolved.config);
+    return this.#resolvedConfigPromise;
   }
 
   /** The control plane, built once (the webhook processor forwards through it). */
@@ -515,7 +544,7 @@ export default class PaymentsProvider {
    * is logged, not fatal.
    */
   async #resolveConsoleCommands(): Promise<void> {
-    const config = this.app.config.get<PaymentsConfig>('payments', {});
+    const config = await this.#resolvedConfig();
     if (!config.consoleCommands || resolveTopology(config) === 'tenant') return;
     if (this.app.getEnvironment() !== 'web' || resolveRole(config) === 'worker') return;
     const logger = await this.app.container.make('logger');

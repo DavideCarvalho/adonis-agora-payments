@@ -26,9 +26,15 @@ export function resolveTopology(config: PaymentsConfig): PaymentsTopology {
   }
   if (topology === 'tenant') {
     const tenant = config.tenant;
-    if (!tenant?.partition || !tenant.token || !tenant.providers) {
+    if (!tenant?.providers) {
       throw new Error(
-        "[@adonis-agora/payments] topology 'tenant' needs `tenant.partition`, `tenant.token` and `tenant.providers`.",
+        "[@adonis-agora/payments] topology 'tenant' needs `tenant.providers` (the control plane providers this app uses).",
+      );
+    }
+    // Filled in by the provider from authkit-client (`resolvePaymentsTenant`) when it is booted.
+    if (!tenant.partition || !tenant.token) {
+      throw new Error(
+        "[@adonis-agora/payments] topology 'tenant' needs `tenant.partition` and `tenant.token` (or @adonis-agora/authkit-client with its `service` configured, which supplies them).",
       );
     }
     if (tenant.url === undefined && tenant.transport === undefined) {
@@ -95,10 +101,13 @@ export function buildTenantRuntime(config: PaymentsConfig): TenantRuntime {
     tenant.transport && http
       ? fallbackTransport(tenant.transport, http)
       : (tenant.transport ?? (http as HubTransport));
+  if (tenant.token === undefined) {
+    throw new Error('[@adonis-agora/payments] topology tenant without `tenant.token`');
+  }
   const client = createHubClient({
     transport,
     token: tenant.token,
-    partition: tenant.partition,
+    ...(tenant.partition !== undefined ? { partition: tenant.partition } : {}),
     ...(tenant.timeoutMs !== undefined ? { timeoutMs: tenant.timeoutMs } : {}),
   });
   const declarations: Record<string, HubProviderDeclaration> = Array.isArray(tenant.providers)

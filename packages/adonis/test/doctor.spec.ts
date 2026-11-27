@@ -310,6 +310,7 @@ describe('registration', () => {
     'payments.console-gate',
     'payments.tables',
     'payments.health',
+    'payments.tenant',
     'payments.console-commands',
     'payments.console-commands-key',
   ];

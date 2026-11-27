@@ -8,6 +8,8 @@ import { type PaymentsDashboardConfig, resolveConfig } from '../dashboard/define
 import type { PaymentsConfig } from '../define_config.js';
 import type { WebhookVerificationState } from '../driver.js';
 import { PaymentsManager, resolveDrivers } from '../payments_manager.js';
+import { describeTenantSources, resolvePaymentsTenant } from '../topology/authkit_tenant.js';
+import { resolveTopology } from '../topology/runtime.js';
 import type { AgoraDoctorCheck, AgoraDoctorResult } from './agora_doctor.js';
 import { consoleCommandsDoctorChecks } from './console_commands.js';
 
@@ -472,6 +474,45 @@ async function lucid(app: ApplicationService): Promise<LucidLike | undefined> {
   return (await app.container.make('lucid.db' as never)) as LucidLike;
 }
 
+/**
+ * `payments.tenant`: a tenant knows its control plane, token and partition, and says where each
+ * comes from (`explicit`, or `authkit-client (auto)` when `@adonis-agora/authkit-client`'s
+ * `tenantOf` supplies it).
+ */
+export async function checkTenant(
+  config: PaymentsConfig | undefined,
+  container?: Parameters<typeof resolvePaymentsTenant>[1],
+): Promise<AgoraDoctorResult> {
+  if (config?.topology !== 'tenant') return { status: 'skip', message: 'Not a payments tenant.' };
+  let resolved: Awaited<ReturnType<typeof resolvePaymentsTenant<PaymentsConfig>>>;
+  try {
+    resolved = await resolvePaymentsTenant(config, container);
+  } catch (error) {
+    const message = (error as Error).message;
+    const at = message.indexOf(' Fix: ');
+    return {
+      status: 'error',
+      message: message.slice(0, at),
+      fix: message.slice(at + 6),
+      docs: `${DOCS}/control-plane`,
+    };
+  }
+  try {
+    resolveTopology(resolved.config);
+  } catch (error) {
+    return {
+      status: 'error',
+      message: (error as Error).message,
+      fix: 'Fix the `tenant` block in config/payments.ts.',
+      docs: `${DOCS}/control-plane`,
+    };
+  }
+  const where = resolved.sources ? describeTenantSources(resolved.sources) : 'tenant';
+  const transport =
+    config.tenant?.transport !== undefined ? ` (transport: ${config.tenant.transport.name})` : '';
+  return { status: 'ok', message: `${where}${transport}.` };
+}
+
 /** The checks `@adonis-agora/payments` registers into `agora:doctor`. */
 export function paymentsDoctorChecks(
   deps: {
@@ -530,6 +571,12 @@ export function paymentsDoctorChecks(
         const store = deps.store?.() ?? (await resolveBillingStore(config));
         return checkHealth(await billingHealth(store));
       },
+    },
+    {
+      id: 'payments.tenant',
+      lib: 'payments',
+      title: 'Tenant control plane, token and partition',
+      run: (app) => checkTenant(paymentsConfig(app), app.container as never),
     },
     ...consoleCommandsDoctorChecks(),
   ];

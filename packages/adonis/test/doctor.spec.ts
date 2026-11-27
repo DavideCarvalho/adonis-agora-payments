@@ -66,6 +66,13 @@ describe('payments.webhook-csrf', () => {
     expect(checkWebhookCsrf({ billing: { role: 'worker' } }, shield({})).status).toBe('skip');
   });
 
+  it('skips on a tenant, which mounts no webhook route', () => {
+    const tenant = { topology: 'tenant', tenant: { providers: ['asaas'] } } as never;
+    const result = checkWebhookCsrf(tenant, shield({}));
+    expect(result.status).toBe('skip');
+    expect(result.message).toContain('control plane');
+  });
+
   it('is ok when CSRF is off or POST is not checked', () => {
     expect(checkWebhookCsrf(payments, undefined).status).toBe('ok');
     expect(checkWebhookCsrf(payments, { csrf: { enabled: false } }).status).toBe('ok');

@@ -245,7 +245,7 @@ export default defineConfig({
 Efí is **Pix only**, over mTLS — the certificate is part of the credentials. Its webhooks carry no
 signature the driver can check, so there is no webhook credential to set and no boot refusal;
 authenticity is enforced in front of the app (mTLS or the `hmac` query parameter). See
-[Efí → webhooks](/docs/payments/providers/efi#webhooks-are-not-authenticated-by-this-driver).
+[Efí → webhooks](/docs/payments/providers/efi#webhooks-are-confirmed-with-efi).
 
 </ProviderCase>
 <ProviderCase for="infinitepay">

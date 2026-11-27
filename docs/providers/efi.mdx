@@ -115,7 +115,7 @@ billing tables. Refunds take it too — the driver resolves the settled Pix behi
 refunds against that `endToEndId`, because a Pix refund is made against the payment, not
 against the charge.
 
-## Webhooks are confirmed with Efí before anything is emitted
+## Webhooks are confirmed with Efí before anything is emitted [#webhooks-are-confirmed-with-efi]
 
 The notification carries no signature header, so **the driver does not trust its body.** Every
 Pix it names is read back from Efí (`GET /v2/pix/:e2eid`, over the driver's own mutual-TLS

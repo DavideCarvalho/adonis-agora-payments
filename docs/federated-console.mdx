@@ -396,8 +396,8 @@ applies only to the viewer capabilities the console's `authorize` returns.
 Both errors are a `ConsoleAuthConfigError` (exported) and end with "Run `node ace agora:doctor` to
 see every Agora lib's console auth at once." In token mode the boot log names the app's public key
 by a short id only; `node ace payments:console-key` prints the key itself. A console whose command
-gets no answer says `no instance of "<app>" answered within <n>s — the app may have refused the
-command (check its logs, or run \`node ace agora:doctor\` there)`. A garbage or refused message on
+gets no answer says `` no instance of "<app>" answered within <n>s — the app may have refused the
+command (check its logs, or run `node ace agora:doctor` there) ``. A garbage or refused message on
 the command channel is dropped and logged once per reason; it never stops the app.
 
 - **Owning app:** `consoleCommands` set, and no mode resolves (no crypto booted, no `secret`, no

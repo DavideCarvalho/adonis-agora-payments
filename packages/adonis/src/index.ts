@@ -1,5 +1,6 @@
 import './container_bindings.js';
 
+export { configure } from '../configure.js';
 export type { AccountExtensionContext as PaymentsAccountContext } from './account_console/contract.js';
 export type {
   AccountConsolePlan,

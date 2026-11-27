@@ -114,7 +114,26 @@ every tenant.
 
 ## A tenant
 
+With [`@adonis-agora/authkit-client`](/docs/authkit) configured with its `service` (`name`,
+`clientId`, `clientSecret`), you write the topology and the control plane providers this app uses:
+authkit-client supplies the control plane's URL (from the issuer's discovery document), a service
+token for `urn:agora:payments` and the app's partition (`service.partition`, else `service.name`).
+
 ```ts title="config/payments.ts"
+import { defineConfig } from '@adonis-agora/payments'
+
+export default defineConfig({
+  topology: 'tenant',
+  tenant: { providers: ['asaas', 'woovi'] },
+  methods: { pix: 'woovi', credit_card: 'asaas' },
+})
+```
+
+Or set them yourself, for another client, another issuer or a shared secret. Each field you set wins
+over authkit-client's, one by one, and `tenant: { auto: false }` turns authkit-client off for
+payments:
+
+```ts title="config/payments.ts (explicit)"
 import { defineConfig } from '@adonis-agora/payments'
 import { authkitTenantToken } from '@adonis-agora/authkit-client'
 import env from '#start/env'
@@ -143,6 +162,10 @@ export default defineConfig({
 A tenant has no `providers`: the boot refuses one that still builds a gateway, because the
 credentials belong to the control plane. It has no webhook route either.
 
+With neither authkit-client nor the field, the boot of a web process (or the billing worker) fails,
+naming the missing fields and both fixes. `node ace agora:doctor` (`payments.tenant`) shows where
+each one came from: `tenant url/token/partition: authkit-client (auto)`, or `explicit`.
+
 Your code does not change:
 
 ```ts title="app/billing/services/checkout_service.ts"
@@ -166,6 +189,8 @@ tenant: {
 ```
 
 With both `url` and `transport`, a call the bus cannot deliver goes over HTTP with the same id.
+With `transport` alone, authkit-client supplies the token and partition but no `url`: set it to
+keep the HTTP fallback.
 `wakeConnection` lets the control plane wake this app the moment an event is waiting, instead of
 the app checking every 30 seconds.
 

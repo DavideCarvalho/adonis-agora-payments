@@ -375,19 +375,34 @@ export interface PaymentsControlPlaneConfig {
   };
 }
 
-/** `tenant` of `config/payments.ts` (`topology: 'tenant'`). */
+/**
+ * `tenant` of `config/payments.ts` (`topology: 'tenant'`). `url`, `token` and `partition` may be
+ * left out when `@adonis-agora/authkit-client` is booted with its `service` configured: its
+ * `tenantOf('urn:agora:payments')` supplies them (each one set here wins).
+ */
 export interface PaymentsTenantConfig {
-  /** This app's name on the control plane. The control plane trusts the TOKEN, not this. */
-  partition: string;
-  /** The control plane mount (`https://hub.example.com/_payments`): HTTP calls. */
+  /**
+   * This app's name on the control plane. The control plane trusts the TOKEN, not this. Default:
+   * authkit-client's `service.partition`, else `service.name`.
+   */
+  partition?: string;
+  /**
+   * The control plane mount (`https://hub.example.com/_payments`): HTTP calls. Default (when no
+   * `transport` is set either): authkit-client's, discovered from the issuer.
+   */
   url?: HubUrlSource;
   /**
    * Another transport (`hubTransports.redis(...)`). With `url` too, a call the transport cannot
    * deliver falls back to HTTP with the same id (the control plane never runs it twice).
    */
   transport?: HubTransport;
-  /** The bearer token. With authkit: `authkitTenantToken({ ..., resource: 'urn:agora:payments' })`. */
-  token: HubTokenSource;
+  /**
+   * The bearer token. With authkit: `authkitTenantToken({ ..., resource: 'urn:agora:payments' })`.
+   * Default: authkit-client's service token for `urn:agora:payments`.
+   */
+  token?: HubTokenSource;
+  /** `false`: never fill `url`/`token`/`partition` from `@adonis-agora/authkit-client`. */
+  auto?: boolean;
   /**
    * The control plane providers this app uses, by their key there. A list, or a map with what to
    * assume before the control plane answered `describe` (methods, provider name).

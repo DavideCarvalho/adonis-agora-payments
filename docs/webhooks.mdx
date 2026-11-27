@@ -56,7 +56,7 @@ returns `400` and is never processed.
 | Woovi | RSA-SHA256 (recommended) | `x-webhook-signature` | `webhookPublicKey` / `WOOVI_WEBHOOK_PUBLIC_KEY` |
 | Woovi | Per-webhook HMAC-SHA1 (deprecated) | `X-OpenPix-Signature` | `webhookSecret` / `WOOVI_WEBHOOK_SECRET` |
 | PagBank | SHA-256 of `<token>-<body>` — **not an HMAC**, [read why](/docs/payments/providers/pagbank#webhook-authenticity--read-this-before-you-rely-on-it) | `x-authenticity-token` | `webhookToken` / `PAGBANK_WEBHOOK_TOKEN` (defaults to the API token) |
-| Efí | **None** — mTLS or an `hmac` query param, both [enforced outside the driver](/docs/payments/providers/efi#webhooks-are-not-authenticated-by-this-driver) | — | — |
+| Efí | **None** — mTLS or an `hmac` query param, both [enforced outside the driver](/docs/payments/providers/efi#webhooks-are-confirmed-with-efi) | — | — |
 | InfinitePay | **None** — the gateway publishes no signature | — | — |
 
 </ProviderMatrix>
@@ -201,7 +201,7 @@ and trusting the rest would let an attacker append anything beside one genuine n
 One bad signature rejects the whole delivery.
 
 Efí signs nothing at all — its authenticity comes from mutual TLS or an `hmac` query
-parameter, both [enforced outside the driver](/docs/payments/providers/efi#webhooks-are-not-authenticated-by-this-driver) —
+parameter, both [enforced outside the driver](/docs/payments/providers/efi#webhooks-are-confirmed-with-efi) —
 so a batch there is exactly as trusted as the transport that carried it, and no more.
 
 <Callout title="Writing a driver? One event is still the normal answer">

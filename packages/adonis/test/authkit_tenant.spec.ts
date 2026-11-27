@@ -273,6 +273,19 @@ describe('agora:doctor payments.tenant', () => {
         "[@adonis-agora/payments] topology 'tenant' needs tenant.url, tenant.token, tenant.partition.",
     });
     expect(none.fix).toContain("configure @adonis-agora/authkit-client's `service:");
+    const transport: HubTransport = { name: 'mine', request: async () => ({}) as never };
+    expect(
+      await checkTenant(
+        {
+          topology: 'tenant',
+          tenant: { providers: ['asaas'], url: 'https://hub.example/_payments', transport },
+        },
+        containerWith(fakeAuthkit().client),
+      ),
+    ).toEqual({
+      status: 'ok',
+      message: 'tenant url: explicit; token/partition: authkit-client (auto) (transport: mine).',
+    });
     const noProviders = await checkTenant(
       { topology: 'tenant' },
       containerWith(fakeAuthkit().client),

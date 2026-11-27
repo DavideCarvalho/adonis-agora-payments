@@ -8,7 +8,11 @@ import { type PaymentsDashboardConfig, resolveConfig } from '../dashboard/define
 import type { PaymentsConfig } from '../define_config.js';
 import type { WebhookVerificationState } from '../driver.js';
 import { PaymentsManager, resolveDrivers } from '../payments_manager.js';
-import { describeTenantSources, resolvePaymentsTenant } from '../topology/authkit_tenant.js';
+import {
+  describeTenantSources,
+  resolvePaymentsTenant,
+  splitTenantError,
+} from '../topology/authkit_tenant.js';
 import { resolveTopology } from '../topology/runtime.js';
 import type { AgoraDoctorCheck, AgoraDoctorResult } from './agora_doctor.js';
 import { consoleCommandsDoctorChecks } from './console_commands.js';
@@ -488,12 +492,11 @@ export async function checkTenant(
   try {
     resolved = await resolvePaymentsTenant(config, container);
   } catch (error) {
-    const message = (error as Error).message;
-    const at = message.indexOf(' Fix: ');
+    const { message, fix } = splitTenantError((error as Error).message);
     return {
       status: 'error',
-      message: message.slice(0, at),
-      fix: message.slice(at + 6),
+      message,
+      ...(fix !== undefined ? { fix } : {}),
       docs: `${DOCS}/control-plane`,
     };
   }

@@ -442,7 +442,13 @@ controlPlane: {
 crypto is ready. The answer carries a MAC under a one-off secret that travelled inside the
 encrypted command, so a forged answer is ignored.
 
-### With authkit (token mode)
+### With authkit, explicitly (token mode)
+
+With authkit-client's [calls between apps](#with-authkit-too-a-token-from-its-calls-between-apps)
+configured, the console's token and the app's verifier are automatic: nothing below is needed.
+Set them yourself to use a service-tenant client of your own (or your own IdP) instead. This
+client is the console's, for the owning app's partition: it is not the `service` that
+`topology: 'tenant'` takes its token from.
 
 1. In authkit, create a **service-tenant client** for the console, for the resource
    `urn:agora:payments`, with `partition` set to the owning app (`entretextos`, or whatever you set

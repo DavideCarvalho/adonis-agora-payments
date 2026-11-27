@@ -13,8 +13,8 @@
       "enabled": false
     },
     {
-      "description": "Build and release are pinned to Node 24 and CI tests 24 and 26 (1.0 policy). A Node major bump of the pinned toolchain is a policy change, not an update, so Renovate does not propose it.",
-      "matchManagers": ["nvm", "node-version", "github-actions"],
+      "description": "Build and release stay pinned to Node 24 and CI tests 24 and 26 (1.0 policy), so Renovate never proposes a major bump of the pinned Node toolchain: `.nvmrc` (nvm), `.node-version` (nodenv) and setup-node's `node-version` (github-actions). Patch and minor bumps within 24 still come through.",
+      "matchManagers": ["nvm", "nodenv", "github-actions"],
       "matchDepNames": ["node"],
       "matchUpdateTypes": ["major"],
       "enabled": false

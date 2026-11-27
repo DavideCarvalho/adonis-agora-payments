@@ -19,6 +19,19 @@ webhooks and keeps its own billing tables. With `topology` you can move all of t
 
 Nothing changes for an app that never sets `topology`.
 
+## Three ways to run it
+
+- **Standalone** (the default): each app holds its own gateways, webhooks and billing tables, and
+  serves its own console.
+- **Federated console**: each app stays standalone, and one console shows them all. The console
+  reads each app's `billing_*` tables read-only, and asks the app to run every action as an
+  authenticated command. Gateway credentials never leave the app. See
+  [Federated console](/docs/payments/federated-console).
+- **Hub**: one app is the control plane, the others run `topology: 'tenant'` (this page). With
+  authkit-client's `service` configured, a tenant only adds the control plane providers it uses
+  (`tenant: { providers }`). How the Hub fits with the other Agora libraries is in the
+  [Agora Hub guide](https://davidecarvalho.github.io/agora/docs/agora-hub).
+
 ---
 
 ## The control plane

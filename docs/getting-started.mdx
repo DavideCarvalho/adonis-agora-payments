@@ -28,6 +28,10 @@ The configure command does five things:
 4. publishes **one** Lucid migration for the billing tables — which most apps can delete, see the
    next step;
 5. registers the payment env validations.
+
+In an app that runs as a tenant of a [control plane](/docs/payments/control-plane), run
+`node ace configure @adonis-agora/payments --topology=tenant` instead: `config/payments.ts` is then
+the tenant form and no gateway env validation is registered.
 </Step>
 
 <Step title="Configure a gateway">

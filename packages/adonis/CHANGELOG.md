@@ -1,5 +1,11 @@
 # @adonis-agora/payments
 
+## 1.1.2
+
+### Patch Changes
+
+- [#283](https://github.com/DavideCarvalho/adonis-agora-payments/pull/283) [`1f43f26`](https://github.com/DavideCarvalho/adonis-agora-payments/commit/1f43f263c3a3215ce6e0b45f0b5feccb445eb062) Thanks [@DavideCarvalho](https://github.com/DavideCarvalho)! - `node ace configure @adonis-agora/payments --topology=tenant` publishes `config/payments.ts` in the tenant form (`topology: 'tenant'` with `tenant.providers` and `methods`), with a note that url, token and partition come from `@adonis-agora/authkit-client` and the explicit fields commented out, and skips the gateway credential env validations a tenant never uses. Without the flag, configure is unchanged.
+
 ## 1.1.1
 
 ### Patch Changes

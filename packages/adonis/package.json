@@ -146,6 +146,9 @@
     "CHANGELOG.md"
   ],
   "sideEffects": false,
+  "publishConfig": {
+    "tag": "v0"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json && pnpm run copy:stubs && pnpm run copy:spa",
     "copy:stubs": "mkdir -p dist/stubs/config dist/stubs/database/migrations dist/stubs/make/billable dist/stubs/make/webhook_handler && cp -r stubs/config/. dist/stubs/config/ && cp -r stubs/database/migrations/. dist/stubs/database/migrations/ && cp -r stubs/make/billable/. dist/stubs/make/billable/ && cp -r stubs/make/webhook_handler/. dist/stubs/make/webhook_handler/",

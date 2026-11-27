@@ -142,6 +142,10 @@ export default defineConfig({
 })
 ```
 
+`node ace configure @adonis-agora/payments --topology=tenant` publishes `config/payments.ts` in this
+form (with the explicit `url`, `token` and `partition` commented out); edit `providers` and `methods`
+to the control plane's.
+
 Or set them yourself, for another client, another issuer or a shared secret. Each field you set wins
 over authkit-client's, one by one, and `tenant: { auto: false }` turns authkit-client off for
 payments:

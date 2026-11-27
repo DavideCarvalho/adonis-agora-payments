@@ -1,0 +1,30 @@
+{{{
+  exports({ to: app.configPath('payments.ts') })
+}}}
+// import env from '#start/env'
+import { defineConfig } from '@adonis-agora/payments'
+
+/**
+ * Configuration for @adonis-agora/payments in a tenant app: every gateway call runs on the
+ * control plane (the Hub), with its credentials. A tenant has no \`providers\` and no webhook route.
+ *
+ * url, token and partition come from @adonis-agora/authkit-client (\`service\` in
+ * config/authkit_client.ts). To set them yourself (each field you set wins), uncomment the env
+ * import above and the line inside \`tenant\` below.
+ */
+export default defineConfig({
+  topology: 'tenant',
+  tenant: {
+    // url: env.get('PAYMENTS_URL'), token: env.get('PAYMENTS_TOKEN'), partition: env.get('PAYMENTS_PARTITION'),
+
+    /**
+     * The control plane providers this app uses, by their key there.
+     */
+    providers: ['asaas', 'woovi'],
+  },
+
+  /**
+   * Route a payment method to one of those providers: \`getPayments().driver('pix').charge(...)\`.
+   */
+  methods: { pix: 'woovi', credit_card: 'asaas' },
+})

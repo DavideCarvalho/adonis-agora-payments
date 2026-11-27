@@ -16,6 +16,10 @@ import { stubsRoot } from './stubs/main.js';
  *    default), so the file is there for apps that would rather run the DDL explicitly. Both
  *    paths call the same `createBillingTables`;
  * 5. registers the env validations for the payment providers.
+ *
+ * With `--topology=tenant`, `config/payments.ts` is the one-line tenant form instead (url, token
+ * and partition come from `@adonis-agora/authkit-client`), and no provider env validation is
+ * registered: a tenant holds no gateway credentials.
  */
 export async function configure(command: Configure) {
   const codemods = await command.createCodemods();
@@ -29,13 +33,24 @@ export async function configure(command: Configure) {
     rcFile.addAssemblerHook('init', '@adonis-agora/payments/hooks/webhook_handlers');
   });
 
+  // `--topology=tenant`: an app whose gateway calls run on a control plane, in the one-line form
+  // (url, token and partition come from @adonis-agora/authkit-client).
+  const tenant = command.parsedFlags?.topology === 'tenant';
+
   const stubs = stubsRoot();
-  await codemods.makeUsingStub(stubs, 'config/payments.stub', {});
+  await codemods.makeUsingStub(
+    stubs,
+    tenant ? 'config/payments_tenant.stub' : 'config/payments.stub',
+    {},
+  );
   await codemods.makeUsingStub(stubs, 'config/payments_dashboard.stub', {});
   await codemods.makeUsingStub(stubs, 'config/payments_client.stub', {});
   await codemods.makeUsingStub(stubs, 'database/migrations/create_billing_tables.stub', {});
   // Opt-in on an existing install (CONCURRENTLY on Postgres): the console lists' indexes.
   await codemods.makeUsingStub(stubs, 'database/migrations/add_billing_list_indexes.stub', {});
+
+  // A tenant holds no gateway credentials (they belong to the control plane).
+  if (tenant) return;
 
   await codemods.defineEnvValidations({
     leadingComment: 'PAYMENTS_',

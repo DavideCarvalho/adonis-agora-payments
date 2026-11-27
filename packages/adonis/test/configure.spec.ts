@@ -6,7 +6,7 @@ import { configure } from '../configure.js';
  * missing entry here is invisible: the app boots, and the feature it enables
  * just never happens.
  */
-function fakeCommand() {
+function fakeCommand(parsedFlags?: Record<string, unknown>) {
   const rcFile = {
     providers: [] as string[],
     commands: [] as string[],
@@ -30,13 +30,14 @@ function fakeCommand() {
     async makeUsingStub(_root: string, stub: string) {
       stubs.push(stub);
     },
-    async defineEnvValidations() {},
+    defineEnvValidations: vi.fn(async () => {}),
   };
 
   return {
     rcFile,
     stubs,
-    command: { createCodemods: vi.fn(async () => codemods) },
+    codemods,
+    command: { createCodemods: vi.fn(async () => codemods), parsedFlags },
   };
 }
 
@@ -67,5 +68,30 @@ describe('configure', () => {
     expect(stubs).toContain('database/migrations/create_billing_tables.stub');
     // All three, in order: the two later files are the only way the columns and the table
     // added after `create_billing_tables` shipped ever reach an install that already ran it.
+  });
+
+  it('--topology=tenant publishes the one-line tenant config and no credential env vars', async () => {
+    const { command, stubs, rcFile, codemods } = fakeCommand({ topology: 'tenant' });
+    await configure(command as never);
+
+    expect(stubs).toEqual([
+      'config/payments_tenant.stub',
+      'config/payments_dashboard.stub',
+      'config/payments_client.stub',
+      'database/migrations/create_billing_tables.stub',
+      'database/migrations/add_billing_list_indexes.stub',
+    ]);
+    expect(rcFile.providers).toContain('@adonis-agora/payments/payments_provider');
+    // The gateway credentials belong to the control plane.
+    expect(codemods.defineEnvValidations).not.toHaveBeenCalled();
+  });
+
+  it('any other --topology value keeps the standalone config', async () => {
+    const { command, stubs, codemods } = fakeCommand({ topology: 'standalone' });
+    await configure(command as never);
+
+    expect(stubs[0]).toBe('config/payments.stub');
+    expect(stubs).not.toContain('config/payments_tenant.stub');
+    expect(codemods.defineEnvValidations).toHaveBeenCalledOnce();
   });
 });
